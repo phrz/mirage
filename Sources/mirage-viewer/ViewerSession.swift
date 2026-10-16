@@ -52,6 +52,8 @@ final class ViewerSession: @unchecked Sendable {
     private var assembler = FrameAssembler()
     private let decoder = HEVCDecoder()
     private var awaitingRecovery = false
+    /// Sequence of the last decoded recovery frame: a loss verdict for an older frame is already healed.
+    private var lastRecoverySeq: UInt32 = 0
     let compositor = Compositor()
     /// Called (on the video queue) whenever the picture changed and should be presented.
     var onChange: (() -> Void)?
@@ -261,7 +263,9 @@ final class ViewerSession: @unchecked Sendable {
         for ev in assembler.ingest(frag, now: now) {
             switch ev {
             case .lost(let seq):
-                awaitingRecovery = true
+                // The assembler gives up on an old partial after its timeout; if a recovery frame newer
+                // than it was decoded meanwhile, nothing is missing (the host ignores such acks too).
+                if seq > lastRecoverySeq { awaitingRecovery = true }
                 statsLock.lock(); sLost += 1; statsLock.unlock()
                 sender?.send(.frameAck(.init(seq: seq, captureNanos: 0, receivedNanos: now, decodedNanos: 0, bytes: 0, lost: true)))
             case .completed(let frame):
@@ -277,6 +281,7 @@ final class ViewerSession: @unchecked Sendable {
                     let image = try decoder.decode(frame)
                     let t1 = Clock.nowNanos()
                     awaitingRecovery = false
+                    if frame.flags.contains(.recovery) { lastRecoverySeq = max(lastRecoverySeq, frame.seq) }
                     if let compositor {
                         if compositor.width == 0 { compositor.configure(width: decoder.width, height: decoder.height) }
                         let region = frame.region.isEmpty ? PixelRect(x: 0, y: 0, width: compositor.width, height: compositor.height) : frame.region

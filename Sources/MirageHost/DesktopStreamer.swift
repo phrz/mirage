@@ -64,6 +64,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var wantLTRRefresh = false
     private var encoding = false
     private var recoverySeq: UInt32 = 0
+    private var recoverySentNanos: UInt64 = 0
     private var keyframeArmed = false
 
     // Stats (per log interval).
@@ -605,7 +606,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         var flags: VideoFragment.Flags = [.tileMask]
         if f.keyframe { flags.insert(.keyframe); flags.insert(.recovery) }
         if recovery { flags.insert(.recovery) }
-        if flags.contains(.recovery) { recoverySeq = seq }
+        if flags.contains(.recovery) { recoverySeq = seq; recoverySentNanos = Clock.nowNanos() }
         if !f.parameterSets.isEmpty { flags.insert(.parameterSets) }
         let payload = VideoFramePayload.encode(parameterSets: f.parameterSets, tileMask: mask.bits, sample: f.sample)
         let maxPayload = out.maxDatagramSize - VideoFragment.headerSize
@@ -636,6 +637,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         for s in unacked.keys where s < ack.seq { unacked[s] = nil }
         if ack.lost { statLost += 1; rc?.lossDetected(now: now); if ack.seq >= recoverySeq { requestRecovery() } }
+        // Safety net: a viewer still skipping (not decoding) frames newer than the last recovery for
+        // over a second did not get that recovery frame; send another.
+        if !ack.lost, ack.decodedNanos == 0, ack.seq > recoverySeq, now - recoverySentNanos > 1_500_000_000, !wantKeyframe {
+            log("viewer skipping frames after recovery \(recoverySeq); resending keyframe")
+            requestRecovery(); recoverySentNanos = now
+        }
         applyBudget(now: now)
     }
 
