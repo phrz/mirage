@@ -10,8 +10,10 @@ public struct RateController {
         /// Fraction of the estimated capacity to aim for.
         public var capacityFraction = 0.7
         /// Queuing delay (above the base one-way delay) that triggers a decrease / allows an increase.
-        public var overuseMs = 60.0
-        public var underuseMs = 25.0
+        /// Measured on the Dallas→Japan tailnet: the EWMA sits ~30 ms above the windowed minimum even
+        /// when the link is nearly idle (tile acks ride a reliable stream), so the dead band starts above that.
+        public var overuseMs = 90.0
+        public var underuseMs = 40.0
         public var decrease = 0.85
         public var increasePerSecond = 0.08
         public var lossDecrease = 0.8

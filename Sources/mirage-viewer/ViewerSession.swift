@@ -287,8 +287,11 @@ final class ViewerSession: @unchecked Sendable {
                         onChange?()
                     }
                     statsLock.lock()
-                    let ageNanos = (Double(t1) + clockOffset) - Double(frame.captureNanos)
-                    sFrames += 1; sDecodeNanos += t1 - t0; sAge = sAge == 0 ? ageNanos : sAge * 0.7 + ageNanos * 0.3
+                    sFrames += 1; sDecodeNanos += t1 - t0
+                    if bestRTT.isFinite {   // frame age needs the clock offset from a pong first
+                        let ageNanos = max(0, (Double(t1) + clockOffset) - Double(frame.captureNanos))
+                        sAge = sAge == 0 ? ageNanos : sAge * 0.7 + ageNanos * 0.3
+                    }
                     statsLock.unlock()
                     sender?.send(.frameAck(.init(seq: frame.seq, captureNanos: frame.captureNanos, receivedNanos: frame.lastFragmentNanos, decodedNanos: t1, bytes: frame.bytes, lost: false,
                                                  firstReceivedNanos: frame.firstFragmentNanos, fragments: frame.fragments)))
