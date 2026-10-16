@@ -1,6 +1,7 @@
 import Foundation
 import ScreenCaptureKit
 import CoreMedia
+import IOKit.pwr_mgt
 import MirageCore
 
 /// One SCStream on one display, scaled by SCK to the requested size, frames only on change.
@@ -22,12 +23,24 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
     /// Resolves the display and the stream size (display aspect fitted into the request).
     static func resolve(_ req: ControlMessage.StreamRequest) async throws -> Target {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-        let main = CGMainDisplayID()
-        guard let display = content.displays.first(where: { $0.displayID == (req.displayID ?? main) }) ?? content.displays.first else {
-            throw MirageError.transport("no display to capture")
+        var content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        func wanted() -> SCDisplay? { content.displays.first { $0.displayID == (req.displayID ?? CGMainDisplayID()) } }
+        if wanted() == nil {
+            // Displays asleep: SCK lists none, or only a virtual one (Astropad's) while the physical panels
+            // wake. Wake them like a local user would (ARD does the same) and wait for the wanted display.
+            var id: IOPMAssertionID = 0
+            IOPMAssertionDeclareUserActivity("Mirage viewer connected" as CFString, kIOPMUserActiveLocal, &id)
+            for _ in 0..<16 where wanted() == nil {
+                try await Task.sleep(for: .milliseconds(500))
+                content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            }
         }
-        let pw = Double(CGDisplayPixelsWide(display.displayID)), ph = Double(CGDisplayPixelsHigh(display.displayID))
+        // Fallback: the largest display listed (never a tiny virtual one if a real panel is there).
+        guard let display = wanted() ?? content.displays.max(by: { $0.width * $0.height < $1.width * $1.height }) else {
+            throw MirageError.transport("no display to capture (displays asleep?)")
+        }
+        var pw = Double(CGDisplayPixelsWide(display.displayID)), ph = Double(CGDisplayPixelsHigh(display.displayID))
+        if pw < 64 || ph < 64 { pw = Double(display.width); ph = Double(display.height) }
         let mode = CGDisplayCopyDisplayMode(display.displayID)
         let scale = mode.map { Double($0.pixelWidth) / Double($0.width) } ?? 1
         // Fit the display aspect into the requested box; even dimensions keep the encoder happy.

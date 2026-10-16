@@ -82,6 +82,16 @@ final class ViewerSession: @unchecked Sendable {
     private(set) var windows: [ControlMessage.WindowInfo] = []
     private var bandColors: [UInt32: SIMD4<Float>] = [:]
     private var inputSeq: UInt64 = 0
+    /// Receiver clock of the last refinement-flagged tile batch (scenario time-to-crisp).
+    private(set) var lastRefinementNanos: UInt64 = 0
+    /// Scenario watch rect: last lossless tile / video frame that touched it.
+    var watchRect: PixelRect = .zero
+    private(set) var lastWatchedTileNanos: UInt64 = 0, lastWatchedVideoNanos: UInt64 = 0
+    private(set) var watchedTileBytes = 0, watchedTileCount = 0
+    static let debugTiles = ProcessInfo.processInfo.environment["MIRAGE_DEBUG_TILES"] != nil
+    func resetWatched() { videoQueue.async { self.watchedTileBytes = 0; self.watchedTileCount = 0 } }
+    func windowsSnapshot() -> [ControlMessage.WindowInfo] { predictorLock.lock(); defer { predictorLock.unlock() }; return windows }
+    var scenario: ScenarioRunner?
 
     init(host: String, port: UInt16, pairCode: String?, model: ViewerModel) {
         self.host = host; self.port = port; self.pairCode = pairCode; self.model = model
@@ -217,6 +227,14 @@ final class ViewerSession: @unchecked Sendable {
         case .tiles(let t):
             let n = compositor?.applyTiles(t.tiles) ?? 0
             statsLock.lock(); sTileBytes += t.bytes; sTileRects += n; statsLock.unlock()
+            if t.refinement { lastRefinementNanos = now }
+            if !watchRect.isEmpty {
+                let inside = t.tiles.filter { $0.rect.intersects(watchRect) }
+                if !inside.isEmpty {
+                    lastWatchedTileNanos = now; watchedTileBytes += inside.reduce(0) { $0 + $1.data.count }; watchedTileCount += inside.count
+                    if Self.debugTiles { log("tiles\(t.refinement ? " (refine)" : "") seq \(t.header.captureSeq) in watch rect: " + inside.map { "\($0.rect.width)x\($0.rect.height)@\($0.rect.x),\($0.rect.y) \($0.data.count)B \($0.format)" }.joined(separator: "  ")) }
+                }
+            }
             predictorLock.lock()
             for tile in t.tiles { predictor.hostUpdate(inputSeq: t.header.inputSeq, rect: tile.rect, now: now) }
             predictorLock.unlock()
@@ -264,6 +282,7 @@ final class ViewerSession: @unchecked Sendable {
                         let grid = TileMask.grid(for: region)
                         let mask = frame.tileMask.flatMap { TileMask(cols: grid.cols, rows: grid.rows, bits: $0) }
                         compositor.applyVideo(image, region: region, mask: mask)
+                        if !watchRect.isEmpty, region.intersects(watchRect) { lastWatchedVideoNanos = now }
                         predictorLock.lock(); predictor.hostUpdate(inputSeq: frame.inputSeq, rect: region, now: now); predictorLock.unlock()
                         onChange?()
                     }
@@ -452,6 +471,8 @@ extension ViewerSession {
             var tileKbpsMedian: Double, totalKbpsMedian: Double, controllerTargetKbpsMedian: Double, capacityKbpsMedian: Double, queueMsMedian: Double, queueMsP95: Double, rungMax: Int, rungFinal: Int
             var framesTotal: Int, lostTotal: Int, skippedTotal: Int, tileRectsTotal: Int, copyRectsTotal: Int
             var predictionsShown: Int, predictionsConfirmed: Int, predictionsMismatched: Int
+            var scenario: String?, crispMs: [Double]?, crispMsMedian: Double?, crispMsMax: Double?
+            var watchedTileBytes: Int?, watchedTileCount: Int?, watchedKbps: Double?
             var samples: [Sample]
         }
         let target = MainActor.assumeIsolated { lastRequest?.bitrateKbps ?? 0 }
@@ -469,6 +490,9 @@ extension ViewerSession {
                       framesTotal: Int(samples.map(\.fps).reduce(0, +)), lostTotal: samples.map(\.lost).reduce(0, +), skippedTotal: samples.map(\.skipped).reduce(0, +),
                       tileRectsTotal: samples.map(\.tileRects).reduce(0, +), copyRectsTotal: samples.map(\.copyRects).reduce(0, +),
                       predictionsShown: pstats.shown, predictionsConfirmed: pstats.confirmed, predictionsMismatched: pstats.mismatched,
+                      scenario: scenario?.name, crispMs: scenario?.crispMs, crispMsMedian: scenario.map { median($0.crispMs) }, crispMsMax: scenario?.crispMs.max(),
+                      watchedTileBytes: scenario == nil ? nil : watchedTileBytes, watchedTileCount: scenario == nil ? nil : watchedTileCount,
+                      watchedKbps: scenario.map { Double(watchedTileBytes) * 8 / 1000 / max(1, $0.activeSeconds) },
                       samples: samples)
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         return (try? enc.encode(out)) ?? Data()

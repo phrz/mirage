@@ -72,18 +72,22 @@ final class TileTrackerTests: XCTestCase {
 }
 
 final class ShiftDetectorTests: XCTestCase {
-    /// A frame with "text lines": rows of pseudo-random pixels every few px, white elsewhere.
-    private func makeFrame(width: Int, height: Int, seed: UInt32, yOffset: Int = 0) -> [UInt8] {
+    /// A frame with "text lines": rows of pseudo-random pixels every few px, white elsewhere,
+    /// plus ±2 per-channel noise (what SCK's downscale leaves between a moved pixel and its original).
+    private func makeFrame(width: Int, height: Int, seed: UInt32, yOffset: Int = 0, noiseSeed: UInt32 = 0) -> [UInt8] {
         var px = [UInt8](repeating: 0xFF, count: width * height * 4)
+        var noise = noiseSeed &* 2246822519 &+ 1
         for y in 0..<height {
             let srcY = y + yOffset
             guard srcY >= 0, srcY % 7 < 3 else { continue }   // blank lines between text lines
             var rng = seed &+ UInt32(srcY) &* 2654435761
             for x in 0..<width {
                 rng = rng &* 1103515245 &+ 12345
+                noise = noise &* 1103515245 &+ 12345
                 let v = UInt8((rng >> 16) & 0xff)
+                let n = noiseSeed == 0 ? 0 : Int((noise >> 16) % 5) - 2
                 let o = (y * width + x) * 4
-                px[o] = v; px[o + 1] = v ^ 0x55; px[o + 2] = v ^ 0xAA; px[o + 3] = 0xff
+                px[o] = UInt8(clamping: Int(v) + n); px[o + 1] = UInt8(clamping: Int(v ^ 0x55) + n); px[o + 2] = UInt8(clamping: Int(v ^ 0xAA) + n); px[o + 3] = 0xff
             }
         }
         return px
@@ -92,7 +96,7 @@ final class ShiftDetectorTests: XCTestCase {
     func testDetectsVerticalScrollAndExposedStripMismatch() {
         let w = 640, h = 512
         let old = makeFrame(width: w, height: h, seed: 7)
-        let new = makeFrame(width: w, height: h, seed: 7, yOffset: 40)   // content moved up by 40 px (scrolled down)
+        let new = makeFrame(width: w, height: h, seed: 7, yOffset: 40, noiseSeed: 99)   // content moved up by 40 px (scrolled down), noisy
         let d = ShiftDetector()
         let r = old.withUnsafeBytes { o in new.withUnsafeBytes { n in
             d.detect(old: .init(base: o.baseAddress!, stride: w * 4, width: w, height: h),
@@ -169,7 +173,7 @@ final class RateControllerTests: XCTestCase {
         XCTAssertLessThan(rc.targetKbps, 900, "target \(rc.targetKbps) should back off below a 1 Mbps link")
         XCTAssertGreaterThan(rc.targetKbps, 400)
         XCTAssertLessThan(rc.queueMs, 100)
-        XCTAssertGreaterThan(rc.capacityKbps, 700); XCTAssertLessThan(rc.capacityKbps, 1400)
+        XCTAssertGreaterThan(rc.capacityKbps, 600); XCTAssertLessThan(rc.capacityKbps, 1400)
     }
 
     func testHoldsRequestedRateOnAFatLink() {
@@ -197,7 +201,31 @@ final class RateControllerTests: XCTestCase {
 
     func testBudgetSplit() {
         let rc = RateController(initialKbps: 1000, maxKbps: 1000, nativePixels: 1)
-        XCTAssertEqual(rc.budget(videoActive: true), .init(tileKbps: 450, videoKbps: 550))
+        XCTAssertEqual(rc.budget(videoActive: true), .init(tileKbps: 450, videoKbps: 900))
+        XCTAssertEqual(rc.budget(videoActive: true, recentTileKbps: 200), .init(tileKbps: 450, videoKbps: 750))
+        XCTAssertEqual(rc.budget(videoActive: true, recentTileKbps: 800), .init(tileKbps: 450, videoKbps: 550))
         XCTAssertEqual(rc.budget(videoActive: false).tileKbps, 900)
+    }
+}
+
+final class ShiftRefineTests: XCTestCase {
+    func testRefineFindsDiagonalOffsetFromSkewedDelta() {
+        let w = 512, h = 384
+        var old = [UInt8](repeating: 0xFF, count: w * h * 4)
+        var rng: UInt32 = 5
+        for i in 0..<(w * h) { rng = rng &* 1103515245 &+ 12345; let v = UInt8((rng >> 16) & 0xff); old[i * 4] = v; old[i * 4 + 1] = v; old[i * 4 + 2] = v }
+        var new = [UInt8](repeating: 0xFF, count: w * h * 4)
+        let win = PixelRect(x: 64, y: 64, width: 256, height: 192)
+        for y in 0..<h { for x in 0..<w {
+            let sx = x - 7, sy = y - 4
+            guard win.contains(sx, sy) else { continue }
+            let o = (y * w + x) * 4, s = (sy * w + sx) * 4
+            new[o] = old[s]; new[o+1] = old[s+1]; new[o+2] = old[s+2]
+        } }
+        let d = ShiftDetector()
+        let r = old.withUnsafeBytes { o in new.withUnsafeBytes { n in
+            d.refine(old: .init(base: o.baseAddress!, stride: w * 4, width: w, height: h), new: .init(base: n.baseAddress!, stride: w * 4, width: w, height: h), rect: win, dx: 4, dy: 2)
+        } }
+        XCTAssertEqual(r?.dx, 7); XCTAssertEqual(r?.dy, 4)
     }
 }

@@ -14,6 +14,7 @@ struct Options {
     var probeInput = false
     var duration = 60.0
     var statsJSON: String?
+    var scenario: (String, Double)?
 
     static func parse() -> Options {
         var o = Options()
@@ -29,6 +30,7 @@ struct Options {
         if let v = value("--stats-log") { o.statsLog = v }
         if let v = value("--duration"), let d = Double(v) { o.duration = d }
         if let v = value("--stats") { o.statsJSON = v }
+        if let v = value("--scenario") { let p = v.split(separator: ":"); o.scenario = (String(p[0]), p.count > 1 ? Double(p[1]) ?? 30 : 30) }
         if let i = args.firstIndex(of: "--headless") { o.headless = true; args.remove(at: i) }
         if let i = args.firstIndex(of: "--probe-input") { o.probeInput = true; args.remove(at: i) }
         if let v = value("--window") { let p = v.split(separator: "x").compactMap { Int($0) }; if p.count == 2 { o.window = (p[0], p[1]) } }
@@ -44,6 +46,7 @@ struct Options {
                              no window: connect, request --window pixels (× --scale), decode for S seconds,
                              write per-second samples and medians to PATH.json, exit 0 (SSH-friendly)
                   --probe-input  (headless) after 8 s move the host pointer and open/close Spotlight
+                  --scenario NAME:SECONDS  (headless) drive the host's "Mirage Test Bench" window: idle | typing | scroll | drag
                   ⌃⌥⌘S toggles the stats overlay, ⌃⌥⌘Q quits; all other keys go to the host.
                 """)
             exit(0)
@@ -260,6 +263,11 @@ if CommandLine.arguments.contains("--headless") {
     session.start()
     session.requestStream(width: Int(Double(o.window.0) * o.pixelFactor), height: Int(Double(o.window.1) * o.pixelFactor))
     if o.probeInput { Task { try? await Task.sleep(for: .seconds(8)); await session.probeInput() } }
+    if let (name, secs) = o.scenario {
+        let runner = ScenarioRunner(session: session, name: name, seconds: secs)
+        session.scenario = runner
+        Task { try? await Task.sleep(for: .seconds(3)); await runner.run() }
+    }
     Timer.scheduledTimer(withTimeInterval: o.duration, repeats: false) { _ in
         session.stop()
         let json = session.statsJSON()

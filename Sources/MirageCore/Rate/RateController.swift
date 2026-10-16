@@ -133,14 +133,16 @@ public struct RateController {
         }
     }
 
-    /// Byte budget split for the next second: tiles first (bounded so video keeps moving), video the rest.
+    /// Byte budget split: tiles may take up to 45 % while video is active (90 % otherwise), and
+    /// video gets whatever tiles are not actually using (`recentTileKbps`, smoothed by the caller).
     public struct Budget: Equatable {
         public var tileKbps: Int; public var videoKbps: Int
         public init(tileKbps: Int, videoKbps: Int) { self.tileKbps = tileKbps; self.videoKbps = videoKbps }
     }
-    public func budget(videoActive: Bool) -> Budget {
+    public func budget(videoActive: Bool, recentTileKbps: Int = 0) -> Budget {
         let tiles = videoActive ? Int(Double(targetKbps) * 0.45) : Int(Double(targetKbps) * 0.9)
-        return Budget(tileKbps: tiles, videoKbps: max(100, targetKbps - (videoActive ? tiles : Int(Double(targetKbps) * 0.1))))
+        let reserved = max(Int(Double(targetKbps) * 0.1), min(tiles, Int(Double(recentTileKbps) * 1.25)))
+        return Budget(tileKbps: tiles, videoKbps: max(100, targetKbps - reserved))
     }
 
     public var srttMs: Double { srttNanos / 1e6 }

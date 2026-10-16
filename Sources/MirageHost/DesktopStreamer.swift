@@ -27,7 +27,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     // Hybrid codec state.
     private var tracker: TileTracker?
-    private let detector = ShiftDetector()
+    private var detector = ShiftDetector()
     private var rc: RateController?
     private var canvas: CVPixelBuffer?          // native BGRA picture the encoder sees
     private var scaled: CVPixelBuffer?          // encoder input at the current rung (nil at native)
@@ -49,6 +49,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private struct PendingScroll { let x: Int, y: Int; let windowID: UInt32; let nanos: UInt64 }
     private let scrollLock = NSLock()
     private var pendingScroll: PendingScroll?
+    private var dumped = false
 
     // Video pacing state.
     private var seq: UInt32 = 0
@@ -70,11 +71,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var statEncodeNanos: UInt64 = 0
     private var statInput = 0, statTileBytes = 0, statTileRects = 0, statRefineBytes = 0, statCopyRects = 0, statDirtyTiles = 0, statDiffPruned = 0, statTileSkipped = 0
     private var secTileBytes = 0, secVideoBytes = 0   // per rateState second
+    private var tileKbpsEWMA = 0.0
     private var statTimer: DispatchSourceTimer?
 
     public init(log: @escaping @Sendable (String) -> Void) {
         self.log = log
         hostLog = log
+        if ProcessInfo.processInfo.environment["MIRAGE_DEBUG_SHIFT"] != nil { detector.debug = { log($0) } }
     }
 
     // MARK: DesktopStreamer
@@ -230,10 +233,20 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         ShiftDetector.Frame(base: CVPixelBufferGetBaseAddress(pb)!, stride: CVPixelBufferGetBytesPerRow(pb), width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb))
     }
 
+    /// Per-channel difference below which a tile counts as unchanged: whole-screen ±1–2 level flickers
+    /// and anti-aliasing re-renders are invisible, but through an exact diff they would turn into a
+    /// video frame plus a full lossless refinement pass (measured: ~400 KB per flicker).
+    private static let diffTolerance: Int32 = 4
+
     private func tileEqual(_ a: ShiftDetector.Frame, _ b: ShiftDetector.Frame, _ r: PixelRect) -> Bool {
         let n = r.width * 4
         for y in r.y..<r.maxY {
-            if memcmp(a.base.advanced(by: y * a.stride + r.x * 4), b.base.advanced(by: y * b.stride + r.x * 4), n) != 0 { return false }
+            let pa = a.base.advanced(by: y * a.stride + r.x * 4), pb = b.base.advanced(by: y * b.stride + r.x * 4)
+            if memcmp(pa, pb, n) == 0 { continue }
+            let ua = pa.assumingMemoryBound(to: UInt8.self), ub = pb.assumingMemoryBound(to: UInt8.self)
+            for i in 0..<n where i & 3 != 3 {   // skip alpha
+                if abs(Int32(ua[i]) - Int32(ub[i])) > Self.diffTolerance { return false }
+            }
         }
         return true
     }
@@ -275,9 +288,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         var explained = Set<Int>()
         if let old, prev != nil {
             for d in moved {
-                let dx = d.new.x - d.old.x, dy = d.new.y - d.old.y
-                guard abs(dx) + abs(dy) > 0, abs(dx) < 600, abs(dy) < 600,
-                      let r = detector.verify(old: old, new: new, rect: d.old, dx: dx, dy: dy) else { continue }
+                let dx0 = d.new.x - d.old.x, dy0 = d.new.y - d.old.y
+                guard abs(dx0) + abs(dy0) > 0, abs(dx0) < 600, abs(dy0) < 600 else { continue }
+                // The window list is sampled a few ms after the pixels were composited, so during a fast
+                // drag the reported delta can be off by a few px: verify it, else search around the window.
+                var r = detector.verify(old: old, new: new, rect: d.old, dx: dx0, dy: dy0)
+                if r == nil, let (rdx, rdy) = detector.refine(old: old, new: new, rect: d.old, dx: dx0, dy: dy0), (rdx, rdy) != (dx0, dy0) {
+                    r = detector.verify(old: old, new: new, rect: d.old, dx: rdx, dy: rdy)
+                }
+                guard let r else { continue }
+                let dx = r.dx, dy = r.dy
                 let dest = tracker.tiles(covering: [r.rect.offset(dx, dy)])
                 let mismatched = Set(tracker.tiles(covering: r.mismatchedTiles))
                 explained.formUnion(dest.filter { !mismatched.contains($0) })
@@ -285,9 +305,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 statCopyRects += 1
             }
             let unexplained = dirty.filter { !explained.contains($0) }
-            if unexplained.count >= 6 {
-                scrollLock.lock(); let scroll = pendingScroll; pendingScroll = nil; scrollLock.unlock()
-                let bb = tracker.boundingRect(unexplained)
+            if detector.debug != nil, unexplained.count >= 6 { log("capture \(captureSeq): dirty \(dirty.count) unexplained \(unexplained.count) moved \(moved.count) scroll \(pendingScroll != nil)") }
+            if let dir = ProcessInfo.processInfo.environment["MIRAGE_DUMP_DIR"], unexplained.count >= 100, !dumped {
+                dumped = true
+                for (name, f) in [("old", old), ("new", new)] {
+                    var d = Data(count: f.width * f.height * 4)
+                    d.withUnsafeMutableBytes { dst in for y in 0..<f.height { memcpy(dst.baseAddress!.advanced(by: y * f.width * 4), f.base.advanced(by: y * f.stride), f.width * 4) } }
+                    try? d.write(to: URL(fileURLWithPath: "\(dir)/\(name)-\(f.width)x\(f.height).bgra"))
+                }
+                log("dumped frame pair to \(dir)")
+            }
+            scrollLock.lock(); let scroll = pendingScroll; pendingScroll = nil; scrollLock.unlock()
+            let bb = tracker.boundingRect(unexplained)
+            if unexplained.count >= 12, bb.height >= 128 || bb.width >= 128 {
                 let win = scroll.flatMap { s in windows.window(at: s.x, s.y) } ?? windows.window(at: bb.x + bb.width / 2, bb.y + bb.height / 2)
                 let known = win.flatMap { windows.scrollRect(for: $0.id) }
                 var region = (known ?? win?.frame ?? bb).intersection(bb)
@@ -366,7 +396,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             for (r, d) in jobs {
                 let encoded: (TileCodec.Format, Data)? = d.withUnsafeBytes { p -> (TileCodec.Format, Data)? in
                     let base = p.baseAddress!
-                    let fmt: TileCodec.Format = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4) > 256 ? .nearLossless : .lossless
+                    let fmt: TileCodec.Format = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4, limit: 4096) > 4096 ? .nearLossless : .lossless
                     return TileCodec.encode(base: base, width: r.width, height: r.height, stride: r.width * 4, format: fmt).map { (fmt, $0) }
                 }
                 if let (fmt, data) = encoded { out.append(.init(rect: r, format: fmt, data: data)) }
@@ -574,7 +604,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func applyBudget(now: UInt64) {
         guard let rc, now - lastBudgetApply > 500_000_000 else { return }
         lastBudgetApply = now
-        let b = rc.budget(videoActive: now - videoActiveNanos < 500_000_000)
+        let b = rc.budget(videoActive: now - videoActiveNanos < 500_000_000, recentTileKbps: Int(tileKbpsEWMA))
         let rungChanged = encoder.map { Int(Double(target?.pixelWidth ?? 0) * rc.scale) & ~1 != $0.width } ?? false
         if rungChanged {
             lastBudget = b
@@ -620,6 +650,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard let self, let rc = self.rc else { return }
             self.output?.sendControl(.rateState(.init(targetKbps: rc.targetKbps, capacityKbps: rc.capacityKbps, queueMs: rc.queueMs, rung: rc.rung, scale: rc.scale,
                                                       tileBudgetKbps: self.lastBudget.tileKbps, videoKbps: self.secVideoBytes * 8 / 1000, tileKbps: self.secTileBytes * 8 / 1000)))
+            self.tileKbpsEWMA = self.tileKbpsEWMA * 0.5 + Double(self.secTileBytes * 8 / 1000) * 0.5
             self.secVideoBytes = 0; self.secTileBytes = 0
         }
         s.resume(); rateTimer = s
