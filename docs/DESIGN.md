@@ -648,3 +648,75 @@ still reveal the half-world RTT. Expected: those are the two interactions whose 
 local prediction can hide (DESIGN §3.5), and M1 ships none of it yet except the local cursor.
 Both cheats are mode-independent and will apply in Desktop mode too: copy-rect-driven window
 dragging and the caret echo overlay are M2/M3 work, not Unified-mode work.
+
+### M2 (2026-10-17, hybrid codec + local prediction)
+
+What was built is in §3.3a; the viewer, host and test bench are described in the README. Measured
+on the real link, mac-daddy (Dallas, now a 3200×1800 panel at 2x: the 5K is offline) → this
+MacBook (Japan), RTT 160–240 ms, stream 2560×1440 unless noted, headless viewer over the tailnet.
+
+**Full-screen motion.** mac-daddy was at its lock screen for these runs, whose animated wallpaper
+changes essentially every tile at 25 fps (the tolerant diff still prunes 84 % of the tiles SCK
+flags, because the fades are mostly below ±4). 60 s per run, display held awake by the host:
+
+| Cap | Delivered (video + lossless) | Video fps | Frame age median / p95 | Queue median / p95 | Controller target | Tier / rung | Lost |
+|---|---|---|---|---|---|---|---|
+| 800 kbps | 460 + 370 kbps | 4 | 113 / 122 ms | 15 / 23 ms | 800 | Constrained / 0 | 0 |
+| 2000 kbps | 1050 + 920 kbps | 5 | 114 / 125 ms | 21 / 30 ms | 2000 | Constrained / 0 | 0 |
+
+So at a 2 Mbps cap the link carried ~2 Mbps today with the queue under 30 ms and p95 frame age
+125 ms, well inside the 250 ms criterion; the controller backed off only during the opening
+burst (queue 101 ms at t = 3 s → target 680 kbps) and then climbed to the cap at 8 %/s. The
+M1 run that saw 567 ms sRTT at 2 Mbps had 15 frames in flight; M2 keeps 1–2 (in-flight cap of
+one base RTT + 50 ms of the video budget) and backs off on delay, which is the difference. The
+dispersion-based capacity estimate reads 40–100 Mbps here (the physical path), so the 70 %
+rule never engages on this link; the delay rule does the work. Full-screen photographic motion
+at 2560×1440 costs ~25 KB per HEVC frame, hence 4–5 fps at 1 Mbps of video: that is the
+ladder's job, and the Constrained tier allows all four rungs (the rung stayed at 0 because the
+target was above the 0.18 kbps/kpixel threshold; the wallpaper is not the content the ladder
+is tuned for).
+
+A loss at the 2 Mbps cap exposed a recovery bug (fixed): the assembler's late "lost" verdict for
+a frame *older* than the recovery keyframe re-armed the viewer's wait, the host rightly ignored
+the stale loss, and video froze for 40 s while lossless refinement kept the picture current.
+The viewer now ignores such verdicts and the host resends a keyframe when a viewer keeps
+skipping frames newer than the last recovery.
+
+**Typing, scrolling, dragging: loopback and host-side facts** (the link runs against the test
+bench window need mac-daddy unlocked; see below):
+
+- A typed glyph is one lossless rect of the exact changed box, ~500 B at native scale, a caret
+  blink ~250 B (9×40 px); at 6 keys/s that is ~30 kbps plus ~4 kbps of caret. The same glyph
+  costs 1.4 KB as a whole 64-px tile and 2.8 KB when the stream is a downscaled copy of the
+  display (viewer window smaller than the host display), which is why direct updates send tight
+  boxes and why `--scale` ≥ 1 matters for text.
+- Scroll bursts of 40 wheel events (30 pt each) through NSTextView: every capture became a
+  copy-rect plus the exposed strip as lossless tiles, no video; the viewer's 80 predictions were
+  all confirmed by the host's copy-rects, 0 mismatches. Window drags of 6×3 px per 16 ms: 47
+  copy-rects per burst, 81 of 90 predictions confirmed, 6 mismatches (the translucent title bar
+  and the shadow verify as "changed" at the edges).
+- Exact-match detection found nothing on a real scroll: SCK's downscale leaves ±1–3 levels
+  between a moved pixel and its original. Line-profile correlation with tolerant verification
+  finds the shift (−30 px per wheel event) on every capture.
+- Invisible whole-screen flickers (±1–2 levels) turned into a video frame plus a full lossless
+  refinement pass (~400 KB) until the tile diff got a ±4 tolerance.
+
+**Pending (mac-daddy must be unlocked):** idle kbps, typing kbps into the test bench over the
+link, scroll and drag time-to-crisp, subjective notes. Commands are in experiments/testbench/README.md.
+
+Platform findings from M2:
+
+- SCK lists no displays while the panels sleep, and lists only Astropad's virtual display while
+  they wake; `IOPMAssertionDeclareUserActivity` wakes them like a local user, and a
+  `PreventUserIdleDisplaySleep` assertion for the life of the capture keeps them on (they
+  otherwise re-sleep ~90 s later and the stream goes silent).
+- `WebPConfigLosslessPreset` does not initialise the rest of `WebPConfig`; call `WebPConfigInit`
+  first or `WebPEncode` fails with an invalid configuration.
+- `CGWindowListCopyWindowInfo` sampled in the SCK callback lags the composited pixels by a few
+  ms, so a dragged window's frame delta is a few px stale at 30 fps; verify against the pixels
+  and refine, never trust it blind.
+- The one-way-delay EWMA sits ~30 ms above its windowed minimum even on a nearly idle link (tile
+  acks ride a reliable stream, the control stream carries JSON); the controller's dead band
+  starts above that (40–90 ms).
+- The 1600×900 virtual display reports `CGDisplayPixelsWide` of 1600 for a 3200×1800 mode;
+  take the mode's pixel size, not the display's.
