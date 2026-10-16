@@ -8,6 +8,8 @@ struct Options {
     var pair: String?
     var bitrate = 800
     var pixelFactor = 1.0
+    var statsLog: String?
+    var window = (1280, 720)
 
     static func parse() -> Options {
         var o = Options()
@@ -20,11 +22,15 @@ struct Options {
         if let v = value("--pair") { o.pair = v }
         if let v = value("--bitrate"), let b = Int(v) { o.bitrate = b }
         if let v = value("--scale"), let f = Double(v) { o.pixelFactor = f }
+        if let v = value("--stats-log") { o.statsLog = v }
+        if let v = value("--window") { let p = v.split(separator: "x").compactMap { Int($0) }; if p.count == 2 { o.window = (p[0], p[1]) } }
         if args.contains("-h") || args.contains("--help") || args.isEmpty {
             print("""
                 usage: mirage-viewer HOST [--port N] [--pair CODE] [--bitrate KBPS] [--scale F]
                   --bitrate  target video bitrate in kbit/s (default 800); ⌃⌥⌘↑/↓ adjusts live
                   --scale    stream pixels = window points × backing scale × F (default 1.0)
+                  --window   initial window size in points, WxH (default 1280x720)
+                  --stats-log PATH  append one line of stats per second to PATH
                   ⌃⌥⌘S toggles the stats overlay, ⌃⌥⌘Q quits; all other keys go to the host.
                 """)
             exit(args.isEmpty ? 2 : 0)
@@ -44,16 +50,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         model = ViewerModel(bitrateKbps: options.bitrate, pixelFactor: options.pixelFactor)
+        model.statsLog = options.statsLog.map { URL(fileURLWithPath: $0) }
         session = ViewerSession(host: options.host, port: options.port, pairCode: options.pair, model: model)
         let content = ContentView(session: session, model: model)
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1280, height: 720),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: options.window.0, height: options.window.1),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Mirage — \(options.host)"
         w.contentView = NSHostingView(rootView: content)
         w.contentMinSize = NSSize(width: 480, height: 270)
         w.delegate = self
         w.center()
-        w.setFrameAutosaveName("MirageViewer")
+        if options.window == (1280, 720) { w.setFrameAutosaveName("MirageViewer") }
         w.makeKeyAndOrderFront(nil)
         window = w
         installMenu()

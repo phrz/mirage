@@ -252,7 +252,9 @@ keyboard and trackpad pass straight through.
 - Headless operation on mac-daddy: real displays today; a virtual display (CGVirtualDisplay,
   private) only if you ever want a client-shaped desktop without a monitor attached.
 
-## 6. M0 status (2026-10-16)
+## 6. Status
+
+### M0 (2026-10-16)
 
 Built and measured between this MacBook (Japan, rural link) and mac-daddy (Dallas):
 
@@ -277,3 +279,108 @@ Network.framework findings that cost time, recorded so they are not rediscovered
   touching the keychain; the P12 is produced once by the system LibreSSL `openssl`.
 - The Command Line Tools' SwiftPM manifest API is broken on this machine; build with
   `DEVELOPER_DIR` pointing at Xcode.
+
+### M1 (2026-10-16, Desktop mode)
+
+What was built: SCK display stream (scaled by SCK to the viewer's pixel size, cursor hidden,
+frames only on change) → hardware HEVC in low-latency mode (`AllowFrameReordering=false`,
+`EnableLTR`, `MaxKeyFrameInterval` 2²⁰, `DataRateLimits` = one second of the target bitrate,
+`ExpectedFrameRate` = bitrate / 6 KB clamped to [5, 30]) → ≤1200-byte QUIC datagrams with a
+23-byte header (seq, fragment i/n, flags, capture clock, frame size) → reassembly →
+`VTDecompressionSession` → `AVSampleBufferDisplayLayer`. Host cursor shape + hotspot travel on
+the control stream and are drawn at the local pointer; mouse, scroll and keys travel back as
+JSON on the same stream and are posted with `CGEvent` at the HID tap. Pacing is a token bucket
+at the target bitrate plus an in-flight cap of bitrate × (sRTT + 150 ms); SCK frames that do
+not fit are dropped, never queued. Loss recovery: the viewer acks every frame; a loss triggers
+`ForceLTRRefresh` against acknowledged LTR tokens (keyframe if none), and the viewer skips
+decoding until a frame flagged *recovery* arrives.
+
+Measured on the real link. Because mac-daddy's TCC grants were not yet clicked, the link run
+was done in the **reverse direction**: `miraged` on this MacBook (M4 Max, Japan, already
+permitted) streaming its 1512×982-pt display to the viewer running on mac-daddy (M3 Ultra,
+Dallas), launched over SSH with `open … --stats-log`. The direction does not change the
+RTT or the bottleneck; the content was a page with a scrolling text column, a spinning box
+and a millisecond clock. Stream size 2216×1440 (fitted to the viewer's 1280×720-pt window
+at 2x). Steady state over 30–50 s each:
+
+| Target | Delivered | fps | Frame age (capture→decoded, clock-offset corrected) | Decode | Loss |
+|---|---|---|---|---|---|
+| 800 kbps | 780–900 kbps | 26–32 | 120–150 ms typical, 180–250 ms during RTT spikes | 1.6–3 ms | 0 after the opening keyframe |
+| 2000 kbps | 1.94–2.2 Mbps | 28–32 | 117–147 ms | 1.6–2.4 ms | 0 |
+| 4000 kbps | 3.7–4.5 Mbps | 25–32 | 122–158 ms | 1.7–2.6 ms | 0 |
+
+Host side at every rate: encode 10 ms per frame, sRTT 195–260 ms as seen through acks, 4–7
+frames in flight, delivered bitrate within 2% of target. Frame age of ~125 ms is one-way
+delay (~90 ms) + serialization of a 3–4 KB frame + capture/encode/decode (~15 ms); the
+~200 ms readings coincide with RTT spikes to 300–500 ms on the ping stream, i.e. the link,
+not the pipeline. In loopback the same pipeline shows 9–16 ms frame age, and the infinite
+mirror of a viewer looking at its own host shows each recursion level exactly one frame
+(33 ms) behind the last — a cheap end-to-end latency check worth keeping.
+
+Quality at 800 kbps: 30 fps of a 2216×1440 frame is ~3.3 KB per frame, so moving text is soft
+but legible and snaps crisp within a frame of motion stopping (HEVC spends the saved bits
+immediately). At 2 Mbps text in motion is clean. The "frame rate is a result" rule holds: the
+encoder's own rate control stayed at the capture ceiling (30 fps) at all three rates on this
+content; the token bucket only intervened for the first second (the opening keyframe).
+
+Click-to-pixel is therefore RTT + ~40 ms ≈ 250 ms at 800 kbps on this link — the §0 budget
+without the 160 ms serialization term, because frames are 3–8 KB instead of 20 KB.
+
+**ARD comparison: pending a human.** It needs someone at this MacBook with both ARD and the
+viewer open on mac-daddy and both machines' TCC grants in place. Procedure, so it is a
+five-minute job: on mac-daddy show a millisecond clock (e.g. the `motion.html` page from this
+session, or `while true; do date +%T.%N; done` in Terminal at 72 pt); open ARD and the Mirage
+viewer side by side here; take local screenshots (`screencapture -x`) and read the two clocks
+off each — the difference is the relative latency; compare each to the clock shown by a
+third viewer that is known-good (or to the host clock via `ssh mac-daddy date` with the clock
+offset from `ntpdate -q`). Record subjective feel for: cursor (Mirage draws it locally so it
+should be the obvious win), typing echo, window drag, scroll. Fill in the table below.
+
+| | ARD | Mirage M1 |
+|---|---|---|
+| Cursor latency | remote-drawn, ~RTT | local, 0 |
+| Measured frame age | | 120–150 ms at 800 kbps |
+| Typing / drag / scroll feel | | |
+
+Idle and sparse change, same link, 800 kbps target, after adding a dirty-area frame-rate cap
+(SCK `dirtyRects`, in output pixels: <0.5% dirty → 5 fps, <3% → 10 fps, <15% → 20 fps,
+else the 30 fps ceiling) and a QP floor of 36 on keyframes:
+
+| Content | fps | kbps | Notes |
+|---|---|---|---|
+| Static desktop | 1 | 13 | SCK delivers nothing until something changes |
+| One small spinner (0.1% dirty) | 5 | 70 | was 29 fps / 270 kbps before the cap: low-latency HEVC re-polishes a static picture at any frame rate it is given |
+| Scrolling text + spinning box (75% dirty) | 28 | 800 | cap not engaged |
+| Opening keyframe, 2216×1440 | — | 17.7 KB | 72–160 KB without the QP floor (0.6–1.6 s on a 1 Mbps link); P-frames restore detail within ~300 ms |
+
+The sparse case is the argument for M2's lossless tiles: 70 kbps for a spinner is still a
+whole-frame refresh five times a second.
+
+Platform findings from M1:
+
+- `SCStreamConfiguration` with `width/height` set scales the display on the GPU; requesting
+  the viewer's pixel size costs nothing on the host and avoids shipping 5K.
+- Low-latency HEVC drops frames itself when `DataRateLimits` would be exceeded
+  (`kVTEncodeInfo_FrameDropped`); treat that as a normal skip, not an error — forcing a
+  keyframe there starves the link (first version did).
+- `MinAllowedFrameQP` can be flipped per frame between encodes in low-latency mode; raising
+  it to 36 for keyframes only cuts the opening frame 4–9x. `dirtyRects` from SCK are in the
+  configured output pixel size, and a frame with an empty list is delivered only around start.
+- Apple Events to third-party apps (`osascript … tell application "Helium"`) trigger a TCC
+  Automation prompt per target app; `System Events` was already allowed. Drive test content
+  from your own process (`scratch motion.swift`-style window) rather than scripting a browser.
+- `VTCompressionSession` in low-latency mode emits `RequireLTRAcknowledgementToken` per
+  frame; feeding tokens back via `AcknowledgedLTRTokens` + `ForceLTRRefresh` compiles and runs,
+  but with 0% loss on this link the recovery path was only exercised by the opening frames.
+- `NWConnection.maximumDatagramSize` is 1252 on the tailnet (1280 MTU) and 16336 on loopback;
+  1200-byte datagrams fit everywhere.
+- A SwiftUI `App` scene opened no window when the executable was launched from a shell
+  (bundled or not); an AppKit `NSWindow` with `NSHostingView` works. The viewer still needs a
+  bundle (`scripts/make-viewer-app.sh`) for a Dock icon and key-window behaviour.
+- TCC identifies CLI tools by code signature. `swift build`'s ad-hoc signature changes every
+  build and would reset the host's grants; `scripts/deploy-host.sh` signs `miraged` with the
+  Apple Development identity so the designated requirement is stable across rebuilds.
+- `NSCursor.currentSystem` works from a LaunchAgent without an `NSApplication`; polling at
+  20 Hz and hashing the PNG is cheap and ships every I-beam/arrow change.
+- The macOS application firewall auto-allowed the signed `miraged` (no prompt) when mac-daddy
+  connected inbound.

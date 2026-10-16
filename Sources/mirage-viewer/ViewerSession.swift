@@ -15,6 +15,7 @@ final class ViewerModel: ObservableObject {
     @Published var streamInfo: ControlMessage.StreamInfo?
     @Published var bitrateKbps: Int
     @Published var pixelFactor: Double
+    var statsLog: URL?
 
     struct Stats {
         var rttMs = 0.0, fps = 0.0, kbps = 0.0, frameAgeMs = 0.0, decodeMs = 0.0
@@ -222,6 +223,12 @@ final class ViewerSession: @unchecked Sendable {
                 s.decodeMs = frames > 0 ? Double(dec) / Double(frames) / 1e6 : s.decodeMs
                 s.frameAgeMs = age / 1e6; s.rttMs = rtt; s.width = w; s.height = h
                 model.stats = s
+                if let url = model.statsLog {
+                    let line = String(format: "%@ rtt %.0f age %.0f fps %.1f kbps %.0f target %d decode %.1f lost %d skipped %d size %dx%d\n",
+                                      ISO8601DateFormatter().string(from: Date()), s.rttMs, s.frameAgeMs, s.fps, s.kbps, model.bitrateKbps, s.decodeMs, lost, dropped, w, h)
+                    if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() }
+                    else { try? line.write(to: url, atomically: true, encoding: .utf8) }
+                }
             }
         }
     }

@@ -22,6 +22,7 @@ final class HEVCEncoder {
     let width: Int, height: Int
     private var session: VTCompressionSession
     private var lastFormat: CMFormatDescription?
+    private var firstFrame = true
     private(set) var bitrateKbps: Int
     private(set) var expectedFPS: Int
 
@@ -67,8 +68,21 @@ final class HEVCEncoder {
     }
 
     /// Encodes one frame; `completion` runs on VideoToolbox's thread.
+    /// Keyframes are bounded by a floor on QP: a 2x desktop keyframe at the encoder's default
+    /// quality is ~160 KB (1.3 s at 1 Mbps); at QP ≥ 36 it is a fraction of that and the following
+    /// P-frames restore detail within a few hundred ms.
+    static let keyframeMinQP = 36
+    private var coarse = false
+    private func setCoarse(_ on: Bool) {
+        guard on != coarse else { return }
+        coarse = on
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MinAllowedFrameQP, value: (on ? Self.keyframeMinQP : 0) as CFNumber)
+    }
+
     func encode(_ pixelBuffer: CVPixelBuffer, captureNanos: UInt64, options: FrameOptions, completion: @escaping (Result<Encoded, Error>) -> Void) {
         var props: [CFString: Any] = [:]
+        setCoarse(options.forceKeyframe || firstFrame)
+        firstFrame = false
         if options.forceKeyframe { props[kVTEncodeFrameOptionKey_ForceKeyFrame] = kCFBooleanTrue }
         if options.forceLTRRefresh { props[kVTEncodeFrameOptionKey_ForceLTRRefresh] = kCFBooleanTrue }
         if !options.acknowledgedLTRTokens.isEmpty { props[kVTEncodeFrameOptionKey_AcknowledgedLTRTokens] = options.acknowledgedLTRTokens as CFArray }

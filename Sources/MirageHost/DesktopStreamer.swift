@@ -36,6 +36,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     // Stats (per log interval).
     private var statFrames = 0, statBytes = 0, statDropped = 0, statSkippedBudget = 0, statLost = 0
     private var statEncodeNanos: UInt64 = 0
+    private var statDirty = 0.0, statDirtyN = 0, statKeyBytes = 0
     private var statTimer: DispatchSourceTimer?
 
     public init(log: @escaping @Sendable (String) -> Void) {
@@ -47,7 +48,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     public func start(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         let cap = ScreenCapturer(queue: queue)
-        let t = try await cap.start(req) { [weak self] pb, nanos in self?.captured(pb, nanos) }
+        let t = try await cap.start(req) { [weak self] pb, nanos, dirty in self?.captured(pb, nanos, dirty: dirty) }
         return try await withCheckedThrowingContinuation { c in
             queue.async {
                 do {
@@ -140,7 +141,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         tokens = max(tokens, -3 * bucketCapacity(req))   // bound the debt a huge keyframe can create
     }
 
-    private func captured(_ pb: CVPixelBuffer, _ nanos: UInt64) {
+    private func captured(_ pb: CVPixelBuffer, _ nanos: UInt64, dirty: Double) {
         guard let enc = encoder, let req = request, output != nil else { return }
         refill()
         let now = Clock.nowNanos()
@@ -157,8 +158,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Classic token bucket: a frame may go when the bucket is non-negative; it then goes negative
         // by the frame's size and refills at the target bitrate. Big keyframes thus pay their debt over time.
         if tokens < 0 { statSkippedBudget += 1; return }
-        let minInterval = UInt64(1e9 / Double(max(1, req.maxFPS)))
+        // Sparse changes (a caret, a spinner, a clock) do not deserve 30 fps of whole-frame refreshes:
+        // low-latency HEVC spends the whole budget re-polishing a static picture otherwise. M2's tile
+        // path replaces this; for now cap the rate by how much of the frame moved.
+        let fpsCap: Double = dirty < 0.005 ? 5 : dirty < 0.03 ? 10 : dirty < 0.15 ? 20 : Double(req.maxFPS)
+        let minInterval = UInt64(1e9 / min(fpsCap, Double(max(1, req.maxFPS))))
         if now - lastSendNanos < minInterval * 9 / 10 { statDropped += 1; return }
+        statDirty += dirty; statDirtyN += 1
 
         var opts = HEVCEncoder.FrameOptions()
         if wantKeyframe { opts.forceKeyframe = true }
@@ -200,6 +206,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         expectedFrameBytes = expectedFrameBytes * 0.8 + Double(payload.count) * 0.2
         unacked[seq] = InFlight(sentNanos: Clock.nowNanos(), bytes: payload.count, ltrToken: f.ltrToken)
         statFrames += 1; statBytes += payload.count; statEncodeNanos += f.encodeNanos
+        if f.keyframe { statKeyBytes = payload.count; log("keyframe \(payload.count) bytes (\(frags.count) datagrams)") }
     }
 
     private func acked(_ ack: ControlMessage.FrameAck) {
@@ -231,9 +238,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let fps = Double(statFrames) / 5
             let kbps = Double(statBytes) * 8 / 5 / 1000
             let enc = statFrames > 0 ? Double(statEncodeNanos) / Double(statFrames) / 1e6 : 0
-            log(String(format: "video %.1f fps  %.0f kbps  encode %.1f ms  srtt %.0f ms  inflight %d  skipped(budget) %d dropped(busy/rate) %d lost %d  ltr-acked %d",
-                       fps, kbps, enc, srttNanos / 1e6, unacked.count, statSkippedBudget, statDropped, statLost, ackedLTR.count))
-            statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0
+            let dirty = statDirtyN > 0 ? statDirty / Double(statDirtyN) * 100 : 0
+            log(String(format: "video %.1f fps  %.0f kbps  encode %.1f ms  dirty %.1f%%  srtt %.0f ms  inflight %d  skipped(budget) %d dropped(busy/rate) %d lost %d  ltr-acked %d",
+                       fps, kbps, enc, dirty, srttNanos / 1e6, unacked.count, statSkippedBudget, statDropped, statLost, ackedLTR.count))
+            statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statDirty = 0; statDirtyN = 0
         }
         t.resume()
         statTimer = t

@@ -13,7 +13,8 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
     private var stream: SCStream?
     private let queue: DispatchQueue
-    private var onFrame: ((CVPixelBuffer, UInt64) -> Void)?
+    /// (pixel buffer, capture clock, dirty fraction 0…1 of the output frame)
+    private var onFrame: ((CVPixelBuffer, UInt64, Double) -> Void)?
     private(set) var target: Target?
     var onStop: ((Error?) -> Void)?
 
@@ -52,7 +53,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         return c
     }
 
-    func start(_ req: ControlMessage.StreamRequest, onFrame: @escaping (CVPixelBuffer, UInt64) -> Void) async throws -> Target {
+    func start(_ req: ControlMessage.StreamRequest, onFrame: @escaping (CVPixelBuffer, UInt64, Double) -> Void) async throws -> Target {
         let t = try await Self.resolve(req)
         self.onFrame = onFrame
         self.target = t
@@ -90,7 +91,18 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let statusRaw = attachments.first?[.status] as? Int, let status = SCFrameStatus(rawValue: statusRaw), status == .complete,
               let pb = CMSampleBufferGetImageBuffer(sb) else { return }
-        onFrame?(pb, Clock.nowNanos())
+        // dirtyRects are in output pixels (the configured size), not display points.
+        var dirty = 1.0
+        if let rects = attachments.first?[.dirtyRects] as? [Any] {
+            let w = Double(CVPixelBufferGetWidth(pb)), h = Double(CVPixelBufferGetHeight(pb))
+            let area = rects.reduce(0.0) { acc, r in
+                guard let d = r as? NSDictionary, let rect = CGRect(dictionaryRepresentation: d) else { return acc + w * h }
+                return acc + Double(rect.width * rect.height)
+            }
+            dirty = min(1, area / (w * h))
+        }
+        if dirty == 0 { return }   // nothing changed; SCK still delivers these around the first frames
+        onFrame?(pb, Clock.nowNanos(), dirty)
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
