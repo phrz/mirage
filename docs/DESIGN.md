@@ -551,3 +551,10 @@ Platform findings from M1:
   20 Hz and hashing the PNG is cheap and ships every I-beam/arrow change.
 - The macOS application firewall auto-allowed the signed `miraged` (no prompt) when mac-daddy
   connected inbound.
+
+**ARD side-by-side (phrz, 2026-10-17 morning, Japan ↔ Dallas, Mirage at 800 kbps):** subjectively
+"a hint better" than Apple Remote Desktop on codec decisions alone; window dragging and typing
+still reveal the half-world RTT. Expected: those are the two interactions whose latency only
+local prediction can hide (DESIGN §3.5), and M1 ships none of it yet except the local cursor.
+Both cheats are mode-independent and will apply in Desktop mode too: copy-rect-driven window
+dragging and the caret echo overlay are M2/M3 work, not Unified-mode work.
