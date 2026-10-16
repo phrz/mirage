@@ -33,3 +33,31 @@ diff of consecutive frames, per 64 px tile.
   worse there because a one-glyph change often comes back as a whole-line or whole-window
   rect. Decision: use dirtyRects as the first-pass mask and add a GPU tile diff
   (Astropad's wgpu pass) inside those rects only if the sparse-scene number justifies it.
+
+## axtext.swift — can typed-text prediction get caret bounds and fonts through Accessibility?
+
+Queries `AXBoundsForRange` and `AXAttributedStringForRange` on text elements without
+focusing them.
+
+| app | toolkit | bounds for range | font attributes |
+|---|---|---|---|
+| Mail, Finder, Sketch | AppKit | yes, exact glyph rects | yes (`AXFont` dict: name + size) |
+| Helium (Chromium) | Blink | returns 0×0 | none |
+| Claude (Electron) | Blink | no text elements exposed at all | – |
+
+Setting `AXManualAccessibility` on the Electron app succeeds but still exposes no text
+elements; `AXEnhancedUserInterface` is rejected by both. So the mosh-style typed-text
+overlay (DESIGN §3.5 item 4) is **AppKit/SwiftUI-only** as far as Accessibility goes:
+Xcode, Terminal, Mail, Notes, Sketch, Finder — not Chromium, not Electron, not WebKit
+without more work. For browsers and Electron apps the fallback is the generic one: nothing
+predicted, normal pixel path. That is well under the 60 % hoped for; realistic coverage is
+"native apps and terminals". A browser-side route (an extension exposing caret rects) is
+possible later but out of scope.
+
+## menubar-windows.swift — where do status items live?
+
+On macOS 27 the menu bar is **one window** (`Menubar`, owned by Window Server, layer 24,
+full width). Status items are drawn inside it; they are not separate windows any more. So
+the "status item strip" in DESIGN §3.8 is: capture the Menubar window via SCK
+(`desktopIndependentWindow`), get item positions per app through `AXExtrasMenuBar`, crop
+the third-party region, and map clicks back. Still cheap: one 1512×33 window.
