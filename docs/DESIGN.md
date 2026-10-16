@@ -254,6 +254,15 @@ at low QP is the fallback.
    tile arrives). AppKit/SwiftUI text views, WebKit and Chromium (Electron) all expose these
    attributes; terminals vary. Covers roughly the 60% you estimated; falls back to normal
    behavior everywhere else.
+   For apps that expose nothing through Accessibility (Chromium, Electron, measured in
+   experiments/probes), the host finds the caret itself: a temporal diff spots the blinking
+   1–2 px bar inside the focused window, Apple's Vision text-rectangle detection (ANE, a few
+   ms) gives the line's baseline and height, and glyph advances are learned per field by
+   measuring how far the caret moves after each confirmed keystroke. The host ships the caret
+   rect as metadata like the cursor shape. No language or vision-language model anywhere in
+   this loop; if a learned detector is ever needed it is a sub-millisecond Core ML keypoint
+   CNN trained on synthetic renders. Scroll rects for such apps are learned from the first
+   observed copy-rect shift per window.
 5. Hover/press feedback: not generalizable; skipped on purpose.
 
 ### 3.6 Input
