@@ -118,15 +118,16 @@ public final class QUICHost: @unchecked Sendable {
     }
 
     /// `onStream` is called on the host queue for every new stream/flow, already started.
-    public func start(onStream: @escaping @Sendable (NWConnection, _ remote: String) -> Void,
+    public func start(onStream: @escaping @Sendable (NWConnection, _ connectionID: UUID, _ remote: String) -> Void,
                       onState: @escaping @Sendable (NWListener.State) -> Void) {
         listener.stateUpdateHandler = onState
         listener.newConnectionGroupHandler = { [queue] group in
             let remote = "\(group.descriptor)"
+            let id = UUID()   // one per QUIC connection; its streams and datagram flow share it
             group.stateUpdateHandler = { _ in }
             group.newConnectionHandler = { conn in
                 conn.start(queue: queue)
-                onStream(conn, remote)
+                onStream(conn, id, remote)
             }
             group.start(queue: queue)
         }

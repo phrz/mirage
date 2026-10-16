@@ -67,10 +67,10 @@ public struct ClientSession {
     }
 }
 
-/// Datagram ping format: magic(1) seq(8 BE) sentNanos(8 BE) padding to `size`.
+/// Datagram ping format: magic(1) type(1)=ping seq(8 BE) sentNanos(8 BE) padding to `size`.
 public enum DatagramPing {
     public static func encode(seq: UInt64, size: Int = 64) -> Data {
-        var d = Data([datagramMagic])
+        var d = Data([datagramMagic, DatagramType.ping.rawValue])
         var s = seq.bigEndian; var t = Clock.nowNanos().bigEndian
         withUnsafeBytes(of: &s) { d.append(contentsOf: $0) }
         withUnsafeBytes(of: &t) { d.append(contentsOf: $0) }
@@ -78,9 +78,9 @@ public enum DatagramPing {
         return d
     }
     public static func decode(_ d: Data) -> (seq: UInt64, sentNanos: UInt64)? {
-        guard d.count >= 17, d[d.startIndex] == datagramMagic else { return nil }
-        let seq = d.subdata(in: d.startIndex+1..<d.startIndex+9).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.bigEndian
-        let t = d.subdata(in: d.startIndex+9..<d.startIndex+17).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.bigEndian
+        guard d.count >= 18, d[d.startIndex] == datagramMagic, d[d.startIndex+1] == DatagramType.ping.rawValue else { return nil }
+        let seq = d.subdata(in: d.startIndex+2..<d.startIndex+10).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.bigEndian
+        let t = d.subdata(in: d.startIndex+10..<d.startIndex+18).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.bigEndian
         return (seq, t)
     }
 }

@@ -56,6 +56,21 @@ public enum ControlMessage: Codable, Equatable {
     case ping(Ping)
     case pong(Ping)
 
+    // Desktop streaming (M1).
+    case streamRequest(StreamRequest)
+    case streamInfo(StreamInfo)
+    case streamStop
+    case frameAck(FrameAck)
+    case cursorShape(CursorShape)
+    case cursorPosition(CursorPosition)
+
+    // Input, client → host. Coordinates are normalized to the streamed display: (0,0) top-left, (1,1) bottom-right.
+    case mouseMove(MouseMove)
+    case mouseButton(MouseButton)
+    case scroll(Scroll)
+    case key(Key)
+    case modifiers(Modifiers)
+
     public struct Hello: Codable, Equatable {
         public var protocolVersion: Int
         /// SHA-256 of the client's Ed25519 public key, hex.
@@ -136,7 +151,111 @@ public enum ControlMessage: Codable, Equatable {
         public var seq: UInt64
         /// Sender's monotonic clock in nanoseconds; echoed back verbatim.
         public var sentNanos: UInt64
-        public init(seq: UInt64, sentNanos: UInt64) { self.seq = seq; self.sentNanos = sentNanos }
+        /// Responder's own monotonic clock when it replied; lets the pinger estimate the clock offset.
+        public var echoNanos: UInt64?
+        public init(seq: UInt64, sentNanos: UInt64, echoNanos: UInt64? = nil) { self.seq = seq; self.sentNanos = sentNanos; self.echoNanos = echoNanos }
+    }
+
+    // MARK: Streaming
+
+    public struct StreamRequest: Codable, Equatable {
+        /// Requested stream size in pixels; the host fits the display's aspect ratio inside it.
+        public var width: Int
+        public var height: Int
+        /// Target bitrate in kbit/s.
+        public var bitrateKbps: Int
+        /// Capture rate ceiling.
+        public var maxFPS: Int
+        /// Display to stream: nil = main display, else a CGDirectDisplayID.
+        public var displayID: UInt32?
+        public init(width: Int, height: Int, bitrateKbps: Int = 800, maxFPS: Int = 30, displayID: UInt32? = nil) {
+            self.width = width; self.height = height; self.bitrateKbps = bitrateKbps; self.maxFPS = maxFPS; self.displayID = displayID
+        }
+    }
+    public struct StreamInfo: Codable, Equatable {
+        public var width: Int            // actual stream pixels
+        public var height: Int
+        public var displayID: UInt32
+        public var displayWidth: Int     // display size in points, for cursor/input mapping
+        public var displayHeight: Int
+        public var displayScale: Double
+        public var displayName: String
+        public init(width: Int, height: Int, displayID: UInt32, displayWidth: Int, displayHeight: Int, displayScale: Double, displayName: String) {
+            self.width = width; self.height = height; self.displayID = displayID; self.displayWidth = displayWidth
+            self.displayHeight = displayHeight; self.displayScale = displayScale; self.displayName = displayName
+        }
+    }
+    public struct FrameAck: Codable, Equatable {
+        public var seq: UInt32
+        /// Host capture clock echoed from the fragment header.
+        public var captureNanos: UInt64
+        /// Receiver clock: last fragment arrival and decode completion (0 if not decoded).
+        public var receivedNanos: UInt64
+        public var decodedNanos: UInt64
+        public var bytes: Int
+        /// Frame could not be reassembled or decoded; the host should send a recovery frame.
+        public var lost: Bool
+        public init(seq: UInt32, captureNanos: UInt64, receivedNanos: UInt64, decodedNanos: UInt64, bytes: Int, lost: Bool) {
+            self.seq = seq; self.captureNanos = captureNanos; self.receivedNanos = receivedNanos
+            self.decodedNanos = decodedNanos; self.bytes = bytes; self.lost = lost
+        }
+    }
+    public struct CursorShape: Codable, Equatable {
+        public var png: Data
+        public var width: Double      // points
+        public var height: Double
+        public var hotspotX: Double   // points from top-left
+        public var hotspotY: Double
+        public init(png: Data, width: Double, height: Double, hotspotX: Double, hotspotY: Double) {
+            self.png = png; self.width = width; self.height = height; self.hotspotX = hotspotX; self.hotspotY = hotspotY
+        }
+    }
+    public struct CursorPosition: Codable, Equatable {
+        public var x: Double  // normalized to the streamed display
+        public var y: Double
+        public var visible: Bool
+        public init(x: Double, y: Double, visible: Bool) { self.x = x; self.y = y; self.visible = visible }
+    }
+
+    // MARK: Input
+
+    public struct MouseMove: Codable, Equatable {
+        public var x: Double, y: Double
+        public init(x: Double, y: Double) { self.x = x; self.y = y }
+    }
+    public struct MouseButton: Codable, Equatable {
+        public var button: Int        // 0 left, 1 right, 2+ other
+        public var down: Bool
+        public var x: Double, y: Double
+        public var clickCount: Int
+        public var modifiers: UInt64  // CGEventFlags raw value
+        public init(button: Int, down: Bool, x: Double, y: Double, clickCount: Int, modifiers: UInt64) {
+            self.button = button; self.down = down; self.x = x; self.y = y; self.clickCount = clickCount; self.modifiers = modifiers
+        }
+    }
+    public struct Scroll: Codable, Equatable {
+        public var x: Double, y: Double
+        public var dx: Double, dy: Double   // pixels if precise, lines otherwise
+        public var precise: Bool
+        public var modifiers: UInt64
+        public init(x: Double, y: Double, dx: Double, dy: Double, precise: Bool, modifiers: UInt64) {
+            self.x = x; self.y = y; self.dx = dx; self.dy = dy; self.precise = precise; self.modifiers = modifiers
+        }
+    }
+    public struct Key: Codable, Equatable {
+        public var keyCode: UInt16
+        public var down: Bool
+        public var isRepeat: Bool
+        public var modifiers: UInt64
+        public var characters: String?
+        public init(keyCode: UInt16, down: Bool, isRepeat: Bool, modifiers: UInt64, characters: String?) {
+            self.keyCode = keyCode; self.down = down; self.isRepeat = isRepeat; self.modifiers = modifiers; self.characters = characters
+        }
+    }
+    public struct Modifiers: Codable, Equatable {
+        public var keyCode: UInt16
+        public var modifiers: UInt64
+        public init(keyCode: UInt16, modifiers: UInt64) { self.keyCode = keyCode; self.modifiers = modifiers }
     }
 }
 

@@ -7,48 +7,61 @@ public struct HostContext: Sendable {
     public let store: Store
     public let tlsFingerprint: Data
     public let log: @Sendable (String) -> Void
-    public init(identity: DeviceIdentity, store: Store, tlsFingerprint: Data, log: @escaping @Sendable (String) -> Void) {
-        self.identity = identity; self.store = store; self.tlsFingerprint = tlsFingerprint; self.log = log
+    /// Creates the platform streamer for an authenticated client that asks for the desktop. nil = refuse.
+    public let makeStreamer: (@Sendable () -> DesktopStreamer)?
+    public let connections = HostConnections()
+
+    public init(identity: DeviceIdentity, store: Store, tlsFingerprint: Data, log: @escaping @Sendable (String) -> Void,
+                makeStreamer: (@Sendable () -> DesktopStreamer)? = nil) {
+        self.identity = identity; self.store = store; self.tlsFingerprint = tlsFingerprint; self.log = log; self.makeStreamer = makeStreamer
     }
 }
 
 /// Handles one incoming stream or datagram flow on the host.
 public enum HostSession {
-    public static func handle(connection: NWConnection, remote: String, ctx: HostContext) async {
+    public static func handle(connection: NWConnection, connectionID: UUID, remote: String, ctx: HostContext) async {
         let stream = MessageStream(connection: connection, queue: DispatchQueue(label: "mirage.host.stream"))
         stream.adoptStarted()
         let remote = connection.currentPath?.remoteEndpoint.map { "\($0)" } ?? remote
+        let conn = await ctx.connections.connection(connectionID)
         do {
             // Sniff the first byte: 0xD7 = datagram flow, otherwise a framed stream.
             let first = try await stream.receiveSome()
             stream.unread(first)
             if first.first == datagramMagic {
-                try await echoDatagrams(stream, remote: remote, ctx: ctx)
+                conn.setFlow(stream)
+                try await serveDatagrams(stream, remote: remote, ctx: ctx)
             } else {
-                try await serveStream(stream, remote: remote, ctx: ctx)
+                try await serveStream(stream, conn: conn, remote: remote, ctx: ctx)
             }
         } catch {
             let text = "\(error)"
-            // ECONNREFUSED(61)/ENOTCONN(57)/cancelled are how QUIC stream closes surface; keep them quiet.
-            if text.contains("rawValue: 61") || text.contains("rawValue: 57") || text.contains("cancelled") || text.contains("stream closed") {
+            // ECONNREFUSED(61)/ENOTCONN(57)/ETIMEDOUT(60)/cancelled are how QUIC stream closes surface; keep them quiet.
+            if text.contains("rawValue: 61") || text.contains("rawValue: 57") || text.contains("rawValue: 60") || text.contains("cancelled") || text.contains("stream closed") {
                 ctx.log("[\(remote)] closed")
             } else {
                 ctx.log("[\(remote)] closed: \(error)")
             }
         }
+        if let s = conn.streamer { conn.streamer = nil; await s.stop(); ctx.log("[\(remote)] stream stopped") }
+        _ = await ctx.connections.remove(connectionID)
         stream.cancel()
     }
 
-    static func echoDatagrams(_ flow: MessageStream, remote: String, ctx: HostContext) async throws {
-        ctx.log("[\(remote)] datagram flow open")
+    static func serveDatagrams(_ flow: MessageStream, remote: String, ctx: HostContext) async throws {
+        ctx.log("[\(remote)] datagram flow open (max datagram \(flow.connection.maximumDatagramSize))")
         while true {
             let d = try await flow.receiveSome()
-            try await flow.sendRaw(d)   // echo verbatim; client computes RTT and loss
+            guard d.count >= 2, d[d.startIndex] == datagramMagic else { continue }
+            if d[d.startIndex + 1] == DatagramType.ping.rawValue {
+                try await flow.sendRaw(d)   // echo verbatim; client computes RTT and loss
+            }
         }
     }
 
-    static func serveStream(_ stream: MessageStream, remote: String, ctx: HostContext) async throws {
+    static func serveStream(_ stream: MessageStream, conn: HostConnection, remote: String, ctx: HostContext) async throws {
         var authenticated: DeviceRecord?
+        var output: ConnectionOutput?
         while true {
             let msg = try await stream.receive()
             switch msg {
@@ -56,9 +69,44 @@ public enum HostSession {
                 authenticated = try await authenticate(hello, stream, remote: remote, ctx: ctx)
             case .pairRequest(let req):
                 try await pair(req, stream, remote: remote, ctx: ctx)
-            case .ping(let p):
+            case .ping(var p):
                 guard authenticated != nil else { throw MirageError.protocolViolation("ping before auth") }
-                try await stream.send(.pong(p))
+                p.echoNanos = Clock.nowNanos()
+                if let output { output.sendControl(.pong(p)) } else { try await stream.send(.pong(p)) }
+            case .streamRequest(let req):
+                guard authenticated != nil else { throw MirageError.protocolViolation("streamRequest before auth") }
+                if let s = conn.streamer {
+                    let info = try await s.update(req)
+                    output?.sendControl(.streamInfo(info))
+                } else {
+                    guard let make = ctx.makeStreamer else {
+                        try await stream.send(.reject(.init(reason: "host cannot stream"))); continue
+                    }
+                    guard let flow = await conn.waitForFlow(timeout: .seconds(5)) else {
+                        try await stream.send(.reject(.init(reason: "no datagram flow"))); continue
+                    }
+                    let out = ConnectionOutput(flow: flow, control: stream, log: ctx.log)
+                    output = out
+                    let s = make()
+                    do {
+                        let info = try await s.start(req, output: out)
+                        conn.streamer = s
+                        ctx.log("[\(remote)] streaming \(info.displayName) \(info.width)x\(info.height) @ \(req.bitrateKbps) kbps, datagrams ≤\(out.maxDatagramSize)")
+                        out.sendControl(.streamInfo(info))
+                    } catch {
+                        await s.stop()
+                        let why = HostPermissionHint.explain(error)
+                        ctx.log("[\(remote)] stream failed: \(error)\(why.map { " — \($0)" } ?? "")")
+                        out.sendControl(.reject(.init(reason: "cannot stream: \(why ?? "\(error)")")))
+                    }
+                }
+            case .streamStop:
+                if let s = conn.streamer { conn.streamer = nil; await s.stop() }
+            case .frameAck(let ack):
+                conn.streamer?.handle(ack: ack)
+            case .mouseMove, .mouseButton, .scroll, .key, .modifiers:
+                guard authenticated != nil else { throw MirageError.protocolViolation("input before auth") }
+                conn.streamer?.handle(input: msg)
             default:
                 throw MirageError.protocolViolation("unexpected \(msg)")
             }
@@ -138,5 +186,18 @@ public enum HostSession {
         try await stream.send(.pairComplete(.init(sealed: try SealedBox.seal(ctx.identity.record, key: key))))
         try ctx.store.setPairingResult(attemptID: pending.attemptID, ok: true, message: "paired \(device.name) (\(device.id.prefix(12)))")
         ctx.log("[\(remote)] paired \(device.name) (\(device.id.prefix(12)))")
+    }
+}
+
+
+/// Turns the usual TCC failures into an instruction the viewer can show.
+public enum HostPermissionHint {
+    public static func explain(_ error: Error) -> String? {
+        let t = "\(error)"
+        // SCStream errors: -3801 = user declined / no Screen Recording permission.
+        if t.contains("-3801") || t.contains("3801") || t.contains("not authorized") || t.contains("TCC") {
+            return "host is missing Screen Recording permission: on the host open System Settings → Privacy & Security → Screen & System Audio Recording and enable miraged, then restart it"
+        }
+        return nil
     }
 }

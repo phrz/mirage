@@ -1,6 +1,7 @@
 import Foundation
 import ArgumentParser
 import MirageCore
+import MirageHost
 import Network
 
 @main
@@ -27,11 +28,17 @@ struct Serve: AsyncParsableCommand {
         let store = try Store()
         let identity = try store.identity(role: "host", name: name ?? DeviceNames.current())
         let tls = try TLSIdentity.loadOrCreate(store: store)
-        let ctx = HostContext(identity: identity, store: store, tlsFingerprint: tls.fingerprint, log: { log($0) })
+        let ctx = HostContext(identity: identity, store: store, tlsFingerprint: tls.fingerprint, log: { log($0) },
+                              makeStreamer: { MacDesktopStreamer(log: { log($0) }) })
         let host = try QUICHost(port: port, tls: tls)
         log("mirage host \(identity.name) id=\(identity.id.prefix(12)) tls=\(tls.fingerprint.prefix(6).map { String(format: "%02x", $0) }.joined()) devices=\(try store.authorizedDevices().count)")
-        host.start(onStream: { conn, remote in
-            Task { await HostSession.handle(connection: conn, remote: remote, ctx: ctx) }
+        // TCC: prompting registers this binary in System Settings → Privacy & Security so it can be ticked once.
+        let screen = HostPermissions.screenRecordingGranted() || HostPermissions.requestScreenRecording()
+        let ax = HostPermissions.accessibilityGranted(prompt: true)
+        log("permissions: screen recording \(screen ? "granted" : "MISSING (System Settings → Privacy & Security → Screen & System Audio Recording → enable miraged)")"
+            + ", accessibility \(ax ? "granted" : "MISSING (System Settings → Privacy & Security → Accessibility → enable miraged)")")
+        host.start(onStream: { conn, id, remote in
+            Task { await HostSession.handle(connection: conn, connectionID: id, remote: remote, ctx: ctx) }
         }, onState: { state in
             switch state {
             case .ready: log("listening on udp/\(port)")
