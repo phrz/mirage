@@ -1,0 +1,54 @@
+
+== claude-ui.png  1510x1898  tiles 23x29=667 @ 64px  raw frame 8396 KB
+class tiles raw lz4 lzfse zlib sub+lzfse paeth+lzfse pal+lzfse best-apple webp-ll webp-nl60 zstd19
+uniform   186     12288       193       154        30       161       157       150       151        44        44        24   (mean bytes/tile)
+flat≤16   121     12288       245       193        99       205       197       188       186        82        82        67   (mean bytes/tile)
+text≤256   356     12288      1487      1145       995      1493      1482      1003      1000       567       577      1241   (mean bytes/tile)
+rich>256     4     12288      2447      1912      1740      1964      1866      1866      1814      1342      1124      1672   (mean bytes/tile)
+FRAME KB   667      8004       590       456       370       580       574       405       404       220       223       450 
+HEVC HW intra whole frame: qp20=163KB  qp26=125KB  qp32=88KB  qp38=57KB   JPEG HW q0.75=330KB
+
+== mail-text.png  2410x1898  tiles 37x29=1073 @ 64px  raw frame 13400 KB
+class tiles raw lz4 lzfse zlib sub+lzfse paeth+lzfse pal+lzfse best-apple webp-ll webp-nl60 zstd19
+uniform   576     12288       193       161        33       165       161       150       151        44        44        24   (mean bytes/tile)
+flat≤16    87     12288       261       205        95       206       201       185       186        76        76        62   (mean bytes/tile)
+text≤256   402     12288      1774      1271      1071      1638      1616      1053      1052       634       690      1372   (mean bytes/tile)
+rich>256     8     12288      6554      3851      3592      4468      4344      4344      3852      2410      2276      3887   (mean bytes/tile)
+FRAME KB  1073     12876       879       637       475       788       776       547       544       299       320       588 
+HEVC HW intra whole frame: qp20=172KB  qp26=125KB  qp32=82KB  qp38=50KB   JPEG HW q0.75=346KB
+
+== finder.png  1840x872  tiles 28x13=364 @ 64px  raw frame 4700 KB
+class tiles raw lz4 lzfse zlib sub+lzfse paeth+lzfse pal+lzfse best-apple webp-ll webp-nl60 zstd19
+uniform    41     12288       193       161        33       165       161       150       151        44        44        24   (mean bytes/tile)
+flat≤16    16     12288       836       496       292       428       386       371       357       208       208       236   (mean bytes/tile)
+text≤256   253     12288      2104      1355      1185      1586      1542      1227      1221       786       797      1311   (mean bytes/tile)
+rich>256    54     12288      3546      2441      2224      3148      2988      2988      2441      1433      1420      2688   (mean bytes/tile)
+FRAME KB   364      4368       728       478       416       571       551       473       442       275       277       470 
+HEVC HW intra whole frame: qp20=114KB  qp26=84KB  qp32=57KB  qp38=36KB   JPEG HW q0.75=222KB
+
+== sketch-graphics.png  1822x1898  tiles 28x29=812 @ 64px  raw frame 10131 KB
+class tiles raw lz4 lzfse zlib sub+lzfse paeth+lzfse pal+lzfse best-apple webp-ll webp-nl60 zstd19
+uniform   442     12288       193       154        30       161       157       150       151        44        44        24   (mean bytes/tile)
+flat≤16    95     12288       288       203       117       215       209       197       195        87        87        75   (mean bytes/tile)
+text≤256   209     12288      1822      1020       886      1122      1210       999       948       616       611       960   (mean bytes/tile)
+rich>256    66     12288      7434      5197      4550      4355      4448      4448      4288      3072      2406      4063   (mean bytes/tile)
+FRAME KB   812      9744       961       629       498       599       621       574       553       351       307       475 
+HEVC HW intra whole frame: qp20=58KB  qp26=36KB  qp32=22KB  qp38=13KB   JPEG HW q0.75=168KB
+
+== icon-composer.png  3024x1898  tiles 47x29=1363 @ 64px  raw frame 16815 KB
+class tiles raw lz4 lzfse zlib sub+lzfse paeth+lzfse pal+lzfse best-apple webp-ll webp-nl60 zstd19
+uniform   867     12288       193       158        32       163       159       150       151        44        44        24   (mean bytes/tile)
+flat≤16    84     12288       438       319       158       265       269       251       223       106       106       120   (mean bytes/tile)
+text≤256   170     12288      3930      1985      1786      2192      2289      1872      1829      1343      1335      1857   (mean bytes/tile)
+rich>256   242     12288      8514      5957      5417      4998      4961      4961      4875      3526      2830      4391   (mean bytes/tile)
+FRAME KB  1363     16356      2864      1897      1617      1705      1710      1631      1602      1102       936      1376 
+HEVC HW intra whole frame: qp20=85KB  qp26=48KB  qp32=25KB  qp38=13KB   JPEG HW q0.75=242KB
+
+== full-1.png  3024x1964  tiles 47x30=1410 @ 64px  raw frame 17399 KB
+class tiles raw lz4 lzfse zlib sub+lzfse paeth+lzfse pal+lzfse best-apple webp-ll webp-nl60 zstd19
+uniform   304     12288       193       154        30       161       157       150       151        44        44        24   (mean bytes/tile)
+flat≤16   266     12288       320       224       141       233       235       211       207        98        98        96   (mean bytes/tile)
+text≤256   781     12288      1485      1095       953      1414      1393       979       973       527       534      1125   (mean bytes/tile)
+rich>256    59     12288      7937      5405      5023      4955      4720      4720      4633      3170      2886      4170   (mean bytes/tile)
+FRAME KB  1410     16920      1730      1250      1062      1472      1442      1118      1108       623       612      1131 
+HEVC HW intra whole frame: qp20=365KB  qp26=275KB  qp32=194KB  qp38=125KB   JPEG HW q0.75=745KB
