@@ -132,3 +132,19 @@ final class TileWireTests: XCTestCase {
         XCTAssertEqual(msgs[4].inputSeq, 77)
     }
 }
+
+final class TileMaskTests: XCTestCase {
+    func testMaskBitsAndPayloadRoundTrip() {
+        let region = PixelRect(x: 64, y: 128, width: 200, height: 70)   // 4 cols × 2 rows
+        let g = TileMask.grid(for: region)
+        XCTAssertEqual(g.cols, 4); XCTAssertEqual(g.rows, 2)
+        var m = TileMask(cols: g.cols, rows: g.rows)
+        m[3, 1] = true; m[0, 0] = true
+        XCTAssertEqual(m.count, 2); XCTAssertTrue(m[3, 1]); XCTAssertFalse(m[1, 1])
+        let payload = VideoFramePayload.encode(parameterSets: [Data([1])], tileMask: m.bits, sample: Data([7, 7]))
+        let d = VideoFramePayload.decode(payload, hasParameterSets: true, hasTileMask: true)
+        XCTAssertEqual(d?.parameterSets, [Data([1])]); XCTAssertEqual(d?.sample, Data([7, 7]))
+        XCTAssertEqual(TileMask(cols: 4, rows: 2, bits: d!.tileMask!), m)
+        XCTAssertEqual(TileMask.full(cols: 3, rows: 3).count, 9)
+    }
+}
