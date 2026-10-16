@@ -1,0 +1,129 @@
+import Foundation
+
+/// Persistent state under ~/Library/Application Support/Mirage.
+/// Every file is created 0600; the directory 0700.
+public final class Store: @unchecked Sendable {
+    public let root: URL
+    private let fm = FileManager.default
+    private let lock = NSLock()
+
+    public init(root: URL? = nil) throws {
+        if let root {
+            self.root = root
+        } else {
+            let base = try fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+            self.root = base.appendingPathComponent("Mirage", isDirectory: true)
+        }
+        try fm.createDirectory(at: self.root, withIntermediateDirectories: true,
+                               attributes: [.posixPermissions: 0o700])
+    }
+
+    public func url(_ name: String) -> URL { root.appendingPathComponent(name) }
+
+    // MARK: Generic JSON files
+
+    func read<T: Decodable>(_ type: T.Type, _ name: String) throws -> T? {
+        lock.lock(); defer { lock.unlock() }
+        let u = url(name)
+        guard fm.fileExists(atPath: u.path) else { return nil }
+        let enc = JSONDecoder(); enc.dateDecodingStrategy = .iso8601
+        return try enc.decode(type, from: Data(contentsOf: u))
+    }
+
+    func write<T: Encodable>(_ value: T, _ name: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]; enc.dateEncodingStrategy = .iso8601
+        let data = try enc.encode(value)
+        let u = url(name)
+        try data.write(to: u, options: .atomic)
+        try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: u.path)
+    }
+
+    public func remove(_ name: String) {
+        lock.lock(); defer { lock.unlock() }
+        try? fm.removeItem(at: url(name))
+    }
+
+    // MARK: Identity
+
+    /// Loads or creates this machine's identity key. The display name is not persisted;
+    /// callers pass the current one (computer name or --name) every launch.
+    public func identity(role: String, name: String) throws -> DeviceIdentity {
+        let file = "\(role)-identity.json"
+        if let f = try read(IdentityFile.self, file) {
+            return try DeviceIdentity(seed: f.seed, name: name)
+        }
+        let id = DeviceIdentity(name: name)
+        try write(IdentityFile(seed: id.signingKey.rawRepresentation, name: nil), file)
+        return id
+    }
+
+    // MARK: Host: authorized devices
+
+    public func authorizedDevices() throws -> [DeviceRecord] {
+        try read([DeviceRecord].self, "authorized-devices.json") ?? []
+    }
+    public func authorize(_ device: DeviceRecord) throws {
+        var list = try authorizedDevices().filter { $0.id != device.id }
+        list.append(device)
+        try write(list, "authorized-devices.json")
+    }
+    public func revoke(idPrefix: String) throws -> [DeviceRecord] {
+        let list = try authorizedDevices()
+        let removed = list.filter { $0.id.hasPrefix(idPrefix) }
+        try write(list.filter { !$0.id.hasPrefix(idPrefix) }, "authorized-devices.json")
+        return removed
+    }
+
+    // MARK: Host: pending pairing code (written by `miraged pair`, consumed by the daemon)
+
+    public struct PendingPairing: Codable {
+        public var attemptID: String
+        public var code: String
+        public var expiresAt: Date
+        public init(attemptID: String = UUID().uuidString, code: String, expiresAt: Date) {
+            self.attemptID = attemptID; self.code = code; self.expiresAt = expiresAt
+        }
+    }
+    public struct PairingResult: Codable {
+        public var attemptID: String
+        public var ok: Bool
+        public var message: String
+        public var at: Date
+    }
+
+    public func setPendingPairing(_ p: PendingPairing) throws { try write(p, "pending-pair.json") }
+    /// Returns the pending code and removes it: one attempt per code.
+    public func consumePendingPairing() throws -> PendingPairing? {
+        guard let p = try read(PendingPairing.self, "pending-pair.json") else { return nil }
+        remove("pending-pair.json")
+        return p.expiresAt > Date() ? p : nil
+    }
+    public func setPairingResult(attemptID: String, ok: Bool, message: String) throws {
+        try write(PairingResult(attemptID: attemptID, ok: ok, message: message, at: Date()), "pair-result.json")
+    }
+    /// Returns and clears the result for this attempt only, so two `pair` runs cannot steal each other's outcome.
+    public func takePairingResult(attemptID: String) throws -> PairingResult? {
+        guard let r = try read(PairingResult.self, "pair-result.json"), r.attemptID == attemptID else { return nil }
+        remove("pair-result.json")
+        return r
+    }
+
+    // MARK: Client: known hosts
+
+    public struct KnownHost: Codable, Equatable {
+        public var hostID: String
+        public var hostName: String
+        public var publicKey: Data
+        public var endpoint: String
+        public var pairedAt: Date
+    }
+    public func knownHosts() throws -> [String: KnownHost] {
+        try read([String: KnownHost].self, "known-hosts.json") ?? [:]
+    }
+    public func remember(host: KnownHost, as alias: String) throws {
+        var hosts = try knownHosts()
+        hosts[alias] = host
+        try write(hosts, "known-hosts.json")
+    }
+}
