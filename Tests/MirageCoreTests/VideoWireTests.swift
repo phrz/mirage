@@ -36,15 +36,31 @@ final class VideoWireTests: XCTestCase {
         let done = a.ingest(f1[1], now: 12)
         guard case .completed(let frame)? = done.first else { return XCTFail("expected completion, got \(done)") }
         XCTAssertEqual(frame.seq, 1); XCTAssertEqual(frame.sample, p1); XCTAssertEqual(frame.firstFragmentNanos, 10)
-        // Frame 2 loses a fragment; frame 3 completing declares it lost.
+        // Frame 2 is missing a fragment; frame 3 completing does NOT declare it lost yet (reordering).
         _ = a.ingest(f2[0], now: 20)
         let f3 = VideoFragment.fragments(frameSeq: 3, flags: [.keyframe], captureNanos: 3, payload: Data([7])).compactMap(VideoFragment.decode)
         let ev = a.ingest(f3[0], now: 30)
-        XCTAssertEqual(ev.count, 2)
-        guard case .lost(let seq)? = ev.first else { return XCTFail("expected lost, got \(ev)") }
-        XCTAssertEqual(seq, 2)
-        // Late fragment of the lost frame is ignored.
+        XCTAssertEqual(ev.count, 1)
+        guard case .completed(let f3done)? = ev.first else { return XCTFail("expected completion, got \(ev)") }
+        XCTAssertEqual(f3done.seq, 3)
+        XCTAssertEqual(a.pendingCount, 1)
+        // A late fragment of frame 2 (older than the newest completed frame) retires it quietly.
         XCTAssertTrue(a.ingest(f2[1], now: 31).isEmpty)
+        XCTAssertEqual(a.pendingCount, 0)
+        // A partial that nothing completes is declared lost once it is older than the timeout...
+        let f4 = VideoFragment.fragments(frameSeq: 4, flags: [], captureNanos: 4, payload: p1).compactMap(VideoFragment.decode)
+        _ = a.ingest(f4[0], now: 40)
+        let f5 = VideoFragment.fragments(frameSeq: 5, flags: [], captureNanos: 5, payload: Data([1])).compactMap(VideoFragment.decode)
+        let late = a.ingest(f5[0], now: 40 + a.timeoutNanos + 1)
+        XCTAssertEqual(late.count, 2)
+        guard case .lost(let lostSeq)? = late.first else { return XCTFail("expected lost first, got \(late)") }
+        XCTAssertEqual(lostSeq, 4)
+        // ...or once the stream is more than reorderWindow frames past it.
+        let f6 = VideoFragment.fragments(frameSeq: 6, flags: [], captureNanos: 6, payload: p1).compactMap(VideoFragment.decode)
+        _ = a.ingest(f6[0], now: 50)
+        let far = VideoFragment.fragments(frameSeq: 6 + a.reorderWindow + 1, flags: [], captureNanos: 7, payload: Data([1])).compactMap(VideoFragment.decode)
+        let ev2 = a.ingest(far[0], now: 51)
+        XCTAssertTrue(ev2.contains { if case .lost(6) = $0 { return true } else { return false } }, "\(ev2)")
         XCTAssertEqual(a.pendingCount, 0)
     }
 

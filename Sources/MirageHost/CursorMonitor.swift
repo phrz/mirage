@@ -7,6 +7,7 @@ import MirageCore
 final class CursorMonitor {
     private var timer: DispatchSourceTimer?
     private var lastShapeHash: Data?
+    private var lastCursor: NSCursor?
     private var lastPos: CGPoint = .zero
     private var displayBounds: CGRect
     var onShape: ((ControlMessage.CursorShape) -> Void)?
@@ -25,10 +26,12 @@ final class CursorMonitor {
     func stop() { timer?.cancel(); timer = nil }
 
     /// Re-sends the current shape (new viewer).
-    func resend() { lastShapeHash = nil; poll() }
+    func resend() { lastShapeHash = nil; lastCursor = nil; poll() }
 
     private func poll() {
-        if let cursor = NSCursor.currentSystem {
+        // AppKit hands back the same NSCursor object while the shape is unchanged; only encode on a new one.
+        if let cursor = NSCursor.currentSystem, cursor !== lastCursor {
+            lastCursor = cursor
             let image = cursor.image
             if let rep = image.representations.max(by: { $0.pixelsWide < $1.pixelsWide }),
                let cg = rep.cgImage(forProposedRect: nil, context: nil, hints: nil) {

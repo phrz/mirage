@@ -24,14 +24,17 @@ public enum HostSession {
         stream.adoptStarted()
         let remote = connection.currentPath?.remoteEndpoint.map { "\($0)" } ?? remote
         let conn = await ctx.connections.connection(connectionID)
+        var isControl = false
         do {
             // Sniff the first byte: 0xD7 = datagram flow, otherwise a framed stream.
             let first = try await stream.receiveSome()
             stream.unread(first)
             if first.first == datagramMagic {
                 conn.setFlow(stream)
+                defer { conn.clearFlow(stream) }
                 try await serveDatagrams(stream, remote: remote, ctx: ctx)
             } else {
+                isControl = true
                 try await serveStream(stream, conn: conn, remote: remote, ctx: ctx)
             }
         } catch {
@@ -43,8 +46,15 @@ public enum HostSession {
                 ctx.log("[\(remote)] closed: \(error)")
             }
         }
-        if let s = conn.streamer { conn.streamer = nil; await s.stop(); ctx.log("[\(remote)] stream stopped") }
-        _ = await ctx.connections.remove(connectionID)
+        // The control stream owns the session: only its end tears the streamer and the registry entry
+        // down. A datagram flow ending on its own just clears itself (see clearFlow), so the next
+        // streamRequest waits for a fresh flow instead of sending into a dead one.
+        if isControl {
+            if let s = conn.streamer { conn.streamer = nil; await s.stop(); ctx.log("[\(remote)] stream stopped") }
+            _ = await ctx.connections.remove(connectionID)
+        } else if conn.streamer != nil {
+            ctx.log("[\(remote)] datagram flow closed while streaming")
+        }
         stream.cancel()
     }
 
@@ -75,10 +85,11 @@ public enum HostSession {
                 if let output { output.sendControl(.pong(p)) } else { try await stream.send(.pong(p)) }
             case .streamRequest(let req):
                 guard authenticated != nil else { throw MirageError.protocolViolation("streamRequest before auth") }
-                if let s = conn.streamer {
-                    let info = try await s.update(req)
-                    output?.sendControl(.streamInfo(info))
+                if let s = conn.streamer, let out = output, conn.flow === out.flow {
+                    do { out.sendControl(.streamInfo(try await s.update(req))) }
+                    catch { ctx.log("[\(remote)] stream update failed: \(error)"); out.sendControl(.reject(.init(reason: "cannot reconfigure stream: \(error)"))) }
                 } else {
+                    if let s = conn.streamer { conn.streamer = nil; await s.stop(); output = nil }   // flow died; start over
                     guard let make = ctx.makeStreamer else {
                         try await stream.send(.reject(.init(reason: "host cannot stream"))); continue
                     }

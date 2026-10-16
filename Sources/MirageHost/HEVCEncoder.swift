@@ -114,7 +114,7 @@ final class HEVCEncoder {
                 var count = 0
                 var hdr: Int32 = 0
                 CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fd, parameterSetIndex: 0, parameterSetPointerOut: nil, parameterSetSizeOut: nil, parameterSetCountOut: &count, nalUnitHeaderLengthOut: &hdr)
-                precondition(hdr == 4, "unexpected NAL length size \(hdr)")
+                guard hdr == 4 else { throw MirageError.transport("unexpected NAL length size \(hdr)") }
                 for i in 0..<count {
                     var p: UnsafePointer<UInt8>? = nil; var n = 0
                     CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(fd, parameterSetIndex: i, parameterSetPointerOut: &p, parameterSetSizeOut: &n, parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil)

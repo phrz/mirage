@@ -25,7 +25,7 @@ public final class HostConnection: @unchecked Sendable {
     public let id: UUID
     private let lock = NSLock()
     private var _flow: MessageStream?
-    private var flowWaiters: [CheckedContinuation<MessageStream, Never>] = []
+    private var flowWaiters: [FlowWaiter] = []
     public var streamer: DesktopStreamer?
 
     init(id: UUID) { self.id = id }
@@ -37,28 +37,40 @@ public final class HostConnection: @unchecked Sendable {
         _flow = f
         let waiters = flowWaiters; flowWaiters = []
         lock.unlock()
-        for w in waiters { w.resume(returning: f) }
+        for w in waiters { w.resume(f) }
     }
 
-    private func registerWaiter(_ c: CheckedContinuation<MessageStream, Never>) {
-        lock.lock()
-        if let f = _flow { lock.unlock(); c.resume(returning: f); return }
-        flowWaiters.append(c)
-        lock.unlock()
+    /// Called when the flow's receive loop ends, so a later streamRequest does not build on a dead flow.
+    func clearFlow(_ f: MessageStream) {
+        lock.lock(); if _flow === f { _flow = nil }; lock.unlock()
     }
 
-    /// Waits for the client to open its datagram flow.
+    /// Waits for the client to open its datagram flow. Every waiter is resumed exactly once:
+    /// by `setFlow`, or with nil by the timeout.
     public func waitForFlow(timeout: Duration) async -> MessageStream? {
         if let f = flow { return f }
-        return await withTaskGroup(of: MessageStream?.self) { group in
-            group.addTask { [self] in
-                await withCheckedContinuation { (c: CheckedContinuation<MessageStream, Never>) in registerWaiter(c) }
+        return await withCheckedContinuation { (c: CheckedContinuation<MessageStream?, Never>) in
+            let waiter = FlowWaiter(c)
+            lock.lock()
+            if let f = _flow { lock.unlock(); waiter.resume(f); return }
+            flowWaiters.append(waiter)
+            lock.unlock()
+            DispatchQueue.global().asyncAfter(deadline: .now() + .nanoseconds(Int(timeout.components.seconds * 1_000_000_000 + timeout.components.attoseconds / 1_000_000_000))) { [self] in
+                lock.lock(); flowWaiters.removeAll { $0 === waiter }; lock.unlock()
+                waiter.resume(nil)
             }
-            group.addTask { try? await Task.sleep(for: timeout); return nil }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
         }
+    }
+}
+
+/// A single-shot continuation wrapper (resume at most once from any thread).
+final class FlowWaiter: @unchecked Sendable {
+    private var c: CheckedContinuation<MessageStream?, Never>?
+    private let lock = NSLock()
+    init(_ c: CheckedContinuation<MessageStream?, Never>) { self.c = c }
+    func resume(_ v: MessageStream?) {
+        lock.lock(); let cc = c; c = nil; lock.unlock()
+        cc?.resume(returning: v)
     }
 }
 

@@ -67,7 +67,7 @@ final class InputInjector {
             guard let e = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(k.keyCode), keyDown: k.down) else { return }
             e.flags = CGEventFlags(rawValue: k.modifiers)
             if k.isRepeat { e.setIntegerValueField(.keyboardEventAutorepeat, value: 1) }
-            if let chars = k.characters, !chars.isEmpty, k.down || true {
+            if k.down, let chars = k.characters, !chars.isEmpty {
                 let utf16 = Array(chars.utf16)
                 e.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
             }

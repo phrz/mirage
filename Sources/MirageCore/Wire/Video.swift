@@ -134,11 +134,18 @@ public struct FrameAssembler {
 
     public init() {}
 
-    public enum Event { case completed(VideoFrame), lost(seq: UInt32) }
+    public enum Event {
+        case completed(VideoFrame), lost(seq: UInt32)
+        var seq: UInt32 { switch self { case .completed(let f): return f.seq; case .lost(let s): return s } }
+    }
 
     public mutating func ingest(_ f: VideoFragment, now: UInt64 = Clock.nowNanos()) -> [Event] {
         var events: [Event] = []
-        if let hc = highestCompleted, f.frameSeq <= hc { return [] }   // late duplicate of a finished/old frame
+        if let hc = highestCompleted, f.frameSeq <= hc {
+            // Late fragment of an older frame: if it completes a partial we no longer need, retire it quietly.
+            partials[f.frameSeq] = nil
+            return []
+        }
         var p = partials[f.frameSeq] ?? Partial(flags: f.flags, captureNanos: f.captureNanos, firstNanos: now, lastNanos: now,
                                                  count: Int(f.fragCount), total: Int(f.frameBytes), parts: Array(repeating: nil, count: Int(f.fragCount)))
         guard Int(f.fragCount) == p.count, Int(f.fragIndex) < p.count else { return [] }
@@ -149,9 +156,9 @@ public struct FrameAssembler {
             var sample = Data(capacity: p.total)
             for part in p.parts { sample.append(part!) }
             let decoded = VideoFramePayload.decode(sample, hasParameterSets: f.flags.contains(.parameterSets))
-            // Anything older that is still partial has been overtaken.
-            for seq in partials.keys.sorted() where seq < f.frameSeq { partials[seq] = nil; events.append(.lost(seq: seq)) }
-            highestCompleted = f.frameSeq
+            // Older partials are not declared lost yet: a reordered last fragment may still arrive
+            // within the window/timeout below. Their late completion is then dropped (seq <= highestCompleted).
+            if highestCompleted.map({ f.frameSeq > $0 }) ?? true { highestCompleted = f.frameSeq }
             if let decoded {
                 events.append(.completed(VideoFrame(seq: f.frameSeq, flags: p.flags, captureNanos: p.captureNanos, firstFragmentNanos: p.firstNanos,
                                                      lastFragmentNanos: now, parameterSets: decoded.parameterSets, sample: decoded.sample, bytes: sample.count)))
@@ -161,11 +168,12 @@ public struct FrameAssembler {
         } else {
             partials[f.frameSeq] = p
         }
-        // Give up on stragglers.
-        for (seq, part) in partials where seq + reorderWindow < f.frameSeq || now - part.firstNanos > timeoutNanos {
+        // Give up on stragglers: too far behind the newest frame, or too old.
+        for seq in partials.keys.sorted() {
+            guard let part = partials[seq], seq + reorderWindow < f.frameSeq || now - part.firstNanos > timeoutNanos else { continue }
             partials[seq] = nil; events.append(.lost(seq: seq))
         }
-        return events
+        return events.sorted { a, b in a.seq < b.seq }
     }
 
     public var pendingCount: Int { partials.count }

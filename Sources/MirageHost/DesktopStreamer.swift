@@ -22,7 +22,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var seq: UInt32 = 0
     private var tokens: Double = 0                 // bytes available to send
     private var lastRefill = Clock.nowNanos()
-    private var expectedFrameBytes: Double = 0
     private var lastSendNanos: UInt64 = 0
     private struct InFlight { let sentNanos: UInt64; let bytes: Int; let ltrToken: Int64? }
     private var unacked: [UInt32: InFlight] = [:]
@@ -36,7 +35,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     // Stats (per log interval).
     private var statFrames = 0, statBytes = 0, statDropped = 0, statSkippedBudget = 0, statLost = 0
     private var statEncodeNanos: UInt64 = 0
-    private var statDirty = 0.0, statDirtyN = 0, statKeyBytes = 0
+    private var statDirty = 0.0, statDirtyN = 0
     private var statTimer: DispatchSourceTimer?
 
     public init(log: @escaping @Sendable (String) -> Void) {
@@ -58,7 +57,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.request = req
                     self.encoder = try HEVCEncoder(width: t.pixelWidth, height: t.pixelHeight, bitrateKbps: req.bitrateKbps, expectedFPS: self.plannedFPS(req))
                     self.tokens = self.bucketCapacity(req)
-                    self.expectedFrameBytes = Double(req.bitrateKbps * 1000 / 8) / Double(self.plannedFPS(req))
                     self.injector = InputInjector(displayID: t.display.displayID)
                     let cur = CursorMonitor(displayID: t.display.displayID)
                     cur.onShape = { [weak self] s in self?.output?.sendControl(.cursorShape(s)) }
@@ -76,13 +74,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     public func update(_ req: ControlMessage.StreamRequest) async throws -> ControlMessage.StreamInfo {
         guard let cap = capturer else { throw MirageError.transport("not streaming") }
         let t = try await cap.update(req)
-        return await withCheckedContinuation { c in
+        return try await withCheckedThrowingContinuation { c in
             queue.async {
                 let old = self.target
-                self.target = t
-                self.request = req
                 if old?.pixelWidth != t.pixelWidth || old?.pixelHeight != t.pixelHeight || self.encoder == nil {
-                    self.encoder = try? HEVCEncoder(width: t.pixelWidth, height: t.pixelHeight, bitrateKbps: req.bitrateKbps, expectedFPS: self.plannedFPS(req))
+                    do {
+                        // Build the new encoder first; on failure the old one (and old size) stay in service.
+                        self.encoder = try HEVCEncoder(width: t.pixelWidth, height: t.pixelHeight, bitrateKbps: req.bitrateKbps, expectedFPS: self.plannedFPS(req))
+                    } catch {
+                        self.log("stream reconfigure to \(t.pixelWidth)x\(t.pixelHeight) failed: \(error)")
+                        if let oldReq = self.request { Task { _ = try? await cap.update(oldReq) } }   // put SCK back to the old size
+                        c.resume(throwing: error); return
+                    }
                     self.wantKeyframe = true
                     self.ackedLTR = []
                     self.log("stream reconfigured to \(t.pixelWidth)x\(t.pixelHeight) @ \(req.bitrateKbps) kbps")
@@ -90,9 +93,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.encoder?.setRate(bitrateKbps: req.bitrateKbps, expectedFPS: self.plannedFPS(req))
                     self.log("stream rate set to \(req.bitrateKbps) kbps")
                 }
+                self.target = t
+                self.request = req
                 self.injector?.setDisplay(t.display.displayID)
                 self.cursor?.setDisplay(t.display.displayID)
-                self.expectedFrameBytes = Double(req.bitrateKbps * 1000 / 8) / Double(self.plannedFPS(req))
                 c.resume(returning: t.info)
             }
         }
@@ -203,17 +207,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let frags = VideoFragment.fragments(frameSeq: seq, flags: flags, captureNanos: f.captureNanos, payload: payload, maxPayload: maxPayload)
         for d in frags { out.sendDatagram(d) }
         tokens -= Double(payload.count)
-        expectedFrameBytes = expectedFrameBytes * 0.8 + Double(payload.count) * 0.2
         unacked[seq] = InFlight(sentNanos: Clock.nowNanos(), bytes: payload.count, ltrToken: f.ltrToken)
         statFrames += 1; statBytes += payload.count; statEncodeNanos += f.encodeNanos
-        if f.keyframe { statKeyBytes = payload.count; log("keyframe \(payload.count) bytes (\(frags.count) datagrams)") }
+        if f.keyframe { log("keyframe \(payload.count) bytes (\(frags.count) datagrams)") }
     }
 
     private func acked(_ ack: ControlMessage.FrameAck) {
         let now = Clock.nowNanos()
         if let f = unacked.removeValue(forKey: ack.seq) {
-            let rtt = Double(now - f.sentNanos)
-            srttNanos = srttNanos * 0.8 + rtt * 0.2
+            // Loss acks come after the assembler's timeout; they say nothing about the path's RTT.
+            if !ack.lost { srttNanos = srttNanos * 0.8 + Double(now - f.sentNanos) * 0.2 }
             if !ack.lost, ack.decodedNanos != 0, let tok = f.ltrToken {
                 ackedLTR.append(tok)
                 if ackedLTR.count > 8 { ackedLTR.removeFirst(ackedLTR.count - 8) }

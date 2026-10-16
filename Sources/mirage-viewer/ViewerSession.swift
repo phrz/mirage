@@ -47,14 +47,14 @@ final class ViewerSession: @unchecked Sendable {
     private var awaitingRecovery = false
     var present: ((CVImageBuffer, VideoFrame) -> Void)?
 
-    // Clock sync: hostNanos ≈ localNanos + offset.
+    // Clock sync: hostNanos ≈ localNanos + offset. Guarded by statsLock together with the counters below.
     private var clockOffset: Double = 0
     private var bestRTT: Double = .infinity
     private var pingSeq: UInt64 = 0
-    private var pingsOut: [UInt64: UInt64] = [:]
     private let statsLock = NSLock()
     private var sFrames = 0, sBytes = 0, sLost = 0, sDecodeNanos: UInt64 = 0, sAge: Double = 0, sRTT = 0.0, sDropped = 0
-    private var lastRequest: ControlMessage.StreamRequest?
+    @MainActor private var lastRequest: ControlMessage.StreamRequest?
+    @MainActor private var pendingRequest: ControlMessage.StreamRequest?
     /// One entry per second, for --stats JSON output.
     struct Sample: Codable { var t: Double, rttMs: Double, frameAgeMs: Double, fps: Double, kbps: Double, decodeMs: Double, lost: Int, skipped: Int, width: Int, height: Int }
     private(set) var samples: [Sample] = []
@@ -93,7 +93,7 @@ final class ViewerSession: @unchecked Sendable {
             let welcome = try await session.authenticate()
             setStatus("authenticated to \(welcome.hostName)")
             sender = ControlSender(stream: control, log: { [weak self] in self?.log($0) })
-            if let p = pendingRequest { pendingRequest = nil; requestStream(width: p.width, height: p.height) }
+            await MainActor.run { if let p = pendingRequest { pendingRequest = nil; requestStream(width: p.width, height: p.height) } }
             let flow = try await client.openDatagramFlow()
             self.flow = flow
             try await flow.sendRaw(DatagramPing.encode(seq: 0))   // opens the flow on the host side
@@ -118,7 +118,6 @@ final class ViewerSession: @unchecked Sendable {
             sender.send(.streamRequest(req))
         }
     }
-    private var pendingRequest: ControlMessage.StreamRequest?
 
     @MainActor func adjustBitrate(by delta: Int) {
         model.bitrateKbps = max(100, min(20_000, model.bitrateKbps + delta))
@@ -134,12 +133,13 @@ final class ViewerSession: @unchecked Sendable {
             case .pong(let p):
                 let now = Clock.nowNanos()
                 let rtt = Double(now - p.sentNanos)
-                pingsOut[p.seq] = nil
+                statsLock.lock()
                 if let echo = p.echoNanos, rtt < bestRTT {
                     bestRTT = rtt
                     clockOffset = Double(echo) - (Double(p.sentNanos) + rtt / 2)
                 }
-                statsLock.lock(); sRTT = rtt / 1e6; statsLock.unlock()
+                sRTT = rtt / 1e6
+                statsLock.unlock()
             case .streamInfo(let info):
                 Task { @MainActor in model.streamInfo = info; model.status = "streaming \(info.width)x\(info.height) from \(host)" }
             case .cursorShape(let c):
@@ -150,8 +150,7 @@ final class ViewerSession: @unchecked Sendable {
                 Task { @MainActor in model.remoteCursor = p.visible ? CGPoint(x: p.x, y: p.y) : nil }
             case .reject(let r):
                 log("host: \(r.reason)")
-                Task { @MainActor in model.error = r.reason; model.status = "host refused" }
-                lastRequest = nil   // a later resize/bitrate change retries
+                Task { @MainActor in model.error = r.reason; model.status = "host refused"; lastRequest = nil }   // a later resize/bitrate change retries
             default:
                 log("unexpected control message: \(msg)")
             }
@@ -188,8 +187,8 @@ final class ViewerSession: @unchecked Sendable {
                     let t1 = Clock.nowNanos()
                     awaitingRecovery = false
                     present?(image, frame)
-                    let ageNanos = (Double(t1) + clockOffset) - Double(frame.captureNanos)
                     statsLock.lock()
+                    let ageNanos = (Double(t1) + clockOffset) - Double(frame.captureNanos)
                     sFrames += 1; sDecodeNanos += t1 - t0; sAge = sAge == 0 ? ageNanos : sAge * 0.7 + ageNanos * 0.3
                     statsLock.unlock()
                     sender?.send(.frameAck(.init(seq: frame.seq, captureNanos: frame.captureNanos, receivedNanos: frame.lastFragmentNanos, decodedNanos: t1, bytes: frame.bytes, lost: false)))
@@ -207,9 +206,7 @@ final class ViewerSession: @unchecked Sendable {
         while true {
             try? await Task.sleep(for: .seconds(1))
             pingSeq += 1
-            let t = Clock.nowNanos()
-            pingsOut[pingSeq] = t
-            sender?.send(.ping(.init(seq: pingSeq, sentNanos: t)))
+            sender?.send(.ping(.init(seq: pingSeq, sentNanos: Clock.nowNanos())))
         }
     }
 
@@ -280,7 +277,8 @@ extension ViewerSession {
             var framesTotal: Int, lostTotal: Int, skippedTotal: Int
             var samples: [Sample]
         }
-        let out = Out(host: host, seconds: samples.last?.t ?? 0, targetKbps: lastRequest?.bitrateKbps ?? 0,
+        let target = MainActor.assumeIsolated { lastRequest?.bitrateKbps ?? 0 }
+        let out = Out(host: host, seconds: samples.last?.t ?? 0, targetKbps: target,
                       width: samples.last?.width ?? 0, height: samples.last?.height ?? 0,
                       fpsMedian: median(steady.map(\.fps)), kbpsMedian: median(steady.map(\.kbps)),
                       frameAgeMsMedian: median(steady.map(\.frameAgeMs)), frameAgeMsP95: p95(steady.map(\.frameAgeMs)),
