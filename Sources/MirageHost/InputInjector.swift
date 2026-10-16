@@ -8,6 +8,9 @@ final class InputInjector {
     private var displayBounds: CGRect
     private var buttonsDown: Set<Int> = []
     private var lastPos: CGPoint
+    /// (input seq, injection clock) of recent inputs, so captures can be stamped with the last input they reflect.
+    private var injected: [(seq: UInt64, nanos: UInt64)] = []
+    private let seqLock = NSLock()
 
     init(displayID: CGDirectDisplayID) {
         displayBounds = CGDisplayBounds(displayID)
@@ -36,7 +39,19 @@ final class InputInjector {
     }
     private func cgButton(_ b: Int) -> CGMouseButton { b == 0 ? .left : b == 1 ? .right : .center }
 
+    /// Highest input sequence injected at or before `nanos` (host clock).
+    func inputSeq(before nanos: UInt64) -> UInt64 {
+        seqLock.lock(); defer { seqLock.unlock() }
+        return injected.last(where: { $0.nanos <= nanos })?.seq ?? 0
+    }
+
     func handle(_ msg: ControlMessage) {
+        if let seq = msg.inputSeq {
+            seqLock.lock()
+            injected.append((seq, Clock.nowNanos()))
+            if injected.count > 512 { injected.removeFirst(injected.count - 512) }
+            seqLock.unlock()
+        }
         switch msg {
         case .mouseMove(let m):
             let p = point(m.x, m.y); lastPos = p

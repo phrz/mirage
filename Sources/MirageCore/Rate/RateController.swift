@@ -16,7 +16,7 @@ public struct RateController {
         public var increasePerSecond = 0.08
         public var lossDecrease = 0.8
         /// Delivery-rate samples need at least this many datagrams and this much spread.
-        public var minTrainFragments = 4
+        public var minTrainFragments = 3
         public var minTrainNanos: UInt64 = 2_000_000
         /// Ladder: kbps the target must stay under (per native kilopixel × scale²) for `downNanos` to drop a rung,
         /// and over (for the rung above) for `upNanos` to climb.
@@ -80,6 +80,17 @@ public struct RateController {
         adjust(now: now)
     }
 
+    /// A delay-only sample (tile-stream ack): updates the queue estimate without a rate sample.
+    public mutating func delaySample(sentNanos: UInt64, receivedNanos: UInt64, now: UInt64) {
+        let owd = Double(receivedNanos) - Double(sentNanos)
+        if baseOWDWindowStart == 0 { baseOWDWindowStart = now }
+        baseOWDCandidate = min(baseOWDCandidate, owd)
+        if owd < baseOWD { baseOWD = owd }
+        owdEWMA = owdEWMA.isNaN ? owd : owdEWMA * 0.7 + owd * 0.3
+        queueMs = max(0, (owdEWMA - baseOWD) / 1e6)
+        adjust(now: now)
+    }
+
     public mutating func lossDetected(now: UInt64) {
         if Double(now - lastDecreaseNanos) > srttNanos {
             targetKbps = max(tuning.minKbps, Int(Double(targetKbps) * tuning.lossDecrease))
@@ -123,7 +134,10 @@ public struct RateController {
     }
 
     /// Byte budget split for the next second: tiles first (bounded so video keeps moving), video the rest.
-    public struct Budget: Equatable { public var tileKbps: Int; public var videoKbps: Int }
+    public struct Budget: Equatable {
+        public var tileKbps: Int; public var videoKbps: Int
+        public init(tileKbps: Int, videoKbps: Int) { self.tileKbps = tileKbps; self.videoKbps = videoKbps }
+    }
     public func budget(videoActive: Bool) -> Budget {
         let tiles = videoActive ? Int(Double(targetKbps) * 0.45) : Int(Double(targetKbps) * 0.9)
         return Budget(tileKbps: tiles, videoKbps: max(100, targetKbps - (videoActive ? tiles : Int(Double(targetKbps) * 0.1))))

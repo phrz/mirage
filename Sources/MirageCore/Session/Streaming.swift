@@ -7,6 +7,8 @@ public protocol StreamOutput: AnyObject, Sendable {
     func sendDatagram(_ data: Data)
     /// Reliable, ordered control message (cursor shapes, stream info, ...).
     func sendControl(_ message: ControlMessage)
+    /// Reliable, ordered bytes on the tile stream (already framed by `TileMessage.encode`).
+    func sendTiles(_ data: Data)
     var maxDatagramSize: Int { get }
 }
 
@@ -16,6 +18,7 @@ public protocol DesktopStreamer: AnyObject, Sendable {
     func start(_ request: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo
     func update(_ request: ControlMessage.StreamRequest) async throws -> ControlMessage.StreamInfo
     func handle(ack: ControlMessage.FrameAck)
+    func handle(tileAck: ControlMessage.TileAck)
     func handle(input: ControlMessage)
     func stop() async
 }
@@ -25,12 +28,15 @@ public final class HostConnection: @unchecked Sendable {
     public let id: UUID
     private let lock = NSLock()
     private var _flow: MessageStream?
+    private var _tiles: MessageStream?
     private var flowWaiters: [FlowWaiter] = []
+    private var tileWaiters: [FlowWaiter] = []
     public var streamer: DesktopStreamer?
 
     init(id: UUID) { self.id = id }
 
     public var flow: MessageStream? { lock.lock(); defer { lock.unlock() }; return _flow }
+    public var tiles: MessageStream? { lock.lock(); defer { lock.unlock() }; return _tiles }
 
     func setFlow(_ f: MessageStream) {
         lock.lock()
@@ -39,24 +45,43 @@ public final class HostConnection: @unchecked Sendable {
         lock.unlock()
         for w in waiters { w.resume(f) }
     }
+    func setTiles(_ t: MessageStream) {
+        lock.lock()
+        _tiles = t
+        let waiters = tileWaiters; tileWaiters = []
+        lock.unlock()
+        for w in waiters { w.resume(t) }
+    }
 
     /// Called when the flow's receive loop ends, so a later streamRequest does not build on a dead flow.
     func clearFlow(_ f: MessageStream) {
         lock.lock(); if _flow === f { _flow = nil }; lock.unlock()
     }
+    func clearTiles(_ t: MessageStream) {
+        lock.lock(); if _tiles === t { _tiles = nil }; lock.unlock()
+    }
 
     /// Waits for the client to open its datagram flow. Every waiter is resumed exactly once:
     /// by `setFlow`, or with nil by the timeout.
     public func waitForFlow(timeout: Duration) async -> MessageStream? {
-        if let f = flow { return f }
+        await wait(timeout: timeout, current: { $0._flow }, register: { $0.flowWaiters.append($1) }, unregister: { c, w in c.flowWaiters.removeAll { $0 === w } })
+    }
+    public func waitForTiles(timeout: Duration) async -> MessageStream? {
+        await wait(timeout: timeout, current: { $0._tiles }, register: { $0.tileWaiters.append($1) }, unregister: { c, w in c.tileWaiters.removeAll { $0 === w } })
+    }
+
+    private func wait(timeout: Duration, current: @escaping (HostConnection) -> MessageStream?, register: @escaping (HostConnection, FlowWaiter) -> Void,
+                      unregister: @escaping (HostConnection, FlowWaiter) -> Void) async -> MessageStream? {
+        lock.lock(); let now = current(self); lock.unlock()
+        if let now { return now }
         return await withCheckedContinuation { (c: CheckedContinuation<MessageStream?, Never>) in
             let waiter = FlowWaiter(c)
             lock.lock()
-            if let f = _flow { lock.unlock(); waiter.resume(f); return }
-            flowWaiters.append(waiter)
+            if let f = current(self) { lock.unlock(); waiter.resume(f); return }
+            register(self, waiter)
             lock.unlock()
             DispatchQueue.global().asyncAfter(deadline: .now() + .nanoseconds(Int(timeout.components.seconds * 1_000_000_000 + timeout.components.attoseconds / 1_000_000_000))) { [self] in
-                lock.lock(); flowWaiters.removeAll { $0 === waiter }; lock.unlock()
+                lock.lock(); unregister(self, waiter); lock.unlock()
                 waiter.resume(nil)
             }
         }
@@ -115,15 +140,16 @@ public final class ControlSender: @unchecked Sendable {
     }
 }
 
-/// StreamOutput bound to one connection's datagram flow and control stream.
+/// StreamOutput bound to one connection's datagram flow, tile stream and control stream.
 final class ConnectionOutput: StreamOutput, @unchecked Sendable {
     let flow: MessageStream
+    let tiles: MessageStream?
     let control: ControlSender
     let log: @Sendable (String) -> Void
     let maxDatagramSize: Int
 
-    init(flow: MessageStream, control: MessageStream, log: @escaping @Sendable (String) -> Void) {
-        self.flow = flow; self.control = ControlSender(stream: control, log: log); self.log = log
+    init(flow: MessageStream, tiles: MessageStream?, control: MessageStream, log: @escaping @Sendable (String) -> Void) {
+        self.flow = flow; self.tiles = tiles; self.control = ControlSender(stream: control, log: log); self.log = log
         let m = flow.connection.maximumDatagramSize
         maxDatagramSize = m > 0 ? min(m, VideoFragment.datagramSize) : VideoFragment.datagramSize
     }
@@ -135,4 +161,11 @@ final class ConnectionOutput: StreamOutput, @unchecked Sendable {
     }
 
     func sendControl(_ message: ControlMessage) { control.send(message) }
+
+    func sendTiles(_ data: Data) {
+        // Network.framework queues sends in order on one connection; no await needed for ordering.
+        tiles?.connection.send(content: data, completion: .contentProcessed { [log] err in
+            if let err { log("tile send: \(err)") }
+        })
+    }
 }

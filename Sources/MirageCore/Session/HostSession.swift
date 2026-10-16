@@ -33,6 +33,12 @@ public enum HostSession {
                 conn.setFlow(stream)
                 defer { conn.clearFlow(stream) }
                 try await serveDatagrams(stream, remote: remote, ctx: ctx)
+            } else if first.first == tileStreamMagic {
+                _ = try await stream.receiveExactly(1)
+                conn.setTiles(stream)
+                defer { conn.clearTiles(stream) }
+                ctx.log("[\(remote)] tile stream open")
+                while true { _ = try await stream.receiveSome() }   // nothing expected client → host; detects close
             } else {
                 isControl = true
                 try await serveStream(stream, conn: conn, remote: remote, ctx: ctx)
@@ -85,7 +91,7 @@ public enum HostSession {
                 if let output { output.sendControl(.pong(p)) } else { try await stream.send(.pong(p)) }
             case .streamRequest(let req):
                 guard authenticated != nil else { throw MirageError.protocolViolation("streamRequest before auth") }
-                if let s = conn.streamer, let out = output, conn.flow === out.flow {
+                if let s = conn.streamer, let out = output, conn.flow === out.flow, conn.tiles === out.tiles {
                     do { out.sendControl(.streamInfo(try await s.update(req))) }
                     catch { ctx.log("[\(remote)] stream update failed: \(error)"); out.sendControl(.reject(.init(reason: "cannot reconfigure stream: \(error)"))) }
                 } else {
@@ -96,7 +102,9 @@ public enum HostSession {
                     guard let flow = await conn.waitForFlow(timeout: .seconds(5)) else {
                         try await stream.send(.reject(.init(reason: "no datagram flow"))); continue
                     }
-                    let out = ConnectionOutput(flow: flow, control: stream, log: ctx.log)
+                    let tiles = await conn.waitForTiles(timeout: .seconds(5))
+                    if tiles == nil { ctx.log("[\(remote)] no tile stream; lossless tiles disabled") }
+                    let out = ConnectionOutput(flow: flow, tiles: tiles, control: stream, log: ctx.log)
                     output = out
                     let s = make()
                     do {
@@ -115,6 +123,8 @@ public enum HostSession {
                 if let s = conn.streamer { conn.streamer = nil; await s.stop() }
             case .frameAck(let ack):
                 conn.streamer?.handle(ack: ack)
+            case .tileAck(let ack):
+                conn.streamer?.handle(tileAck: ack)
             case .mouseMove, .mouseButton, .scroll, .key, .modifiers:
                 guard authenticated != nil else { throw MirageError.protocolViolation("input before auth") }
                 conn.streamer?.handle(input: msg)

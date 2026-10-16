@@ -36,7 +36,7 @@ struct Options {
         if args.contains("-h") || args.contains("--help") {
             print("""
                 usage: mirage-viewer HOST [--port N] [--pair CODE] [--bitrate KBPS] [--scale F]
-                  --bitrate  target video bitrate in kbit/s (default 800); ⌃⌥⌘↑/↓ adjusts live
+                  --bitrate  bitrate cap in kbit/s (default 800); the host's controller stays at or below it; ⌃⌥⌘↑/↓ adjusts live
                   --scale    stream pixels = window points × backing scale × F (default 1.0)
                   --window   initial window size in points, WxH (default 1280x720)
                   --stats-log PATH  append one line of stats per second to PATH
@@ -234,8 +234,10 @@ struct StatsOverlay: View {
         let s = model.stats
         VStack(alignment: .leading, spacing: 2) {
             Text(model.status)
-            Text(String(format: "rtt %4.0f ms   age %4.0f ms   %4.1f fps   %5.0f kbps (target %d)", s.rttMs, s.frameAgeMs, s.fps, s.kbps, model.bitrateKbps))
-            Text(String(format: "%dx%d   decode %.1f ms   frames %d   lost %d   skipped %d", s.width, s.height, s.decodeMs, s.frames, s.lost, s.dropped))
+            Text(String(format: "rtt %4.0f ms   age %4.0f ms   %4.1f fps   video %5.0f kbps   tiles %5.0f kbps   (cap %d)", s.rttMs, s.frameAgeMs, s.fps, s.kbps, s.tileKbps, model.bitrateKbps))
+            Text(String(format: "target %d kbps   capacity %d   queue %.0f ms   rung %d (%.3gx%@)   tile budget %d", s.rate.targetKbps, s.rate.capacityKbps, s.rate.queueMs, s.rate.rung, s.rate.scale, s.upscaling ? " MetalFX" : "", s.rate.tileBudgetKbps))
+            Text(String(format: "video %dx%d   decode %.1f ms   frames %d   lost %d   skipped %d   tile rects %d   copy-rects %d", s.width, s.height, s.decodeMs, s.frames, s.lost, s.dropped, s.tileRects, s.copyRects))
+            Text(String(format: "predictions shown %d   confirmed %d   mismatched %d   expired %d", s.predictions.shown, s.predictions.confirmed, s.predictions.mismatched, s.predictions.expired))
             Text("⌃⌥⌘S stats  ⌃⌥⌘↑↓ bitrate  ⌃⌥⌘Q quit").foregroundStyle(.secondary)
         }
         .font(.system(size: 11, design: .monospaced))

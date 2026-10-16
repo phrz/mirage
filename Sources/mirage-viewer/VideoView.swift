@@ -1,12 +1,13 @@
 import AppKit
-import AVFoundation
-import CoreMedia
+import Metal
+import QuartzCore
 import SwiftUI
 import MirageCore
 
-/// Presents decoded frames, draws the host cursor at the local pointer, forwards input.
+/// Presents the compositor's canvas on a CAMetalLayer, draws the host cursor at the local pointer,
+/// forwards input, and starts local scroll / window-drag predictions (DESIGN §3.5).
 final class VideoNSView: NSView {
-    let displayLayer = AVSampleBufferDisplayLayer()
+    let metalLayer = CAMetalLayer()
     let cursorLayer = CALayer()
     var session: ViewerSession?
     var model: ViewerModel?
@@ -19,15 +20,19 @@ final class VideoNSView: NSView {
     private var pointerInside = false
     private var localPointer: CGPoint = .zero
     private var lastRequested: (Int, Int) = (0, 0)
+    private var displayLink: CADisplayLink?
+    private var drag: (windowID: UInt32, frame: PixelRect, last: (Int, Int))?
     var onToggleStats: (() -> Void)?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
-        displayLayer.videoGravity = .resizeAspect
-        displayLayer.backgroundColor = NSColor.black.cgColor
-        layer?.addSublayer(displayLayer)
+        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.framebufferOnly = true
+        metalLayer.isOpaque = true
+        metalLayer.presentsWithTransaction = false
+        layer?.addSublayer(metalLayer)
         cursorLayer.contentsGravity = .resize
         cursorLayer.isHidden = true
         cursorLayer.zPosition = 10
@@ -39,15 +44,46 @@ final class VideoNSView: NSView {
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { true }   // top-left origin, like the host display
 
+    func attach(_ session: ViewerSession) {
+        self.session = session
+        metalLayer.device = session.compositor?.device
+        session.onChange = { [weak self] in DispatchQueue.main.async { self?.needsDisplay = true } }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        displayLink?.invalidate(); displayLink = nil
+        guard window != nil else { return }
+        let link = displayLink(target: self, selector: #selector(tick))
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    @objc private func tick() {
+        guard let session, let comp = session.compositor, comp.width > 0 else { return }
+        let (disp, colors) = session.displacements()
+        let changed = comp.needsRender || !disp.isEmpty || lastDisplacements != disp
+        lastDisplacements = disp
+        guard changed, let drawable = metalLayer.nextDrawable() else { return }
+        let scale = metalLayer.contentsScale
+        let r = videoRect
+        comp.render(to: drawable, dest: CGRect(x: r.minX * scale, y: r.minY * scale, width: r.width * scale, height: r.height * scale), displacements: disp, bandColors: colors)
+    }
+    private var lastDisplacements: [Predictor.Displacement] = []
+
     override func layout() {
         super.layout()
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        displayLayer.frame = bounds
+        metalLayer.frame = bounds
+        let scale = window?.backingScaleFactor ?? 2
+        metalLayer.contentsScale = scale
+        metalLayer.drawableSize = CGSize(width: max(1, bounds.width * scale), height: max(1, bounds.height * scale))
         CATransaction.commit()
+        session?.compositor?.invalidate()
         scheduleStreamRequest()
     }
 
-    override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); scheduleStreamRequest() }
+    override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); needsLayout = true; scheduleStreamRequest() }
 
     private func scheduleStreamRequest() {
         resizeWork?.cancel()
@@ -65,28 +101,10 @@ final class VideoNSView: NSView {
         session.requestStream(width: w, height: h)
     }
 
-    // MARK: Presentation
-
-    func present(_ image: CVImageBuffer, _ frame: VideoFrame) {
-        var fd: CMVideoFormatDescription?
-        guard CMVideoFormatDescriptionCreateForImageBuffer(allocator: nil, imageBuffer: image, formatDescriptionOut: &fd) == noErr, let fd else { return }
-        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()), decodeTimeStamp: .invalid)
-        var sb: CMSampleBuffer?
-        guard CMSampleBufferCreateReadyWithImageBuffer(allocator: nil, imageBuffer: image, formatDescription: fd, sampleTiming: &timing, sampleBufferOut: &sb) == noErr, let sb else { return }
-        if let atts = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true), CFArrayGetCount(atts) > 0 {
-            let dict = unsafeBitCast(CFArrayGetValueAtIndex(atts, 0), to: CFMutableDictionary.self)
-            CFDictionarySetValue(dict, Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(), Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
-        }
-        let dims = CMVideoFormatDescriptionGetDimensions(fd)
-        let newAspect = CGFloat(dims.width) / CGFloat(dims.height)
-        if displayLayer.sampleBufferRenderer.status == .failed { displayLayer.sampleBufferRenderer.flush() }
-        displayLayer.sampleBufferRenderer.enqueue(sb)
-        if abs(newAspect - aspect) > 0.001 { DispatchQueue.main.async { self.aspect = newAspect } }
-    }
-
-    /// Where the video actually is inside the view (letterboxed).
+    /// Where the picture actually is inside the view (letterboxed), in points.
     var videoRect: CGRect {
         let b = bounds
+        if let comp = session?.compositor, comp.width > 0 { aspect = CGFloat(comp.width) / CGFloat(comp.height) }
         guard b.width > 0, b.height > 0 else { return b }
         if b.width / b.height > aspect {
             let w = b.height * aspect
@@ -101,6 +119,12 @@ final class VideoNSView: NSView {
         let p = convert(e.locationInWindow, from: nil)
         let r = videoRect
         return (Double((p.x - r.minX) / r.width), Double((p.y - r.minY) / r.height))
+    }
+    /// Host stream pixel under an event.
+    private func streamPixel(_ e: NSEvent) -> (Int, Int)? {
+        guard let comp = session?.compositor, comp.width > 0 else { return nil }
+        let (x, y) = normalized(e)
+        return (Int(x * Double(comp.width)), Int(y * Double(comp.height)))
     }
 
     // MARK: Cursor
@@ -138,7 +162,19 @@ final class VideoNSView: NSView {
         session?.sendMouseMove(x: x, y: y)
     }
     override func mouseMoved(with event: NSEvent) { moved(event) }
-    override func mouseDragged(with event: NSEvent) { moved(event) }
+    override func mouseDragged(with event: NSEvent) {
+        // Window drag prediction: translate the window's pixels with the pointer, send the move as usual.
+        if let drag, let session, let p = streamPixel(event) {
+            let dx = p.0 - drag.last.0, dy = p.1 - drag.last.1
+            self.drag?.last = p
+            localPointer = convert(event.locationInWindow, from: nil); updateCursorLayer()
+            let (x, y) = normalized(event)
+            let seq = session.send(.mouseMove(.init(x: x, y: y)))
+            if dx != 0 || dy != 0 { session.predict(kind: .drag, windowID: drag.windowID, rect: drag.frame, dx: dx, dy: dy, inputSeq: seq) }
+            return
+        }
+        moved(event)
+    }
     override func rightMouseDragged(with event: NSEvent) { moved(event) }
     override func otherMouseDragged(with event: NSEvent) { moved(event) }
 
@@ -147,8 +183,16 @@ final class VideoNSView: NSView {
         let (x, y) = normalized(e)
         session?.send(.mouseButton(.init(button: b, down: down, x: x, y: y, clickCount: e.clickCount, modifiers: flags(e))))
     }
-    override func mouseDown(with event: NSEvent) { button(event, 0, down: true) }
-    override func mouseUp(with event: NSEvent) { button(event, 0, down: false) }
+    override func mouseDown(with event: NSEvent) {
+        button(event, 0, down: true)
+        drag = nil
+        // Title-bar hit test on the host's window list: a plain left press there starts a predicted drag.
+        guard let session, let p = streamPixel(event), event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty, event.clickCount == 1,
+              let w = session.window(at: p.0, p.1) else { return }
+        let titleBar = Int(28 * MainActor.assumeIsolated { session.pixelsPerPoint })
+        if p.1 < w.frame.y + titleBar { drag = (w.id, w.frame, p) }
+    }
+    override func mouseUp(with event: NSEvent) { button(event, 0, down: false); drag = nil }
     override func rightMouseDown(with event: NSEvent) { button(event, 1, down: true) }
     override func rightMouseUp(with event: NSEvent) { button(event, 1, down: false) }
     override func otherMouseDown(with event: NSEvent) { button(event, max(2, event.buttonNumber), down: true) }
@@ -157,8 +201,17 @@ final class VideoNSView: NSView {
     override func scrollWheel(with event: NSEvent) {
         let (x, y) = normalized(event)
         let precise = event.hasPreciseScrollingDeltas
-        session?.send(.scroll(.init(x: x, y: y, dx: precise ? event.scrollingDeltaX : event.deltaX, dy: precise ? event.scrollingDeltaY : event.deltaY,
-                                    precise: precise, modifiers: flags(event))))
+        let dx = precise ? event.scrollingDeltaX : event.deltaX, dy = precise ? event.scrollingDeltaY : event.deltaY
+        guard let session else { return }
+        let seq = session.send(.scroll(.init(x: x, y: y, dx: dx, dy: dy, precise: precise, modifiers: flags(event))))
+        // Scroll prediction: shift the scrollable rect's pixels now; the host's copy-rect confirms it later.
+        guard precise, event.modifierFlags.intersection([.command, .option, .control]).isEmpty, let p = streamPixel(event), let w = session.window(at: p.0, p.1) else { return }
+        let ppp = MainActor.assumeIsolated { session.pixelsPerPoint }
+        let sdx = Int((dx * ppp).rounded()), sdy = Int((dy * ppp).rounded())
+        guard sdx != 0 || sdy != 0 else { return }
+        let rect = session.scrollRect(for: w, titleBarPx: Int(28 * ppp))
+        guard rect.contains(p.0, p.1) else { return }
+        session.predict(kind: .scroll, windowID: w.id, rect: rect, dx: sdx, dy: sdy, inputSeq: seq)
     }
 
     /// Viewer-local shortcuts: ⌃⌥⌘ + S (stats), ↑/↓ (bitrate), Q (quit). Everything else goes to the host.
@@ -196,9 +249,9 @@ struct VideoView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> VideoNSView {
         let v = VideoNSView(frame: .zero)
-        v.session = session; v.model = model
+        v.model = model
+        v.attach(session)
         v.onToggleStats = { model.showStats.toggle() }
-        session.present = { [weak v] image, frame in v?.present(image, frame) }
         DispatchQueue.main.async { v.window?.makeFirstResponder(v) }
         return v
     }

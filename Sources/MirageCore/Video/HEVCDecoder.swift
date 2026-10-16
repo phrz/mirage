@@ -72,6 +72,7 @@ public final class HEVCDecoder {
         if let s = session { VTDecompressionSessionInvalidate(s); session = nil }
         let attrs: [CFString: Any] = [
             kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+            kCVPixelBufferMetalCompatibilityKey: true,
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
         ]
         var s: VTDecompressionSession?

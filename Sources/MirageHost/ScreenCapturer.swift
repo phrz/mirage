@@ -13,8 +13,8 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
     private var stream: SCStream?
     private let queue: DispatchQueue
-    /// (pixel buffer, capture clock, dirty fraction 0…1 of the output frame)
-    private var onFrame: ((CVPixelBuffer, UInt64, Double) -> Void)?
+    /// (pixel buffer, capture clock, dirty rects in output pixels)
+    private var onFrame: ((CVPixelBuffer, UInt64, [PixelRect]) -> Void)?
     private(set) var target: Target?
     var onStop: ((Error?) -> Void)?
 
@@ -45,15 +45,17 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private static func configuration(for t: Target, maxFPS: Int) -> SCStreamConfiguration {
         let c = SCStreamConfiguration()
         c.width = t.pixelWidth; c.height = t.pixelHeight
-        c.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        // BGRA: the tile path reads pixels and the HEVC encoder accepts it directly. Deeper queue:
+        // the streamer retains the previous frame for diffing and the latest for refinement.
+        c.pixelFormat = kCVPixelFormatType_32BGRA
         c.showsCursor = false
-        c.queueDepth = 3
+        c.queueDepth = 6
         c.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(1, min(maxFPS, 120))))
         c.capturesAudio = false
         return c
     }
 
-    func start(_ req: ControlMessage.StreamRequest, onFrame: @escaping (CVPixelBuffer, UInt64, Double) -> Void) async throws -> Target {
+    func start(_ req: ControlMessage.StreamRequest, onFrame: @escaping (CVPixelBuffer, UInt64, [PixelRect]) -> Void) async throws -> Target {
         let t = try await Self.resolve(req)
         self.onFrame = onFrame
         self.target = t
@@ -92,16 +94,19 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
               let statusRaw = attachments.first?[.status] as? Int, let status = SCFrameStatus(rawValue: statusRaw), status == .complete,
               let pb = CMSampleBufferGetImageBuffer(sb) else { return }
         // dirtyRects are in output pixels (the configured size), not display points.
-        var dirty = 1.0
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        var dirty: [PixelRect] = []
         if let rects = attachments.first?[.dirtyRects] as? [Any] {
-            let w = Double(CVPixelBufferGetWidth(pb)), h = Double(CVPixelBufferGetHeight(pb))
-            let area = rects.reduce(0.0) { acc, r in
-                guard let d = r as? NSDictionary, let rect = CGRect(dictionaryRepresentation: d) else { return acc + w * h }
-                return acc + Double(rect.width * rect.height)
+            for r in rects {
+                guard let d = r as? NSDictionary, let rect = CGRect(dictionaryRepresentation: d) else { dirty = [PixelRect(x: 0, y: 0, width: w, height: h)]; break }
+                let x0 = max(0, Int(rect.minX.rounded(.down))), y0 = max(0, Int(rect.minY.rounded(.down)))
+                let x1 = min(w, Int(rect.maxX.rounded(.up))), y1 = min(h, Int(rect.maxY.rounded(.up)))
+                if x1 > x0 && y1 > y0 { dirty.append(PixelRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)) }
             }
-            dirty = min(1, area / (w * h))
+        } else {
+            dirty = [PixelRect(x: 0, y: 0, width: w, height: h)]
         }
-        if dirty == 0 { return }   // nothing changed; SCK still delivers these around the first frames
+        if dirty.isEmpty { return }   // nothing changed; SCK still delivers these around the first frames
         onFrame?(pb, Clock.nowNanos(), dirty)
     }
 

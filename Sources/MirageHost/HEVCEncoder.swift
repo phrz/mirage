@@ -61,8 +61,9 @@ final class HEVCEncoder {
     private func applyRate() {
         let bps = bitrateKbps * 1000
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
-        // Hard cap: one second's worth of bytes per second. Low-latency mode has no CBR, so this is the ceiling.
-        let limits: [Any] = [bps / 8, 1.0]
+        // Hard cap: 1.5 s' worth of bytes per second. Low-latency mode has no CBR, so this is the ceiling;
+        // motion frames are bursty against a steady lossless-tile trickle, so leave headroom.
+        let limits: [Any] = [bps / 8 * 3 / 2, 1.0]
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: expectedFPS as CFNumber)
     }

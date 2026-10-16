@@ -126,11 +126,36 @@ public struct TileTracker {
         return plan
     }
 
+    /// Marks tiles as shown through video (keyframe, recovery): they need refinement.
+    public mutating func markVideo(_ tiles: [Int], now: UInt64) {
+        for i in tiles {
+            var c = cells[i]
+            c.pending = true; c.viaVideo = true
+            if c.pendingSince == 0 { c.pendingSince = now }
+            c.dueNanos = now &+ tuning.settleNanos
+            cells[i] = c
+        }
+    }
+
+    /// Lossless tiles the budget could not carry now: keep them pending, due shortly.
+    public mutating func `defer`(_ tiles: [Int], now: UInt64, delayNanos: UInt64 = 50_000_000) {
+        for i in tiles {
+            var c = cells[i]
+            c.pending = true
+            if c.pendingSince == 0 { c.pendingSince = now }
+            c.dueNanos = now &+ delayNanos
+            cells[i] = c
+        }
+    }
+
+    /// The client has this tile pixel-exact (last update was lossless or a copy of crisp pixels, nothing pending).
+    public func isCrisp(_ i: Int) -> Bool { !cells[i].pending && cells[i].lastLosslessNanos >= cells[i].lastDirtyNanos }
+
     /// Marks tiles as updated by a copy-rect (they are crisp again if the source was crisp).
     public mutating func markCopied(_ tiles: [Int], now: UInt64) {
         for i in tiles {
             var c = cells[i]
-            c.lastDirtyNanos = now
+            c.lastDirtyNanos = now; c.lastLosslessNanos = now
             c.pending = false; c.pendingSince = 0; c.viaVideo = false
             cells[i] = c
         }
