@@ -379,6 +379,18 @@ at 2x). Steady state over 30–50 s each:
 | 2000 kbps | 1.94–2.2 Mbps | 28–32 | 117–147 ms | 1.6–2.4 ms | 0 |
 | 4000 kbps | 3.7–4.5 Mbps | 25–32 | 122–158 ms | 1.7–2.6 ms | 0 |
 
+A repeatable version of the same run, headless over SSH (no GUI needed on the measuring
+machine), 60 s at 800 kbps with the scrolling-text/spinning-box window (97% dirty):
+
+```bash
+ssh mac-daddy '~/.local/bin/mirage-viewer phrz-mbp-m4 --headless --duration 60 --bitrate 800 --window 2560x1440 --stats /tmp/m1-800.json'
+```
+
+→ 1644 frames, median 30 fps, 829 kbps, frame age median 126 ms / p95 139 ms, decode 2.1 ms,
+RTT median 200 ms (min 159), 0 lost. Note the direction: this is the Japan→Dallas uplink
+(~4.5 Mbps measured by scp), the opposite of the eventual use; the latency figures are symmetric,
+the capacity figure may not be.
+
 Host side at every rate: encode 10 ms per frame, sRTT 195–260 ms as seen through acks, 4–7
 frames in flight, delivered bitrate within 2% of target. Frame age of ~125 ms is one-way
 delay (~90 ms) + serialization of a 3–4 KB frame + capture/encode/decode (~15 ms); the

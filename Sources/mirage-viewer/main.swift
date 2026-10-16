@@ -10,6 +10,9 @@ struct Options {
     var pixelFactor = 1.0
     var statsLog: String?
     var window = (1280, 720)
+    var headless = false
+    var duration = 60.0
+    var statsJSON: String?
 
     static func parse() -> Options {
         var o = Options()
@@ -23,6 +26,9 @@ struct Options {
         if let v = value("--bitrate"), let b = Int(v) { o.bitrate = b }
         if let v = value("--scale"), let f = Double(v) { o.pixelFactor = f }
         if let v = value("--stats-log") { o.statsLog = v }
+        if let v = value("--duration"), let d = Double(v) { o.duration = d }
+        if let v = value("--stats") { o.statsJSON = v }
+        if let i = args.firstIndex(of: "--headless") { o.headless = true; args.remove(at: i) }
         if let v = value("--window") { let p = v.split(separator: "x").compactMap { Int($0) }; if p.count == 2 { o.window = (p[0], p[1]) } }
         if args.contains("-h") || args.contains("--help") || args.isEmpty {
             print("""
@@ -31,6 +37,9 @@ struct Options {
                   --scale    stream pixels = window points × backing scale × F (default 1.0)
                   --window   initial window size in points, WxH (default 1280x720)
                   --stats-log PATH  append one line of stats per second to PATH
+                  --headless --duration S --stats PATH.json
+                             no window: connect, request --window pixels (× --scale), decode for S seconds,
+                             write per-second samples and medians to PATH.json, exit 0 (SSH-friendly)
                   ⌃⌥⌘S toggles the stats overlay, ⌃⌥⌘Q quits; all other keys go to the host.
                 """)
             exit(args.isEmpty ? 2 : 0)
@@ -118,7 +127,28 @@ struct StatsOverlay: View {
     }
 }
 
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.run()
+if CommandLine.arguments.contains("--headless") {
+    // Headless measurement mode: decode without presenting; usable over SSH on a machine with no GUI access.
+    let o = Options.parse()
+    let (model, session) = MainActor.assumeIsolated { () -> (ViewerModel, ViewerSession) in
+        let m = ViewerModel(bitrateKbps: o.bitrate, pixelFactor: o.pixelFactor)
+        m.statsLog = o.statsLog.map { URL(fileURLWithPath: $0) }
+        return (m, ViewerSession(host: o.host, port: o.port, pairCode: o.pair, model: m))
+    }
+    session.start()
+    session.requestStream(width: Int(Double(o.window.0) * o.pixelFactor), height: Int(Double(o.window.1) * o.pixelFactor))
+    Timer.scheduledTimer(withTimeInterval: o.duration, repeats: false) { _ in
+        session.stop()
+        let json = session.statsJSON()
+        if let path = o.statsJSON { try? json.write(to: URL(fileURLWithPath: path)) }
+        FileHandle.standardOutput.write(json); FileHandle.standardOutput.write(Data("\n".utf8))
+        let failed = MainActor.assumeIsolated { model.error != nil } && session.samples.isEmpty
+        exit(failed ? 1 : 0)
+    }
+    RunLoop.main.run()
+} else {
+    let app = NSApplication.shared
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    app.run()
+}

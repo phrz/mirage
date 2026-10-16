@@ -55,6 +55,10 @@ final class ViewerSession: @unchecked Sendable {
     private let statsLock = NSLock()
     private var sFrames = 0, sBytes = 0, sLost = 0, sDecodeNanos: UInt64 = 0, sAge: Double = 0, sRTT = 0.0, sDropped = 0
     private var lastRequest: ControlMessage.StreamRequest?
+    /// One entry per second, for --stats JSON output.
+    struct Sample: Codable { var t: Double, rttMs: Double, frameAgeMs: Double, fps: Double, kbps: Double, decodeMs: Double, lost: Int, skipped: Int, width: Int, height: Int }
+    private(set) var samples: [Sample] = []
+    private let startDate = Date()
     private var lastMoveSent: UInt64 = 0
     private var pendingMove: ControlMessage.MouseMove?
 
@@ -223,6 +227,10 @@ final class ViewerSession: @unchecked Sendable {
                 s.decodeMs = frames > 0 ? Double(dec) / Double(frames) / 1e6 : s.decodeMs
                 s.frameAgeMs = age / 1e6; s.rttMs = rtt; s.width = w; s.height = h
                 model.stats = s
+                if frames > 0 || bytes > 0 {
+                    samples.append(Sample(t: Date().timeIntervalSince(startDate), rttMs: rtt, frameAgeMs: age / 1e6, fps: Double(frames), kbps: Double(bytes) * 8 / 1000,
+                                          decodeMs: s.decodeMs, lost: lost, skipped: dropped, width: w, height: h))
+                }
                 if let url = model.statsLog {
                     let line = String(format: "%@ rtt %.0f age %.0f fps %.1f kbps %.0f target %d decode %.1f lost %d skipped %d size %dx%d\n",
                                       ISO8601DateFormatter().string(from: Date()), s.rttMs, s.frameAgeMs, s.fps, s.kbps, model.bitrateKbps, s.decodeMs, lost, dropped, w, h)
@@ -256,5 +264,31 @@ final class ViewerSession: @unchecked Sendable {
     func stop() {
         sender?.send(.streamStop)
         client?.close()
+    }
+}
+
+
+extension ViewerSession {
+    /// Aggregates for --stats: medians over the steady state (first 3 s dropped), plus totals.
+    func statsJSON() -> Data {
+        let steady = samples.count > 5 ? Array(samples.dropFirst(3)) : samples
+        func median(_ v: [Double]) -> Double { let s = v.sorted(); return s.isEmpty ? 0 : s[s.count / 2] }
+        func p95(_ v: [Double]) -> Double { let s = v.sorted(); return s.isEmpty ? 0 : s[min(s.count - 1, Int(Double(s.count) * 0.95))] }
+        struct Out: Codable {
+            var host: String, seconds: Double, targetKbps: Int, width: Int, height: Int
+            var fpsMedian: Double, kbpsMedian: Double, frameAgeMsMedian: Double, frameAgeMsP95: Double, rttMsMedian: Double, rttMsMin: Double, decodeMsMedian: Double
+            var framesTotal: Int, lostTotal: Int, skippedTotal: Int
+            var samples: [Sample]
+        }
+        let out = Out(host: host, seconds: samples.last?.t ?? 0, targetKbps: lastRequest?.bitrateKbps ?? 0,
+                      width: samples.last?.width ?? 0, height: samples.last?.height ?? 0,
+                      fpsMedian: median(steady.map(\.fps)), kbpsMedian: median(steady.map(\.kbps)),
+                      frameAgeMsMedian: median(steady.map(\.frameAgeMs)), frameAgeMsP95: p95(steady.map(\.frameAgeMs)),
+                      rttMsMedian: median(steady.map(\.rttMs)), rttMsMin: steady.map(\.rttMs).filter { $0 > 0 }.min() ?? 0,
+                      decodeMsMedian: median(steady.map(\.decodeMs)),
+                      framesTotal: Int(samples.map(\.fps).reduce(0, +)), lostTotal: samples.map(\.lost).reduce(0, +), skippedTotal: samples.map(\.skipped).reduce(0, +),
+                      samples: samples)
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return (try? enc.encode(out)) ?? Data()
     }
 }

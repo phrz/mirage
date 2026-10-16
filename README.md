@@ -70,7 +70,9 @@ Admin: `miraged devices`, `miraged revoke <id-prefix>`, `mirage hosts`, `miraged
 The viewer requests the stream at its window size (points × backing scale × `--scale`), so
 resize the window to change resolution. `⌃⌥⌘S` toggles the overlay (RTT, frame age, fps,
 kbps, decode time, losses), `⌃⌥⌘↑/↓` changes the target bitrate by 200 kbps, `⌃⌥⌘Q` quits.
-Every other key and ⌘-shortcut goes to the host. The host cursor is drawn locally at your
+Every other key and ⌘-shortcut goes to the host. `--headless --duration 60 --stats out.json`
+connects and decodes without a window and writes per-second samples plus medians, for
+measuring a link over SSH. The host cursor is drawn locally at your
 pointer, so mouse latency is zero; clicks and typing pay the link RTT.
 
 ### Host permissions (once)
