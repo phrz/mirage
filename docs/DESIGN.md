@@ -277,6 +277,37 @@ keyboard and trackpad pass straight through.
 - Clipboard sync, drag-and-drop file transfer over a dedicated QUIC stream, and audio
   (SCK audio → Opus via `AudioConverter` → datagrams) after the pixel path is solid.
 
+### 3.7a Permissions and first run (requirement from phrz, 2026-10-17)
+
+The host's permission experience must feel like an Apple app's, and it must ask for the
+minimum. Inventory of what macOS can demand and what Mirage actually needs:
+
+| Permission | Host | Viewer (macOS) | Viewer (iOS) | Why / how avoided |
+|---|---|---|---|---|
+| Screen & System Audio Recording | **required** | – | – | capture; unavoidable |
+| Accessibility | **required** | – | – | CGEvent input injection, AX window management and native menus; one grant covers all |
+| Monthly "bypass the system private window picker" reminder (macOS 15+) | once per month unless deferred | – | – | a consequence of SCK without the content picker; the picker is a per-session UI and unusable for a headless host, so accept the reminder and explain it in-app |
+| Local Network | avoided | avoided | avoided | no Bonjour; tailnet names and addresses only |
+| Automation (Apple Events) | avoided | – | – | nothing is scripted |
+| Input Monitoring | avoided | – | – | we post events, never read them |
+| Notifications | avoided | avoided | avoided | not used |
+| Camera, microphone, contacts, files | never | never | never | |
+
+So the host needs exactly two toggles, the viewers need none. Rules:
+
+- The host ships as a signed, notarized `.app` with a LaunchAgent helper, not a bare binary,
+  so it appears in System Settings by name and icon and grants survive updates (Developer ID
+  signing; M1 already signs with an Apple Development identity for this reason).
+- First run is a single assistant window: what Mirage is, the two toggles with one button each
+  that deep-links straight to the right pane
+  (`x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture` and
+  `…?Privacy_Accessibility`), live checkmarks as each is granted, then "Start". No ⌘⇧G, no
+  hunting for a path, no restart dance: the host polls `CGPreflightScreenCaptureAccess` and
+  `AXIsProcessTrusted` and begins serving the moment both flip.
+- Pairing lives in the same window: show the 6-digit code there as well as in `miraged pair`.
+- Nothing prompts at launch after first run. If a grant is later revoked, the viewer gets a
+  specific, human message (already done for Screen Recording in M1) rather than a dead stream.
+
 ### 3.8 Native chrome: menu bar, dock, status items, notifications
 
 The host's menu bar and dock are not streamed as pixels. They are read as data through
