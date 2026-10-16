@@ -14,10 +14,21 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
     ],
     targets: [
+        // libwebp 1.6.0 (encoder, decoder, dsp, utils, sharpyuv), vendored as-is; lossless tiles.
+        .target(
+            name: "CWebP",
+            path: "Sources/CWebP",
+            exclude: ["COPYING"],
+            sources: ["src", "sharpyuv"],
+            publicHeadersPath: "include",
+            cSettings: [.headerSearchPath(".")]
+        ),
         // Shared by host and every client; no AppKit/ScreenCaptureKit so it compiles for iOS.
         .target(
             name: "MirageCore",
-            swiftSettings: [.swiftLanguageMode(.v5)]
+            dependencies: ["CWebP"],
+            swiftSettings: [.swiftLanguageMode(.v5)],
+            linkerSettings: [.linkedFramework("Metal"), .linkedFramework("MetalFX"), .linkedFramework("VideoToolbox")]
         ),
         // macOS-only host side: ScreenCaptureKit capture, VideoToolbox encode, CGEvent input, cursor.
         .target(
