@@ -2,7 +2,7 @@ import Foundation
 
 /// Protocol constants shared by host and clients.
 public enum Mirage {
-    public static let protocolVersion = 1
+    public static let protocolVersion = 2
     public static let alpn = "mirage/1"
     public static let defaultPort: UInt16 = 7799
     /// Domain-separation prefix for every hash/signature in the protocol.
@@ -37,6 +37,17 @@ public enum Frame {
 /// Every message on the control stream. JSON is fine for the control plane;
 /// pixel data will get its own binary framing on other streams.
 public enum ControlMessage: Codable, Equatable {
+    /// The input sequence number carried by an input message, if any.
+    public var inputSeq: UInt64? {
+        switch self {
+        case .mouseMove(let m): return m.seq
+        case .mouseButton(let m): return m.seq
+        case .scroll(let s): return s.seq
+        case .key(let k): return k.seq
+        default: return nil
+        }
+    }
+
     // Session authentication (paired devices).
     case hello(Hello)
     case challenge(Challenge)
@@ -63,6 +74,11 @@ public enum ControlMessage: Codable, Equatable {
     case frameAck(FrameAck)
     case cursorShape(CursorShape)
     case cursorPosition(CursorPosition)
+
+    // M2: tile-stream acks (feedback), host window list, rate-controller state for the overlay.
+    case tileAck(TileAck)
+    case windowList(WindowList)
+    case rateState(RateState)
 
     // Input, client → host. Coordinates are normalized to the streamed display: (0,0) top-left, (1,1) bottom-right.
     case mouseMove(MouseMove)
@@ -195,9 +211,60 @@ public enum ControlMessage: Codable, Equatable {
         public var bytes: Int
         /// Frame could not be reassembled or decoded; the host should send a recovery frame.
         public var lost: Bool
-        public init(seq: UInt32, captureNanos: UInt64, receivedNanos: UInt64, decodedNanos: UInt64, bytes: Int, lost: Bool) {
+        /// Receiver clock at the first fragment's arrival and the fragment count: with `receivedNanos`
+        /// this is a packet-train dispersion sample for the host's delivery-rate estimator.
+        public var firstReceivedNanos: UInt64?
+        public var fragments: Int?
+        public init(seq: UInt32, captureNanos: UInt64, receivedNanos: UInt64, decodedNanos: UInt64, bytes: Int, lost: Bool,
+                    firstReceivedNanos: UInt64? = nil, fragments: Int? = nil) {
             self.seq = seq; self.captureNanos = captureNanos; self.receivedNanos = receivedNanos
             self.decodedNanos = decodedNanos; self.bytes = bytes; self.lost = lost
+            self.firstReceivedNanos = firstReceivedNanos; self.fragments = fragments
+        }
+    }
+    /// One per tile-stream message, so the controller sees the reliable stream's delay too.
+    public struct TileAck: Codable, Equatable {
+        public var msgSeq: UInt32
+        public var captureNanos: UInt64   // host clock, echoed
+        public var receivedNanos: UInt64  // receiver clock
+        public var bytes: Int
+        public init(msgSeq: UInt32, captureNanos: UInt64, receivedNanos: UInt64, bytes: Int) {
+            self.msgSeq = msgSeq; self.captureNanos = captureNanos; self.receivedNanos = receivedNanos; self.bytes = bytes
+        }
+    }
+    /// A host window as the client needs it for hit-testing and local prediction. Frames are in
+    /// native stream pixels of the streamed display.
+    public struct WindowInfo: Codable, Equatable {
+        public var id: UInt32
+        public var pid: Int32
+        public var title: String
+        public var frame: PixelRect
+        /// Stacking order, 0 = frontmost.
+        public var z: Int
+        /// Learned scrollable area inside the window, if the host has seen one (native pixels).
+        public var scrollRect: PixelRect?
+        public init(id: UInt32, pid: Int32, title: String, frame: PixelRect, z: Int, scrollRect: PixelRect? = nil) {
+            self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect
+        }
+    }
+    public struct WindowList: Codable, Equatable {
+        public var captureSeq: UInt32
+        public var windows: [WindowInfo]
+        public init(captureSeq: UInt32, windows: [WindowInfo]) { self.captureSeq = captureSeq; self.windows = windows }
+    }
+    /// What the host's rate controller is doing, once a second, for the overlay and --headless JSON.
+    public struct RateState: Codable, Equatable {
+        public var targetKbps: Int
+        public var capacityKbps: Int
+        public var queueMs: Double
+        public var rung: Int
+        public var scale: Double          // encoded video size / native size
+        public var tileBudgetKbps: Int
+        public var videoKbps: Int
+        public var tileKbps: Int
+        public init(targetKbps: Int, capacityKbps: Int, queueMs: Double, rung: Int, scale: Double, tileBudgetKbps: Int, videoKbps: Int, tileKbps: Int) {
+            self.targetKbps = targetKbps; self.capacityKbps = capacityKbps; self.queueMs = queueMs; self.rung = rung; self.scale = scale
+            self.tileBudgetKbps = tileBudgetKbps; self.videoKbps = videoKbps; self.tileKbps = tileKbps
         }
     }
     public struct CursorShape: Codable, Equatable {
@@ -219,9 +286,12 @@ public enum ControlMessage: Codable, Equatable {
 
     // MARK: Input
 
+    // Every input message carries the client's input sequence number; the host echoes the last
+    // one reflected in a capture so the client can retire its local predictions (DESIGN §3.5).
     public struct MouseMove: Codable, Equatable {
         public var x: Double, y: Double
-        public init(x: Double, y: Double) { self.x = x; self.y = y }
+        public var seq: UInt64?
+        public init(x: Double, y: Double, seq: UInt64? = nil) { self.x = x; self.y = y; self.seq = seq }
     }
     public struct MouseButton: Codable, Equatable {
         public var button: Int        // 0 left, 1 right, 2+ other
@@ -229,8 +299,9 @@ public enum ControlMessage: Codable, Equatable {
         public var x: Double, y: Double
         public var clickCount: Int
         public var modifiers: UInt64  // CGEventFlags raw value
-        public init(button: Int, down: Bool, x: Double, y: Double, clickCount: Int, modifiers: UInt64) {
-            self.button = button; self.down = down; self.x = x; self.y = y; self.clickCount = clickCount; self.modifiers = modifiers
+        public var seq: UInt64?
+        public init(button: Int, down: Bool, x: Double, y: Double, clickCount: Int, modifiers: UInt64, seq: UInt64? = nil) {
+            self.button = button; self.down = down; self.x = x; self.y = y; self.clickCount = clickCount; self.modifiers = modifiers; self.seq = seq
         }
     }
     public struct Scroll: Codable, Equatable {
@@ -238,8 +309,9 @@ public enum ControlMessage: Codable, Equatable {
         public var dx: Double, dy: Double   // pixels if precise, lines otherwise
         public var precise: Bool
         public var modifiers: UInt64
-        public init(x: Double, y: Double, dx: Double, dy: Double, precise: Bool, modifiers: UInt64) {
-            self.x = x; self.y = y; self.dx = dx; self.dy = dy; self.precise = precise; self.modifiers = modifiers
+        public var seq: UInt64?
+        public init(x: Double, y: Double, dx: Double, dy: Double, precise: Bool, modifiers: UInt64, seq: UInt64? = nil) {
+            self.x = x; self.y = y; self.dx = dx; self.dy = dy; self.precise = precise; self.modifiers = modifiers; self.seq = seq
         }
     }
     public struct Key: Codable, Equatable {
@@ -248,8 +320,9 @@ public enum ControlMessage: Codable, Equatable {
         public var isRepeat: Bool
         public var modifiers: UInt64
         public var characters: String?
-        public init(keyCode: UInt16, down: Bool, isRepeat: Bool, modifiers: UInt64, characters: String?) {
-            self.keyCode = keyCode; self.down = down; self.isRepeat = isRepeat; self.modifiers = modifiers; self.characters = characters
+        public var seq: UInt64?
+        public init(keyCode: UInt16, down: Bool, isRepeat: Bool, modifiers: UInt64, characters: String?, seq: UInt64? = nil) {
+            self.keyCode = keyCode; self.down = down; self.isRepeat = isRepeat; self.modifiers = modifiers; self.characters = characters; self.seq = seq
         }
     }
     public struct Modifiers: Codable, Equatable {
