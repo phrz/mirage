@@ -189,6 +189,13 @@ history** (dirty in N of the last M frames):
    LTR acks, not keyframes), `DataRateLimits` set per frame from the rate controller, QP map
    biased sharp on text-classified tiles. Decoded with `VTDecompressionSession` straight into
    a Metal texture.
+   Measured (experiments/seqbench): scroll and drag cost ~3 KB per frame at 36–38 dB at
+   800 kbps in low-latency mode, so ~30 fps of motion fits in 1 Mbps; a single changed text
+   tile through video costs 1 KB at an unreadable 20 dB, versus 0.55 KB lossless, which is
+   why sparse changes never take this path. Unchanged frames must never be submitted: the
+   rate controller otherwise spends its budget refreshing a static picture. The first
+   keyframe (161 KB at 2x, 72 KB at 1x) is the stall to engineer around: cap its QP, start
+   one rung down the ladder, refine with lossless tiles, and avoid later keyframes via LTR.
 4. **Refinement**: when a video region stops moving for ~300 ms, its tiles are re-sent via
    path 2 (lossless), so scrolled text snaps crisp. The client composites lossless tiles over
    the video texture and invalidates them when a newer video frame covers them.
