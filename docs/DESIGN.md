@@ -351,6 +351,52 @@ trip, only the final selection travels.
 - **Fallback.** Apps with broken Accessibility fall back to masked pixels, same as the rest
   of the desktop. Desktop mode in a full-screen Space needs none of this.
 
+### 3.9 Link tiers and Extreme mode (requirement from phrz, 2026-10-17)
+
+Goal: the only remote desktop that still works on the world's worst links (Antarctic
+satellite, Iridium, congested rural cellular: 64–256 kbps, 600–1500 ms RTT, 1–10 % loss,
+bufferbloat), without making a LAN session one bit worse. One code path, four tiers, chosen
+transparently by the rate controller's own estimates with hysteresis so it never flaps, and
+shown to the user only as a small badge next to the purple outline.
+
+| Tier | Engages when | What changes |
+|---|---|---|
+| Local | >50 Mbps, <10 ms | 60–120 fps video at near-lossless QP, 2x, no ladder, lossless refresh within one frame, audio on |
+| Normal | 2–50 Mbps, <100 ms | the M2 defaults |
+| Constrained | 0.5–2 Mbps or 100–400 ms | the design's main target (this Japan link): tiles for sparse change, video for motion, ladder, prediction |
+| Extreme | <0.5 Mbps or >400 ms RTT or >2 % loss | everything below |
+
+Extreme mode, in order of payoff:
+
+1. **Pixels become confirmation, not the primary channel.** Local prediction (cursor, scroll,
+   drag, caret echo, native menus and dock) runs first; the stream catches up behind it.
+   Standard controls get local pressed/hover states from their Accessibility roles and frames.
+2. **Video off.** Only lossless tiles and copy-rects; motion capped at 2–5 fps and sent as
+   paletted tiles (16 colours for UI, which cuts a text tile 2–3x) at 0.5x with MetalFX
+   upscaling; full-colour, full-resolution refinement only for the focused window.
+3. **Spotlight capture.** Only the focused window (plus menus) is streamed; other windows are
+   frozen snapshots with a dim overlay, refreshed on focus.
+4. **Host-side simplification while in this tier**: ask macOS to reduce transparency and
+   motion for the session (restored on exit), since blur and animation are the most
+   expensive pixels on screen and carry no information.
+5. **Text mode for text apps.** Terminals, editors and text views expose their text through
+   Accessibility; send the text runs and render them locally with the same font, which both
+   ends have. At 64 kbps this is the difference between usable and not; it is also the only
+   path where a keystroke costs bytes of text rather than bytes of pixels.
+6. **Loss is handled by redundancy, not retransmission.** At 1 s RTT a retransmit is a
+   second of frozen screen: forward error correction on tiles and video (RaptorQ or simple
+   XOR parity per frame, rate chosen from measured loss), input events repeated in every
+   outgoing packet until acked (mosh-style state sync: the latest pointer position and the
+   unacked keystroke sequence, idempotent on the host).
+7. **Session survives anything.** QUIC connection migration plus our own resume token: sleep,
+   IP change, a 30 s outage all come back to the same session with the client's last frame
+   still on screen and its prediction state intact.
+8. **Audio off**, or a 6 kbps Opus voice band if explicitly wanted.
+
+Testing: use the Japan link while we have it, and reproduce Antarctica on demand with
+macOS's own link conditioner (`dnctl`/`pfctl` pipes: bandwidth, delay, loss, queue size) in a
+script, so every tier is a repeatable CI-style run against loopback or mac-daddy.
+
 ## 4. Milestones
 
 | # | Deliverable | Done when |
