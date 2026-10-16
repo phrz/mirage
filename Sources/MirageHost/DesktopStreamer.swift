@@ -239,16 +239,32 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private static let diffTolerance: Int32 = 4
 
     private func tileEqual(_ a: ShiftDetector.Frame, _ b: ShiftDetector.Frame, _ r: PixelRect) -> Bool {
+        tileChangedBox(a, b, r) == nil
+    }
+
+    /// Bounding box of the pixels that differ beyond the tolerance inside `r`, or nil if none do.
+    /// Sparse updates (a typed glyph, a caret) are a fraction of their 64-px tile; sending the tight
+    /// box instead of the tile halves typing's bytes.
+    private func tileChangedBox(_ a: ShiftDetector.Frame, _ b: ShiftDetector.Frame, _ r: PixelRect) -> PixelRect? {
         let n = r.width * 4
+        var x0 = Int.max, x1 = -1, y0 = Int.max, y1 = -1
         for y in r.y..<r.maxY {
             let pa = a.base.advanced(by: y * a.stride + r.x * 4), pb = b.base.advanced(by: y * b.stride + r.x * 4)
             if memcmp(pa, pb, n) == 0 { continue }
             let ua = pa.assumingMemoryBound(to: UInt8.self), ub = pb.assumingMemoryBound(to: UInt8.self)
-            for i in 0..<n where i & 3 != 3 {   // skip alpha
-                if abs(Int32(ua[i]) - Int32(ub[i])) > Self.diffTolerance { return false }
+            var rowChanged = false
+            for x in 0..<r.width {
+                let o = x * 4
+                if abs(Int32(ua[o]) - Int32(ub[o])) > Self.diffTolerance || abs(Int32(ua[o + 1]) - Int32(ub[o + 1])) > Self.diffTolerance || abs(Int32(ua[o + 2]) - Int32(ub[o + 2])) > Self.diffTolerance {
+                    rowChanged = true
+                    if x < x0 { x0 = x }
+                    if x > x1 { x1 = x }
+                }
             }
+            if rowChanged { if y < y0 { y0 = y }; y1 = y }
         }
-        return true
+        guard x1 >= 0 else { return nil }
+        return PixelRect(x: r.x + x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1)
     }
 
     private func captured(_ pb: CVPixelBuffer, _ nanos: UInt64, dirtyRects: [PixelRect]) {
@@ -272,10 +288,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let prev { CVPixelBufferLockBaseAddress(prev, .readOnly); old = frameView(prev) }
         defer { if let prev { CVPixelBufferUnlockBaseAddress(prev, .readOnly) } }
 
+        var tightBoxes: [Int: PixelRect] = [:]
         if let old {
-            // CPU diff inside SCK's dirty rects: they over-report ~1.7x (experiments/probes).
+            // CPU diff inside SCK's dirty rects: they over-report ~1.7x (experiments/probes), and the
+            // exact changed box inside a tile is what a sparse lossless update needs.
             let before = dirty.count
-            dirty.removeAll { tileEqual(old, new, tracker.rect(of: $0)) }
+            dirty.removeAll { i in
+                if let box = tileChangedBox(old, new, tracker.rect(of: i)) { tightBoxes[i] = box; return false }
+                return true
+            }
             statDiffPruned += before - dirty.count
         } else {
             // First frame: everything through one keyframe, then refine lossless.
@@ -341,7 +362,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         refillTiles(now: now)
         if !plan.lossless.isEmpty {
             if tileTokens > 0 {
-                let bytes = submitLossless(tiles: plan.lossless, from: new, refinement: false, nanos: nanos, tracker: tracker)
+                let bytes = submitLossless(tiles: plan.lossless, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
                 tileTokens -= Double(bytes)
             } else {
                 tracker.defer(plan.lossless, now: now); statTileSkipped += plan.lossless.count
@@ -378,8 +399,20 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// Copies the rects' pixels out and encodes them on the tile queue. Returns the byte estimate charged to the budget.
     @discardableResult
-    private func submitLossless(tiles: [Int], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, tracker: TileTracker) -> Int {
-        let rects = tracker.mergedRects(tiles)
+    private func submitLossless(tiles: [Int], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, tracker: TileTracker, tight: [Int: PixelRect]? = nil) -> Int {
+        var rects = tracker.mergedRects(tiles)
+        if let tight {
+            // Shrink each merged rect to the union of its tiles' changed boxes (padded 2 px), when all are known.
+            let set = Set(tiles)
+            rects = rects.map { r in
+                var u = PixelRect.zero
+                for i in tracker.tiles(covering: [r]) where set.contains(i) {
+                    guard let b = tight[i] else { return r }
+                    u = u.union(b)
+                }
+                return u.isEmpty ? r : PixelRect(x: u.x - 2, y: u.y - 2, width: u.width + 4, height: u.height + 4).intersection(r)
+            }
+        }
         var jobs: [(PixelRect, Data)] = []
         var estimate = 0
         for r in rects {
