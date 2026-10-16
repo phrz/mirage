@@ -391,6 +391,31 @@ RTT median 200 ms (min 159), 0 lost. Note the direction: this is the Japan→Dal
 (~4.5 Mbps measured by scp), the opposite of the eventual use; the latency figures are symmetric,
 the capacity figure may not be.
 
+**Forward direction (the real one): mac-daddy → this MacBook**, after the TCC grants, same
+motion window on mac-daddy's 5K display streamed at 2560×1440, viewer window 1280×720 pt at 2x:
+
+| Run | fps | Delivered | Frame age median / p95 | RTT median | Lost / 60 s | Notes |
+|---|---|---|---|---|---|---|
+| GUI viewer, 800 kbps | 29 | 801 kbps | 100 / 126 ms | 213 ms | 4 | mouse + keyboard verified (below) |
+| GUI viewer, 2000 kbps | 29 | 1969 kbps | 104 / **522** ms | 217 ms | 10 | sRTT spiked to 567 ms, 15 frames in flight: the Dallas→Japan downlink is congested at 2 Mbps even though the uplink carried 4 Mbps cleanly |
+| headless, 800 kbps (final build) | 30 | 821 kbps | 102 / 107 ms | 208 ms | 1 | 1578 frames; the one loss recovered in ~2 s via a 97 KB keyframe |
+
+So on this link the usable video rate downstream is ~1 Mbps today, which is exactly the
+design point. Frame age in this direction is ~100 ms, i.e. roughly RTT/2, with decode 2.3 ms.
+
+Input, verified end to end with `--headless --probe-input`: the host echoes its real cursor
+position on the control stream, and after five injected moves it reported (0.25,0.25) …
+(0.5,0.5) exactly as sent; ⌘Space opened Spotlight on mac-daddy (visible in the stream and
+as a 28 fps dirty burst in the host log). Esc did not close it because a macOS
+"miraged is requesting to bypass the system private window picker" dialog had focus — that
+dialog is the macOS 15+ periodic re-confirmation for screen capture; capture keeps running
+while it is up, but it needs an *Allow* click on the host.
+
+Loss recovery, measured: a lost frame costs about 2 s of frozen picture at 800 kbps (viewer
+skips until the recovery frame, host sends a keyframe, keyframe serialises). Keyframe size is
+content-bound: ~18 KB for a mostly flat desktop, 125 KB for a screen of dense text at the
+encoder's own choice of QP, 93 KB with the QP floor at 40 (the default now), 61 KB at 45.
+
 Host side at every rate: encode 10 ms per frame, sRTT 195–260 ms as seen through acks, 4–7
 frames in flight, delivered bitrate within 2% of target. Frame age of ~125 ms is one-way
 delay (~90 ms) + serialization of a 3–4 KB frame + capture/encode/decode (~15 ms); the
@@ -421,7 +446,7 @@ should be the obvious win), typing echo, window drag, scroll. Fill in the table 
 | | ARD | Mirage M1 |
 |---|---|---|
 | Cursor latency | remote-drawn, ~RTT | local, 0 |
-| Measured frame age | | 120–150 ms at 800 kbps |
+| Measured frame age | | 100 ms median at 800 kbps (Dallas→Japan) |
 | Typing / drag / scroll feel | | |
 
 Idle and sparse change, same link, 800 kbps target, after adding a dirty-area frame-rate cap
@@ -451,9 +476,18 @@ Platform findings from M1:
 - Apple Events to third-party apps (`osascript … tell application "Helium"`) trigger a TCC
   Automation prompt per target app; `System Events` was already allowed. Drive test content
   from your own process (`scratch motion.swift`-style window) rather than scripting a browser.
-- `VTCompressionSession` in low-latency mode emits `RequireLTRAcknowledgementToken` per
-  frame; feeding tokens back via `AcknowledgedLTRTokens` + `ForceLTRRefresh` compiles and runs,
-  but with 0% loss on this link the recovery path was only exercised by the opening frames.
+- **LTR refresh does not work as a loss-recovery path the way the docs suggest.** The encoder
+  emits `RequireLTRAcknowledgementToken` per frame and accepts `AcknowledgedLTRTokens` +
+  `ForceLTRRefresh`, but on the first Dallas→Japan run every refresh frame the viewer received
+  after skipping the frames following a loss failed with `kVTVideoDecoderBadDataErr` (-12909),
+  and because each failure asked for another refresh the picture stayed frozen for the rest
+  of the minute. Recovery is now a keyframe by default (`MIRAGE_LTR=1` re-enables one LTR
+  attempt before escalating). Worth revisiting with a decoder that is fed every frame
+  (decode-with-errors instead of skip) before concluding the encoder is at fault.
+- `MinAllowedFrameQP` changes take effect on the frame *after* the next one, so the QP floor is
+  armed one capture before a forced keyframe; a mid-stream keyframe without that was 125 KB
+  (107 datagrams) instead of ~18 KB, and a 107-datagram burst is itself the likeliest thing to
+  lose on this link.
 - `NWConnection.maximumDatagramSize` is 1252 on the tailnet (1280 MTU) and 16336 on loopback;
   1200-byte datagrams fit everywhere.
 - A SwiftUI `App` scene opened no window when the executable was launched from a shell

@@ -27,15 +27,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var unacked: [UInt32: InFlight] = [:]
     private var srttNanos: Double = 250_000_000
     private var ackedLTR: [Int64] = []
-    private var wantKeyframe = true
+    private var wantKeyframe = false   // the first encoded frame is an IDR anyway
     private var wantLTRRefresh = false
     private var encoding = false
     private var recoverySeq: UInt32 = 0
+    private var keyframeArmed = false
 
     // Stats (per log interval).
     private var statFrames = 0, statBytes = 0, statDropped = 0, statSkippedBudget = 0, statLost = 0
     private var statEncodeNanos: UInt64 = 0
-    private var statDirty = 0.0, statDirtyN = 0
+    private var statDirty = 0.0, statDirtyN = 0, statInput = 0
     private var statTimer: DispatchSourceTimer?
 
     public init(log: @escaping @Sendable (String) -> Void) {
@@ -107,7 +108,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     public func handle(input: ControlMessage) {
-        inputQueue.async { self.injector?.handle(input) }
+        inputQueue.async {
+            self.injector?.handle(input)
+            self.queue.async { self.statInput += 1 }
+        }
     }
 
     public func stop() async {
@@ -146,7 +150,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     private func captured(_ pb: CVPixelBuffer, _ nanos: UInt64, dirty: Double) {
-        guard let enc = encoder, let req = request, output != nil else { return }
+        guard var enc = encoder, let req = request, output != nil else { return }
         refill()
         let now = Clock.nowNanos()
         // Give up on frames whose ack is long overdue; treat as lost.
@@ -171,11 +175,23 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         statDirty += dirty; statDirtyN += 1
 
         var opts = HEVCEncoder.FrameOptions()
-        if wantKeyframe { opts.forceKeyframe = true }
-        else if wantLTRRefresh { opts.forceLTRRefresh = true }
+        if wantKeyframe {
+            // A forced keyframe ignores MinAllowedFrameQP (measured: ~125 KB regardless of when the floor
+            // is set), but a fresh session's first IDR honours it (~18 KB). Recovery therefore replaces
+            // the session; creation costs a few ms and losses are rare.
+            if let fresh = try? HEVCEncoder(width: enc.width, height: enc.height, bitrateKbps: enc.bitrateKbps, expectedFPS: enc.expectedFPS) {
+                encoder = fresh; enc = fresh; ackedLTR = []
+            } else {
+                opts.forceKeyframe = true
+            }
+            wantKeyframe = false; wantLTRRefresh = false
+            keyframeArmed = true   // reused as "this frame is a recovery frame"
+        } else if enc.coarse && seq > 0 { enc.setCoarse(false) }
+        if !keyframeArmed && wantLTRRefresh { opts.forceLTRRefresh = true }
         opts.acknowledgedLTRTokens = ackedLTR
-        let recovery = wantKeyframe || wantLTRRefresh
-        wantKeyframe = false; wantLTRRefresh = false
+        let recovery = keyframeArmed || wantLTRRefresh
+        if recovery { lastRecoveryWasLTR = wantLTRRefresh && !keyframeArmed }
+        keyframeArmed = false; wantLTRRefresh = false
         encoding = true
         lastSendNanos = now
         enc.encode(pb, captureNanos: nanos, options: opts) { [weak self] result in
@@ -217,6 +233,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let f = unacked.removeValue(forKey: ack.seq) {
             // Loss acks come after the assembler's timeout; they say nothing about the path's RTT.
             if !ack.lost { srttNanos = srttNanos * 0.8 + Double(now - f.sentNanos) * 0.2 }
+            if !ack.lost, ack.decodedNanos != 0, ack.seq >= recoverySeq { lastRecoveryWasLTR = false }
             if !ack.lost, ack.decodedNanos != 0, let tok = f.ltrToken {
                 ackedLTR.append(tok)
                 if ackedLTR.count > 8 { ackedLTR.removeFirst(ackedLTR.count - 8) }
@@ -228,9 +245,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if ack.lost { statLost += 1; if ack.seq >= recoverySeq { requestRecovery() } }
     }
 
-    private static let ltrDisabled = ProcessInfo.processInfo.environment["MIRAGE_NO_LTR"] != nil
+    /// Recovery defaults to a (QP-floored, ~18 KB) keyframe. LTR refresh is opt-in (MIRAGE_LTR=1):
+    /// on the Dallas→Japan run the viewer rejected every ForceLTRRefresh frame with
+    /// kVTVideoDecoderBadDataErr after it had skipped frames, looping forever; see DESIGN §6.
+    private static let ltrEnabled = ProcessInfo.processInfo.environment["MIRAGE_LTR"] != nil
+    private var lastRecoveryWasLTR = false
     private func requestRecovery() {
-        if ackedLTR.isEmpty || Self.ltrDisabled { wantKeyframe = true } else { wantLTRRefresh = true }
+        if Self.ltrEnabled && !ackedLTR.isEmpty && !lastRecoveryWasLTR {
+            wantLTRRefresh = true      // one LTR attempt; if that frame is lost too, escalate to a keyframe
+        } else {
+            wantKeyframe = true
+        }
     }
 
     private func startStats() {
@@ -242,9 +267,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let kbps = Double(statBytes) * 8 / 5 / 1000
             let enc = statFrames > 0 ? Double(statEncodeNanos) / Double(statFrames) / 1e6 : 0
             let dirty = statDirtyN > 0 ? statDirty / Double(statDirtyN) * 100 : 0
-            log(String(format: "video %.1f fps  %.0f kbps  encode %.1f ms  dirty %.1f%%  srtt %.0f ms  inflight %d  skipped(budget) %d dropped(busy/rate) %d lost %d  ltr-acked %d",
-                       fps, kbps, enc, dirty, srttNanos / 1e6, unacked.count, statSkippedBudget, statDropped, statLost, ackedLTR.count))
-            statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statDirty = 0; statDirtyN = 0
+            log(String(format: "video %.1f fps  %.0f kbps  encode %.1f ms  dirty %.1f%%  srtt %.0f ms  inflight %d  skipped(budget) %d dropped(busy/rate) %d lost %d  ltr-acked %d  input %d",
+                       fps, kbps, enc, dirty, srttNanos / 1e6, unacked.count, statSkippedBudget, statDropped, statLost, ackedLTR.count, statInput))
+            statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statDirty = 0; statDirtyN = 0; statInput = 0
         }
         t.resume()
         statTimer = t

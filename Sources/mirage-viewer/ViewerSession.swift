@@ -147,6 +147,7 @@ final class ViewerSession: @unchecked Sendable {
                     Task { @MainActor in model.cursor = .init(image: img, hotspot: CGPoint(x: c.hotspotX, y: c.hotspotY), size: CGSize(width: c.width, height: c.height)) }
                 }
             case .cursorPosition(let p):
+                if probeLog { log(String(format: "host cursor at (%.3f, %.3f)", p.x, p.y)) }
                 Task { @MainActor in model.remoteCursor = p.visible ? CGPoint(x: p.x, y: p.y) : nil }
             case .reject(let r):
                 log("host: \(r.reason)")
@@ -257,6 +258,32 @@ final class ViewerSession: @unchecked Sendable {
         }
     }
     func send(_ m: ControlMessage) { sender?.send(m) }
+
+    var probeLog = false
+    /// Headless input check: moves the pointer across the host display, opens and closes Spotlight
+    /// (⌘Space, Esc). The host echoes its cursor position on the control stream, which proves the
+    /// mouse path end to end; the key path shows up as a dirty-area burst in the host log.
+    func probeInput() async {
+        probeLog = true
+        log("probe: moving pointer")
+        for (x, y) in [(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75), (0.5, 0.5)] {
+            sender?.send(.mouseMove(.init(x: x, y: y)))
+            try? await Task.sleep(for: .milliseconds(300))
+        }
+        try? await Task.sleep(for: .seconds(1))
+        let cmd: UInt64 = 1 << 20   // kCGEventFlagMaskCommand
+        log("probe: ⌘Space")
+        sender?.send(.modifiers(.init(keyCode: 55, modifiers: cmd)))
+        sender?.send(.key(.init(keyCode: 49, down: true, isRepeat: false, modifiers: cmd, characters: " ")))
+        sender?.send(.key(.init(keyCode: 49, down: false, isRepeat: false, modifiers: cmd, characters: nil)))
+        sender?.send(.modifiers(.init(keyCode: 55, modifiers: 0)))
+        try? await Task.sleep(for: .seconds(2))
+        log("probe: Esc")
+        sender?.send(.key(.init(keyCode: 53, down: true, isRepeat: false, modifiers: 0, characters: "\u{1B}")))
+        sender?.send(.key(.init(keyCode: 53, down: false, isRepeat: false, modifiers: 0, characters: nil)))
+        try? await Task.sleep(for: .seconds(1))
+        probeLog = false
+    }
 
     func stop() {
         sender?.send(.streamStop)

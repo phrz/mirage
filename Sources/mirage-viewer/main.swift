@@ -11,6 +11,7 @@ struct Options {
     var statsLog: String?
     var window = (1280, 720)
     var headless = false
+    var probeInput = false
     var duration = 60.0
     var statsJSON: String?
 
@@ -29,6 +30,7 @@ struct Options {
         if let v = value("--duration"), let d = Double(v) { o.duration = d }
         if let v = value("--stats") { o.statsJSON = v }
         if let i = args.firstIndex(of: "--headless") { o.headless = true; args.remove(at: i) }
+        if let i = args.firstIndex(of: "--probe-input") { o.probeInput = true; args.remove(at: i) }
         if let v = value("--window") { let p = v.split(separator: "x").compactMap { Int($0) }; if p.count == 2 { o.window = (p[0], p[1]) } }
         if args.contains("-h") || args.contains("--help") || args.isEmpty {
             print("""
@@ -40,6 +42,7 @@ struct Options {
                   --headless --duration S --stats PATH.json
                              no window: connect, request --window pixels (× --scale), decode for S seconds,
                              write per-second samples and medians to PATH.json, exit 0 (SSH-friendly)
+                  --probe-input  (headless) after 8 s move the host pointer and open/close Spotlight
                   ⌃⌥⌘S toggles the stats overlay, ⌃⌥⌘Q quits; all other keys go to the host.
                 """)
             exit(args.isEmpty ? 2 : 0)
@@ -137,6 +140,7 @@ if CommandLine.arguments.contains("--headless") {
     }
     session.start()
     session.requestStream(width: Int(Double(o.window.0) * o.pixelFactor), height: Int(Double(o.window.1) * o.pixelFactor))
+    if o.probeInput { Task { try? await Task.sleep(for: .seconds(8)); await session.probeInput() } }
     Timer.scheduledTimer(withTimeInterval: o.duration, repeats: false) { _ in
         session.stop()
         let json = session.statsJSON()

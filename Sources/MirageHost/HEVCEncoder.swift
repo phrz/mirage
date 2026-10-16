@@ -71,18 +71,20 @@ final class HEVCEncoder {
     /// Keyframes are bounded by a floor on QP: a 2x desktop keyframe at the encoder's default
     /// quality is ~160 KB (1.3 s at 1 Mbps); at QP ≥ 36 it is a fraction of that and the following
     /// P-frames restore detail within a few hundred ms.
-    static let keyframeMinQP = 36
-    private var coarse = false
-    private func setCoarse(_ on: Bool) {
+    static let keyframeMinQP = Int(ProcessInfo.processInfo.environment["MIRAGE_KEYFRAME_MINQP"] ?? "") ?? 40
+    private(set) var coarse = false
+    /// Only a session's first IDR honours the floor; forced keyframes later ignore it (measured),
+    /// which is why DesktopStreamer recreates the session for recovery.
+    func setCoarse(_ on: Bool) {
         guard on != coarse else { return }
         coarse = on
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MinAllowedFrameQP, value: (on ? Self.keyframeMinQP : 0) as CFNumber)
+        let r = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MinAllowedFrameQP, value: (on ? Self.keyframeMinQP : 0) as CFNumber)
+        if r != noErr { hostLog("encoder: MinAllowedFrameQP rejected (\(r))") }
     }
 
     func encode(_ pixelBuffer: CVPixelBuffer, captureNanos: UInt64, options: FrameOptions, completion: @escaping (Result<Encoded, Error>) -> Void) {
         var props: [CFString: Any] = [:]
-        setCoarse(options.forceKeyframe || firstFrame)
-        firstFrame = false
+        if firstFrame { setCoarse(true); firstFrame = false }
         if options.forceKeyframe { props[kVTEncodeFrameOptionKey_ForceKeyFrame] = kCFBooleanTrue }
         if options.forceLTRRefresh { props[kVTEncodeFrameOptionKey_ForceLTRRefresh] = kCFBooleanTrue }
         if !options.acknowledgedLTRTokens.isEmpty { props[kVTEncodeFrameOptionKey_AcknowledgedLTRTokens] = options.acknowledgedLTRTokens as CFArray }
