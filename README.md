@@ -37,6 +37,13 @@ ssh HOST '~/.local/bin/miraged install'      # LaunchAgent, runs at login, logs 
 `miraged serve` runs in the foreground instead. The host generates its Ed25519 identity and a
 self-signed TLS certificate on first start under `~/Library/Application Support/Mirage/`.
 
+## Viewer app (GUI)
+
+`scripts/make-viewer-app.sh` wraps the release viewer in `MirageViewer.app`; copy it to
+`~/Applications`. Launched from Finder or the Dock it opens a connect window listing your paired
+Macs, with a host field and a 6-digit code field for pairing a new one. The command line
+(`mirage-viewer HOST [--pair CODE] …`) still works for scripts and headless measurement.
+
 ## Pair a device
 
 On the host (over SSH is fine):

@@ -32,7 +32,8 @@ struct Options {
         if let i = args.firstIndex(of: "--headless") { o.headless = true; args.remove(at: i) }
         if let i = args.firstIndex(of: "--probe-input") { o.probeInput = true; args.remove(at: i) }
         if let v = value("--window") { let p = v.split(separator: "x").compactMap { Int($0) }; if p.count == 2 { o.window = (p[0], p[1]) } }
-        if args.contains("-h") || args.contains("--help") || args.isEmpty {
+        if args.isEmpty { return o }   // launched from Finder/Dock: show the connect window
+        if args.contains("-h") || args.contains("--help") {
             print("""
                 usage: mirage-viewer HOST [--port N] [--pair CODE] [--bitrate KBPS] [--scale F]
                   --bitrate  target video bitrate in kbit/s (default 800); ⌃⌥⌘↑/↓ adjusts live
@@ -45,7 +46,7 @@ struct Options {
                   --probe-input  (headless) after 8 s move the host pointer and open/close Spotlight
                   ⌃⌥⌘S toggles the stats overlay, ⌃⌥⌘Q quits; all other keys go to the host.
                 """)
-            exit(args.isEmpty ? 2 : 0)
+            exit(0)
         }
         o.host = args[0]
         return o
@@ -59,15 +60,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var model: ViewerModel!
     var session: ViewerSession!
     var window: NSWindow!
+    var connectWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installMenu()
+        NSApp.setActivationPolicy(.regular)
+        if ProcessInfo.processInfo.environment["MIRAGE_NO_ACTIVATE"] == nil { NSApp.activate(ignoringOtherApps: true) }
+        MainActor.assumeIsolated {
+            if options.host.isEmpty { showConnectWindow() } else { startViewer(host: options.host, pairCode: options.pair) }
+        }
+    }
+
+    /// The GUI entry point: paired hosts, a host field, an optional pairing code.
+    @MainActor private func showConnectWindow() {
+        let known = (try? Store().knownHosts()) ?? [:]
+        let view = ConnectView(knownHosts: known.map { ($0.key, $0.value.hostName) }.sorted { $0.0 < $1.0 },
+                               lastHost: UserDefaults.standard.string(forKey: "lastHost") ?? "") { [weak self] host, code in
+            self?.connectWindow?.close(); self?.connectWindow = nil
+            MainActor.assumeIsolated { self?.startViewer(host: host, pairCode: code) }
+        }
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 380),
+                         styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        w.title = "Mirage"
+        w.contentView = NSHostingView(rootView: view)
+        w.isReleasedWhenClosed = false
+        w.center()
+        w.makeKeyAndOrderFront(nil)
+        connectWindow = w
+    }
+
+    @MainActor private func startViewer(host: String, pairCode: String?) {
+        UserDefaults.standard.set(host, forKey: "lastHost")
         model = ViewerModel(bitrateKbps: options.bitrate, pixelFactor: options.pixelFactor)
         model.statsLog = options.statsLog.map { URL(fileURLWithPath: $0) }
-        session = ViewerSession(host: options.host, port: options.port, pairCode: options.pair, model: model)
+        session = ViewerSession(host: host, port: options.port, pairCode: pairCode, model: model)
         let content = ContentView(session: session, model: model)
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: options.window.0, height: options.window.1),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        w.title = "Mirage — \(options.host)"
+        w.title = "Mirage — \(host)"
         w.contentView = NSHostingView(rootView: content)
         w.contentMinSize = NSSize(width: 480, height: 270)
         w.delegate = self
@@ -75,13 +105,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if options.window == (1280, 720) { w.setFrameAutosaveName("MirageViewer") }
         w.makeKeyAndOrderFront(nil)
         window = w
-        installMenu()
-        NSApp.setActivationPolicy(.regular)
-        if ProcessInfo.processInfo.environment["MIRAGE_NO_ACTIVATE"] == nil { NSApp.activate(ignoringOtherApps: true) }
         session.start()
     }
 
-    func windowWillClose(_ notification: Notification) { session.stop(); NSApp.terminate(nil) }
+    func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === window else { return }
+        session?.stop(); NSApp.terminate(nil)
+    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     private func installMenu() {
         let main = NSMenu()
@@ -91,9 +122,95 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         quit.keyEquivalentModifierMask = [.control, .option, .command]
         appMenu.addItem(quit)
         appItem.submenu = appMenu
+        let editItem = NSMenuItem(); main.addItem(editItem)
+        let edit = NSMenu(title: "Edit")   // standard editing shortcuts for the connect window's fields
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = edit
         NSApp.mainMenu = main
     }
-    @objc func quit(_ sender: Any?) { session.stop(); NSApp.terminate(nil) }
+    @objc func quit(_ sender: Any?) { session?.stop(); NSApp.terminate(nil) }
+}
+
+/// First window of the app: pick a paired host or enter a new one (with its 6-digit code).
+struct ConnectView: View {
+    let knownHosts: [(alias: String, name: String)]
+    @State var host: String
+    @State private var code = ""
+    let onConnect: (String, String?) -> Void
+
+    init(knownHosts: [(String, String)], lastHost: String, onConnect: @escaping (String, String?) -> Void) {
+        self.knownHosts = knownHosts.map { (alias: $0.0, name: $0.1) }
+        self._host = State(initialValue: lastHost)
+        self.onConnect = onConnect
+    }
+
+    private var isPaired: Bool { knownHosts.contains { $0.alias == host.trimmingCharacters(in: .whitespaces) } }
+    private var canConnect: Bool {
+        let h = host.trimmingCharacters(in: .whitespaces)
+        return !h.isEmpty && (isPaired || PairingCode.normalize(code) != nil)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Mirage").font(.system(size: 26, weight: .semibold))
+                Text("Remote desktop for your Macs over your tailnet.").foregroundStyle(.secondary)
+            }
+            if !knownHosts.isEmpty {
+                Text("Paired Macs").font(.headline)
+                VStack(spacing: 0) {
+                    ForEach(knownHosts, id: \.alias) { h in
+                        Button { host = h.alias; code = "" } label: {
+                            HStack {
+                                Image(systemName: "desktopcomputer")
+                                VStack(alignment: .leading) {
+                                    Text(h.name).fontWeight(.medium)
+                                    Text(h.alias).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if h.alias == host { Image(systemName: "checkmark").foregroundStyle(.tint) }
+                            }
+                            .padding(8).contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .background(h.alias == host ? Color.accentColor.opacity(0.12) : .clear)
+                        .cornerRadius(6)
+                    }
+                }
+                .padding(4)
+                .background(.quaternary.opacity(0.4))
+                .cornerRadius(8)
+            }
+            Text(knownHosts.isEmpty ? "Add a Mac" : "Or another Mac").font(.headline)
+            TextField("Host name or address (e.g. mac-daddy)", text: $host)
+                .textFieldStyle(.roundedBorder)
+                .onSubmit { if canConnect { connect() } }
+            if !isPaired {
+                TextField("6-digit code from `miraged pair` on that Mac", text: $code)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { if canConnect { connect() } }
+                Text("Pairing happens once; afterwards this Mac is remembered.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            HStack {
+                Spacer()
+                Button("Connect") { connect() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canConnect)
+            }
+        }
+        .padding(20)
+        .frame(width: 420, height: 380)
+    }
+
+    private func connect() {
+        let h = host.trimmingCharacters(in: .whitespaces)
+        onConnect(h, isPaired ? nil : PairingCode.normalize(code))
+    }
 }
 
 struct ContentView: View {
