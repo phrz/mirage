@@ -29,10 +29,12 @@ diff of consecutive frames, per 64 px tile.
   tiles over 350 frames): **0 frames where changed tiles were not covered**, over-reporting
   of 1.6x in tile count. Chromium repaints tend to collapse to one big rect
   (`0,33 1512x949`), which is the over-report.
-- A sparse-scene measurement (typing only) is still to be done; expect the ratio to be
-  worse there because a one-glyph change often comes back as a whole-line or whole-window
-  rect. Decision: use dirtyRects as the first-pass mask and add a GPU tile diff
-  (Astropad's wgpu pass) inside those rects only if the sparse-scene number justifies it.
+- Sparse scene (quiet desktop, ~3 changed tiles per frame over 349 frames: clock, a text
+  stream in one window): again **0 uncovered tiles**, over-report **1.7x** (1999 flagged vs
+  1161 changed). So the ratio is the same in both regimes.
+- Decision: dirtyRects are the first-pass mask; a GPU tile diff inside those rects would save
+  roughly 40 % of lossless tile bytes on sparse updates. Worth doing in M2 after the tile
+  path exists, not before.
 
 ## axtext.swift — can typed-text prediction get caret bounds and fonts through Accessibility?
 
