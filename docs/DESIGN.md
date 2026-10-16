@@ -121,27 +121,53 @@ remotectl       CLI on host: pair, status, revoke, metrics       (macOS)
   address and refuses nodes not owned by `phrz@`.
 - TCC: Screen Recording + Accessibility granted once on the host via GUI (over ARD today).
 
-### 3.2 Capture: layers, not a framebuffer
+### 3.2 Capture: one desktop stream plus a visibility mask
 
-The host streams one or more **layers**; the client composites them.
+Decided 2026-10-16 evening, replacing the earlier "one SCStream per app layer" plan.
 
-| Mode | SCK filter | Purpose |
-|---|---|---|
-| Desktop | `display`, cursor hidden | classic full-screen view |
-| App layers (Unified / Parallels Coherence style) | `display including:[app]` per app | every window of the app at desktop coordinates on a transparent background; menus, sheets, popovers, tooltips come along correctly; empty area costs nothing after diffing |
-| Window | `desktopIndependentWindow` | a single window as its own stream (Citrix-style seamless) |
-| Menu bar | `display including:[Control Center, WindowServer menubar]` | shown on client when a remote app is focused |
+The host keeps **one** ScreenCaptureKit display capture per physical display, scaled by SCK
+to the client's chosen pixel size, cursor hidden, frames only on change with `dirtyRects`.
+Everything the client shows, whether the whole desktop or three individual windows, is cut
+out of that one stream. What makes individual windows cheap is a **visibility mask**, not
+extra captures:
 
-App layers are the default Unified mode because per-window capture misses transient windows
-(menus, autocomplete popups) that are separate windows. Each layer is its own `SCStream`
-scaled by SCK to the client's requested pixel size (never ship 5K to a 1 Mbps link; the
-resolution ladder is part of the rate control).
+- The client knows which remote windows it has open locally and where, and which parts of
+  them are covered by its own local windows. It sends the host a mask: the set of tiles it
+  can actually show, updated on every local move, resize, focus change or occlusion change.
+- The host intersects SCK's dirty tiles with the mask and encodes only the intersection.
+  Pixels nobody can see are dropped before they cost a byte or an encoder cycle.
+- One SCStream and one HEVC session per display regardless of window count, so it scales,
+  and overlap on the client side is free: a window 80% covered sends 20% of its tiles.
+- The lossless refinement pass, the tile scheduler and the bandwidth budget all already
+  work in tiles, so the mask is one more filter in the same pipeline.
+
+The one thing a single composited capture cannot give you is a window that is partly
+**covered on the host**. Two rules handle it:
+
+1. Focusing a remote window locally raises it on the host through Accessibility
+   (`AXRaise`), the same call the local-window-management latency trick already uses, so in
+   normal use the window you are looking at is on top over there as well.
+2. If a window you have open locally stays occluded on the host (you want two host-stacked
+   windows side by side here), the host opens a dedicated `desktopIndependentWindow`
+   SCStream for just that window, for as long as the condition holds. In practice that is
+   zero or one extra stream, never one per window.
+
+Opening a remote window locally also grabs a single unoccluded `desktopIndependentWindow`
+snapshot so its initial content is complete even if it was buried on the host.
 
 Window metadata (id, pid, title, frame, level, z-order, minimized, focused) is published on
 `control` at up to 30 Hz from `SCShareableContent` + `CGWindowListCopyWindowInfo` +
-AX notifications (`kAXWindowMoved/Resized/Created/UIElementDestroyed`). Client-side, each
-remote window in Unified mode is a real `NSWindow` (or an iPadOS scene) whose content view
-is a Metal layer sampling the right sub-rect of its app layer.
+AX notifications. In Unified mode each remote window is a real `NSWindow` (or iPadOS scene)
+whose content view is a Metal layer sampling its rect of the display texture; in Desktop
+mode the whole texture is shown in one window or a full-screen Space.
+
+Mode summary:
+
+| Mode | Capture | Mask |
+|---|---|---|
+| Desktop | display stream | whole frame minus nothing |
+| Unified (windows) | same display stream | union of locally visible window rects |
+| Occluded-on-host window | + one per-window stream | that window only |
 
 ### 3.3 Codec: per-tile hybrid, three paths
 
@@ -229,6 +255,40 @@ keyboard and trackpad pass straight through.
   windows later. External display support for iPad.
 - Clipboard sync, drag-and-drop file transfer over a dedicated QUIC stream, and audio
   (SCK audio → Opus via `AudioConverter` → datagrams) after the pixel path is solid.
+
+### 3.8 Native chrome: menu bar, dock, status items, notifications
+
+The host's menu bar and dock are not streamed as pixels. They are read as data through
+Accessibility and NSWorkspace and rendered natively on the client, which is both the
+"Apple designed it" look and a latency win: browsing a menu happens locally with no round
+trip, only the final selection travels.
+
+- **Menu bar.** When a remote window is frontmost, the viewer app owns the local menu bar
+  anyway, so it fills it with the remote app's menus: Apple menu stays local, then the host
+  app's menus from `AXMenuBar`, items fetched lazily on open, shortcuts forwarded. Click a
+  local window and the local menus return. There is never a second strip, because macOS
+  already gives the menu bar to whoever is focused. The purple screen-sharing outline goes
+  around the remote window itself, where macOS already draws it for shared content.
+- **Dock.** A native remote dock built from the host's running apps and windows, icons
+  cached by bundle id after first transfer. It avoids the local dock's edge (read from
+  `NSScreen.visibleFrame` and the dock's auto-hide state) or collapses into a small app
+  switcher in the menu bar when space is tight. Activating an app raises it on the host and
+  brings its windows up locally.
+- **Status items.** Different animal: tiny windows owned by each app, opening custom popover
+  windows rather than real menus, so Accessibility gives positions and names but not
+  reliably contents. Plan: capture all windows at the status-item level as one thin SCK
+  layer (cheap after tile diffing), filter out system-owned items (Control Center, clock,
+  Wi-Fi, battery describe the host, not you) by default, show third-party items in a
+  purple-outlined strip that drops down under the right end of the local menu bar while a
+  remote window is focused, or behind a single status item of our own that expands on
+  click. Clicking an icon sends a click to its host coordinates; whatever opens arrives
+  through the masked desktop stream and is translated to sit under the right local icon.
+  Real menus get the native treatment as a bonus.
+- **Notifications.** Notification banners are windows at a known level too, so the same
+  trick yields a remote notification layer: an agent finishing on the host shows a
+  purple-outlined banner in a corner here, even with no remote window open.
+- **Fallback.** Apps with broken Accessibility fall back to masked pixels, same as the rest
+  of the desktop. Desktop mode in a full-screen Space needs none of this.
 
 ## 4. Milestones
 
