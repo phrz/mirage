@@ -189,6 +189,9 @@ history** (dirty in N of the last M frames):
    LTR acks, not keyframes), `DataRateLimits` set per frame from the rate controller, QP map
    biased sharp on text-classified tiles. Decoded with `VTDecompressionSession` straight into
    a Metal texture.
+   Scrolling is a special case: the host detects a uniform shift of a region (scroll event +
+   AX scroll-area rect, or phase correlation on the dirty region) and sends a **copy-rect**
+   plus the newly exposed strip as lossless tiles instead of video; see §3.5 item 3.
    Measured (experiments/seqbench): scroll and drag cost ~3 KB per frame at 36–38 dB at
    800 kbps in low-latency mode, so ~30 fps of motion fits in 1 Mbps; a single changed text
    tile through video costs 1 KB at an unreadable 20 dB, versus 0.55 KB lossless, which is
@@ -229,10 +232,18 @@ at low QP is the fallback.
    (`kAXPositionAttribute`, `kAXSizeAttribute`, `AXRaise`) and the layer catches up. Old
    pixels are stretched/clipped until new frames arrive. This is most of what makes Parallels
    Coherence feel local, and ARD cannot do it at all.
-3. **Scroll prediction** (experiment). Host publishes AX scroll-area frames for the focused
-   window. On wheel events the client shifts the pixels inside that rect by the delta
-   immediately, exposing a neutral band at the edge, and reconciles when frames arrive.
-   Mosh-style rule: predict only while recent predictions were confirmed; back off on misses.
+3. **Scroll prediction** (required, not an experiment). Rule: *the client never waits for the
+   wire to move pixels it already has.* On the wheel event the client shifts the pixels inside
+   the scrollable rect by the delta at once, showing a neutral band where new content will land,
+   and only then sends the input. The host detects the real shift and answers with a
+   **copy-rect** (VNC CopyRect / RDP style: "move this rect by (0,-40)") plus the newly exposed
+   strip as lossless tiles, or video if the region is churning. On arrival the client
+   reconciles: same offset, nothing visible happens; different offset (end of document, snap,
+   nested scroll view), one small correction and a mosh-style confidence back-off for that
+   window until predictions match again. The rect to shift comes from the Accessibility
+   scroll-area frame under the pointer for native apps; for browsers and Electron, which expose
+   nothing, the window content area minus title bar. Copy-rect has no encoder search-range
+   cliff, so fast flicks stay cheap and sharp.
 4. **Typed-text prediction** (experiment, the mosh part). Host tracks the AX focused element.
    For text roles it ships role, frame, caret bounds (`kAXBoundsForRangeParameterizedAttribute`
    at the insertion point) and the font from
