@@ -72,6 +72,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var statInput = 0, statTileBytes = 0, statTileRects = 0, statRefineBytes = 0, statCopyRects = 0, statDirtyTiles = 0, statDiffPruned = 0, statTileSkipped = 0
     private var secTileBytes = 0, secVideoBytes = 0   // per rateState second
     private var tileKbpsEWMA = 0.0
+    private var lastTier: LinkTier? = nil
     private var statTimer: DispatchSourceTimer?
 
     public init(log: @escaping @Sendable (String) -> Void) {
@@ -358,7 +359,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             tracker.markCopied(Array(explained), now: now)
         }
 
-        let plan = tracker.classify(dirty: dirty, now: now)
+        var plan = tracker.classify(dirty: dirty, now: now)
+        if let rc, !rc.policy.videoEnabled, !plan.video.isEmpty {
+            // Extreme tier: no video; motion goes lossless at the tier's frame cap through the refinement queue.
+            tracker.markVideo(plan.video, now: now)
+            plan.video = []; plan.videoRegion = .zero; plan.wholeFrame = false
+        }
         refillTiles(now: now)
         if !plan.lossless.isEmpty {
             if tileTokens > 0 {
@@ -524,7 +530,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if !unacked.isEmpty && Double(inflightBytes) > inflightBudget { statSkippedBudget += 1; return }
         if tokens < 0 { statSkippedBudget += 1; return }
         let fraction = Double(pendingVideoRegion.area) / Double(tracker.width * tracker.height)
-        let fpsCap: Double = fraction < 0.03 ? 15 : Double(req.maxFPS)
+        let tierFPS = Double(rc?.policy.maxVideoFPS ?? req.maxFPS)
+        let fpsCap: Double = min(tierFPS, fraction < 0.03 ? 15 : Double(req.maxFPS))
         let minInterval = UInt64(1e9 / min(fpsCap, Double(max(1, req.maxFPS))))
         if now - lastSendNanos < minInterval * 9 / 10 && !wantKeyframe { statDropped += 1; return }
 
@@ -682,7 +689,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         s.setEventHandler { [weak self] in
             guard let self, let rc = self.rc else { return }
             self.output?.sendControl(.rateState(.init(targetKbps: rc.targetKbps, capacityKbps: rc.capacityKbps, queueMs: rc.queueMs, rung: rc.rung, scale: rc.scale,
-                                                      tileBudgetKbps: self.lastBudget.tileKbps, videoKbps: self.secVideoBytes * 8 / 1000, tileKbps: self.secTileBytes * 8 / 1000)))
+                                                      tileBudgetKbps: self.lastBudget.tileKbps, videoKbps: self.secVideoBytes * 8 / 1000, tileKbps: self.secTileBytes * 8 / 1000, tier: rc.tier)))
+            if rc.tier != self.lastTier { self.lastTier = rc.tier; self.log("link tier: \(rc.tier.name) (capacity \(rc.capacityKbps) kbps, srtt \(Int(rc.srttMs)) ms, loss \(String(format: "%.1f", rc.lossPercent)) %)") }
             self.tileKbpsEWMA = self.tileKbpsEWMA * 0.5 + Double(self.secTileBytes * 8 / 1000) * 0.5
             self.secVideoBytes = 0; self.secTileBytes = 0
         }

@@ -38,6 +38,12 @@ public struct RateController {
     public private(set) var rung = 0
     public var scale: Double { Self.scales[rung] }
     public let nativePixels: Int
+    /// Link tier (DESIGN §3.9) from the controller's own estimates, with hysteresis; `policy` is what the host applies.
+    public private(set) var tiers = TierSelector()
+    public var tier: LinkTier { tiers.tier }
+    public var policy: LinkTier.Policy { tier.policy }
+    private var ackedFrames = 0, lostFrames = 0
+    public var lossPercent: Double { ackedFrames + lostFrames == 0 ? 0 : Double(lostFrames) * 100 / Double(ackedFrames + lostFrames) }
 
     private var baseOWD: Double = .infinity       // min(receiverNanos − hostNanos), includes the clock offset
     private var baseOWDWindowStart: UInt64 = 0
@@ -73,6 +79,7 @@ public struct RateController {
             let kbps = Double(bytes) * 8 / (Double(lastReceived - firstReceived) / 1e9) / 1000
             rateSamples.append((now, kbps))
         }
+        ackedFrames += 1
         rateSamples.removeAll { now - $0.nanos > 10_000_000_000 }
         if !rateSamples.isEmpty {
             // Windowed max over 10 s, trimmed: the 90th percentile is more robust to bursts than the max.
@@ -94,6 +101,7 @@ public struct RateController {
     }
 
     public mutating func lossDetected(now: UInt64) {
+        lostFrames += 1
         if Double(now - lastDecreaseNanos) > srttNanos {
             targetKbps = max(tuning.minKbps, Int(Double(targetKbps) * tuning.lossDecrease))
             lastDecreaseNanos = now
@@ -116,17 +124,22 @@ public struct RateController {
             }
         }
         targetKbps = min(targetKbps, max(ceiling, tuning.minKbps))
+        if ackedFrames + lostFrames > 200 { ackedFrames /= 2; lostFrames /= 2 }   // sliding loss window
+        tiers.update(capacityKbps: capacityKbps, rttMs: srttNanos / 1e6, lossPercent: lossPercent, now: now)
         updateRung(now: now)
     }
 
     private mutating func updateRung(now: UInt64) {
         let kpix = Double(nativePixels) / 1000
         let need = kpix * scale * scale * tuning.kbpsPerKpixelDown
-        if Double(targetKbps) < need, rung < Self.scales.count - 1 {
+        let p = policy
+        if rung < p.minRung { rung = p.minRung; lastRungChange = now }
+        if rung > p.maxRung { rung = p.maxRung; lastRungChange = now }
+        if Double(targetKbps) < need, rung < p.maxRung {
             if belowSince == 0 { belowSince = now }
             if now - belowSince > tuning.downNanos { rung += 1; belowSince = 0; aboveSince = 0; lastRungChange = now }
         } else { belowSince = 0 }
-        if rung > 0 {
+        if rung > p.minRung {
             let up = Self.scales[rung - 1]
             if Double(targetKbps) > kpix * up * up * tuning.kbpsPerKpixelUp {
                 if aboveSince == 0 { aboveSince = now }
@@ -142,7 +155,7 @@ public struct RateController {
         public init(tileKbps: Int, videoKbps: Int) { self.tileKbps = tileKbps; self.videoKbps = videoKbps }
     }
     public func budget(videoActive: Bool, recentTileKbps: Int = 0) -> Budget {
-        let tiles = videoActive ? Int(Double(targetKbps) * 0.45) : Int(Double(targetKbps) * 0.9)
+        let tiles = videoActive ? Int(Double(targetKbps) * policy.tileShareWhileVideo) : Int(Double(targetKbps) * 0.9)
         let reserved = max(Int(Double(targetKbps) * 0.1), min(tiles, Int(Double(recentTileKbps) * 1.25)))
         return Budget(tileKbps: tiles, videoKbps: max(100, targetKbps - reserved))
     }

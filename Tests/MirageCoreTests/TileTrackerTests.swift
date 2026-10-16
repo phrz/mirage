@@ -229,3 +229,34 @@ final class ShiftRefineTests: XCTestCase {
         XCTAssertEqual(r?.dx, 7); XCTAssertEqual(r?.dy, 4)
     }
 }
+
+final class LinkTierTests: XCTestCase {
+    func testClassification() {
+        XCTAssertEqual(LinkTier.classify(capacityKbps: 0, rttMs: 210, lossPercent: 0), .constrained)   // this Japan link
+        XCTAssertEqual(LinkTier.classify(capacityKbps: 30_000, rttMs: 30, lossPercent: 0), .normal)
+        XCTAssertEqual(LinkTier.classify(capacityKbps: 900_000, rttMs: 2, lossPercent: 0), .local)
+        XCTAssertEqual(LinkTier.classify(capacityKbps: 256, rttMs: 900, lossPercent: 5), .extreme)
+        XCTAssertFalse(LinkTier.extreme.policy.videoEnabled); XCTAssertEqual(LinkTier.extreme.policy.tilePaletteColours, 16)
+    }
+    func testHysteresis() {
+        var sel = TierSelector()
+        sel.update(capacityKbps: 0, rttMs: 500, lossPercent: 0, now: 1_000_000_000)
+        XCTAssertEqual(sel.tier, .normal, "one bad sample does not change the tier")
+        sel.update(capacityKbps: 0, rttMs: 500, lossPercent: 0, now: 2_000_000_000)
+        XCTAssertEqual(sel.tier, .normal)
+        sel.update(capacityKbps: 0, rttMs: 500, lossPercent: 0, now: 3_100_000_000)
+        XCTAssertEqual(sel.tier, .extreme, "worse tier after 2 s")
+        sel.update(capacityKbps: 0, rttMs: 200, lossPercent: 0, now: 4_000_000_000)
+        sel.update(capacityKbps: 0, rttMs: 200, lossPercent: 0, now: 9_000_000_000)
+        XCTAssertEqual(sel.tier, .extreme, "better tier needs 10 s")
+        sel.update(capacityKbps: 0, rttMs: 200, lossPercent: 0, now: 14_100_000_000)
+        XCTAssertEqual(sel.tier, .constrained)
+    }
+    func testControllerReportsConstrainedOnThisLink() {
+        var rc = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 1000)
+        var now: UInt64 = 1_000_000_000
+        for _ in 0..<120 { rc.frameAcked(sentNanos: now, firstReceived: now + 100_000_000, lastReceived: now + 110_000_000, fragments: 4, bytes: 4000, now: now + 200_000_000, rttNanos: 210_000_000); now += 33_000_000 }
+        XCTAssertEqual(rc.tier, .constrained)
+        XCTAssertEqual(rc.policy.maxRung, 3)
+    }
+}

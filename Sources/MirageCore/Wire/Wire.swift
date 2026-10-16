@@ -262,9 +262,10 @@ public enum ControlMessage: Codable, Equatable {
         public var tileBudgetKbps: Int
         public var videoKbps: Int
         public var tileKbps: Int
-        public init(targetKbps: Int, capacityKbps: Int, queueMs: Double, rung: Int, scale: Double, tileBudgetKbps: Int, videoKbps: Int, tileKbps: Int) {
+        public var tier: LinkTier?
+        public init(targetKbps: Int, capacityKbps: Int, queueMs: Double, rung: Int, scale: Double, tileBudgetKbps: Int, videoKbps: Int, tileKbps: Int, tier: LinkTier? = nil) {
             self.targetKbps = targetKbps; self.capacityKbps = capacityKbps; self.queueMs = queueMs; self.rung = rung; self.scale = scale
-            self.tileBudgetKbps = tileBudgetKbps; self.videoKbps = videoKbps; self.tileKbps = tileKbps
+            self.tileBudgetKbps = tileBudgetKbps; self.videoKbps = videoKbps; self.tileKbps = tileKbps; self.tier = tier
         }
     }
     public struct CursorShape: Codable, Equatable {

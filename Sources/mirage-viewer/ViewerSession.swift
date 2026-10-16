@@ -70,6 +70,7 @@ final class ViewerSession: @unchecked Sendable {
     struct Sample: Codable {
         var t: Double, rttMs: Double, frameAgeMs: Double, fps: Double, kbps: Double, decodeMs: Double, lost: Int, skipped: Int, width: Int, height: Int
         var tileKbps: Double, tileRects: Int, copyRects: Int, targetKbps: Int, capacityKbps: Int, queueMs: Double, rung: Int, scale: Double
+        var tier: String?
     }
     private(set) var samples: [Sample] = []
     private let startDate = Date()
@@ -336,7 +337,7 @@ final class ViewerSession: @unchecked Sendable {
                     samples.append(Sample(t: Date().timeIntervalSince(startDate), rttMs: rtt, frameAgeMs: age / 1e6, fps: Double(frames), kbps: Double(bytes) * 8 / 1000,
                                           decodeMs: s.decodeMs, lost: lost, skipped: dropped, width: w, height: h,
                                           tileKbps: s.tileKbps, tileRects: tileRects, copyRects: copies, targetKbps: rate.targetKbps, capacityKbps: rate.capacityKbps,
-                                          queueMs: rate.queueMs, rung: rate.rung, scale: rate.scale))
+                                          queueMs: rate.queueMs, rung: rate.rung, scale: rate.scale, tier: rate.tier?.name))
                 }
                 if let url = model.statsLog {
                     let line = String(format: "%@ rtt %.0f age %.0f fps %.1f kbps %.0f tiles %.0f target %d cap %d queue %.0f rung %d decode %.1f lost %d skipped %d size %dx%d\n",
