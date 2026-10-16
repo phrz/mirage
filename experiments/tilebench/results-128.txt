@@ -1,0 +1,18 @@
+
+== claude-ui.png  1510x1898  tiles 11x14=154 @ 128px  raw frame 8396 KB
+class tiles raw lz4 lzfse zlib sub+lzfse paeth+lzfse pal+lzfse best-apple
+uniform    27     49152       338       174        66       180       176       159       160   (mean bytes/tile)
+flat≤16    14     49152       372       204       239       211       202       189       190   (mean bytes/tile)
+text≤256    97     49152      3872      2815      2657      3789      3872      2081      2081   (mean bytes/tile)
+rich>256    16     49152      4606      3501      3252      4440      4381      4381      3473   (mean bytes/tile)
+FRAME KB   154      7392       453       329       307       436       443       272       258 
+HEVC HW intra whole frame: qp20=163KB  qp26=125KB  qp32=88KB  qp38=57KB   JPEG HW q0.75=330KB
+
+== full-1.png  3024x1964  tiles 23x15=345 @ 128px  raw frame 17399 KB
+class tiles raw lz4 lzfse zlib sub+lzfse paeth+lzfse pal+lzfse best-apple
+uniform    28     49152       338       174        66       180       176       159       160   (mean bytes/tile)
+flat≤16    39     49152       595       338       349       328       334       285       271   (mean bytes/tile)
+text≤256   231     49152      3835      2683      2565      3541      3570      1997      1996   (mean bytes/tile)
+rich>256    47     49152     12114      8340      7881      8465      8247      8247      7744   (mean bytes/tile)
+FRAME KB   345     16560      1453      1006       955      1205      1201       844       820 
+HEVC HW intra whole frame: qp20=365KB  qp26=275KB  qp32=194KB  qp38=125KB   JPEG HW q0.75=745KB

@@ -177,9 +177,12 @@ history** (dirty in N of the last M frames):
 
 1. **Static → nothing.** Most of a desktop, most of the time.
 2. **Settling / sparse → lossless tile** on the `tiles` stream. Typing, cursor-caused UI
-   changes, blinking carets, a button highlight. Encoder: start with **WebP lossless** via
-   libwebp (2–4 KB for a 64² text tile, fast decode); later a custom predictor + rANS/LZFSE
-   codec tuned for UI (Astropad's path) if it measurably wins.
+   changes, blinking carets, a button highlight. Encoder: **WebP lossless** via libwebp,
+   measured at ~550–800 B per 64² text tile and ~2x smaller than anything in Apple's
+   Compression framework on UI content (experiments/tilebench). Adjacent dirty tiles are
+   merged and encoded as one rect, which halves the per-pixel cost again. Near-lossless mode
+   only for tiles classified rich (>256 colours), where it saves ~20 %. A custom predictor +
+   rANS codec (Astropad's path) is not worth building: predictors measurably hurt on UI.
 3. **Sustained motion → video**: the moving region's bounding rect (snapped to 64 px, or the
    whole layer if >40% dirty) goes to a hardware **HEVC low-latency session**, one per layer,
    `AllowFrameReordering=false`, `EnableLTR=true`, `MaxKeyFrameInterval` large (recover via
