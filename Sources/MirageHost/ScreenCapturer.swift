@@ -18,6 +18,9 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private var onFrame: ((CVPixelBuffer, UInt64, [PixelRect]) -> Void)?
     private(set) var target: Target?
     var onStop: ((Error?) -> Void)?
+    /// While a viewer is connected the host's display stays awake (it would otherwise sleep ~90 s
+    /// after the wake we trigger, and SCK then delivers nothing).
+    private var displayAssertion: IOPMAssertionID = 0
 
     init(queue: DispatchQueue) { self.queue = queue }
 
@@ -77,6 +80,9 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await s.startCapture()
         stream = s
+        if displayAssertion == 0 {
+            IOPMAssertionCreateWithName(kIOPMAssertPreventUserIdleDisplaySleep as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn), "Mirage viewer connected" as CFString, &displayAssertion)
+        }
         return t
     }
 
@@ -94,6 +100,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     func stop() async {
+        if displayAssertion != 0 { IOPMAssertionRelease(displayAssertion); displayAssertion = 0 }
         guard let s = stream else { return }
         stream = nil
         try? await s.stopCapture()

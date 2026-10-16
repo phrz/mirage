@@ -4,10 +4,15 @@ A remote desktop for Macs and Apple devices that is designed around bad links
 (high latency, ~1 Mbps) and a tailnet instead of accounts. See [docs/DESIGN.md](docs/DESIGN.md)
 for the architecture, the teardown of Astropad's LIQUID that informed it, and the milestones.
 
-**Status: M1.** QUIC link over the tailnet, one-time 6-digit pairing (PAKE), mutual
-Ed25519 authentication, and full-desktop streaming: ScreenCaptureKit → hardware HEVC
-(low-latency, LTR) → QUIC datagrams → VideoToolbox decode in a macOS viewer with a locally
-drawn cursor, mouse/keyboard forwarding and a stats overlay.
+**Status: M2.** QUIC link over the tailnet, one-time 6-digit pairing (PAKE), mutual
+Ed25519 authentication, and a hybrid desktop codec: ScreenCaptureKit dirty tiles classified by
+motion history; sparse changes (typing, carets, highlights) go as pixel-exact WebP rects on a
+reliable QUIC stream, sustained motion goes through hardware HEVC (low-latency) on QUIC
+datagrams and is re-sent lossless once it settles; scrolls and window drags are detected on the
+host and sent as copy-rects. The macOS viewer composites all of it on a Metal canvas (MetalFX
+upscaling when the host drops a rung of the resolution ladder), draws the cursor locally, and
+moves scrolled content and dragged windows locally at the input, reconciling with the host's
+copy-rects mosh-style. A delay-based rate controller on the host keeps the link out of its queue.
 
 ## Build
 
@@ -75,12 +80,21 @@ Admin: `miraged devices`, `miraged revoke <id-prefix>`, `mirage hosts`, `miraged
 ```
 
 The viewer requests the stream at its window size (points × backing scale × `--scale`), so
-resize the window to change resolution. `⌃⌥⌘S` toggles the overlay (RTT, frame age, fps,
-kbps, decode time, losses), `⌃⌥⌘↑/↓` changes the target bitrate by 200 kbps, `⌃⌥⌘Q` quits.
-Every other key and ⌘-shortcut goes to the host. `--headless --duration 60 --stats out.json`
-connects and decodes without a window and writes per-second samples plus medians, for
-measuring a link over SSH. The host cursor is drawn locally at your
-pointer, so mouse latency is zero; clicks and typing pay the link RTT.
+resize the window to change resolution; the host's tiles are pixel-exact at that size (a
+window smaller than the host display means downscaled text, which costs 2–3x more per tile
+than native, so prefer `--scale` ≥ 1 on a big screen). `⌃⌥⌘S` toggles the overlay (RTT, frame
+age, fps, video/tile kbps, the controller's target, capacity and queuing-delay estimates, the
+ladder rung, copy-rects, prediction confirm/mismatch counts), `⌃⌥⌘↑/↓` changes the bitrate
+*cap* by 200 kbps (the controller stays at or below it), `⌃⌥⌘Q` quits. Every other key and
+⌘-shortcut goes to the host. The host cursor is drawn locally at your pointer, so mouse latency
+is zero; trackpad scrolls and title-bar drags move pixels locally before the host confirms them;
+clicks and typing pay the link RTT.
+
+`--headless --duration 60 --stats out.json` connects and decodes without a window and writes
+per-second samples plus medians, for measuring a link over SSH. `--scenario typing:30` (or
+`scroll:40`, `drag:30`, `idle:20`) additionally drives the "Mirage Test Bench" window on the host
+(`experiments/testbench/make.sh`, then `open` the app there) with scripted input and reports
+bytes into that window, per-burst time-to-crisp and prediction counters.
 
 ### Host permissions (once)
 
@@ -110,14 +124,21 @@ the keychain / Secure Enclave is on the list.
 ## Layout
 
 ```
-Sources/MirageCore/Wire        framing, ControlMessage (auth, pairing, stream/ack/cursor/input), video datagrams + reassembly
+Sources/CWebP                  libwebp 1.6.0, vendored unmodified (lossless tiles; compiles for iOS)
+Sources/MirageCore/Wire        framing, ControlMessage (auth, pairing, stream/ack/cursor/input/window list/rate state),
+                               video datagrams + reassembly (region, tile mask, input seq), tile-stream messages
+Sources/MirageCore/Tiles       TileCodec (WebP), TileTracker (classification, refinement queue), ShiftDetector (copy-rects)
+Sources/MirageCore/Rate        RateController (one-way-delay/dispersion based target, budget split, resolution ladder)
+Sources/MirageCore/Render      Compositor (Metal canvas, MetalFX), Predictor (scroll/drag reconciliation)
 Sources/MirageCore/Video       VideoToolbox HEVC decoder (macOS + iOS)
 Sources/MirageCore/Crypto      CPace PAKE, device identity, sealed box
 Sources/MirageCore/Transport   QUIC client/host (Network.framework), framed streams, TLS identity
 Sources/MirageCore/Session     host and client protocol flows; DesktopStreamer protocol the host plugs into
 Sources/MirageCore/Store       on-disk state
-Sources/MirageHost             macOS: SCStream capture, HEVC encoder, ack-paced sender, CGEvent input, cursor monitor
-Sources/mirage-viewer          macOS viewer (AppKit window, SwiftUI overlay, AVSampleBufferDisplayLayer)
+Sources/MirageHost             macOS: SCStream capture (BGRA + dirty rects), tile diff, copy-rect detection, window tracker,
+                               HEVC canvas encoder, tile encoder, pacing, CGEvent input, cursor monitor
+Sources/mirage-viewer          macOS viewer (AppKit window, CAMetalLayer, SwiftUI overlay, scripted scenarios)
 Sources/miraged, Sources/mirage  CLIs
+experiments/                   measurements that fixed the design (tilebench, seqbench, probes) and the test bench app
 scripts/                       make-viewer-app.sh, deploy-host.sh
 ```

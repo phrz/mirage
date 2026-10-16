@@ -207,6 +207,50 @@ Photographic tiles (high entropy, lots of colors) that are static still go lossl
 the budget says otherwise; near-lossless WebP (`-near_lossless 60`) or an HEVC intra tile
 at low QP is the fallback.
 
+### 3.3a As built in M2 (2026-10-17)
+
+The three paths above exist; the mechanics that were not obvious from the plan:
+
+- **One encoder, a host-side canvas, a tile mask.** The HEVC session stays full-frame (a fixed
+  size keeps temporal prediction alive and the hardware does not care about skip blocks). Dirty
+  tiles classified as motion are copied into a native-size BGRA canvas, the canvas is encoded,
+  and the datagram header carries the native rect the frame updates plus a bit per 64-px tile of
+  that rect in the payload. The client only takes masked tiles from the decoded picture, so
+  crisp lossless tiles elsewhere are never degraded by a video frame, and a keyframe masks out
+  every tile the client already has pixel-exact. Lower ladder rungs scale the canvas through
+  `VTPixelTransferSession` into a smaller encoder; the client upscales with MetalFX before
+  taking tiles.
+- **Client canvas.** The compositor keeps one native BGRA texture; video tiles, lossless tiles
+  and copy-rects write into it in arrival order (one Metal command queue, so ordering is free).
+  "Invalidate the overlay where video covers it" falls out of this for nothing.
+- **Dirty tracking.** SCK `dirtyRects` → 64-px tiles → a CPU diff against the previous capture
+  with ±4/channel tolerance (invisible whole-screen flickers and glyph re-renders otherwise turn
+  into a video frame plus a full lossless refinement pass) → the exact changed box inside each
+  tile. Sparse updates send that box: a typed glyph is ~500 B, a caret blink ~250 B at native
+  scale. Near-lossless is used only above 4096 colours, because downscaled text already exceeds
+  256 and has to stay exact.
+- **Copy-rects.** Window drags come from the window list (frame deltas between captures,
+  verified against the pixels, refined ±8 px by a patch search because the list lags the
+  composited pixels by a few ms); scrolls from a line-profile correlation (sum of absolute
+  differences over every candidate shift, then per-tile verification with tolerance 12) over
+  the Accessibility scroll area under the pointer, the rect learned from an earlier detection,
+  or the dirty bounding box. Exact row hashing never fired on a real scroll: SCK's downscale
+  leaves ±1–3 levels between a moved pixel and its original.
+- **Prediction epochs.** Every input message carries a client sequence number; every pixel
+  update from the host (video header, tile batch, copy-rect) echoes the last input injected at
+  least 40 ms before its capture. The client's predictor consumes host copy-rects FIFO per
+  window and retires a prediction when an update that reflects its input touches its rect
+  without a copy-rect having matched it (mismatch → predictions for that window are tracked
+  but not shown until one is confirmed again, or 2 s pass). Displayed picture = confirmed
+  canvas + unconfirmed displacements, drawn at present time.
+- **Rate control.** The controller sees one-way delay (receiver clock minus host send clock,
+  offset-free after subtracting the windowed minimum) from every video and tile ack, and
+  delivery rate from datagram-train dispersion. On the tailnet the dispersion reads the physical
+  path (20–100 Mbps), not the ~1–2 Mbps that actually congests, so in practice the delay signal
+  does the work: ×0.85 per RTT above 60 ms of queue, +8 %/s below 25 ms, ×0.8 on loss, floor
+  150 kbps, ceiling the viewer's cap. Tiles may use 45 % of the target while video is active
+  (90 % otherwise); video gets the target minus what tiles actually used.
+
 ### 3.4 Rate control and adaptation
 
 - Client sends receive timestamps for every packet; host runs a GCC/BBR-style **delivery-rate
