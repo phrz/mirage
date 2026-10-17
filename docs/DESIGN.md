@@ -312,7 +312,13 @@ The three paths above exist; the mechanics that were not obvious from the plan:
   150 kbps, ceiling the viewer's cap. Tiles may use 45 % of the target while video is active
   (90 % otherwise); video gets the target minus what tiles actually used.
 
-**Two standing rules (phrz, 2026-10-17).**
+**Three standing rules (phrz, 2026-10-17).**
+*Change beats refinement; change near the input beats everything.* Observed failure on a 400 ms
+cellular link: the viewer refined the static login screen centre-out while the password field
+being typed into never updated. Scheduler order, strict and per frame in every tier: newly
+changed pixels in the focused element or near the last input event; all other changed pixels;
+copy-rects and the lossy first frame of newly visible regions; refinement of unchanged areas
+on leftover budget only, yielding the moment new dirt appears.
 *Lossy first, always.* A fresh picture, in any tier including Extreme, arrives as one whole
 lossy frame within about a second at the current rate (a tiny HEVC keyframe at a low rung or a
 quarter-resolution lossy still, MetalFX-upscaled) and then sharpens centre-first with lossless
