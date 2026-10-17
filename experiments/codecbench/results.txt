@@ -1,0 +1,44 @@
+
+== full claude-ui.png: PNG 505 KB
+codec             KB   enc ms   dec ms
+webp-ll z6     119.3     89.1     77.0
+webp-ll z9     110.3   2575.3     75.0
+jxl-ll e3      366.5     52.4     80.9
+jxl-ll e7      206.0    116.3     67.1
+jxl d1 e3      257.2     72.1     85.2
+avif-ll s10   1192.3    179.7    160.2
+avif-ll s6     571.6   1361.9    122.3
+heic-ll        729.7    226.2    140.3
+
+== 256px rect of claude-ui.png: PNG 16 KB
+codec             KB   enc ms   dec ms
+webp-ll z6       2.8      5.7      0.0
+webp-ll z9       2.8    302.2      0.0
+jxl-ll e3        6.2     11.2      2.3
+jxl-ll e7        4.8     17.8      2.8
+jxl d1 e3        4.6      6.6      3.2
+avif-ll s10     21.0      3.2      2.1
+avif-ll s6      13.0     21.8      1.7
+heic-ll         16.0     32.0      8.5
+
+== full full-1.png: PNG 1435 KB
+codec             KB   enc ms   dec ms
+webp-ll z6     545.4   1271.4    196.6
+webp-ll z9     473.2   5652.8    190.0
+jxl-ll e3      866.7     91.4    157.7
+jxl-ll e7      604.5    197.7    138.7
+jxl d1 e3      578.7    127.9    184.7
+avif-ll s10   2873.8    338.7    365.1
+avif-ll s6    1302.4   2659.1    272.7
+heic-ll       1817.5    437.5    368.5
+
+== 256px rect of full-1.png: PNG 14 KB
+codec             KB   enc ms   dec ms
+webp-ll z6       4.1      2.8      0.0
+webp-ll z9       4.1    554.7      0.0
+jxl-ll e3        8.6      9.0      1.7
+jxl-ll e7        6.7     18.4      3.3
+jxl d1 e3        8.9      4.3      0.7
+avif-ll s10     41.1      3.7      3.2
+avif-ll s6      20.2     29.6      2.0
+heic-ll         28.4     21.5      6.9

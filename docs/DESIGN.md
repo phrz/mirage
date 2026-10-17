@@ -199,6 +199,28 @@ history** (dirty in N of the last M frames):
    rate controller otherwise spends its budget refreshing a static picture. The first
    keyframe (161 KB at 2x, 72 KB at 1x) is the stall to engineer around: cap its QP, start
    one rung down the ladder, refine with lossless tiles, and avoid later keyframes via LTR.
+   Checked against the field (experiments/codecbench): on screen content WebP lossless is
+   1.7–3x smaller than JPEG XL lossless and 5–10x smaller than AVIF/HEIC lossless, and decodes
+   fastest; JPEG XL only wins on encode time for whole desktops, which the tile path never
+   does. **Learned ("neural") image codecs** are allowed in exactly one place: a learned
+   entropy model behind an exactly reversible coder (a 20–30 % gain over WebP is plausible on
+   UI tiles, with zero substitution risk). A learned *lossy* codec may only ever be a first
+   pass that lossless refinement overwrites, never the final state of text: the JBIG2/Xerox
+   failure, where a symbol matcher swapped visually similar digits, is the exact failure mode
+   of a text-trained lossy model, and no quality metric catches it. The safe extreme form of
+   font-aware coding is verified glyph re-rendering: recognize a glyph, render it locally from
+   the same font, accept it only if the rendered pixels hash-match the host's, else send
+   pixels; lossless by construction.
+   **Tile cache (phrz, 2026-10-17).** Both ends keep a content-addressed LRU of lossless tiles
+   (hash → pixels on the client; hash → "client has it" on the host, confirmed by acks). A
+   tile the client already holds is sent as `hash @ (x,y)`, ~20 bytes instead of ~550, which
+   makes scrolling back, tab switches, re-exposed windows, reopened menus and terminal
+   scrollback nearly free. The prediction half is the novel part: the client also keeps each
+   window's scrolled-away content as an off-screen canvas in document coordinates and draws
+   from it on a scroll-back *before* the host answers; the host's hash references confirm,
+   and a mismatch (content changed) is corrected by real tiles with the same reconciliation
+   rule as scroll prediction. RDP's bitmap cache and NX's image cache do the byte-saving half
+   only.
 4. **Refinement**: when a video region stops moving for ~300 ms, its tiles are re-sent via
    path 2 (lossless), so scrolled text snaps crisp. The client composites lossless tiles over
    the video texture and invalidates them when a newer video frame covers them.

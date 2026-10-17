@@ -1,0 +1,28 @@
+
+== claude-ui.png  1510x1898  tiles 23x29=667 @ 64px  raw frame 8396 KB
+class tiles raw zlib pal+lzfse qoi webp-ll webp-nl60 jxl-ll-e3 jxl-ll-e7 jxl-d1 avif-ll-s10 avif-ll-s6 heic-ll
+uniform    44     12288        30       150        91        44        44       225       154       211       439       439      1427   (mean bytes/tile)
+flat≤16    33     12288        97       186       226        83        83       236       197       310       777       541      1794   (mean bytes/tile)
+text≤256    89     12288      1000      1007      1315       569       580      1241       913      1128      3786      2299      3552   (mean bytes/tile)
+rich>256     1     12288      2120      1896      1724      1542      1208      1773      1628      1229      3636      2775      3317   (mean bytes/tile)
+FRAME KB   667      2004        93       102       127        56        56       127        94       118       377       239       431 
+HEVC HW intra whole frame: qp20=204KB  qp26=147KB  qp32=100KB  qp38=63KB   JPEG HW q0.75=330KB
+
+== full-1.png  3024x1964  tiles 47x30=1410 @ 64px  raw frame 17399 KB
+class tiles raw zlib pal+lzfse qoi webp-ll webp-nl60 jxl-ll-e3 jxl-ll-e7 jxl-d1 avif-ll-s10 avif-ll-s6 heic-ll
+uniform    79     12288        30       150        91        44        44       225       154       211       439       439      1426   (mean bytes/tile)
+flat≤16    61     12288       139       210       356        95        95       300       218       346       967       592      1829   (mean bytes/tile)
+text≤256   198     12288       954       978      1299       527       532      1167       837      1082      3731      2208      3495   (mean bytes/tile)
+rich>256    15     12288      4981      4661      4495      3147      2870      3573      3305      1110      5662      4763      6025   (mean bytes/tile)
+FRAME KB  1410      4236       268       281       345       157       154       313       235       262       896       566       983 
+HEVC HW intra whole frame: qp20=447KB  qp26=321KB  qp32=216KB  qp38=135KB   JPEG HW q0.75=745KB
+
+== sketch-graphics.png  1822x1898  tiles 28x29=812 @ 64px  raw frame 10131 KB
+class tiles raw zlib pal+lzfse qoi webp-ll webp-nl60 jxl-ll-e3 jxl-ll-e7 jxl-d1 avif-ll-s10 avif-ll-s6 heic-ll
+uniform    88     12288        30       150        91        44        44       225       154       211       439       439      1427   (mean bytes/tile)
+flat≤16    52     12288       149       200       392        89        89       230       197       330       685       524      1694   (mean bytes/tile)
+text≤256    51     12288       780       884      1152       547       548       870       706       578      1862      1332      2401   (mean bytes/tile)
+rich>256    12     12288      4538      4644      4368      3305      2578      3592      3253       810      5164      4290      5888   (mean bytes/tile)
+FRAME KB   812      2436       102       121       136        74        66       116        96        73       226       181       397 
+HEVC HW intra whole frame: qp20=62KB  qp26=39KB  qp32=23KB  qp38=13KB   JPEG HW q0.75=168KB
+finished
