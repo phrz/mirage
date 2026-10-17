@@ -73,6 +73,8 @@ public enum TileMessage: Equatable, Sendable {
     }
 
     enum Kind: UInt8 { case tiles = 1, copyRect = 2, reset = 3 }
+    /// Tiles dropped because their format byte was unknown (diagnostics).
+    nonisolated(unsafe) public static var skippedUnknownFormats = 0
 
     public func encode(msgSeq: UInt32) -> Data {
         var body = Data()
@@ -120,10 +122,16 @@ public enum TileMessage: Equatable, Sendable {
             tiles.reserveCapacity(Int(n))
             for _ in 0..<n {
                 guard r.remaining >= 8 + 1 + 4, let rect = PixelRect.read(&r) else { return nil }
-                guard let f = TileCodec.Format(rawValue: r.readByte()) else { return nil }
+                let formatByte = r.readByte()
                 let len: UInt32 = r.read()
                 guard r.remaining >= Int(len) else { return nil }
-                tiles.append(Tile(rect: rect, format: f, data: body.subdata(in: r.offset..<r.offset + Int(len))))
+                // A format this build does not know (a newer host) is skipped, never fatal: the stream
+                // must stay up and the ack must still go out.
+                if let f = TileCodec.Format(rawValue: formatByte) {
+                    tiles.append(Tile(rect: rect, format: f, data: body.subdata(in: r.offset..<r.offset + Int(len))))
+                } else {
+                    skippedUnknownFormats += 1
+                }
                 r.offset += Int(len)
             }
             return .tiles(Tiles(header: h, refinement: refinement, tiles: tiles))
@@ -159,6 +167,7 @@ extension PixelRect {
 /// Incremental parser for the tile stream's byte stream.
 public struct TileStreamParser {
     private var buffer = Data()
+    public private(set) var skipped = 0
     public init() {}
     /// Feeds bytes; returns complete messages with their sequence numbers, in order.
     public mutating func feed(_ data: Data) throws -> [(seq: UInt32, bytes: Int, message: TileMessage)] {
@@ -172,9 +181,10 @@ public struct TileStreamParser {
             guard buffer.count >= total else { break }
             let kind = buffer[buffer.startIndex]
             let body = buffer.subdata(in: buffer.startIndex + TileMessage.headerSize..<buffer.startIndex + total)
-            guard let m = TileMessage.decode(kind: kind, body: body) else { throw MirageError.protocolViolation("malformed tile message kind \(kind)") }
-            out.append((seq, total, m))
             buffer.removeFirst(total)
+            // A message this build cannot decode (an unknown kind from a newer host) is skipped, not fatal.
+            guard let m = TileMessage.decode(kind: kind, body: body) else { skipped += 1; continue }
+            out.append((seq, total, m))
         }
         return out
     }

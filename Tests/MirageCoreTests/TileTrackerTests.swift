@@ -280,3 +280,33 @@ final class LadderFPSTests: XCTestCase {
         XCTAssertEqual(rc.rung, before + 1, "a healthy rate does not drop further")
     }
 }
+
+final class TileSchedulerTests: XCTestCase {
+    /// Regression guard for the scheduler rule: changed pixels near the input locus are dequeued before
+    /// any other change and before every refinement item.
+    func testLocusChangesComeBeforeEverythingElse() {
+        let t = TileTracker(width: 1280, height: 720)
+        let nearLocus = t.index(col: 5, row: 3)          // tile centre (352, 224)
+        let farChange = t.index(col: 18, row: 10)
+        let refine = [t.index(col: 0, row: 0), t.index(col: 5, row: 2)]
+        let o = TileScheduler.order(changed: [farChange, nearLocus], refinement: refine, locus: (x: 360, y: 240), tracker: t)
+        XCTAssertEqual(o.locus, [nearLocus]); XCTAssertEqual(o.changed, [farChange]); XCTAssertEqual(o.refinement, refine)
+        let seq = TileScheduler.sequence(o)
+        XCTAssertEqual(seq.first, nearLocus)
+        XCTAssertLessThan(seq.firstIndex(of: farChange)!, seq.firstIndex(of: refine[0])!)
+        let o2 = TileScheduler.order(changed: [farChange], refinement: refine, locus: nil, tracker: t)
+        XCTAssertEqual(TileScheduler.sequence(o2).first, farChange)
+    }
+
+    func testUnknownTileFormatIsSkippedNotFatal() throws {
+        var m = TileMessage.tiles(.init(header: .init(captureSeq: 1, inputSeq: 1, windowID: 0, captureNanos: 1), refinement: true,
+                                        tiles: [.init(rect: PixelRect(x: 0, y: 0, width: 8, height: 8), format: .solid, data: Data([1, 2, 3, 4]))])).encode(msgSeq: 7)
+        let formatOffset = 9 + 24 + 1 + 2 + 8   // frame header, tile header, refinement byte, count, rect
+        m[formatOffset] = 0x7F
+        var p = TileStreamParser()
+        let got = try p.feed(m)
+        XCTAssertEqual(got.count, 1)
+        guard case .tiles(let t)? = got.first?.message else { return XCTFail() }
+        XCTAssertTrue(t.tiles.isEmpty, "the unknown tile is dropped, the message (and its ack) survives")
+    }
+}

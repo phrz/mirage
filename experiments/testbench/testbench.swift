@@ -13,8 +13,11 @@ final class App: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         let screen = NSScreen.screens.first!
-        let size = NSSize(width: 1100, height: 750)
-        let origin = NSPoint(x: screen.frame.minX + 240, y: screen.frame.maxY - 160 - size.height)
+        // `--static`: cover the whole screen with a window that never changes (no caret, fixed caption),
+        // so a loopback host sees a genuinely static picture (the static-picture refinement test).
+        let isStatic = CommandLine.arguments.contains("--static")
+        let size = isStatic ? NSSize(width: screen.frame.width, height: screen.frame.height - 25) : NSSize(width: 1100, height: 750)
+        let origin = isStatic ? NSPoint(x: screen.frame.minX, y: screen.frame.minY) : NSPoint(x: screen.frame.minX + 240, y: screen.frame.maxY - 160 - size.height)
         let w = NSWindow(contentRect: NSRect(origin: origin, size: size), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         w.title = "Mirage Test Bench — measurement window started by Claude, safe to ignore"
         let captionHeight: CGFloat = 44
@@ -57,8 +60,8 @@ final class App: NSObject, NSApplicationDelegate {
         w.contentView = content
         w.makeKeyAndOrderFront(nil)
         updateCaption()
-        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.updateCaption() }
-        w.makeFirstResponder(tv)
+        if !isStatic { Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.updateCaption() } }
+        if isStatic { w.level = .floating; w.makeFirstResponder(nil); tv.isSelectable = false; tv.isEditable = false } else { w.makeFirstResponder(tv) }
         tv.setSelectedRange(NSRange(location: text.utf16.count, length: 0))
         tv.scrollRangeToVisible(NSRange(location: 0, length: 0))
         window = w

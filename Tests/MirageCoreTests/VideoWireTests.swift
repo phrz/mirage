@@ -61,6 +61,25 @@ final class VideoWireTests: XCTestCase {
         XCTAssertEqual(a.pendingCount, 0)
     }
 
+    func testPacedFrameIsNotDeclaredLostWhileStillArriving() {
+        var a = FrameAssembler()
+        a.timeoutNanos = 300_000_000   // what a 1 ms RTT gives
+        let payload = Data(repeating: 5, count: 1157 * 40)
+        let frags = VideoFragment.fragments(frameSeq: 1, flags: [.keyframe], captureNanos: 1, payload: payload).compactMap(VideoFragment.decode)
+        XCTAssertEqual(frags.count, 40)
+        // Fragments 30 ms apart: the frame takes 1.2 s, far beyond the 300 ms timeout, with no gap over 30 ms.
+        var now: UInt64 = 1_000_000_000
+        var completed = false
+        for f in frags {
+            let ev = a.ingest(f, now: now)
+            XCTAssertFalse(ev.contains { if case .lost = $0 { return true } else { return false } }, "declared lost mid-flight at \(now)")
+            if ev.contains(where: { if case .completed = $0 { return true } else { return false } }) { completed = true }
+            _ = a.tick(now: now + 15_000_000)
+            now += 30_000_000
+        }
+        XCTAssertTrue(completed)
+    }
+
     func testParityRebuildsOneLostFragment() {
         var a = FrameAssembler()
         let payload = Data((0..<3500).map { UInt8($0 & 0xff) })

@@ -219,7 +219,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             self.refinementInFlight = max(0, self.refinementInFlight - sent.refinement)
             if sent.block { self.freshBlockAcked(); self.freshBlocksStep(now: now) }
             self.rc?.delaySample(sentNanos: sent.nanos, receivedNanos: tileAck.receivedNanos, now: now)
-            for k in self.tileSent.keys where k < tileAck.msgSeq &- 64 { if let v = self.tileSent.removeValue(forKey: k) { self.refinementInFlight = max(0, self.refinementInFlight - v.refinement) } }
+            // Prune by age (a big refinement block legitimately outlives dozens of interactive acks).
+            for (k, v) in self.tileSent where now - v.nanos > 20_000_000_000 { self.tileSent[k] = nil; self.refinementInFlight = max(0, self.refinementInFlight - v.refinement) }
         }
     }
 
@@ -456,18 +457,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         refine(now: now)
     }
 
-    /// Tiles within ~200 px (native) of the last input event, and the rest.
+    /// Tiles within ~200 px (native) of the last input event, and the rest (TileScheduler, unit-tested).
     private func splitByLocus(_ tiles: [Int], tracker: TileTracker) -> ([Int], [Int]) {
-        guard let l = injector?.locus else { return ([], tiles) }
-        let lx = Int(l.x * Double(tracker.width)), ly = Int(l.y * Double(tracker.height))
-        let radius = 200
-        var near: [Int] = [], far: [Int] = []
-        for i in tiles {
-            let r = tracker.rect(of: i)
-            let cx = r.x + r.width / 2, cy = r.y + r.height / 2
-            if abs(cx - lx) <= radius + r.width / 2 && abs(cy - ly) <= radius + r.height / 2 { near.append(i) } else { far.append(i) }
-        }
-        return (near, far)
+        let l = injector?.locus.map { (x: Int($0.x * Double(tracker.width)), y: Int($0.y * Double(tracker.height))) }
+        let o = TileScheduler.order(changed: tiles, refinement: [], locus: l, tracker: tracker)
+        return (o.locus, o.changed)
     }
     private var lastDirectNanos: UInt64 = 0
 
@@ -496,13 +490,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     enum Fresh: CustomStringConvertible, Equatable {
         case base(seq: UInt32)          // waiting for the ack of the tiny keyframe
         case climb(seq: UInt32)         // waiting for the ack of the last ladder step
-        case blocks(remaining: [PixelRect], inFlightBytes: Int)
+        case blocks(remaining: [PixelRect], inFlightBytes: Int, sentNanos: UInt64 = 0)
         case done
         var description: String {
             switch self {
             case .base(let s): return "base(\(s))"
             case .climb(let s): return "climb(\(s))"
-            case .blocks(let r, let b): return "blocks(\(r.count) left, \(b) B in flight)"
+            case .blocks(let r, let b, _): return "blocks(\(r.count) left, \(b) B in flight)"
             case .done: return "done"
             }
         }
@@ -557,8 +551,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// Sends the next large lossless block when the previous one is acked (one in flight), within budget.
     private func freshBlocksStep(now: UInt64) {
-        guard case .blocks(var remaining, let inFlight) = fresh else { return }
-        guard inFlight == 0 else { return }
+        guard case .blocks(var remaining, let inFlight, let sentAt) = fresh else { return }
+        if inFlight > 0 {
+            // A block whose ack never comes (a viewer that dropped the message, a stale ack) must not
+            // freeze the picture: after ~3 RTT + 2 s treat it as done and move on.
+            guard now - sentAt > UInt64(3 * srttNanos) + 2_000_000_000 else { return }
+            log("fresh picture: block ack timed out after \((now - sentAt) / 1_000_000) ms; continuing")
+        }
         guard !remaining.isEmpty else { fresh = .done; log("fresh picture: complete"); return }
         guard let src = lastFrame, var tracker else { return }
         refillTiles(now: now)
@@ -575,10 +574,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let covered = tracker.tiles(covering: [rect]).filter { tracker.rect(of: $0).intersection(rect) == tracker.rect(of: $0) }
         tracker.sent(lossless: covered, now: now)
         self.tracker = tracker
-        fresh = .blocks(remaining: remaining, inFlightBytes: est)
+        fresh = .blocks(remaining: remaining, inFlightBytes: est, sentNanos: now)
     }
     private func freshBlockAcked() {
-        if case .blocks(let remaining, _) = fresh { fresh = .blocks(remaining: remaining, inFlightBytes: 0) }
+        if case .blocks(let remaining, _, _) = fresh { fresh = .blocks(remaining: remaining, inFlightBytes: 0) }
     }
     /// Refinement bytes sent but not yet acked by the viewer (bounded so refinement cannot fill the link's queue).
     private var refinementInFlight = 0

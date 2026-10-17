@@ -248,8 +248,10 @@ public struct FrameAssembler {
     private var partials: [UInt32: Partial] = [:]
     /// Highest sequence delivered (completed or lost); nothing at or below it is delivered again.
     private var delivered: UInt32? = nil
-    /// A frame still incomplete after this long (receiver clock) is given up; the viewer sets it from the RTT.
+    /// A frame whose fragments stopped arriving this long ago (receiver clock) is given up; the viewer sets it from the RTT.
     public var timeoutNanos: UInt64 = 600_000_000
+    /// Absolute cap on a frame's age, whatever keeps trickling in.
+    public var maxFrameAgeNanos: UInt64 = 8_000_000_000
     /// Missing fragments are asked for this long after the frame's last fragment arrived.
     public var nackAfterNanos: UInt64 = 30_000_000
     public var maxNacks = 2
@@ -344,7 +346,9 @@ public struct FrameAssembler {
                 }
                 continue
             }
-            if now - p.firstNanos > timeoutNanos || (p.count == 0 && now - p.firstNanos > timeoutNanos) {
+            // Give up on the gap since the LAST fragment, not the age of the frame: a paced keyframe
+            // arrives over a second or more and must not be declared lost while still flowing.
+            if now - p.lastNanos > timeoutNanos || now - p.firstNanos > maxFrameAgeNanos {
                 partials[seq] = nil; delivered = seq; events.append(.lost(seq: seq)); continue
             }
             // Head of line has a hole: ask for the missing fragments once the gap is older than a reorder.
