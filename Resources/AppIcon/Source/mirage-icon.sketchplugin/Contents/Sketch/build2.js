@@ -91,6 +91,47 @@ function displacedReflection(scale, cx, cy) {
   return 'M' + out.map(function (q) { return q[0] + ',' + q[1]; }).join(' L') + ' Z';
 }
 
+// ---- Fine grain: a faint field of tiny flat specks (squares, discs, jagged chips) under the big grains.
+// Deterministic, vector, grouped into six compound shapes (shape type x tone) so it stays editable.
+function lcg(seed) { var x = seed >>> 0; return function () { x = (x * 1664525 + 1013904223) >>> 0; return x / 4294967296; }; }
+function fineGrain(parent) {
+  var rnd = lcg(20261017), N = 3200, top = HORIZON + 6, h = 1024 - top;
+  var buckets = { square_dark: [], square_light: [], disc_dark: [], disc_light: [], chip_dark: [], chip_light: [] };
+  function f(v) { return v.toFixed(2); }
+  for (var i = 0; i < N; i++) {
+    var u = rnd(), t = Math.pow(u, 0.85);                 // slightly denser toward the bottom
+    var y = top + t * h, x = rnd() * 1024;
+    var r = (0.55 + 1.7 * t) * (0.6 + 0.8 * rnd());       // radius in px, grows with proximity
+    var rot = rnd() * Math.PI, k = rnd(), tone = rnd() < 0.5 ? 'dark' : 'light', d;
+    if (k < 0.34) {                                       // rotated square
+      var c = Math.cos(rot) * r, sn = Math.sin(rot) * r;
+      d = 'M' + f(x + c - sn) + ',' + f(y + sn + c) + ' L' + f(x - c - sn) + ',' + f(y - sn + c) + ' L' + f(x - c + sn) + ',' + f(y - sn - c) + ' L' + f(x + c + sn) + ',' + f(y + sn - c) + ' Z';
+      buckets['square_' + tone].push(d);
+    } else if (k < 0.66) {                                // disc
+      d = 'M' + f(x - r) + ',' + f(y) + ' a' + f(r) + ',' + f(r) + ' 0 1,0 ' + f(2 * r) + ',0 a' + f(r) + ',' + f(r) + ' 0 1,0 ' + f(-2 * r) + ',0 Z';
+      buckets['disc_' + tone].push(d);
+    } else {                                              // jagged chip: 5-7 vertices at uneven radii
+      var n = 5 + Math.floor(rnd() * 3), pts = [];
+      for (var j = 0; j < n; j++) { var a = rot + (j / n) * 2 * Math.PI + (rnd() - 0.5) * 0.5, rr = r * (0.55 + 0.7 * rnd()); pts.push(f(x + Math.cos(a) * rr) + ',' + f(y + Math.sin(a) * rr)); }
+      buckets['chip_' + tone].push('M' + pts.join(' L') + ' Z');
+    }
+  }
+  var g = G('Fine Grain', parent);
+  // fade the specks out toward the horizon (distance haze) with an alpha mask
+  var m = rect(g, 'Grain Fade', 0, HORIZON, 1024, 1024 - HORIZON, lin([[0, 'rgba(0,0,0,0)'], [0.18, 'rgba(0,0,0,0.6)'], [0.45, 'rgba(0,0,0,1)'], [1, 'rgba(0,0,0,1)']]));
+  m.sketchObject.hasClippingMask = true; m.sketchObject.clippingMaskMode = 1;
+  var tones = { dark: 'rgba(118,88,52,0.42)', light: 'rgba(255,251,238,0.55)' };
+  Object.keys(buckets).forEach(function (key) {
+    if (!buckets[key].length) return;
+    var parts = key.split('_'), shapeName = parts[0], toneName = parts[1];
+    var d = buckets[key].join(' ');
+    var sh = path(g, 'Grain ' + shapeName + ' ' + toneName, d, solid(tones[toneName]));
+    try { sh.sketchObject.style().setWindingRule(1); } catch (e) {}
+  });
+  g.adjustToFit();
+  return g;
+}
+
 function buildIcon(ab, opts) {
   var icon = G('Icon', ab);
   var mask = radius(rect(icon, 'Squircle Mask', 100, 100, 824, 824, solid('#FFFFFF')), 185, true);
@@ -110,6 +151,8 @@ function buildIcon(ab, opts) {
   var sand = G('Sand', icon);
   var sandImg = new Image({ name: 'Sand Plane', parent: sand, image: OUT + '/export/textures/sand.png',
     frame: new Rectangle(0, HORIZON, 1024, 1024 - HORIZON) });
+  var grain = fineGrain(sand);
+  grain.style.opacity = 0.6;   // start faint
   // heat shimmer: horizontal motion blur of whatever is behind, right at the horizon line
   var shimmer = G('Heat Shimmer', sand);
   var shimMask = rect(shimmer, 'Shimmer Fade', 0, HORIZON - 14, 1024, 64, lin([
