@@ -403,28 +403,36 @@ final class DelayControllerTests: XCTestCase {
             now += 300_000_000
         }
         XCTAssertLessThan(rc.queueMs, 15, "tile acks never feed the path-delay estimate")
-        for _ in 0..<6 { rc.tick(now: now); rc.probeSample(sentNanos: now, receivedNanos: now + UInt64(base), now: now + 148_000_000); now += 1_000_000_000 }
-        XCTAssertLessThan(rc.queueMs, 15)
+        for _ in 0..<6 { rc.tick(now: now); rc.probeSample(sentNanos: now, receivedNanos: now + UInt64(base) + 95_000_000, now: now + 148_000_000); now += 1_000_000_000 }
+        XCTAssertLessThan(rc.queueMs, 15, "probes 95 ms late (our own send buffering) do not feed it either")
         XCTAssertEqual(rc.targetKbps, 800)
         XCTAssertEqual(rc.tier, .constrained)
         XCTAssertNotEqual(rc.rung, RateController.tinyRung)
     }
 
-    /// Genuine path queuing seen by the video and probe samples still backs the target off.
-    func testVideoAndProbeQueuingStillBackOff() {
+    /// Genuine path queuing seen by video samples while video flows still backs the target off; the same
+    /// samples with video at a trickle (one small frame a second) do not.
+    func testVideoQueuingBacksOffOnlyWhileVideoFlows() {
         var rc = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 1108 * 720)
         let base = 74_000_000.0
         var now: UInt64 = 1_000_000_000
-        rc.probeSample(sentNanos: now, receivedNanos: now + UInt64(base), now: now + 148_000_000)
-        for _ in 0..<20 {   // 2 s of frames arriving 150 ms late: a queue is building on the path
+        for _ in 0..<10 {   // 1 s of frames at the baseline first
+            now += 100_000_000
+            rc.frameAcked(sentNanos: now, firstReceived: now + UInt64(base), lastReceived: now + UInt64(base) + 2_000_000, fragments: 1, bytes: 6000, now: now + 150_000_000, rttNanos: 148_000_000)
+        }
+        for _ in 0..<20 {   // 2 s of 6 KB frames arriving 150 ms late: 480 kbps of video, a queue on the path
             now += 100_000_000
             rc.frameAcked(sentNanos: now, firstReceived: now + UInt64(base) + 150_000_000, lastReceived: now + UInt64(base) + 152_000_000, fragments: 1, bytes: 6000, now: now + 300_000_000, rttNanos: 300_000_000)
         }
         XCTAssertLessThan(rc.targetKbps, 700, "video samples 150 ms late must cost a decrease (\(rc.targetKbps))")
         var rc2 = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 1108 * 720)
         now = 1_000_000_000
-        for _ in 0..<6 { rc2.probeSample(sentNanos: now, receivedNanos: now + UInt64(base) + (now > 2_000_000_000 ? 150_000_000 : 0), now: now + 148_000_000); now += 1_000_000_000 }
-        XCTAssertLessThan(rc2.targetKbps, 700, "probe samples 150 ms late must cost a decrease too (\(rc2.targetKbps))")
+        rc2.frameAcked(sentNanos: now, firstReceived: now + UInt64(base), lastReceived: now + UInt64(base) + 2_000_000, fragments: 1, bytes: 6000, now: now + 150_000_000, rttNanos: 148_000_000)
+        for _ in 0..<6 {   // one 1 KB frame a second (8 kbps), 150 ms late: not video flowing
+            now += 1_000_000_000
+            rc2.frameAcked(sentNanos: now, firstReceived: now + UInt64(base) + 150_000_000, lastReceived: now + UInt64(base) + 152_000_000, fragments: 1, bytes: 1000, now: now + 300_000_000, rttNanos: 300_000_000)
+        }
+        XCTAssertEqual(rc2.targetKbps, 800, "a trickle of video cannot congest the link")
     }
 }
 
@@ -494,19 +502,23 @@ final class IdleDelayEstimateTests: XCTestCase {
             now += 1_000_000_000
             rc.tick(now: now)
             rc.delaySample(sentNanos: now, receivedNanos: now + UInt64(base) + 85_000_000, bytes: 300, now: now + 200_000_000)
-            if probes { rc.probeSample(sentNanos: now, receivedNanos: now + UInt64(base), now: now + 145_000_000) }
+            if probes { rc.probeSample(sentNanos: now, receivedNanos: now + UInt64(base) + 95_000_000, now: now + 145_000_000) }
             if sec == 3 { queueAt3s = rc.queueMs }
         }
+        for _ in 0..<8 { now += 1_000_000_000; rc.tick(now: now) }   // a quiet screen for a while longer: the ladder climbs
         return (queueAt3s, rc.targetKbps)
     }
 
-    func testIdleLinkWithProbesReadsNoQueueAndHoldsTheCap() {
+    /// Static screen: refinement blocks and small tiles 85 ms late, probes 95 ms late (all our own send
+    /// buffering), no video → queue reads ~0, target at the cap, tier Constrained, the ladder climbs.
+    func testStaticScreenReadsNoQueueHoldsTheCapAndClimbs() {
         var rc = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 1108 * 720)
         let r = burstThenIdle(&rc, probes: true)
         XCTAssertLessThan(r.queueAt3s, 15, "queue \(r.queueAt3s) ms three seconds into an idle link")
         XCTAssertEqual(r.target, 800)
-        XCTAssertEqual(rc.lastSampleSource, "probe")
+        XCTAssertEqual(rc.lastSampleSource, "idle")
         XCTAssertEqual(rc.tier, .constrained)
+        XCTAssertLessThan(rc.rung, RateController.tinyRung, "the ladder climbs on a quiet link at the cap")
     }
 
     func testStaleEstimateDecaysWithoutSamples() {
@@ -514,7 +526,6 @@ final class IdleDelayEstimateTests: XCTestCase {
         let r = burstThenIdle(&rc, probes: false)
         XCTAssertLessThan(r.queueAt3s, 15, "a queue estimate nobody refreshed decays toward zero: \(r.queueAt3s) ms")
         XCTAssertEqual(r.target, 800)
-        XCTAssertEqual(rc.lastSampleSource, "decay")
     }
 }
 

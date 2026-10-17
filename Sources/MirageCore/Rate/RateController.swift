@@ -121,12 +121,20 @@ public struct RateController {
         rung = Self.tinyRung; belowSince = 0; aboveSince = 0; lastRungChange = now
     }
 
+    /// Video bytes acked in the last second (delay-driven back-off applies only while video actually
+    /// flows at ≥ 20 % of the target: an idle picture's stray sample must not halve the rate).
+    private var ackedBytes: [(nanos: UInt64, bytes: Int)] = []
+    public var recentVideoKbps: Int {
+        ackedBytes.reduce(0) { $0 + $1.bytes } * 8 / 1000
+    }
+
     /// One acked frame: when the host sent its first datagram, when the viewer saw the first and
     /// last datagram, how many datagrams, how many bytes.
     /// `recovered`: the frame needed parity or a NACK, so its arrival time says nothing about the path's
     /// queue (a NACK round trip is not queuing delay); it counts as acked and nothing else.
     public mutating func frameAcked(sentNanos: UInt64, firstReceived: UInt64, lastReceived: UInt64, fragments: Int, bytes: Int, now: UInt64, rttNanos: Double?, recovered: Bool = false) {
         if recovered { ackedFrames += 1; return }
+        ackedBytes.append((now, bytes)); ackedBytes.removeAll { now &- $0.nanos > 1_000_000_000 }
         if let rtt = rttNanos {
             srttNanos = srttNanos * 0.8 + rtt * 0.2
             if minRTTWindowStart == 0 { minRTTWindowStart = now }
@@ -170,16 +178,17 @@ public struct RateController {
 
     /// A delay probe's echo: the host sent a 32-byte datagram at `sentNanos` (host clock), the viewer
     /// stamped it `receivedNanos` (its clock) and sent it straight back, arriving `now`. The host sends
-    /// one every second unconditionally (0.3 kbps): with video it is the second path-delay source, on an
-    /// idle picture the only one, and its RTT is the srtt source when video is idle.
+    /// one every second unconditionally (0.3 kbps); it is the srtt / min-RTT source when video is idle.
     public mutating func probeSample(sentNanos: UInt64, receivedNanos: UInt64, now: UInt64) {
+        // RTT and min-RTT only (mac-daddy, 2026-10-17 night: the probe datagram itself queues in the
+        // host's QUIC send path behind refinement blocks, so its one-way delay read 91–98 ms of our own
+        // buffering on an idle link and no baseline could tell). Path delay comes from video acks alone.
         let rtt = Double(now &- sentNanos)
         srttNanos = srttNanos * 0.8 + rtt * 0.2
         if minRTTWindowStart == 0 { minRTTWindowStart = now }
         minRTTCandidate = min(minRTTCandidate, rtt); minRTTNanos = min(minRTTNanos, rtt)
         if now - minRTTWindowStart > 30_000_000_000 { minRTTNanos = minRTTCandidate; minRTTCandidate = .infinity; minRTTWindowStart = now }
-        noteOWD(Double(receivedNanos) - Double(sentNanos), now: now, source: "probe")
-        adjust(now: now)
+        _ = receivedNanos
     }
 
     /// Nanoseconds since the last delay sample of any kind (0 = none yet).
@@ -193,11 +202,19 @@ public struct RateController {
         guard lastSampleNanos > 0, !owdEWMA.isNaN, baseOWD.isFinite else { return }
         let age = Double(now &- lastSampleNanos) / 1e9
         if age > 1 {
+            // No video for a second: you cannot congest a link you are not sending video on, and the
+            // reliable streams are bounded by their own budget. The estimate decays to zero and the
+            // target floats back toward the cap (×1.25 per second), so the next motion starts near it.
             let dt = min(age - 1, 5)
             let factor = exp(-dt)
             owdEWMA = baseOWD + (owdEWMA - baseOWD) * factor
             queueMs = max(0, (owdEWMA - baseOWD) / 1e6)
-            if age > 2 { lastSampleSource = "decay" }
+            if age > 2 { lastSampleSource = "idle" }
+            let ceiling = capacityKbps > 0 ? min(maxKbps, max(tuning.minKbps, Int(Double(capacityKbps) * tuning.capacityFraction))) : maxKbps
+            if targetKbps < ceiling, now &- lastIncreaseNanos >= 900_000_000 {
+                targetKbps = min(ceiling, Int(Double(targetKbps) * tuning.probeIncrease)); lastIncreaseNanos = now
+                if targetKbps >= ceiling { probing = false }
+            }
             adjust(now: now)
         }
     }
@@ -231,7 +248,9 @@ public struct RateController {
 
     private mutating func adjust(now: UInt64) {
         let ceiling = capacityKbps > 0 ? min(maxKbps, max(tuning.minKbps, Int(Double(capacityKbps) * tuning.capacityFraction))) : maxKbps
-        if queueMs > tuning.overuseMs {
+        ackedBytes.removeAll { now &- $0.nanos > 1_000_000_000 }
+        let videoFlowing = recentVideoKbps * 5 >= targetKbps
+        if queueMs > tuning.overuseMs, videoFlowing {
             underSince = 0
             if Double(now - lastDecreaseNanos) > srttNanos {
                 targetKbps = max(tuning.minKbps, Int(Double(targetKbps) * tuning.decrease))
