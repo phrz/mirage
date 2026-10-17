@@ -95,16 +95,16 @@ function displacedReflection(scale, cx, cy) {
 // Deterministic, vector, grouped into six compound shapes (shape type x tone) so it stays editable.
 function lcg(seed) { var x = seed >>> 0; return function () { x = (x * 1664525 + 1013904223) >>> 0; return x / 4294967296; }; }
 function fineGrain(parent) {
-  var rnd = lcg(20261017), N = 7000, top = HORIZON + 6, h = 1024 - top;
+  var rnd = lcg(20261017), N = 11000, top = HORIZON + 6, h = 1024 - top;
   var buckets = {}; ['square', 'disc', 'chip'].forEach(function (sh) { ['dark', 'light', 'glint'].forEach(function (tn) { buckets[sh + '_' + tn] = []; }); });
   function f(v) { return v.toFixed(2); }
   for (var i = 0; i < N; i++) {
     var u = rnd(), t = Math.pow(u, 0.85);                 // slightly denser toward the bottom
     var y = top + t * h, x = rnd() * 1024;
     var r = (0.28 + 0.75 * t) * (0.5 + 0.8 * rnd());      // radius in px: well under the big grains
-    var tr = rnd(), tone = tr < 0.36 ? 'dark' : (tr < 0.9 ? 'light' : 'glint');   // glints: pure white sparkle
+    var tr = rnd(), tone = tr < 0.24 ? 'dark' : (tr < 0.78 ? 'light' : 'glint');   // glints: pure white sparkle
     var rot = rnd() * Math.PI, k = rnd(), d;
-    if (tone === 'glint') r *= 0.8;
+    if (tone === 'glint') r *= 0.9;
     if (k < 0.34) {                                       // rotated square
       var c = Math.cos(rot) * r, sn = Math.sin(rot) * r;
       d = 'M' + f(x + c - sn) + ',' + f(y + sn + c) + ' L' + f(x - c - sn) + ',' + f(y - sn + c) + ' L' + f(x - c + sn) + ',' + f(y - sn - c) + ' L' + f(x + c + sn) + ',' + f(y + sn - c) + ' Z';
@@ -122,7 +122,7 @@ function fineGrain(parent) {
   // fade the specks out toward the horizon (distance haze) with an alpha mask
   var m = rect(g, 'Grain Fade', 0, HORIZON, 1024, 1024 - HORIZON, lin([[0, 'rgba(0,0,0,0)'], [0.18, 'rgba(0,0,0,0.6)'], [0.45, 'rgba(0,0,0,1)'], [1, 'rgba(0,0,0,1)']]));
   m.sketchObject.hasClippingMask = true; m.sketchObject.clippingMaskMode = 1;
-  var tones = { dark: 'rgba(150,94,44,0.34)', light: 'rgba(255,253,244,0.92)', glint: 'rgba(255,255,255,1)' };   // sand is never grey
+  var tones = { dark: 'rgba(150,94,44,0.34)', light: 'rgba(255,254,248,1)', glint: 'rgba(255,255,255,1)' };   // sand is never grey
   Object.keys(buckets).forEach(function (key) {
     if (!buckets[key].length) return;
     var parts = key.split('_'), shapeName = parts[0], toneName = parts[1];
@@ -154,7 +154,7 @@ function buildIcon(ab, opts) {
   var sandImg = new Image({ name: 'Sand Plane', parent: sand, image: OUT + '/export/textures/sand.png',
     frame: new Rectangle(0, HORIZON, 1024, 1024 - HORIZON) });
   var grain = fineGrain(sand);
-  grain.style.opacity = 0.75;
+  grain.style.opacity = 0.9;
   // the big grains (with their shadows and contact edges) sit ABOVE the fine grain
   new Image({ name: 'Sand Grains', parent: sand, image: OUT + '/export/textures/sand-grains.png',
     frame: new Rectangle(0, HORIZON, 1024, 1024 - HORIZON) });
