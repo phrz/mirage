@@ -90,9 +90,9 @@ final class ViewerSession: @unchecked Sendable {
     /// Scenario watch rect: last lossless tile / video frame that touched it.
     var watchRect: PixelRect = .zero
     private(set) var lastWatchedTileNanos: UInt64 = 0, lastWatchedVideoNanos: UInt64 = 0
-    private(set) var watchedTileBytes = 0, watchedTileCount = 0
+    private(set) var watchedTileBytes = 0, watchedTileCount = 0, watchedDirectBytes = 0
     static let debugTiles = ProcessInfo.processInfo.environment["MIRAGE_DEBUG_TILES"] != nil
-    func resetWatched() { videoQueue.async { self.watchedTileBytes = 0; self.watchedTileCount = 0 } }
+    func resetWatched() { videoQueue.async { self.watchedTileBytes = 0; self.watchedTileCount = 0; self.watchedDirectBytes = 0 } }
     func windowsSnapshot() -> [ControlMessage.WindowInfo] { predictorLock.lock(); defer { predictorLock.unlock() }; return windows }
     var scenario: ScenarioRunner?
 
@@ -237,6 +237,7 @@ final class ViewerSession: @unchecked Sendable {
                 let inside = t.tiles.filter { $0.rect.intersects(watchRect) }
                 if !inside.isEmpty {
                     lastWatchedTileNanos = now; watchedTileBytes += inside.reduce(0) { $0 + $1.data.count }; watchedTileCount += inside.count
+                    if !t.refinement { watchedDirectBytes += inside.reduce(0) { $0 + $1.data.count } }
                     if Self.debugTiles { log("tiles\(t.refinement ? " (refine)" : "") seq \(t.header.captureSeq) in watch rect: " + inside.map { "\($0.rect.width)x\($0.rect.height)@\($0.rect.x),\($0.rect.y) \($0.data.count)B \($0.format)" }.joined(separator: "  ")) }
                 }
             }
@@ -483,7 +484,7 @@ extension ViewerSession {
             var framesTotal: Int, lostTotal: Int, skippedTotal: Int, tileRectsTotal: Int, copyRectsTotal: Int
             var predictionsShown: Int, predictionsConfirmed: Int, predictionsMismatched: Int
             var scenario: String?, crispMs: [Double]?, crispMsMedian: Double?, crispMsMax: Double?
-            var watchedTileBytes: Int?, watchedTileCount: Int?, watchedKbps: Double?
+            var watchedTileBytes: Int?, watchedTileCount: Int?, watchedKbps: Double?, watchedDirectKbps: Double?
             var samples: [Sample]
         }
         let target = MainActor.assumeIsolated { lastRequest?.bitrateKbps ?? 0 }
@@ -504,6 +505,7 @@ extension ViewerSession {
                       scenario: scenario?.name, crispMs: scenario?.crispMs, crispMsMedian: scenario.map { median($0.crispMs) }, crispMsMax: scenario?.crispMs.max(),
                       watchedTileBytes: scenario == nil ? nil : watchedTileBytes, watchedTileCount: scenario == nil ? nil : watchedTileCount,
                       watchedKbps: scenario.map { Double(watchedTileBytes) * 8 / 1000 / max(1, $0.activeSeconds) },
+                      watchedDirectKbps: scenario.map { Double(watchedDirectBytes) * 8 / 1000 / max(1, $0.activeSeconds) },
                       samples: samples)
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         return (try? enc.encode(out)) ?? Data()

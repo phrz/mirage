@@ -21,6 +21,16 @@ final class ScenarioRunner {
         if let w = session.windowsSnapshot().first(where: { $0.title.contains("Mirage Test Bench") }) { lastBench = w }
         return lastBench
     }
+    /// The bench's visible part (it may have drifted partly off-screen); points are picked inside it,
+    /// in its upper half, away from the Dock at the bottom of the display.
+    private func visible(_ w: ControlMessage.WindowInfo) -> PixelRect {
+        let c = session.compositor
+        return w.frame.intersection(PixelRect(x: 0, y: 0, width: c?.width ?? w.frame.maxX, height: c?.height ?? w.frame.maxY))
+    }
+    private func safePoint(_ w: ControlMessage.WindowInfo, ppp: Double) -> (Int, Int) {
+        let v = visible(w)
+        return (v.x + v.width / 2, min(v.y + Int(120 * ppp), v.maxY - Int(40 * ppp)))
+    }
     private func normalized(_ x: Int, _ y: Int) -> (Double, Double) {
         let c = session.compositor
         return (Double(x) / Double(max(1, c?.width ?? 1)), Double(y) / Double(max(1, c?.height ?? 1)))
@@ -70,7 +80,8 @@ final class ScenarioRunner {
         let started = Date()
         defer { activeSeconds = Date().timeIntervalSince(started) }
         // Raise the bench (a click inside its text) so the scenario drives it and not whatever covers it.
-        await click(w.frame.x + w.frame.width / 2, w.frame.maxY - Int(60 * ppp))
+        let (cx, cy) = safePoint(w, ppp: ppp)
+        await click(cx, cy)
         try? await Task.sleep(for: .milliseconds(800))
         switch name {
         case "idle":
@@ -89,7 +100,7 @@ final class ScenarioRunner {
                 try? await Task.sleep(for: .milliseconds(160))
             }
         case "scroll":
-            let x = w.frame.x + w.frame.width / 2, y = w.frame.y + w.frame.height / 2
+            let (x, y) = safePoint(w, ppp: ppp)
             let (nx, ny) = normalized(x, y)
             session.send(.mouseMove(.init(x: nx, y: ny)))
             var dir = -1.0
