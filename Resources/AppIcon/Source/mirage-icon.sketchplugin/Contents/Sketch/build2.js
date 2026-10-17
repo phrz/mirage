@@ -21,7 +21,22 @@ function rad(stops, from, to, aspect) {
     stops: stops.map(function (s) { return { position: s[0], color: s[1] }; }) } };
 }
 function solid(c) { return { fillType: Style.FillType.Color, color: c }; }
-function applyExtra(s, extra) { if (!extra) return s; Object.keys(extra).forEach(function (k) { s.style[k] = extra[k]; }); return s; }
+// Sketch 2026 styles carry a `blurs` array and the JS API's `style.blur` setter is a no-op (verified by
+// dumping the file), so blur goes through the native MSStyleBlur: type 0 = Gaussian, 1 = Motion, 2 = Zoom, 3 = Background.
+function setBlur(s, b) {
+  var types = {}; types[Style.BlurType.Gaussian] = 0; types[Style.BlurType.Motion] = 1; types[Style.BlurType.Zoom] = 2; types[Style.BlurType.Background] = 3;
+  var nb = MSStyleBlur.new();
+  nb.setType(types[b.blurType] !== undefined ? types[b.blurType] : 0);
+  nb.setRadius(b.radius);
+  nb.setIsEnabled(b.enabled !== false);
+  var arr = []; arr.push(nb);
+  s.sketchObject.style().setBlurs(arr);
+}
+function applyExtra(s, extra) {
+  if (!extra) return s;
+  Object.keys(extra).forEach(function (k) { if (k === 'blur') setBlur(s, extra[k]); else s.style[k] = extra[k]; });
+  return s;
+}
 function rect(parent, name, x, y, w, h, fills, extra) {
   var s = new ShapePath({ name: name, parent: parent, shapeType: ShapePath.ShapeType.Rectangle,
     frame: new Rectangle(x, y, w, h), style: { fills: arr(fills), borders: [] } });
@@ -52,30 +67,76 @@ var ARROW = 'M0,0 L0,82 L19.5,64 L33.5,95 L47.5,88.5 L33.5,58.5 L60,58.5 Z';
 // Inverted, squashed copy of the pointer whose outline is displaced horizontally by a smooth
 // shimmer function of depth. Edges are subdivided so the wobble shows along vertical edges.
 var ARROW_PTS = [[0, 0], [0, 82], [19.5, 64], [33.5, 95], [47.5, 88.5], [33.5, 58.5], [60, 58.5]];
-function shimmer(r) {   // r = px below the horizon
-  var amp = 1.5 + 0.075 * r;
-  return amp * (0.55 * Math.sin(r / 9.5) + 0.45 * Math.sin(r / 4.1 + 1.3) + 0.25 * Math.sin(r / 17 + 0.4)) + 2.5 * Math.sin(r / 31);
-}
+// Heat-shimmer warp for the inverted image. Primary motion is VERTICAL: rows are pushed up/down by a
+// sine keyed on depth below the horizon (like a rippled water reflection), amplitude growing with depth.
+// A much shorter-wavelength, small horizontal jiggle rides on top.
+var BAND = 56;   // px below the horizon where the mirage sheet has faded out (matches gen_textures band)
+function warpY(r) { return (0.8 + 0.075 * r) * Math.sin(r / 2.6 + 0.6) + (0.4 + 0.03 * r) * Math.sin(r / 6.1 + 2.0); }
+function warpX(r) { return 1.1 * Math.sin(r / 0.9) + 0.6 * Math.sin(r / 1.7 + 1.0); }
 function displacedReflection(scale, cx, cy) {
-  var squash = 0.5, bottom = cy + 95 * scale, centre = cx + 30 * scale;
-  function map(p) {  // design units -> reflected absolute point (before displacement)
-    var X = cx + p[0] * scale, Y = cy + p[1] * scale;
-    return [X, HORIZON + (bottom - Y) * squash];
-  }
+  var squash = 0.5;
+  function map(p) { var X = cx + p[0] * scale, Y = cy + p[1] * scale; return [X, HORIZON + (HORIZON - Y) * squash]; }
   var out = [];
   for (var i = 0; i < ARROW_PTS.length; i++) {
     var a = map(ARROW_PTS[i]), b = map(ARROW_PTS[(i + 1) % ARROW_PTS.length]);
-    var n = Math.max(1, Math.ceil(Math.abs(b[1] - a[1]) / 1.5));
+    var len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    var n = Math.max(1, Math.ceil(len / 1.2));            // dense sampling on every edge so the y-warp shows
     for (var k = 0; k < n; k++) {
       var t = k / n, x = a[0] + (b[0] - a[0]) * t, y = a[1] + (b[1] - a[1]) * t;
-      var r = y - HORIZON, stretch = 1 + 0.0012 * r;
-      out.push([(centre + (x - centre) * stretch + shimmer(r)).toFixed(2), y.toFixed(2)]);
+      var r = Math.max(0, y - HORIZON);
+      var yy = Math.max(HORIZON, y + warpY(r)), xx = x + warpX(r);
+      out.push([xx.toFixed(2), yy.toFixed(2)]);
     }
   }
   return 'M' + out.map(function (q) { return q[0] + ',' + q[1]; }).join(' L') + ' Z';
 }
 
+// ---- Fine grain: a faint field of tiny flat specks (squares, discs, jagged chips) under the big grains.
+// Deterministic, vector, grouped into six compound shapes (shape type x tone) so it stays editable.
+function lcg(seed) { var x = seed >>> 0; return function () { x = (x * 1664525 + 1013904223) >>> 0; return x / 4294967296; }; }
+function fineGrain(parent) {
+  var rnd = lcg(20261017), N = 11000, top = HORIZON + 6, h = 1024 - top;
+  var buckets = {}; ['square', 'disc', 'chip'].forEach(function (sh) { ['dark', 'light', 'glint'].forEach(function (tn) { buckets[sh + '_' + tn] = []; }); });
+  function f(v) { return v.toFixed(2); }
+  for (var i = 0; i < N; i++) {
+    var u = rnd(), t = Math.pow(u, 1.15);                 // perspective packs more grains per pixel in the distance
+    var y = top + t * h, x = rnd() * 1024;
+    var r = (0.5 + 0.45 * t) * (0.5 + 0.8 * rnd());       // radius in px: gentle perspective, specular points stay visible far off
+    var tr = rnd(), tone = tr < 0.24 ? 'dark' : (tr < 0.78 ? 'light' : 'glint');   // glints: pure white sparkle
+    var rot = rnd() * Math.PI, k = rnd(), d;
+    if (tone === 'glint') r *= 0.9;
+    if (k < 0.34) {                                       // rotated square
+      var c = Math.cos(rot) * r, sn = Math.sin(rot) * r;
+      d = 'M' + f(x + c - sn) + ',' + f(y + sn + c) + ' L' + f(x - c - sn) + ',' + f(y - sn + c) + ' L' + f(x - c + sn) + ',' + f(y - sn - c) + ' L' + f(x + c + sn) + ',' + f(y + sn - c) + ' Z';
+      buckets['square_' + tone].push(d);
+    } else if (k < 0.66) {                                // disc
+      d = 'M' + f(x - r) + ',' + f(y) + ' a' + f(r) + ',' + f(r) + ' 0 1,0 ' + f(2 * r) + ',0 a' + f(r) + ',' + f(r) + ' 0 1,0 ' + f(-2 * r) + ',0 Z';
+      buckets['disc_' + tone].push(d);
+    } else {                                              // jagged chip: 5-7 vertices at uneven radii
+      var n = 5 + Math.floor(rnd() * 3), pts = [];
+      for (var j = 0; j < n; j++) { var a = rot + (j / n) * 2 * Math.PI + (rnd() - 0.5) * 0.5, rr = r * (0.55 + 0.7 * rnd()); pts.push(f(x + Math.cos(a) * rr) + ',' + f(y + Math.sin(a) * rr)); }
+      buckets['chip_' + tone].push('M' + pts.join(' L') + ' Z');
+    }
+  }
+  var g = G('Fine Grain', parent);
+  // fade the specks out toward the horizon (distance haze) with an alpha mask
+  var m = rect(g, 'Grain Fade', 0, HORIZON, 1024, 1024 - HORIZON, lin([[0, 'rgba(0,0,0,0.35)'], [0.12, 'rgba(0,0,0,0.85)'], [0.3, 'rgba(0,0,0,1)'], [1, 'rgba(0,0,0,1)']]));
+  m.sketchObject.hasClippingMask = true; m.sketchObject.clippingMaskMode = 1;
+  var tones = { dark: 'rgba(150,94,44,0.34)', light: 'rgba(255,254,248,1)', glint: 'rgba(255,255,255,1)' };   // sand is never grey
+  Object.keys(buckets).forEach(function (key) {
+    if (!buckets[key].length) return;
+    var parts = key.split('_'), shapeName = parts[0], toneName = parts[1];
+    var d = buckets[key].join(' ');
+    var sh = path(g, 'Grain ' + shapeName + ' ' + toneName, d, solid(tones[toneName]));
+    try { sh.sketchObject.style().setWindingRule(1); } catch (e) {}
+  });
+  g.adjustToFit();
+  return g;
+}
+
 function buildIcon(ab, opts) {
+  var F = opts.features || {};
+  var TEX = OUT + '/export/textures/' + (opts.tex || 'base');
   var icon = G('Icon', ab);
   var mask = radius(rect(icon, 'Squircle Mask', 100, 100, 824, 824, solid('#FFFFFF')), 185, true);
   mask.sketchObject.hasClippingMask = true;
@@ -87,12 +148,24 @@ function buildIcon(ab, opts) {
   ]));
   // sun is out of frame upper-left: a wide soft brightening of the sky toward that corner
   oval(sky, 'Sun Wash', -420, -520, 1100, 1100, rad([[0, 'rgba(255,255,255,0.35)'], [1, 'rgba(255,255,255,0)']]));
+  if (F.sky) {
+    // a light source: glare toward the upper-left, deeper zenith toward the upper-right, film grain against banding
+    oval(sky, 'Sun Glare', -700, -760, 1500, 1500, rad([[0, 'rgba(255,252,240,0.7)'], [0.45, 'rgba(255,250,235,0.22)'], [1, 'rgba(255,250,235,0)']]));
+    rect(sky, 'Zenith Deepen', 0, 0, 1024, HORIZON, lin([[0, 'rgba(10,40,140,0.42)'], [0.55, 'rgba(10,40,140,0)']], { x: 1, y: 0 }, { x: 0.25, y: 1 }));
+    var grainImg = new Image({ name: 'Sky Grain', parent: sky, image: OUT + '/export/textures/sky-grain.png', frame: new Rectangle(0, 0, 1024, HORIZON) });
+    grainImg.style.blendingMode = Style.BlendingMode.Overlay; grainImg.style.opacity = 0.14;
+  }
   // atmospheric haze sitting on the horizon
   rect(sky, 'Horizon Haze', 0, HORIZON - 160, 1024, 160, lin([[0, 'rgba(236,243,250,0)'], [0.6, 'rgba(238,244,250,0.22)'], [1, 'rgba(240,245,250,0.5)']]));
 
   // ---- SAND: procedural raster plane (grain, speckle, ripples, mirage band baked in)
   var sand = G('Sand', icon);
-  var sandImg = new Image({ name: 'Sand Plane', parent: sand, image: OUT + '/export/textures/sand.png',
+  var sandImg = new Image({ name: 'Sand Plane', parent: sand, image: TEX + '/sand.png',
+    frame: new Rectangle(0, HORIZON, 1024, 1024 - HORIZON) });
+  var grain = fineGrain(sand);
+  grain.style.opacity = 0.9;
+  // the big grains (with their shadows and contact edges) sit ABOVE the fine grain
+  new Image({ name: 'Sand Grains', parent: sand, image: TEX + '/sand-grains.png',
     frame: new Rectangle(0, HORIZON, 1024, 1024 - HORIZON) });
   // heat shimmer: horizontal motion blur of whatever is behind, right at the horizon line
   var shimmer = G('Heat Shimmer', sand);
@@ -100,7 +173,7 @@ function buildIcon(ab, opts) {
     [0, 'rgba(0,0,0,0)'], [0.3, 'rgba(0,0,0,1)'], [0.7, 'rgba(0,0,0,1)'], [1, 'rgba(0,0,0,0)']]));
   shimMask.sketchObject.hasClippingMask = true; shimMask.sketchObject.clippingMaskMode = 1;
   rect(shimmer, 'Shimmer Blur', 0, HORIZON - 14, 1024, 64, solid('rgba(255,255,255,0.01)'),
-    { blur: { blurType: Style.BlurType.Background, radius: 5, enabled: true } });
+    { blur: { blurType: Style.BlurType.Background, radius: 3, enabled: true } });
   // ---- optional WINDOW (glass frame) hovering above the horizon
   if (opts.window) {
     var win = G('Window', icon);
@@ -130,26 +203,47 @@ function buildIcon(ab, opts) {
 
   // ---- MIRAGE REFLECTION (part of the ground, not the pointer): inverted, squashed, outline displaced
   var refl = G('Mirage Reflection', sand);
-  var reflMask = rect(refl, 'Reflection Fade', cx - 80, HORIZON, 60 * scale + 160, 120, lin([
-    [0, 'rgba(0,0,0,1)'], [0.3, 'rgba(0,0,0,0.85)'], [0.7, 'rgba(0,0,0,0.3)'], [1, 'rgba(0,0,0,0)']]));
+  var reflMask = rect(refl, 'Reflection Fade', cx - 80, HORIZON, 60 * scale + 160, BAND, lin([
+    [0, 'rgba(0,0,0,1)'], [0.25, 'rgba(0,0,0,0.9)'], [0.5, 'rgba(0,0,0,0.55)'], [0.75, 'rgba(0,0,0,0.2)'], [1, 'rgba(0,0,0,0)']]));
   reflMask.sketchObject.hasClippingMask = true; reflMask.sketchObject.clippingMaskMode = 1;
-  path(refl, 'Reflected Pointer', displacedReflection(scale, cx, cy),
-    lin([[0, 'rgba(70,84,110,0.42)'], [1, 'rgba(70,84,110,0.18)']]), { blur: blur(2.5) });
+  var reflD = displacedReflection(scale, cx, cy);
+  path(refl, 'Reflected Keyline', reflD, solid('rgba(255,255,255,0.7)'), {
+    borders: [{ color: 'rgba(255,255,255,0.7)', thickness: 6 * scale / 3 * 0.75, position: Style.BorderPosition.Outside }], blur: blur(3) });
+  path(refl, 'Reflected Pointer', reflD,
+    lin([[0, 'rgba(62,76,104,0.78)'], [1, 'rgba(62,76,104,0.4)']]), { blur: blur(3) });
   // bright turbulent air veils the inverted image
-  rect(refl, 'Air Veil', cx - 80, HORIZON, 60 * scale + 160, 60, lin([[0, 'rgba(226,238,252,0.55)'], [1, 'rgba(226,238,252,0)']]));
+  rect(refl, 'Air Veil', cx - 80, HORIZON, 60 * scale + 160, BAND, lin([[0, 'rgba(226,238,252,0.3)'], [1, 'rgba(226,238,252,0)']]));
   refl.adjustToFit();
 
-  // ---- CURSOR: the macOS pointer standing on the vanishing line, its base dissolving into the sheet of light
+  // ---- CURSOR: the macOS pointer standing on the vanishing line
   var cur = G('Cursor', icon);
-  var curMask = rect(cur, 'Base Dissolve Mask', cx - 40, cy - 40, 60 * scale + 80, HORIZON - cy + 40, lin([
-    [0, 'rgba(0,0,0,1)'], [0.86, 'rgba(0,0,0,1)'], [0.95, 'rgba(0,0,0,0.6)'], [1, 'rgba(0,0,0,0.15)']]));
-  curMask.sketchObject.hasClippingMask = true; curMask.sketchObject.clippingMaskMode = 1;
-  arrow(cur, 'Pointer Keyline', solid('#FFFFFF'), {
-    borders: [{ color: '#FFFFFF', thickness: 6 * scale / 3, position: Style.BorderPosition.Outside }],
-    shadows: [{ color: 'rgba(10,20,50,0.16)', blur: 30, x: 0, y: 12, spread: 0 }]
-  });
-  arrow(cur, 'Pointer', lin([[0, '#2B2F3A'], [0.6, '#15171D'], [1, '#0A0B0F']], { x: 0.2, y: 0 }, { x: 0.8, y: 1 }));
-  arrow(cur, 'Pointer Edge Light', lin([[0, 'rgba(255,255,255,0.28)'], [0.25, 'rgba(255,255,255,0)'], [1, 'rgba(255,255,255,0)']], { x: 0, y: 0.5 }, { x: 1, y: 0.5 }));
+  if (F.cursor) {
+    // a physical object: white edge with thickness, glossy black body reflecting sky above and sand below,
+    // specular rim on the sun side, depth on the far side
+    arrow(cur, 'Pointer Keyline', lin([[0, '#FFFFFF'], [1, '#E3E7EE']], { x: 0, y: 0 }, { x: 1, y: 1 }), {
+      borders: [{ color: '#FFFFFF', thickness: 6 * scale / 3, position: Style.BorderPosition.Outside }],
+      shadows: [{ color: 'rgba(10,20,50,0.16)', blur: 30, x: 0, y: 12, spread: 0 }],
+      innerShadows: [{ color: 'rgba(40,60,100,0.25)', blur: 1.5, x: -1.5, y: -1.5, spread: 0 }]
+    });
+    var body = arrow(cur, 'Pointer', [
+      lin([[0, '#262A34'], [0.6, '#121419'], [1, '#07080B']], { x: 0.2, y: 0 }, { x: 0.8, y: 1 }),
+      lin([[0, 'rgba(140,180,240,0.55)'], [0.3, 'rgba(120,165,235,0.3)'], [0.36, 'rgba(120,165,235,0)'], [1, 'rgba(120,165,235,0)']]),   // sky reflected on the upper face, with a defined reflection edge
+      lin([[0, 'rgba(240,200,135,0)'], [0.62, 'rgba(240,200,135,0)'], [1, 'rgba(240,200,135,0.32)']])       // warm sand bounce along the base
+    ], {
+      innerShadows: [
+        { color: 'rgba(255,255,255,0.75)', blur: 0.6, x: 1.3, y: 1.3, spread: 0 },   // specular rim, sun side
+        { color: 'rgba(0,0,0,0.6)', blur: 3, x: -2, y: -2, spread: 0 }                // depth on the far edges
+      ]
+    });
+    arrow(cur, 'Pointer Edge Light', lin([[0, 'rgba(255,255,255,0.42)'], [0.18, 'rgba(255,255,255,0.06)'], [0.3, 'rgba(255,255,255,0)'], [1, 'rgba(255,255,255,0)']], { x: 0, y: 0.5 }, { x: 1, y: 0.5 }));
+  } else {
+    arrow(cur, 'Pointer Keyline', solid('#FFFFFF'), {
+      borders: [{ color: '#FFFFFF', thickness: 6 * scale / 3, position: Style.BorderPosition.Outside }],
+      shadows: [{ color: 'rgba(10,20,50,0.16)', blur: 30, x: 0, y: 12, spread: 0 }]
+    });
+    arrow(cur, 'Pointer', lin([[0, '#2B2F3A'], [0.6, '#15171D'], [1, '#0A0B0F']], { x: 0.2, y: 0 }, { x: 0.8, y: 1 }));
+    arrow(cur, 'Pointer Edge Light', lin([[0, 'rgba(255,255,255,0.28)'], [0.25, 'rgba(255,255,255,0)'], [1, 'rgba(255,255,255,0)']], { x: 0, y: 0.5 }, { x: 1, y: 0.5 }));
+  }
   cur.adjustToFit();
 
   sky.adjustToFit(); shimmer.adjustToFit(); sand.adjustToFit();
@@ -169,13 +263,27 @@ function onRun(context) {
   var page = doc.selectedPage; page.name = 'Icon';
 
   var A = new Artboard({ name: 'Mirage 1024', parent: page, frame: new Rectangle(0, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
-  buildIcon(A, { window: false, cursorScale: 3.3, cursorX: 432, cursorY: HORIZON - 95 * 3.3 });
+  buildIcon(A, { window: false, cursorScale: 3.3, cursorX: 432, cursorY: HORIZON - 95 * 3.3 - 2 * 3.3 - 3, features: { sky: true, sand: true }, tex: 'form' }); // keyline miter at the tail reaches ~2 px past the stroke width
   dbg('A built');
   var variants = new sketch.Page({ name: 'Variants', parent: doc });
   var B = new Artboard({ name: 'Mirage 1024 (window variant)', parent: variants, frame: new Rectangle(0, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
   buildIcon(B, { window: true, cursorScale: 2.4, cursorX: 560, cursorY: 400 });
   dbg('B built');
 
+  // Study page: the candidate refinements added one at a time, left to right
+  var study = new sketch.Page({ name: 'Study', parent: doc });
+  var steps = [
+    ['1 Baseline', {}, 'base'],
+    ['2 + Cursor material', { cursor: true }, 'base'],
+    ['3 + Directional sky', { cursor: true, sky: true }, 'base'],
+    ['4 + Sand form, minerals', { cursor: true, sky: true, sand: true }, 'form'],
+    ['5 + Horizon waver', { cursor: true, sky: true, sand: true, horizon: true }, 'formwaver']
+  ];
+  steps.forEach(function (st, i) {
+    var sb = new Artboard({ name: st[0], parent: study, frame: new Rectangle(i * 1124, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
+    buildIcon(sb, { window: false, cursorScale: 3.3, cursorX: 432, cursorY: HORIZON - 95 * 3.3 - 2 * 3.3 - 3, features: st[1], tex: st[2] });
+  });
+  dbg('study built');
   doc.selectedPage = page;
   doc.centerOnLayer(A);
   doc.save(OUT + '/Mirage Icon.sketch', { saveMode: Document.SaveMode.SaveAs }, function (err) { dbg(err ? 'save error ' + err : 'saved'); });
