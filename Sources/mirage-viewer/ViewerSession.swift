@@ -19,6 +19,8 @@ final class ViewerModel: ObservableObject {
     /// Forward no local input (a scripted run is being watched).
     var observeOnly = false
     @Published var hostStatus: ControlMessage.HostStatus?
+    /// Non-nil while the connection is down: (attempt number, seconds until the next try).
+    @Published var reconnecting: (attempt: Int, inSeconds: Int)? = nil
 
     struct Stats {
         var rttMs = 0.0, fps = 0.0, kbps = 0.0, frameAgeMs = 0.0, decodeMs = 0.0
@@ -115,8 +117,40 @@ final class ViewerSession: @unchecked Sendable {
     }
 
     private func setStatus(_ s: String) { Task { @MainActor in model.status = s } }
+    private var stopped = false
 
+    /// Connects, and reconnects forever with exponential backoff (1, 2, 4, 8, then 15 s) until the
+    /// window is closed. The last picture stays on screen meanwhile; the stream is re-requested on
+    /// every reconnect. A 15 s handshake limit per attempt is fine; giving up is not.
     private func run() async {
+        var attempt = 0
+        while !stopped {
+            let t0 = Date()
+            let failure = await connectOnce()
+            if stopped { return }
+            // A session that lasted a while resets the backoff; a quick failure escalates it.
+            if Date().timeIntervalSince(t0) > 30 { attempt = 0 }
+            attempt += 1
+            let delay = attempt >= 5 ? 15 : 1 << (attempt - 1)
+            log("viewer: \(failure); reconnecting in \(delay) s (attempt \(attempt))")
+            await MainActor.run {
+                model.reconnecting = (attempt, delay)
+                model.status = "reconnecting… (attempt \(attempt), \(failure))"
+                lastRequest = nil   // re-request the stream once the new connection is up
+                if pendingRequest == nil, let r = lastRequestSent { pendingRequest = r }
+            }
+            try? await Task.sleep(for: .seconds(delay))
+        }
+    }
+
+    /// The stream request we last sent, kept across reconnects.
+    @MainActor private var lastRequestSent: ControlMessage.StreamRequest?
+
+    /// One connection's life: returns the reason it ended.
+    private func connectOnce() async -> String {
+        // Per-connection state; the compositor's picture is deliberately kept.
+        videoQueue.sync { assembler = FrameAssembler(); awaitingRecovery = false; lastRecoverySeq = 0; tileCaptureSeq = [] }
+        sender = nil
         do {
             let store = try Store()
             let identity = try store.identity(role: "client", name: DeviceNames.current())
@@ -150,13 +184,21 @@ final class ViewerSession: @unchecked Sendable {
             Task.detached { [weak self] in await self?.receiveDatagrams(flow) }
             log("connected: control, tile stream and datagram flow up")
             await MainActor.run { if let p = pendingRequest { pendingRequest = nil; requestStream(width: p.width, height: p.height) } }
-            Task.detached { [weak self] in await self?.pingLoop() }
-            Task.detached { [weak self] in await self?.statsLoop() }
+            await MainActor.run { model.reconnecting = nil; model.error = nil }
+            startLoopsOnce()
             try await receiveControl(control)
+            return "control stream ended"
         } catch {
-            log("viewer: \(error)")
-            Task { @MainActor in model.error = "\(error)"; model.status = "disconnected" }
+            return "\(error)"
         }
+    }
+
+    private var loopsStarted = false
+    private func startLoopsOnce() {
+        guard !loopsStarted else { return }
+        loopsStarted = true
+        Task.detached { [weak self] in await self?.pingLoop() }
+        Task.detached { [weak self] in await self?.statsLoop() }
     }
 
     // MARK: Stream control
@@ -166,7 +208,7 @@ final class ViewerSession: @unchecked Sendable {
             let req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: model.bitrateKbps, maxFPS: 30)
             if req == lastRequest { return }
             guard let sender else { pendingRequest = req; log("stream request \(width)x\(height) queued until connected"); return }
-            lastRequest = req
+            lastRequest = req; lastRequestSent = req
             log("stream request \(width)x\(height) cap \(req.bitrateKbps) kbps")
             sender.send(.streamRequest(req))
         }
@@ -347,7 +389,7 @@ final class ViewerSession: @unchecked Sendable {
     }
 
     private func pingLoop() async {
-        while true {
+        while !stopped {
             try? await Task.sleep(for: .seconds(1))
             pingSeq += 1
             sender?.send(.ping(.init(seq: pingSeq, sentNanos: Clock.nowNanos())))
@@ -355,7 +397,7 @@ final class ViewerSession: @unchecked Sendable {
     }
 
     private func statsLoop() async {
-        while true {
+        while !stopped {
             try? await Task.sleep(for: .seconds(1))
             statsLock.lock()
             let frames = sFrames, bytes = sBytes, lost = sLost, dec = sDecodeNanos, age = sAge, rtt = sRTT, dropped = sDropped
@@ -496,6 +538,7 @@ final class ViewerSession: @unchecked Sendable {
     }
 
     func stop() {
+        stopped = true
         sender?.send(.streamStop)
         client?.close()
     }

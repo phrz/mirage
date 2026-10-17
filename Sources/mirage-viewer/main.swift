@@ -241,6 +241,12 @@ struct ContentView: View {
         ZStack(alignment: .topLeading) {
             VideoView(session: session, model: model)
             if model.showStats { StatsOverlay(model: model).padding(8) }
+            if let r = model.reconnecting {
+                VStack { Spacer(); HStack { Spacer()
+                    Text("reconnecting… attempt \(r.attempt), next in \(r.inSeconds) s").font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white).padding(8).background(.orange.opacity(0.85)).cornerRadius(8).padding(12)
+                } }
+            }
             if let e = model.error {
                 Text(e).foregroundStyle(.white).padding().background(.red.opacity(0.8)).cornerRadius(8).padding(40)
             }

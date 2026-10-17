@@ -21,7 +21,7 @@ public final class QUICClient: @unchecked Sendable {
     public init(host: String, port: UInt16 = Mirage.defaultPort) {
         endpoint = .hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!)
         let quic = NWProtocolQUIC.Options(alpn: [Mirage.alpn])
-        quic.idleTimeout = 30_000
+        quic.idleTimeout = 10_000   // pings run every second; a dead peer is noticed in 10 s, not 30
         quic.initialMaxStreamsBidirectional = 64
         quic.maxDatagramFrameSize = 1350
         let box = FingerprintBox()
@@ -106,7 +106,7 @@ public final class QUICHost: @unchecked Sendable {
     public init(port: UInt16, tls: TLSIdentity) throws {
         self.tls = tls
         let quic = NWProtocolQUIC.Options(alpn: [Mirage.alpn])
-        quic.idleTimeout = 30_000
+        quic.idleTimeout = 10_000   // pings run every second; a dead peer is noticed in 10 s, not 30
         quic.initialMaxStreamsBidirectional = 64
         quic.maxDatagramFrameSize = 1350
         guard let secIdentity = sec_identity_create(tls.identity) else {
