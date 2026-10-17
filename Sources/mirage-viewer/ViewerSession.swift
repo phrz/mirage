@@ -254,7 +254,7 @@ final class ViewerSession: @unchecked Sendable {
                 if probeLog { log(String(format: "host cursor at (%.3f, %.3f)", p.x, p.y)) }
                 Task { @MainActor in model.remoteCursor = p.visible ? CGPoint(x: p.x, y: p.y) : nil }
             case .windowList(let list):
-                predictorLock.lock(); windows = list.windows; predictorLock.unlock()
+                predictorLock.lock(); windows = list.apply(to: windows); predictorLock.unlock()
             case .rateState(let r):
                 statsLock.lock(); rateState = r; statsLock.unlock()
             case .hostStatus(let h):

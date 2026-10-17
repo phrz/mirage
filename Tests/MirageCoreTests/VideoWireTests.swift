@@ -184,3 +184,17 @@ final class ScriptedInputTests: XCTestCase {
         XCTAssertEqual(try Frame.decode(ControlMessage.self, from: try Frame.encode(h).dropFirst(4)), h)
     }
 }
+
+final class WindowListDeltaTests: XCTestCase {
+    func testDeltaAndApply() {
+        let a = ControlMessage.WindowInfo(id: 1, pid: 1, title: "a", frame: PixelRect(x: 0, y: 0, width: 10, height: 10), z: 0)
+        let b = ControlMessage.WindowInfo(id: 2, pid: 1, title: "b", frame: PixelRect(x: 5, y: 5, width: 10, height: 10), z: 1)
+        var b2 = b; b2.frame = b.frame.offset(3, 0)
+        let c = ControlMessage.WindowInfo(id: 3, pid: 2, title: "c", frame: PixelRect(x: 0, y: 0, width: 5, height: 5), z: 2)
+        XCTAssertNil(ControlMessage.WindowList.delta(from: [a, b], to: [a, b], captureSeq: 1))
+        let d = ControlMessage.WindowList.delta(from: [a, b], to: [b2, c], captureSeq: 2)!
+        XCTAssertTrue(d.isDelta); XCTAssertEqual(d.changed, [b2, c]); XCTAssertEqual(d.removed, [1])
+        XCTAssertEqual(d.apply(to: [a, b]), [b2, c])
+        XCTAssertLessThan(try! Frame.encode(ControlMessage.windowList(d)).count, try! Frame.encode(ControlMessage.windowList(.init(captureSeq: 2, windows: [b2, c, a, a, a]))).count)
+    }
+}

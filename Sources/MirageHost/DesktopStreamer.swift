@@ -79,6 +79,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var statCaptureNanos: UInt64 = 0
     private var tileKbpsEWMA = 0.0
     private var lastTier: LinkTier? = nil
+    private var effortLevel = "full"
     private var statTimer: DispatchSourceTimer?
 
     public init(log: @escaping @Sendable (String) -> Void) {
@@ -111,7 +112,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.cursor = cur
                     cap.onStop = { [weak self] err in self?.log("capture stopped: \(err.map { "\($0)" } ?? "ok")") }
                     if let w = self.windows?.sample(captureSeq: 0, now: Clock.nowNanos()) {
-                        output.sendControl(.windowList(.init(captureSeq: 0, windows: w.sample.windows)))
+                        self.publishedWindows = w.sample.windows; self.lastFullWindowsNanos = Clock.nowNanos()
+                        self.sendControlCounted(.windowList(.init(captureSeq: 0, windows: w.sample.windows)))
                     }
                     self.startTimers()
                     c.resume(returning: t.info)
@@ -301,7 +303,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         var moved: [WindowTracker.Delta] = []
         if let s = windows.sample(captureSeq: captureSeq, now: now) {
             moved = s.moved
-            if s.changed { output?.sendControl(.windowList(.init(captureSeq: captureSeq, windows: s.sample.windows))) }
+            if s.changed { publishWindows(s.sample.windows, captureSeq: captureSeq, now: now) }
         }
         CVPixelBufferLockBaseAddress(pb, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
@@ -523,6 +525,36 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
     /// Refinement bytes sent but not yet acked by the viewer (bounded so refinement cannot fill the link's queue).
     private var refinementInFlight = 0
+
+    // Window list publication: the client holds the last full list; the host sends coalesced deltas
+    // at most every 100 ms and a full list every 10 s (and on start). Review §2.2.
+    private var publishedWindows: [ControlMessage.WindowInfo] = []
+    private var pendingWindows: [ControlMessage.WindowInfo]? = nil
+    private var lastWindowsSendNanos: UInt64 = 0
+    private var lastFullWindowsNanos: UInt64 = 0
+    private var statControlBytes = 0
+
+    private func publishWindows(_ list: [ControlMessage.WindowInfo], captureSeq: UInt32, now: UInt64) {
+        pendingWindows = list
+        flushWindows(now: now)
+    }
+    private func flushWindows(now: UInt64) {
+        guard let list = pendingWindows, now - lastWindowsSendNanos >= 100_000_000 else { return }
+        pendingWindows = nil
+        lastWindowsSendNanos = now
+        if now - lastFullWindowsNanos > 10_000_000_000 {
+            publishedWindows = list; lastFullWindowsNanos = now
+            sendControlCounted(.windowList(.init(captureSeq: captureSeq, windows: list)))
+        } else if let d = ControlMessage.WindowList.delta(from: publishedWindows, to: list, captureSeq: captureSeq) {
+            publishedWindows = list
+            sendControlCounted(.windowList(d))
+        }
+    }
+    /// Control-stream sends with byte accounting (the stream is outside the datagram budget; measure it).
+    private func sendControlCounted(_ m: ControlMessage) {
+        if let d = try? Frame.encode(m) { statControlBytes += d.count }
+        output?.sendControl(m)
+    }
 
     private func header(windowID: UInt32, nanos: UInt64) -> TileMessage.Header {
         .init(captureSeq: captureSeq, inputSeq: lastInputSeq, windowID: windowID, captureNanos: nanos)
@@ -809,19 +841,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let payloads = (0..<frags.count).map { i -> Data in let lo = payload.startIndex + i * maxPayload; return payload.subdata(in: lo..<min(lo + maxPayload, payload.endIndex)) }
             frags.append(contentsOf: ParityFragment.parity(frameSeq: seq, payloads: payloads))
         }
-        if payload.count > 16_000 {
-            // A big (key)frame sent as one burst is the surest way to build a queue and lose datagrams;
-            // pace it at ~1.5x the video budget in 10 ms slices instead.
-            let bytesPerSec = Double(max(150, lastBudget.videoKbps)) * 1000 / 8 * 1.5
-            let perSlice = max(2, Int(bytesPerSec * 0.01 / Double(maxPayload)))
+        // Intra-frame pacing (review §2.1): datagrams go out at ~1.25x the video budget in 5 ms slices
+        // rather than as one burst, so a 25 KB frame or a keyframe never builds a queue on a 1 Mbps hop.
+        let bytesPerSec = Double(max(150, lastBudget.videoKbps)) * 1000 / 8 * 1.25
+        let perSlice = max(1, Int(bytesPerSec * 0.005 / Double(maxPayload)))
+        if frags.count <= perSlice {
+            for d in frags { out.sendDatagram(d) }
+        } else {
             var i = 0, slice = 0
             while i < frags.count {
                 let chunk = Array(frags[i..<min(frags.count, i + perSlice)])
-                queue.asyncAfter(deadline: .now() + .milliseconds(10 * slice)) { for d in chunk { out.sendDatagram(d) } }
+                queue.asyncAfter(deadline: .now() + .milliseconds(5 * slice)) { for d in chunk { out.sendDatagram(d) } }
                 i += perSlice; slice += 1
             }
-        } else {
-            for d in frags { out.sendDatagram(d) }
         }
         tokens -= Double(payload.count)
         unacked[seq] = InFlight(sentNanos: Clock.nowNanos(), bytes: payload.count, ltrToken: f.ltrToken)
@@ -922,8 +954,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard let self, let rc = self.rc else { return }
             // The window list must not depend on captures: a static desktop produces none.
             if let w = self.windows?.sample(captureSeq: self.captureSeq, now: Clock.nowNanos()), w.changed {
-                self.output?.sendControl(.windowList(.init(captureSeq: self.captureSeq, windows: w.sample.windows)))
+                self.publishWindows(w.sample.windows, captureSeq: self.captureSeq, now: Clock.nowNanos())
             }
+            self.flushWindows(now: Clock.nowNanos())
             self.output?.sendControl(.rateState(.init(targetKbps: rc.targetKbps, capacityKbps: rc.capacityKbps, queueMs: rc.queueMs, rung: rc.rung, scale: rc.scale,
                                                       tileBudgetKbps: self.lastBudget.tileKbps, videoKbps: self.secVideoBytes * 8 / 1000, tileKbps: self.secTileBytes * 8 / 1000, tier: rc.tier)))
             if rc.tier != self.lastTier {
@@ -950,7 +983,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                        fps, vkbps, encoder?.width ?? 0, encoder?.height ?? 0, tkbps, statTileRects, Double(statRefineBytes) * 8 / 5 / 1000, statCopyRects, tracker?.pendingTotal ?? 0, statTileSkipped,
                        statCaptures, capMs, statDirtyTiles, statDiffPruned, rc?.targetKbps ?? 0, rc?.capacityKbps ?? 0, rc?.queueMs ?? 0, rc?.rung ?? 0, srttNanos / 1e6,
                        unacked.count, statSkippedBudget, statDropped, statLost, enc, statInput)
-                + (statNacks > 0 ? " nacks \(statNacks) resent \(statNackResent)" : "") + " fresh \(fresh)")
+                + (statNacks > 0 ? " nacks \(statNacks) resent \(statNackResent)" : "") + " fresh \(fresh)"
+                + String(format: " control %.0f kbps effort %@", Double(statControlBytes) * 8 / 5 / 1000, effortLevel))
+            statControlBytes = 0
             statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0
             statTileBytes = 0; statTileRects = 0; statRefineBytes = 0; statCopyRects = 0; statDirtyTiles = 0; statDiffPruned = 0; statTileSkipped = 0
         }

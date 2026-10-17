@@ -280,10 +280,35 @@ public enum ControlMessage: Codable, Equatable {
             self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect
         }
     }
+    /// Host → client window list. A full list carries `windows`; a delta carries only the windows that
+    /// changed (`changed`) and the ids that went away (`removed`); z-order is each window's `z`.
+    /// Deltas go out at most 10 times a second (review §2.2: full lists at 40 Hz were ~1.5 Mbps).
     public struct WindowList: Codable, Equatable {
         public var captureSeq: UInt32
         public var windows: [WindowInfo]
+        public var changed: [WindowInfo]?
+        public var removed: [UInt32]?
+        public var isDelta: Bool { changed != nil }
         public init(captureSeq: UInt32, windows: [WindowInfo]) { self.captureSeq = captureSeq; self.windows = windows }
+        public init(captureSeq: UInt32, changed: [WindowInfo], removed: [UInt32]) { self.captureSeq = captureSeq; self.windows = []; self.changed = changed; self.removed = removed }
+
+        /// Applies this message to a known list; returns the new full list (front to back by z).
+        public func apply(to known: [WindowInfo]) -> [WindowInfo] {
+            guard isDelta else { return windows }
+            var byID = Dictionary(known.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            for id in removed ?? [] { byID[id] = nil }
+            for w in changed ?? [] { byID[w.id] = w }
+            return byID.values.sorted { $0.z < $1.z }
+        }
+        /// The delta from `old` to `new`, or nil if nothing changed.
+        public static func delta(from old: [WindowInfo], to new: [WindowInfo], captureSeq: UInt32) -> WindowList? {
+            let oldByID = Dictionary(old.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            let newIDs = Set(new.map(\.id))
+            let changed = new.filter { oldByID[$0.id] != $0 }
+            let removed = old.map(\.id).filter { !newIDs.contains($0) }
+            if changed.isEmpty && removed.isEmpty { return nil }
+            return WindowList(captureSeq: captureSeq, changed: changed, removed: removed)
+        }
     }
     public struct Nack: Codable, Equatable {
         public var frameSeq: UInt32
