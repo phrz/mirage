@@ -79,7 +79,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var statCaptureNanos: UInt64 = 0
     private var tileKbpsEWMA = 0.0
     private var lastTier: LinkTier? = nil
-    private var effortLevel = "full"
+    private var effort: HostEffort = .full
+    private var effortLevel: String { effort.rawValue }
+    private var effortCaptureNanos: UInt64 = 0, effortCaptures = 0
+    private var effortLogged = false
     private var statTimer: DispatchSourceTimer?
 
     public init(log: @escaping @Sendable (String) -> Void) {
@@ -296,8 +299,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard var tracker, request != nil, output != nil, let windows else { return }
         captureSeq &+= 1
         let now = Clock.nowNanos()
-        statCaptures += 1
-        defer { statCaptureNanos += Clock.nowNanos() - now }
+        statCaptures += 1; effortCaptures += 1
+        defer { let dt = Clock.nowNanos() - now; statCaptureNanos += dt; effortCaptureNanos += dt }
         // Inputs injected less than ~40 ms before the capture are not in these pixels yet (window server + app render).
         lastInputSeq = injector?.inputSeq(before: nanos &- 40_000_000) ?? 0
         var moved: [WindowTracker.Delta] = []
@@ -320,8 +323,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // CPU diff inside SCK's dirty rects: they over-report ~1.7x (experiments/probes), and the
             // exact changed box inside a tile is what a sparse lossless update needs.
             let before = dirty.count
+            let wantBoxes = effort.tightBoxes
             dirty.removeAll { i in
-                if let box = tileChangedBox(old, new, tracker.rect(of: i)) { tightBoxes[i] = box; return false }
+                if let box = tileChangedBox(old, new, tracker.rect(of: i)) { if wantBoxes { tightBoxes[i] = box }; return false }
                 return true
             }
             statDiffPruned += before - dirty.count
@@ -341,7 +345,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 // The window list is sampled a few ms after the pixels were composited, so during a fast
                 // drag the reported delta can be off by a few px: verify it, else search around the window.
                 var r = detector.verify(old: old, new: new, rect: d.old, dx: dx0, dy: dy0)
-                if r == nil, let (rdx, rdy) = detector.refine(old: old, new: new, rect: d.old, dx: dx0, dy: dy0), (rdx, rdy) != (dx0, dy0) {
+                if r == nil, let (rdx, rdy) = detector.refine(old: old, new: new, rect: d.old, dx: dx0, dy: dy0, radius: effort.shiftSearch.refineRadius), (rdx, rdy) != (dx0, dy0) {
                     r = detector.verify(old: old, new: new, rect: d.old, dx: rdx, dy: rdy)
                 }
                 guard let r else { continue }
@@ -429,7 +433,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         self.tracker = tracker
         lastFrame = pb
-        if !pendingVideoTiles.isEmpty { tryEncode(now: now, latest: new) }
+        if !pendingVideoTiles.isEmpty || wantKeyframe { tryEncode(now: now, latest: new) }
         refine(now: now)
     }
 
@@ -632,6 +636,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             jobs.append((r, d)); estimate += r.area / 5
         }
         let hdr = header(windowID: 0, nanos: nanos)
+        let webp = effort.webpEffort
         tileQueue.async { [weak self] in
             guard let self else { return }
             var out: [TileMessage.Tile] = []
@@ -639,7 +644,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let encoded: (TileCodec.Format, Data)? = d.withUnsafeBytes { p -> (TileCodec.Format, Data)? in
                     let base = p.baseAddress!
                     let fmt: TileCodec.Format = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4, limit: 4096) > 4096 ? .nearLossless : .lossless
-                    return TileCodec.encode(base: base, width: r.width, height: r.height, stride: r.width * 4, format: fmt).map { (fmt, $0) }
+                    return TileCodec.encode(base: base, width: r.width, height: r.height, stride: r.width * 4, format: fmt, effort: webp).map { (fmt, $0) }
                 }
                 if let (fmt, data) = encoded { out.append(.init(rect: r, format: fmt, data: data)) }
             }
@@ -668,6 +673,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             jobs.append((r, d)); estimate += r.area / 5
         }
         let hdr = header(windowID: 0, nanos: nanos)
+        let webp = effort.webpEffort
         tileQueue.async { [weak self] in
             guard let self else { return }
             var out: [TileMessage.Tile] = []
@@ -675,7 +681,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let encoded: (TileCodec.Format, Data)? = d.withUnsafeBytes { p -> (TileCodec.Format, Data)? in
                     let base = p.baseAddress!
                     let fmt: TileCodec.Format = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4, limit: 4096) > 4096 ? .nearLossless : .lossless
-                    return TileCodec.encode(base: base, width: r.width, height: r.height, stride: r.width * 4, format: fmt).map { (fmt, $0) }
+                    return TileCodec.encode(base: base, width: r.width, height: r.height, stride: r.width * 4, format: fmt, effort: webp).map { (fmt, $0) }
                 }
                 if let (fmt, data) = encoded { out.append(.init(rect: r, format: fmt, data: data)) }
             }
@@ -976,7 +982,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard let self else { return }
             let now = Clock.nowNanos()
             self.refine(now: now)
-            if !self.pendingVideoTiles.isEmpty, let src = self.lastFrame {
+            if !self.pendingVideoTiles.isEmpty || self.wantKeyframe, let src = self.lastFrame {
                 CVPixelBufferLockBaseAddress(src, .readOnly)
                 self.tryEncode(now: now, latest: self.frameView(src))
                 CVPixelBufferUnlockBaseAddress(src, .readOnly)
@@ -998,10 +1004,21 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                                                       tileBudgetKbps: self.lastBudget.tileKbps, videoKbps: self.secVideoBytes * 8 / 1000, tileKbps: self.secTileBytes * 8 / 1000, tier: rc.tier)))
             if rc.tier != self.lastTier {
                 let first = self.lastTier == nil
+                let previous = self.lastTier
                 self.lastTier = rc.tier; self.log("link tier: \(rc.tier.name) (capacity \(rc.capacityKbps) kbps, srtt \(Int(rc.srttMs)) ms, loss \(String(format: "%.1f", rc.lossPercent)) %)")
-                if !first, self.fresh == .done { self.rc?.dropToTinyRung(now: Clock.nowNanos()); self.lastRebuildNanos = Clock.nowNanos(); if (try? self.rebuildEncoder()) != nil { self.wantKeyframe = true; self.beginFreshPicture(reason: "tier change") } }
+                // A worse tier restarts lossy-first from the tiny rung; a better one just lets the ladder climb.
+                if !first, self.fresh == .done, rc.tier.rawValue > (previous?.rawValue ?? 0) { self.rc?.dropToTinyRung(now: Clock.nowNanos()); self.lastRebuildNanos = Clock.nowNanos(); if (try? self.rebuildEncoder()) != nil { self.wantKeyframe = true; self.beginFreshPicture(reason: "tier change to \(rc.tier.name)") } }
             }
             self.tileKbpsEWMA = self.tileKbpsEWMA * 0.5 + Double(self.secTileBytes * 8 / 1000) * 0.5
+            let capMs = self.effortCaptures > 0 ? Double(self.effortCaptureNanos) / Double(self.effortCaptures) / 1e6 : 0
+            self.effortCaptureNanos = 0; self.effortCaptures = 0
+            let pressure = HostEffort.measure(captureMs: capMs)
+            if pressure.level != self.effort || !self.effortLogged {
+                self.effortLogged = true
+                self.effort = pressure.level
+                self.detector.maxShift = self.effort.shiftSearch.maxShift
+                self.log(String(format: "host effort: %@ (load/core %.2f, thermal %d, capture %.1f ms)", self.effort.rawValue, pressure.loadPerCore, pressure.thermal.rawValue, capMs))
+            }
             let active = Clock.nowNanos() - self.videoActiveNanos < 1_000_000_000
             self.rc?.videoRate(achievedFPS: Double(self.secVideoFrames), wantedFPS: Double(min(self.request?.maxFPS ?? 30, rc.policy.maxVideoFPS)), active: active, now: Clock.nowNanos())
             self.secVideoBytes = 0; self.secTileBytes = 0; self.secVideoFrames = 0
