@@ -353,6 +353,49 @@ upscaled base with a feathered edge. In Extreme, far-field text may be sent luma
 and receive chroma later: text is legible in luma and it halves the bytes. On Local and Normal
 tiers the fovea covers the screen and the mode is inert.
 
+### 3.3b As built on 2026-10-17 (after the adversarial review and phrz's bus sessions)
+
+- **Lossy-first, never a tile march.** Every stream, resize and tier downgrade starts on a new
+  tiny ladder rung (1/8 native, ~400×225, a 3–4 KB keyframe), upscaled on the client. Nothing
+  from the refinement queue goes out until the viewer has acked that base; the ladder then climbs
+  rung by rung, each step a whole-frame keyframe sent as soon as the previous one is acked and the
+  target affords the next rung (masked-out crisp tiles are flattened to their mean colour first);
+  then lossless lands in large centre-first blocks sized to ~1 s of a 30 % refinement budget, one
+  in flight. Progressive steps and refinement blocks crossfade in over 150 ms on the client.
+  64-px tiles are strictly for changes. Extreme is video-minimal on the tiny rung (5 fps), not
+  video-off.
+- **Scheduler, every tier.** (1) changed pixels within ~200 px of the last input event go at once
+  on a second, interactive QUIC stream regardless of budget; (2) other changed pixels on budget;
+  (3) copy-rects on the interactive stream; (4) refinement only on leftover budget, yielding
+  150 ms after real change (three tiles or more, not a caret blink), ≤ 300 ms of link in flight.
+  The client drops a tile older than the capture it already holds, so a refinement queued before
+  an interactive update of the same tile cannot overwrite it.
+- **Foveated two-layer mode** on Constrained/Extreme: a fovea of about a third of the screen
+  around the input locus takes changed pixels as native tiles ahead of video while the budget
+  holds, refinement orders by distance to the locus, and ground a moving fovea newly covers is
+  refined first. The ladder's low rung is the base layer. Inert on Local/Normal.
+- **Loss.** Frames are delivered in sequence order (a hole holds its dependents), missing fragments
+  are NACKed 30 ms after the gap and resent from a 2 s ring on the host, single losses per group
+  of 8 are rebuilt from XOR parity (always on key/recovery frames, on every frame above 0.5 % loss),
+  and a frame is given up only after ~2.5 RTT; keyframe recovery is the last resort. Every frame's
+  datagrams are paced over its interval at 1.25x the video budget.
+- **Tiers** classify on min-RTT, loss (after 30 samples) and the controller's delay-limited
+  target when the link rather than the cap holds it down; dispersion capacity reads the physical
+  path and is not used. Hysteresis 2 s down, 10 s up.
+- **Host effort.** Load per core, thermal state and the streamer's own capture time give
+  full/reduced/minimal, which sets WebP effort, copy-rect search range, drag refinement radius and
+  whether exact changed boxes are computed. Hosts are desktops on mains power; CPU is spent freely
+  unless genuinely busy.
+- **Wire.** Window list as coalesced deltas at ≤ 10 Hz (full list on start and every 10 s;
+  control bytes are counted); solid-colour tiles are 4 bytes; every input message carries a
+  sequence number and a `scripted` flag.
+- **Safety.** Scripted (measurement) input is refused by the host while the console is locked;
+  the host publishes console lock state and the frontmost app/window once a second; the scenario
+  runner injects nothing until the console is unlocked, the bench is frontmost and the picture
+  shows the bench's caption band.
+- **Viewer.** Reconnects forever (1, 2, 4, 8, then 15 s) keeping the last picture, re-requests the
+  stream; `--observe` shows the picture without forwarding input; QUIC idle timeout 10 s.
+
 ### 3.4 Rate control and adaptation
 
 - Client sends receive timestamps for every packet; host runs a GCC/BBR-style **delivery-rate

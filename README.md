@@ -90,11 +90,18 @@ ladder rung, copy-rects, prediction confirm/mismatch counts), `⌃⌥⌘↑/↓`
 is zero; trackpad scrolls and title-bar drags move pixels locally before the host confirms them;
 clicks and typing pay the link RTT.
 
+The first picture of a stream is one tiny keyframe within a fraction of a second, then the
+ladder climbs and lossless lands in large blocks, never as a march of tiles; on constrained links
+quality follows the pointer (foveated). If the link drops, the viewer keeps the last picture and
+reconnects by itself. `--observe` shows the picture without forwarding any input.
+
 `--headless --duration 60 --stats out.json` connects and decodes without a window and writes
 per-second samples plus medians, for measuring a link over SSH. `--scenario typing:30` (or
-`scroll:40`, `drag:30`, `idle:20`) additionally drives the "Mirage Test Bench" window on the host
+`scroll:40`, `drag:30`, `idle:20`, `login:30`, `fovea:20`) additionally drives the "Mirage Test Bench" window on the host
 (`experiments/testbench/make.sh`, then `open` the app there) with scripted input and reports
-bytes into that window, per-burst time-to-crisp and prediction counters.
+bytes into that window, per-burst time-to-crisp and prediction counters. Scripted input is
+refused by the host while its console is locked, and the runner injects nothing until the bench
+is frontmost and visible in the picture.
 
 ### Host permissions (once)
 
