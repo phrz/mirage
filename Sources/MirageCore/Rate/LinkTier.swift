@@ -34,11 +34,15 @@ public enum LinkTier: Int, Codable, Sendable, CaseIterable {
 
     public var name: String { ["Local", "Normal", "Constrained", "Extreme"][rawValue] }
 
-    /// Which tier the estimates call for, before hysteresis. `capacityKbps` 0 = unknown.
-    public static func classify(capacityKbps: Int, rttMs: Double, lossPercent: Double) -> LinkTier {
-        if capacityKbps > 0 && capacityKbps < 500 || rttMs > 400 || lossPercent > 2 { return .extreme }
-        if capacityKbps > 0 && capacityKbps < 2000 || rttMs >= 100 { return .constrained }
-        if capacityKbps > 50_000 && rttMs < 10 { return .local }
+    /// Which tier the estimates call for, before hysteresis. The rate proxy is the controller's
+    /// delay-limited target (DESIGN §3.9 correction: packet dispersion reads the physical path, 20–100
+    /// Mbps on a tailnet whose usable rate is ~1 Mbps); it only counts when the link, not the viewer's
+    /// cap, is what holds the target down (`limitedByLink`). RTT is the windowed minimum. Loss needs
+    /// enough samples to mean anything (the controller zeroes it below 30 frames).
+    public static func classify(rateKbps: Int, limitedByLink: Bool, rttMs: Double, lossPercent: Double) -> LinkTier {
+        if (limitedByLink && rateKbps < 500) || rttMs > 400 || lossPercent > 2 { return .extreme }
+        if (limitedByLink && rateKbps < 2000) || rttMs >= 100 { return .constrained }
+        if rttMs < 10 && (!limitedByLink || rateKbps > 50_000) { return .local }
         return .normal
     }
 }
@@ -56,8 +60,8 @@ public struct TierSelector: Equatable {
     public init(initial: LinkTier = .normal) { tier = initial; candidate = initial }
 
     @discardableResult
-    public mutating func update(capacityKbps: Int, rttMs: Double, lossPercent: Double, now: UInt64) -> LinkTier {
-        let wanted = LinkTier.classify(capacityKbps: capacityKbps, rttMs: rttMs, lossPercent: lossPercent)
+    public mutating func update(rateKbps: Int, limitedByLink: Bool, rttMs: Double, lossPercent: Double, now: UInt64) -> LinkTier {
+        let wanted = LinkTier.classify(rateKbps: rateKbps, limitedByLink: limitedByLink, rttMs: rttMs, lossPercent: lossPercent)
         if wanted != candidate { candidate = wanted; candidateSince = now }
         guard candidate != tier else { return tier }
         let dwell = candidate.rawValue > tier.rawValue ? dwellNanosDown : dwellNanosUp

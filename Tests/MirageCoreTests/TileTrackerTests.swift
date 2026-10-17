@@ -234,25 +234,26 @@ final class ShiftRefineTests: XCTestCase {
 
 final class LinkTierTests: XCTestCase {
     func testClassification() {
-        XCTAssertEqual(LinkTier.classify(capacityKbps: 0, rttMs: 210, lossPercent: 0), .constrained)   // this Japan link
-        XCTAssertEqual(LinkTier.classify(capacityKbps: 30_000, rttMs: 30, lossPercent: 0), .normal)
-        XCTAssertEqual(LinkTier.classify(capacityKbps: 900_000, rttMs: 2, lossPercent: 0), .local)
-        XCTAssertEqual(LinkTier.classify(capacityKbps: 256, rttMs: 900, lossPercent: 5), .extreme)
+        XCTAssertEqual(LinkTier.classify(rateKbps: 800, limitedByLink: false, rttMs: 210, lossPercent: 0), .constrained)   // this Japan link
+        XCTAssertEqual(LinkTier.classify(rateKbps: 800, limitedByLink: false, rttMs: 30, lossPercent: 0), .normal, "a low cap on a good link is not a constrained link")
+        XCTAssertEqual(LinkTier.classify(rateKbps: 1200, limitedByLink: true, rttMs: 30, lossPercent: 0), .constrained, "held under 2 Mbps by delay")
+        XCTAssertEqual(LinkTier.classify(rateKbps: 800, limitedByLink: false, rttMs: 2, lossPercent: 0), .local)
+        XCTAssertEqual(LinkTier.classify(rateKbps: 256, limitedByLink: true, rttMs: 900, lossPercent: 5), .extreme)
         XCTAssertTrue(LinkTier.extreme.policy.videoEnabled, "video-minimal, not off")
         XCTAssertEqual(LinkTier.extreme.policy.minRung, RateController.tinyRung); XCTAssertEqual(LinkTier.extreme.policy.maxVideoFPS, 5)
     }
     func testHysteresis() {
         var sel = TierSelector()
-        sel.update(capacityKbps: 0, rttMs: 500, lossPercent: 0, now: 1_000_000_000)
+        sel.update(rateKbps: 800, limitedByLink: false, rttMs: 500, lossPercent: 0, now: 1_000_000_000)
         XCTAssertEqual(sel.tier, .normal, "one bad sample does not change the tier")
-        sel.update(capacityKbps: 0, rttMs: 500, lossPercent: 0, now: 2_000_000_000)
+        sel.update(rateKbps: 800, limitedByLink: false, rttMs: 500, lossPercent: 0, now: 2_000_000_000)
         XCTAssertEqual(sel.tier, .normal)
-        sel.update(capacityKbps: 0, rttMs: 500, lossPercent: 0, now: 3_100_000_000)
+        sel.update(rateKbps: 800, limitedByLink: false, rttMs: 500, lossPercent: 0, now: 3_100_000_000)
         XCTAssertEqual(sel.tier, .extreme, "worse tier after 2 s")
-        sel.update(capacityKbps: 0, rttMs: 200, lossPercent: 0, now: 4_000_000_000)
-        sel.update(capacityKbps: 0, rttMs: 200, lossPercent: 0, now: 9_000_000_000)
+        sel.update(rateKbps: 800, limitedByLink: false, rttMs: 200, lossPercent: 0, now: 4_000_000_000)
+        sel.update(rateKbps: 800, limitedByLink: false, rttMs: 200, lossPercent: 0, now: 9_000_000_000)
         XCTAssertEqual(sel.tier, .extreme, "better tier needs 10 s")
-        sel.update(capacityKbps: 0, rttMs: 200, lossPercent: 0, now: 14_100_000_000)
+        sel.update(rateKbps: 800, limitedByLink: false, rttMs: 200, lossPercent: 0, now: 14_100_000_000)
         XCTAssertEqual(sel.tier, .constrained)
     }
     func testControllerReportsConstrainedOnThisLink() {

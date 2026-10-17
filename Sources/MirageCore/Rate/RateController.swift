@@ -157,7 +157,10 @@ public struct RateController {
         }
         targetKbps = min(targetKbps, max(ceiling, tuning.minKbps))
         if ackedFrames + lostFrames > 200 { ackedFrames /= 2; lostFrames /= 2 }   // sliding loss window
-        tiers.update(capacityKbps: capacityKbps, rttMs: minRttMs, lossPercent: lossPercent, now: now)
+        // The link, not the cap, is holding the target down when the target sits well under the cap
+        // after a delay- or loss-driven decrease in the last few seconds.
+        let limitedByLink = targetKbps < maxKbps * 8 / 10 && now - lastDecreaseNanos < 5_000_000_000
+        tiers.update(rateKbps: targetKbps, limitedByLink: limitedByLink, rttMs: minRttMs, lossPercent: lossPercent, now: now)
         updateRung(now: now)
     }
 
