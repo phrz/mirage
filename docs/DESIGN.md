@@ -903,7 +903,22 @@ lossless bytes that landed inside the bench window, direct (changed pixels) in b
 Fresh connection at an 800 kbps cap (coordinator's capture, 89e2ff7's predecessor): a whole
 picture at ~1.7 s, crisp text by 4 s, idle ~15 kbps afterwards.
 
-ROWS_2000
+| Scenario, 2000 kbps cap | kbps | into window | Copy-rects | Predictions confirmed / mismatched | Time-to-crisp | Other |
+|---|---|---|---|---|---|---|
+| idle | 18 | 23 (13) | – | – | – | queue p95 21 ms |
+| typing 6 keys/s | 50 median, 163 mean | 357 (120) | 0 | – | – | the mean is the line-wrap auto-scrolls of the text view going out as lossless strips |
+| login-field typing | 25 | 44 (23) | – | – | – | first changed pixels in the field **187 ms** median after each keystroke |
+| scroll bursts | 38 median, 215 mean | 523 (81) | 255 | 270 / 2 | 3.4 s median, 5.0 s max | queue p95 42 ms |
+| window drag | 46 median, 270 mean | 690 (16) | 177 | 87 / 12 of 137 | 4.9 s median | queue p95 69 ms |
+| fovea | 15 | 390 (18) | – | – | – | **text under the pointer lossless 2.1 s after stream start** |
+
+What the two caps say together: on this link the cap barely matters for interaction cost, because
+typing, carets and idle are tens of kbps either way and copy-rects make scrolls and drags cost only
+their exposed strips; the cap decides how fast the first picture and the refinement blocks land
+(rung 2 at 800 kbps, higher at 2000) and how quickly a scroll's strips become crisp (3.0–3.4 s
+median here, above the 1 s target: the strips of a 3200-px-wide native scroll are ~60 px × 2200 px
+of text per wheel event, and 40 events per burst). Keystroke-to-pixels stays at one RTT plus
+serialization at both caps, which is the login-screen acceptance criterion.
 
 Platform findings from M2:
 
