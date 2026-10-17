@@ -260,8 +260,18 @@ history** (dirty in N of the last M frames):
    get a one-byte solid-colour and a two-colour form (WebP's floor is 44–95 B for those), and
    photographic tiles refine to visually lossless (HEVC intra tile or JPEG XL d=1, ~3x under
    WebP near-lossless), not to bit-exact.
-4. **Refinement**: when a video region stops moving for ~300 ms, its tiles are re-sent via
-   path 2 (lossless), so scrolled text snaps crisp. The client composites lossless tiles over
+4. **Refinement**: two different things, never confused. *Settled changes* (a region that was
+   moving and stopped, a line that was typed) are refined by 64 px tiles via path 2, so
+   scrolled text snaps crisp. *Fresh or invalidated pictures* (stream start, tier change,
+   resize, large invalidation) are refined **progressively and whole**, pyramid style, after
+   the base lossy frame has been acknowledged and never before: the video ladder climbs rung
+   by rung (400×225 → 800×450 → 1600×900 → native), each step a whole frame the client
+   crossfades over the previous (~150 ms); then lossless in large blocks (3×3 of the picture,
+   then 6×6, then 12×12, centre-first within a level, each block crossfading in, a level
+   finishing before the next starts). Granularity shrinks only as budget allows, the pass is
+   capped at ~30 % of the link so the interactive stream is never starved, and no block
+   boundary is ever visible. The "march of tiny tiles" and the tartan of ARD and Workbench
+   are explicitly the failure this rule exists to prevent (phrz, bus, 2026-10-17). The client composites lossless tiles over
    the video texture and invalidates them when a newer video frame covers them.
 
 Photographic tiles (high entropy, lots of colors) that are static still go lossless unless
