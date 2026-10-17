@@ -13,6 +13,9 @@ host and sent as copy-rects. The macOS viewer composites all of it on a Metal ca
 upscaling when the host drops a rung of the resolution ladder), draws the cursor locally, and
 moves scrolled content and dragged windows locally at the input, reconciling with the host's
 copy-rects mosh-style. A delay-based rate controller on the host keeps the link out of its queue.
+Measured from a Tokyo hotel to Dallas (144 ms RTT, DESIGN §6): idle 18–26 kbps, typing 45–50 kbps,
+a keystroke's pixels back in one RTT plus serialization (176–187 ms), scrolls and drags as
+copy-rects with local prediction confirmed, text under the pointer pixel-exact 2 s after connecting.
 
 ## Build
 

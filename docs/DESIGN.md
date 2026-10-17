@@ -898,7 +898,7 @@ lossless bytes that landed inside the bench window, direct (changed pixels) in b
 | login-field typing, 2 keys/s | 17 | 22 (16) | – | – | – | **first changed pixels in the field 176 ms median after each keystroke** (RTT 145): one RTT plus serialization |
 | scroll bursts (40 × 30 pt at 30 Hz) | 27 median, 147 mean | 251 (18) | 272 | 263 / 3 of 273 | 3.0 s median, 5.0 s max | queue p95 36 ms |
 | window drag (6×3 px per 16 ms) | 55 median, 287 mean | 648 (27) | 277 | 34 / 25 of 61 | 4.6 s median | the window list reports a diagonal move axis by axis and the alternating bursts reverse while earlier moves are unconfirmed: each reversal reads as a sign conflict |
-| fovea (pointer over the text from the start) | 16 | 496 (15) | – | – | – | text under the pointer lossless 0.9 s after stream start on loopback; the hotel run measured 21.7 s with a metric that ignored blocks landing before the pointer was known (fixed in 56abb5c; re-measured below) |
+| fovea (pointer over the text from the start) | 16 | 496 (15) | – | – | – | **text under the pointer lossless 2.1 s after stream start** (re-measured with 56abb5c; a first pass read 21.7 s because the metric ignored blocks that landed before the pointer was known); 0.9 s on loopback |
 
 Fresh connection at an 800 kbps cap (coordinator's capture, 89e2ff7's predecessor): a whole
 picture at ~1.7 s, crisp text by 4 s, idle ~15 kbps afterwards.
