@@ -1,0 +1,28 @@
+{
+  "name": "Mirage Icon Builder",
+  "identifier": "com.paulherz.mirage-icon",
+  "version": "1.0",
+  "description": "Builds the Mirage app icon document",
+  "author": "Paul Herz",
+  "commands": [
+    {
+      "name": "Export Mirage Layers",
+      "identifier": "export",
+      "script": "export.js",
+      "handler": "onRun"
+    },
+    {
+      "name": "Build Mirage Icon v2",
+      "identifier": "build2",
+      "script": "build2.js",
+      "handler": "onRun"
+    }
+  ],
+  "menu": {
+    "title": "Mirage Icon",
+    "items": [
+      "export",
+      "build2"
+    ]
+  }
+}
