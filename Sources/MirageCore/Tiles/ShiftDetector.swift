@@ -31,10 +31,13 @@ public struct ShiftDetector {
     public var minLines = 48
     /// The best shift's SAD must be below this fraction of the SAD at shift 0.
     public var maxRatioToZero = 0.4
-    public var minTileConfidence = 0.80
+    /// Tiles that fail verification are simply re-sent lossless, so the bar only guards against a
+    /// wrong shift; the SAD search already chose it decisively. At a 1:1 native stream ~30 % of
+    /// text tiles differ in glyph anti-aliasing after a real scroll (measured on mac-daddy).
+    public var minTileConfidence = 0.55
     public var samplesPerLine = 32
     /// Per-channel tolerance when verifying; a tile matches if ≤ 1 % of its pixels exceed it.
-    public var tolerance: Int32 = 12
+    public var tolerance: Int32 = 16
     /// Diagnostics sink (MIRAGE_DEBUG_SHIFT on the host).
     public var debug: ((String) -> Void)?
 
@@ -160,7 +163,7 @@ public struct ShiftDetector {
                 guard !t.isEmpty else { continue }
                 total += 1
                 var bad = 0
-                let allowed = max(1, t.area / 100)
+                let allowed = max(1, t.area / 50)
                 rows: for y in t.y..<t.maxY {
                     let a = new.base.advanced(by: y * new.stride + t.x * 4).assumingMemoryBound(to: UInt8.self)
                     let b = old.base.advanced(by: (y - dy) * old.stride + (t.x - dx) * 4).assumingMemoryBound(to: UInt8.self)
