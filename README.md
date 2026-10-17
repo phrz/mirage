@@ -22,7 +22,11 @@ survives a 30 s outage and comes back in 0.23 s with the picture, caches and pre
 a longest video gap of 142 ms and a 2 s loss burst is over 134–309 ms after it ends (parity on every
 frame, fragment and whole-frame NACKs, keyframes last);
 input rides datagrams with mosh-style redundancy and 1000 keystrokes under 5 % loss plus 2 s bursts
-arrive once, in order; keepalives are one small datagram per 10 s with a 45 s idle timeout.
+arrive once, in order; keepalives are one small datagram per 10 s with a 45 s idle timeout. A field
+day against mac-daddy then fixed the delay controller (path delay from video acks only) and the
+drag path: refinement is frozen while motion is sustained so video has the whole target, a dragged
+window follows the pointer from the host's last confirmed frame, and a refinement block captured
+before a move is never committed after it.
 
 ## Build
 

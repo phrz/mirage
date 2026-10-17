@@ -106,8 +106,11 @@ public struct TileTracker {
         }
         plan.video = videoSet.sorted()
         for i in plan.video {
+            // A tile that moves again while queued for refinement is dropped and re-queued: its old place
+            // in the oldest-first order would otherwise let a region that kept moving jump the queue
+            // (review: a 1003-tile backlog during a drag).
             cells[i].pending = true; cells[i].viaVideo = true
-            if cells[i].pendingSince == 0 { cells[i].pendingSince = now }
+            cells[i].pendingSince = now
             cells[i].dueNanos = now &+ tuning.settleNanos
         }
         for i in dirty where !videoSet.contains(i) {
@@ -131,7 +134,7 @@ public struct TileTracker {
         for i in tiles {
             var c = cells[i]
             c.pending = true; c.viaVideo = true
-            if c.pendingSince == 0 { c.pendingSince = now }
+            c.pendingSince = now
             c.dueNanos = now &+ tuning.settleNanos
             cells[i] = c
         }
@@ -195,6 +198,12 @@ public struct TileTracker {
     }
 
     public mutating func reset() { cells = Array(repeating: Cell(), count: cols * rows) }
+
+    /// Any tile under `rects` dirtied or moved (copy-rect) after `nanos`: pixels captured at `nanos`
+    /// for those rects are stale and must not be sent.
+    public func changedSince(nanos: UInt64, in rects: [PixelRect]) -> Bool {
+        tiles(covering: rects).contains { cells[$0].lastDirtyNanos > nanos }
+    }
 
     public func boundingRect(_ tiles: [Int]) -> PixelRect {
         var r = PixelRect.zero

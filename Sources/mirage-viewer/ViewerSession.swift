@@ -106,7 +106,8 @@ final class ViewerSession: @unchecked Sendable {
     private(set) var lastRefinementNanos: UInt64 = 0
     /// Scenario watch rect: last lossless tile / video frame that touched it.
     var watchRect: PixelRect = .zero
-    private(set) var lastWatchedTileNanos: UInt64 = 0, lastWatchedVideoNanos: UInt64 = 0
+    private(set) var lastWatchedTileNanos: UInt64 = 0, lastWatchedVideoNanos: UInt64 = 0, lastWatchedCopyNanos: UInt64 = 0
+    private(set) var watchedVideoFrames = 0, watchedCopyRects = 0
     private(set) var watchedTileBytes = 0, watchedTileCount = 0, watchedDirectBytes = 0
     /// Foveation metric: the first lossless tile within ~100 px of the pointer after the stream started.
     private var pointerRect: PixelRect = .zero
@@ -116,7 +117,7 @@ final class ViewerSession: @unchecked Sendable {
     /// Receiver clock of the last lossless tile per 64-px tile (for the legibility metric).
     private var losslessAt: [UInt64] = []
     static let debugTiles = ProcessInfo.processInfo.environment["MIRAGE_DEBUG_TILES"] != nil
-    func resetWatched() { videoQueue.async { self.watchedTileBytes = 0; self.watchedTileCount = 0; self.watchedDirectBytes = 0 } }
+    func resetWatched() { videoQueue.async { self.watchedTileBytes = 0; self.watchedTileCount = 0; self.watchedDirectBytes = 0; self.watchedVideoFrames = 0; self.watchedCopyRects = 0 } }
     func windowsSnapshot() -> [ControlMessage.WindowInfo] { predictorLock.lock(); defer { predictorLock.unlock() }; return windows }
     var scenario: ScenarioRunner?
 
@@ -428,24 +429,46 @@ final class ViewerSession: @unchecked Sendable {
         }
     }
 
-    /// True (and records the capture) unless every tile under `rect` already holds a newer capture.
+    /// Every pixel update carries the host capture it came from; per 64-px tile the viewer keeps the
+    /// newest capture that touched it (tiles, copy-rects, video alike). A tile message is applied only
+    /// if *no* tile under its rect holds a newer capture (review M2: applying a rect because one tile
+    /// under it was still old put stale blocks over a moved window), and applying it marks the tiles.
     private func isFresh(_ rect: PixelRect, captureSeq: UInt32) -> Bool {
         guard let c = compositor, c.width > 0 else { return true }
         let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
         if tileCaptureSeq.count != cols * rows { tileCaptureSeq = Array(repeating: 0, count: cols * rows) }
         let c0 = max(0, rect.x / 64), c1 = min(cols - 1, (rect.maxX - 1) / 64), r0 = max(0, rect.y / 64), r1 = min(rows - 1, (rect.maxY - 1) / 64)
         guard c1 >= c0, r1 >= r0 else { return true }
-        var stale = true
-        for r in r0...r1 { for cc in c0...c1 where tileCaptureSeq[r * cols + cc] <= captureSeq { stale = false } }
-        if stale { return false }
-        for r in r0...r1 { for cc in c0...c1 { tileCaptureSeq[r * cols + cc] = max(tileCaptureSeq[r * cols + cc], captureSeq) } }
+        for r in r0...r1 { for cc in c0...c1 where tileCaptureSeq[r * cols + cc] > captureSeq { staleDiscards += 1; return false } }
+        markCapture(rect, captureSeq: captureSeq)
         return true
+    }
+    /// Records that `rect` now shows pixels from `captureSeq` (copy-rects and video frames too).
+    private func markCapture(_ rect: PixelRect, captureSeq: UInt32) {
+        guard let c = compositor, c.width > 0 else { return }
+        let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
+        if tileCaptureSeq.count != cols * rows { tileCaptureSeq = Array(repeating: 0, count: cols * rows) }
+        let c0 = max(0, rect.x / 64), c1 = min(cols - 1, (rect.maxX - 1) / 64), r0 = max(0, rect.y / 64), r1 = min(rows - 1, (rect.maxY - 1) / 64)
+        guard c1 >= c0, r1 >= r0 else { return }
+        for r in r0...r1 { for cc in c0...c1 { tileCaptureSeq[r * cols + cc] = max(tileCaptureSeq[r * cols + cc], captureSeq) } }
+    }
+    /// Tile messages discarded because newer pixels (a copy-rect, video, a later tile) had already landed
+    /// under them; `staleCommits` counts the opposite and must stay 0 (the drag scenario asserts it).
+    private(set) var staleDiscards = 0, staleCommits = 0
+    private func wouldBeStale(_ rect: PixelRect, captureSeq: UInt32) -> Bool {
+        guard let c = compositor, c.width > 0, !tileCaptureSeq.isEmpty else { return false }
+        let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
+        let c0 = max(0, rect.x / 64), c1 = min(cols - 1, (rect.maxX - 1) / 64), r0 = max(0, rect.y / 64), r1 = min(rows - 1, (rect.maxY - 1) / 64)
+        guard c1 >= c0, r1 >= r0 else { return false }
+        for r in r0...r1 { for cc in c0...c1 where tileCaptureSeq[r * cols + cc] > captureSeq { return true } }
+        return false
     }
 
     private func apply(_ msg: TileMessage, seq: UInt32, bytes: Int, now: UInt64) {
         switch msg {
         case .tiles(let t):
             let fresh = t.tiles.filter { isFresh($0.rect, captureSeq: t.header.captureSeq) }
+            for tile in fresh where wouldBeStale(tile.rect, captureSeq: t.header.captureSeq) { staleCommits += 1 }   // must never happen
             let n = compositor?.applyTiles(fresh, crossfade: t.refinement) ?? 0
             statsLock.lock(); sTileBytes += t.bytes; sTileRects += n; statsLock.unlock()
             if t.refinement { lastRefinementNanos = now; if Self.debugTiles, refinementLogged < 6 { refinementLogged += 1; log("refinement batch: \(t.tiles.prefix(2).map { "\($0.rect)" })") } }
@@ -472,9 +495,11 @@ final class ViewerSession: @unchecked Sendable {
             sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: t.header.captureNanos, receivedNanos: now, bytes: bytes)))
         case .copyRect(let c):
             compositor?.applyCopyRect(c.rect, dx: c.dx, dy: c.dy)
+            markCapture(c.rect.union(c.rect.offset(c.dx, c.dy)), captureSeq: c.header.captureSeq)
             statsLock.lock(); sCopyRects += 1; statsLock.unlock()
+            if !watchRect.isEmpty, c.rect.union(c.rect.offset(c.dx, c.dy)).intersects(watchRect) { lastWatchedCopyNanos = now; watchedCopyRects += 1 }
             predictorLock.lock()
-            predictor.hostCopyRect(windowID: c.header.windowID, rect: c.rect, dx: c.dx, dy: c.dy, now: now)
+            predictor.hostCopyRect(windowID: c.header.windowID, rect: c.rect, dx: c.dx, dy: c.dy, inputSeq: c.header.inputSeq, now: now)
             predictor.hostUpdate(inputSeq: c.header.inputSeq, rect: c.rect.union(c.rect.offset(c.dx, c.dy)), now: now)
             predictorLock.unlock()
             sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: c.header.captureNanos, receivedNanos: now, bytes: bytes)))
@@ -545,6 +570,7 @@ final class ViewerSession: @unchecked Sendable {
                         let grid = TileMask.grid(for: region)
                         let mask = frame.tileMask.flatMap { TileMask(cols: grid.cols, rows: grid.rows, bits: $0) }
                         compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive))
+                        if !frame.flags.contains(.progressive) { markCapture(region, captureSeq: frame.captureSeq) }
                         notePictureChange(now)
                         statsLock.lock(); let since = connectedAtNanos; statsLock.unlock()
                         if lastVideoNanos > 0, since > 0, now > since &+ steadyAfterNanos, now > lastVideoNanos {
@@ -553,7 +579,7 @@ final class ViewerSession: @unchecked Sendable {
                             if gap > 500 { videoGapsOver500.append(gap) }
                         }
                         lastVideoNanos = now
-                        if !watchRect.isEmpty, region.intersects(watchRect) { lastWatchedVideoNanos = now }
+                        if !watchRect.isEmpty, region.intersects(watchRect) { lastWatchedVideoNanos = now; watchedVideoFrames += 1 }
                         predictorLock.lock(); predictor.hostUpdate(inputSeq: frame.inputSeq, rect: region, now: now); predictorLock.unlock()
                         onChange?()
                     }
@@ -735,6 +761,15 @@ final class ViewerSession: @unchecked Sendable {
         return PixelRect(x: w.frame.x, y: w.frame.y + titleBarPx, width: w.frame.width, height: max(0, w.frame.height - titleBarPx))
     }
 
+    func beginDrag(windowID: UInt32, frame: PixelRect, pointer: (Int, Int), inputSeq: UInt64) {
+        predictorLock.lock(); predictor.beginDrag(windowID: windowID, frame: frame, pointer: pointer, inputSeq: inputSeq, now: Clock.nowNanos()); predictorLock.unlock()
+    }
+    func dragPointer(windowID: UInt32, pointer: (Int, Int), inputSeq: UInt64) {
+        predictorLock.lock(); predictor.dragPointer(windowID: windowID, pointer: pointer, inputSeq: inputSeq, now: Clock.nowNanos()); predictorLock.unlock()
+        onChange?()
+    }
+    func endDrag(windowID: UInt32) { predictorLock.lock(); predictor.endDrag(windowID: windowID); predictorLock.unlock() }
+
     func predict(kind: Predictor.Kind, windowID: UInt32, rect: PixelRect, dx: Int, dy: Int, inputSeq: UInt64) {
         let now = Clock.nowNanos()
         predictorLock.lock()
@@ -815,6 +850,8 @@ extension ViewerSession {
             var inputPackets: Int?, inputQueued: Int?, inputDropped: Int?, keysSent: [String]?
             var maxVideoGapMs: Double?, videoGapsOver500ms: [Double]?
             var keepalivesSent: UInt64?
+            var motionFps: [Double]?, motionFrames: [Int]?, motionCopyRects: [Int]?
+            var staleTilesDiscarded: Int?, staleTilesCommitted: Int?
             var samples: [Sample]
         }
         let target = MainActor.assumeIsolated { lastRequest?.bitrateKbps ?? 0 }
@@ -850,6 +887,8 @@ extension ViewerSession {
                       resumes: resumes, reconnects: reconnects, resumeToPictureMs: resumeToPictureMs, maxPictureGapMs: maxPictureGapMs, pictureGapsOver500ms: pictureGapsOver500, bursts: MainActor.assumeIsolated { model.stats.bursts },
                       inputPackets: inputStateNow.packets, inputQueued: inputStateNow.queued, inputDropped: inputStateNow.dropped, keysSent: keysSent.isEmpty ? nil : keysSent,
                       maxVideoGapMs: videoGapMax, videoGapsOver500ms: videoGaps, keepalivesSent: pingSeq,
+                      motionFps: scenario?.motionFps, motionFrames: scenario?.motionFrames, motionCopyRects: scenario?.motionCopyRects,
+                      staleTilesDiscarded: staleDiscards, staleTilesCommitted: staleCommits,
                       samples: samples)
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         return (try? enc.encode(out)) ?? Data()

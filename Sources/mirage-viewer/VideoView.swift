@@ -168,12 +168,11 @@ final class VideoNSView: NSView {
         if observeOnly { moved(event); return }
         // Window drag prediction: translate the window's pixels with the pointer, send the move as usual.
         if let drag, let session, let p = streamPixel(event) {
-            let dx = p.0 - drag.last.0, dy = p.1 - drag.last.1
             self.drag?.last = p
             localPointer = convert(event.locationInWindow, from: nil); updateCursorLayer()
             let (x, y) = normalized(event)
             let seq = session.send(.mouseMove(.init(x: x, y: y)))
-            if dx != 0 || dy != 0 { session.predict(kind: .drag, windowID: drag.windowID, rect: drag.frame, dx: dx, dy: dy, inputSeq: seq) }
+            session.dragPointer(windowID: drag.windowID, pointer: p, inputSeq: seq)
             return
         }
         moved(event)
@@ -181,23 +180,25 @@ final class VideoNSView: NSView {
     override func rightMouseDragged(with event: NSEvent) { moved(event) }
     override func otherMouseDragged(with event: NSEvent) { moved(event) }
 
-    private func button(_ e: NSEvent, _ b: Int, down: Bool) {
+    @discardableResult
+    private func button(_ e: NSEvent, _ b: Int, down: Bool) -> UInt64 {
         if down { window?.makeFirstResponder(self) }
-        guard !observeOnly else { return }
+        guard !observeOnly else { return 0 }
         let (x, y) = normalized(e)
-        session?.send(.mouseButton(.init(button: b, down: down, x: x, y: y, clickCount: e.clickCount, modifiers: flags(e))))
+        return session?.send(.mouseButton(.init(button: b, down: down, x: x, y: y, clickCount: e.clickCount, modifiers: flags(e)))) ?? 0
     }
     override func mouseDown(with event: NSEvent) {
-        button(event, 0, down: true)
+        let seq = button(event, 0, down: true)
+        if let d = drag { session?.endDrag(windowID: d.windowID) }
         drag = nil
         guard !observeOnly else { return }
         // Title-bar hit test on the host's window list: a plain left press there starts a predicted drag.
         guard let session, let p = streamPixel(event), event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty, event.clickCount == 1,
               let w = session.window(at: p.0, p.1) else { return }
         let titleBar = Int(28 * MainActor.assumeIsolated { session.pixelsPerPoint })
-        if p.1 < w.frame.y + titleBar { drag = (w.id, w.frame, p) }
+        if p.1 < w.frame.y + titleBar { drag = (w.id, w.frame, p); session.beginDrag(windowID: w.id, frame: w.frame, pointer: p, inputSeq: seq) }
     }
-    override func mouseUp(with event: NSEvent) { button(event, 0, down: false); drag = nil }
+    override func mouseUp(with event: NSEvent) { button(event, 0, down: false); if let d = drag { session?.endDrag(windowID: d.windowID) }; drag = nil }
     override func rightMouseDown(with event: NSEvent) { button(event, 1, down: true) }
     override func rightMouseUp(with event: NSEvent) { button(event, 1, down: false) }
     override func otherMouseDown(with event: NSEvent) { button(event, max(2, event.buttonNumber), down: true) }

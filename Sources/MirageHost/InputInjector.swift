@@ -16,6 +16,10 @@ final class InputInjector {
     private var _locus: (x: Double, y: Double)? = nil
     private let locusLock = NSLock()
     var locus: (x: Double, y: Double)? { locusLock.lock(); defer { locusLock.unlock() }; return _locus }
+    /// Host clock of the last input that implies motion on screen (a drag move, a scroll, a press):
+    /// the streamer freezes refinement while this is recent, before the pixels even show it.
+    private var _motionHintNanos: UInt64 = 0
+    var motionHintNanos: UInt64 { locusLock.lock(); defer { locusLock.unlock() }; return _motionHintNanos }
 
     /// `MIRAGE_INPUT_SINK=/path`: every input the host would inject is appended to that file as one JSON
     /// line and *nothing* is posted to the HID tap. The loopback integrity tests compare that file with
@@ -76,6 +80,12 @@ final class InputInjector {
             return
         }
         if let p = msg.inputPoint { locusLock.lock(); _locus = p; locusLock.unlock() }
+        switch msg {
+        case .mouseButton(let m): if m.down { buttonsDown.insert(m.button) } else { buttonsDown.remove(m.button) }; if m.down { noteMotion() }
+        case .mouseMove where !buttonsDown.isEmpty: noteMotion()
+        case .scroll: noteMotion()
+        default: break
+        }
         if let seq = msg.inputSeq {
             seqLock.lock()
             injected.append((seq, Clock.nowNanos()))
@@ -94,7 +104,6 @@ final class InputInjector {
             e.post(tap: .cghidEventTap)
         case .mouseButton(let m):
             let p = point(m.x, m.y); lastPos = p
-            if m.down { buttonsDown.insert(m.button) } else { buttonsDown.remove(m.button) }
             guard let e = CGEvent(mouseEventSource: source, mouseType: mouseType(down: m.down, button: m.button), mouseCursorPosition: p, mouseButton: cgButton(m.button)) else { return }
             e.setIntegerValueField(.mouseEventClickState, value: Int64(max(1, m.clickCount)))
             if m.button >= 2 { e.setIntegerValueField(.mouseEventButtonNumber, value: Int64(m.button)) }
@@ -129,6 +138,8 @@ final class InputInjector {
         default: break
         }
     }
+
+    private func noteMotion() { locusLock.lock(); _motionHintNanos = Clock.nowNanos(); locusLock.unlock() }
 
     /// Releases anything still held when the viewer goes away.
     func releaseAll() {

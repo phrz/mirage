@@ -114,6 +114,7 @@ public final class Compositor {
         guard let canvasTex = canvas, CVPixelBufferGetPlaneCount(image) == 2 else { return }
         let canvas = crossfade ? (incoming ?? canvasTex) : canvasTex
         if crossfade { beginFade(region.isEmpty ? PixelRect(x: 0, y: 0, width: width, height: height) : region) }
+        else { dropFades(intersecting: region.isEmpty ? PixelRect(x: 0, y: 0, width: width, height: height) : region) }
         let vw = CVPixelBufferGetWidthOfPlane(image, 0), vh = CVPixelBufferGetHeightOfPlane(image, 0)
         guard vw > 0, vh > 0 else { return }
         var yTex: CVMetalTexture?, cTex: CVMetalTexture?
@@ -202,7 +203,7 @@ public final class Compositor {
     public func applyTiles(_ tiles: [TileMessage.Tile], crossfade: Bool = false) -> Int {
         guard let canvasTex = canvas, let cb = commandQueue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return 0 }
         let canvas = crossfade ? (incoming ?? canvasTex) : canvasTex
-        if crossfade { for t in tiles { beginFade(t.rect) } }
+        if crossfade { for t in tiles { beginFade(t.rect) } } else { for t in tiles { dropFades(intersecting: t.rect) } }
         var n = 0
         let bounds = PixelRect(x: 0, y: 0, width: width, height: height)
         for t in tiles {
@@ -258,7 +259,19 @@ public final class Compositor {
     }
     public var hasActiveFades: Bool { lock.lock(); defer { lock.unlock() }; return !fades.isEmpty }
 
+    /// Newer pixels (a copy-rect, a video frame, a direct tile) arrived under a crossfade still in
+    /// progress: the fading block is stale and is dropped, never committed (review M1: committing it
+    /// 150 ms later put old pixels back over the moved window, the "shattering" of a drag).
+    @discardableResult
+    public func dropFades(intersecting r: PixelRect) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let before = fades.count
+        fades.removeAll { $0.rect.intersects(r) }
+        return before - fades.count
+    }
+
     public func applyCopyRect(_ rect: PixelRect, dx: Int, dy: Int) {
+        dropFades(intersecting: rect.union(rect.offset(dx, dy)))
         guard let canvas, let scratch, let cb = commandQueue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return }
         let bounds = PixelRect(x: 0, y: 0, width: width, height: height)
         let src = rect.intersection(bounds).intersection(bounds.offset(-dx, -dy))

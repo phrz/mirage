@@ -88,7 +88,53 @@ final class ScenarioRunner {
         return true
     }
 
+    /// Per-burst video frames inside the watched window during motion, and frames per second of motion.
+    private(set) var motionFrames: [Int] = []
+    private(set) var motionFps: [Double] = []
+    private(set) var motionCopyRects: [Int] = []
+
+    /// `watch`: inject nothing; the bench moves itself (`--drift`). Each burst of motion the host shows in
+    /// the bench's rect (video or copy-rects) is timed: frames during it, and time-to-crisp after it.
+    private func watch(seconds: Double) async {
+        for _ in 0..<250 where bench() == nil || (session.compositor?.width ?? 0) == 0 { try? await Task.sleep(for: .milliseconds(100)) }
+        guard var w = bench() else { session.log("scenario watch: no Mirage Test Bench window on the host"); return }
+        session.log("scenario watch for \(Int(seconds)) s on window \(w.id) \(w.frame); nothing is injected")
+        let end = Date().addingTimeInterval(seconds)
+        let started = Date()
+        defer { activeSeconds = Date().timeIntervalSince(started) }
+        while Date() < end {
+            w = bench() ?? w
+            session.watchRect = PixelRect(x: max(0, w.frame.x - 400), y: max(0, w.frame.y - 200), width: w.frame.width + 800, height: w.frame.height + 400)
+            // Wait for motion: video or a copy-rect touching the window after ≥ 700 ms of quiet.
+            session.resetWatched()
+            var quietSince = max(session.lastWatchedVideoNanos, session.lastWatchedCopyNanos)
+            while Date() < end {
+                try? await Task.sleep(for: .milliseconds(20))
+                let latest = max(session.lastWatchedVideoNanos, session.lastWatchedCopyNanos)
+                if latest > quietSince, Clock.nowNanos() - quietSince > 700_000_000 { break }
+                if latest > quietSince { quietSince = latest }
+            }
+            guard Date() < end else { break }
+            let burstStart = Clock.nowNanos()
+            // The burst lasts while video/copy-rects keep touching the rect (300 ms quiet ends it).
+            var last = burstStart
+            while Date() < end {
+                try? await Task.sleep(for: .milliseconds(20))
+                let latest = max(session.lastWatchedVideoNanos, session.lastWatchedCopyNanos)
+                if latest > last { last = latest }
+                if Clock.nowNanos() - last > 300_000_000 { break }
+            }
+            let dur = Double(last - burstStart) / 1e9
+            let frames = session.watchedVideoFrames, copies = session.watchedCopyRects
+            if frames + copies < 3 || dur < 0.3 { continue }   // a stray refinement frame, not motion
+            motionFrames.append(frames); motionCopyRects.append(copies); motionFps.append(dur > 0.2 ? Double(frames) / dur : 0)
+            session.log(String(format: "scenario watch: burst %d: %.2f s of motion, %d video frames (%.1f fps), %d copy-rects", bursts + 1, dur, frames, dur > 0.2 ? Double(frames) / dur : 0, copies))
+            await measureCrisp(burstEnd: last)
+        }
+    }
+
     func run() async {
+        if name == "watch" { await watch(seconds: seconds); return }
         if name == "keys" {
             // Input-integrity run: N scripted keystrokes at 20 keys/s. Only against a host that records
             // input instead of injecting it (HostStatus.inputSink), whatever is frontmost there.
@@ -230,17 +276,19 @@ final class ScenarioRunner {
                 var (nx, ny) = normalized(x0, y0)
                 session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
                 try? await Task.sleep(for: .milliseconds(50))
-                session.send(.mouseButton(.init(button: 0, down: true, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
+                let downSeq = session.send(.mouseButton(.init(button: 0, down: true, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
+                session.beginDrag(windowID: win.id, frame: win.frame, pointer: (x0, y0), inputSeq: downSeq)
                 var x = x0, y = y0
                 session.watchRect = win.frame.union(win.frame.offset(300 * dir, 150 * dir))
                 for _ in 0..<50 {   // 0.8 s drag, 6×3 px per 16 ms
                     x += 6 * dir; y += 3 * dir
                     (nx, ny) = normalized(x, y)
                     let seq = session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
-                    session.predict(kind: .drag, windowID: win.id, rect: win.frame, dx: 6 * dir, dy: 3 * dir, inputSeq: seq)
+                    session.dragPointer(windowID: win.id, pointer: (x, y), inputSeq: seq)
                     try? await Task.sleep(for: .milliseconds(16))
                 }
                 session.send(.mouseButton(.init(button: 0, down: false, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
+                session.endDrag(windowID: win.id)
                 await measureCrisp(burstEnd: Clock.nowNanos())
                 try? await Task.sleep(for: .milliseconds(800))
                 dir = -dir

@@ -457,6 +457,44 @@ The §4a bar, implemented on loopback (measurements in §6 "M2.5 (loopback)"):
   every input it would inject to a file and inject nothing; the input-integrity scenario refuses to
   run against a host that is not in that mode, and the scenario runner re-checks its guards before
   every burst and no longer ends with ⌘A+⌫ (review M8, M9).
+- **Motion first, refinement frozen (field fix, 2026-10-18).** phrz dragging windows against
+  mac-daddy at 800 kbps saw a slideshow: refinement took 65–85 % of the budget during the drag
+  (`refine 512–670 kbps`, a 1003-tile backlog) and video starved to ~2 fps. Now: while motion is
+  sustained (classified video, copy-rects, or a drag/scroll/press on the input stream in the last
+  300 ms) refinement sends nothing and its queue is frozen, including the fresh picture's blocks;
+  only the interactive tile bytes (changed pixels at the locus, copy-rects) are reserved from the
+  target, so video has the rest; refinement resumes 300 ms after the motion stops, locus first. A
+  pending tile that moves again is dropped and re-queued (its place in the oldest-first order is
+  forfeited), and a backlog above 40 % of the screen is refined as large locus-first blocks, one in
+  flight, not as a tile march. The host publishes a dragged window's frame as the pixels verified
+  it (one frame per move, both axes), where the window list reports a diagonal move axis by axis.
+- **Drag prediction reworked.** The viewer no longer queues one prediction per pointer move for
+  the host's copy-rects to consume one by one. A drag is one state: the window is displaced from
+  the host's last confirmed frame by (pointer now − pointer at that confirmation); a host copy-rect
+  moves the confirmed frame by its exact (dx, dy), any other host update that reflects input k
+  moves it to where the pointer was at k. A copy-rect confirms when the host's cumulative
+  displacement since mouse-down has moved toward the pointer and not past it (per axis, 8 px), so
+  per-axis and coalesced host updates confirm; a disagreement hides the displacement for 2 s and
+  re-syncs to the host. Measured on loopback with the bench dragging itself (`--drift`, nothing
+  injected, 1512×982 stream so the 6×3 pt moves are integer pixels, five 0.8 s bursts per run):
+  video frames during the bursts went from 7.9 fps median (4–13) to 9.5–12.5 fps (7–21) at an
+  800 kbps cap with the host before/after this change; at 2000 kbps 19–23 fps either way (the
+  budget is not the constraint there); ~24 copy-rects per burst in every run; **0 stale tiles
+  committed** into a region that had moved since their capture (6–8 discarded per run, the host
+  dropped 1–15 encoded blocks per 5 s as stale); time-to-crisp after a burst ~5.0 s at both caps,
+  which is the refinement pacing (blocks of ~1 s of 30 % of the tile budget, one in flight), the
+  same figure the M2 Shibuya drags measured, and the next thing to tune. The field case (a
+  3200×1800 stream, refinement at 65–85 % of the budget) is the one the freeze is for; loopback
+  at 1512×982 only shows the direction.
+- **Stale blocks never committed (field fix, 2026-10-18).** phrz: the dragged window first follows
+  the pointer, then "shatters into blocks". Those were refinement tiles captured before a move and
+  applied after it. Every pixel update already carries its host capture sequence; the viewer now
+  keeps, per 64-px tile, the newest capture that touched it from tiles, copy-rects *and* video, and
+  applies a tile message only if no tile under its rect holds a newer capture (review M2); a
+  crossfade still running under a copy-rect, a video frame or a direct tile is dropped, never
+  committed (review M1); and the host drops refinement it has already encoded when the region
+  changed meanwhile (`stale-dropped` in the stats line). `staleTilesCommitted` in the viewer's
+  stats must read 0; it did in every loopback drag run.
 - **Path migration.** Not testable here (one interface). Network.framework decides whether a QUIC
   connection migrates; what Mirage does is react to its viability / better-path callbacks and to a
   stall by redialing with the resume token, so an IP change costs at most a handshake and a masked

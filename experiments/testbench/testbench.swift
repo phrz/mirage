@@ -19,8 +19,12 @@ final class App: NSObject, NSApplicationDelegate {
         // host has a picture that changes every frame (the §4a loss and burst runs need a moving picture
         // of our own; nothing else on the display is involved).
         let isMotion = CommandLine.arguments.contains("--motion")
+        // `--drift`: an 800×500 window that drags *itself* in 0.8 s bursts of 6×3 pt per 16 ms every 6 s
+        // (what the drag scenario does with the pointer), without taking focus and without any input
+        // being injected: the window-drag path is measured while the person at the machine keeps working.
+        let isDrift = CommandLine.arguments.contains("--drift")
         let isStatic = CommandLine.arguments.contains("--static") || isMotion
-        let size = isStatic ? NSSize(width: screen.frame.width, height: screen.frame.height - 25) : NSSize(width: 1100, height: 750)
+        let size = isStatic ? NSSize(width: screen.frame.width, height: screen.frame.height - 25) : isDrift ? NSSize(width: 800, height: 500) : NSSize(width: 1100, height: 750)
         let origin = isStatic ? NSPoint(x: screen.frame.minX, y: screen.frame.minY) : NSPoint(x: screen.frame.minX + 240, y: screen.frame.maxY - 160 - size.height)
         let w = NSWindow(contentRect: NSRect(origin: origin, size: size), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         w.title = "Mirage Test Bench — measurement window started by Claude, safe to ignore"
@@ -67,6 +71,25 @@ final class App: NSObject, NSApplicationDelegate {
             Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { _ in mv.step() }
         }
         w.contentView = content
+        if isDrift {
+            // Normal level (the host's window list only carries layer-0 windows), ordered front without activating.
+            tv.isSelectable = false; tv.isEditable = false
+            w.orderFrontRegardless()
+            updateCaption()
+            var dir: CGFloat = 1
+            Timer.scheduledTimer(withTimeInterval: 6.0, repeats: true) { [weak self] _ in
+                guard let self, let win = self.window else { return }
+                var step = 0
+                Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { t in
+                    step += 1
+                    var f = win.frame; f.origin.x += 6 * dir; f.origin.y -= 3 * dir
+                    win.setFrameOrigin(f.origin)
+                    if step >= 50 { t.invalidate(); dir = -dir }
+                }
+            }
+            window = w
+            return
+        }
         w.makeKeyAndOrderFront(nil)
         updateCaption()
         if !isStatic { Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.updateCaption() } }
