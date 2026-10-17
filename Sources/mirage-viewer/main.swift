@@ -15,6 +15,7 @@ struct Options {
     var duration = 60.0
     var statsJSON: String?
     var scenario: (String, Double)?
+    var observe = false
 
     static func parse() -> Options {
         var o = Options()
@@ -32,6 +33,7 @@ struct Options {
         if let v = value("--stats") { o.statsJSON = v }
         if let v = value("--scenario") { let p = v.split(separator: ":"); o.scenario = (String(p[0]), p.count > 1 ? Double(p[1]) ?? 30 : 30) }
         if let i = args.firstIndex(of: "--headless") { o.headless = true; args.remove(at: i) }
+        if let i = args.firstIndex(of: "--observe") { o.observe = true; args.remove(at: i) }
         if let i = args.firstIndex(of: "--probe-input") { o.probeInput = true; args.remove(at: i) }
         if let v = value("--window") { let p = v.split(separator: "x").compactMap { Int($0) }; if p.count == 2 { o.window = (p[0], p[1]) } }
         if args.isEmpty { return o }   // launched from Finder/Dock: show the connect window
@@ -46,7 +48,8 @@ struct Options {
                              no window: connect, request --window pixels (× --scale), decode for S seconds,
                              write per-second samples and medians to PATH.json, exit 0 (SSH-friendly)
                   --probe-input  (headless) after 8 s move the host pointer and open/close Spotlight
-                  --scenario NAME:SECONDS  (headless) drive the host's "Mirage Test Bench" window: idle | typing | scroll | drag
+                  --scenario NAME:SECONDS  drive the host's "Mirage Test Bench" window: idle | typing | scroll | drag (GUI or headless)
+                  --observe  show the picture but forward no local input (watching a scripted run without disturbing it)
                   ⌃⌥⌘S toggles the stats overlay, ⌃⌥⌘Q quits; all other keys go to the host.
                 """)
             exit(0)
@@ -95,6 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @MainActor private func startViewer(host: String, pairCode: String?) {
         UserDefaults.standard.set(host, forKey: "lastHost")
         model = ViewerModel(bitrateKbps: options.bitrate, pixelFactor: options.pixelFactor)
+        model.observeOnly = options.observe || options.scenario != nil
         model.statsLog = options.statsLog.map { URL(fileURLWithPath: $0) }
         session = ViewerSession(host: host, port: options.port, pairCode: pairCode, model: model)
         let content = ContentView(session: session, model: model)

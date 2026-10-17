@@ -16,6 +16,8 @@ final class ViewerModel: ObservableObject {
     @Published var bitrateKbps: Int
     @Published var pixelFactor: Double
     var statsLog: URL?
+    /// Forward no local input (a scripted run is being watched).
+    var observeOnly = false
 
     struct Stats {
         var rttMs = 0.0, fps = 0.0, kbps = 0.0, frameAgeMs = 0.0, decodeMs = 0.0

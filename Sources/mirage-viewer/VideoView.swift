@@ -154,15 +154,18 @@ final class VideoNSView: NSView {
 
     private func flags(_ e: NSEvent) -> UInt64 { e.cgEvent?.flags.rawValue ?? UInt64(e.modifierFlags.rawValue) }
 
+    private var observeOnly: Bool { model?.observeOnly ?? false }
     private func moved(_ e: NSEvent) {
         localPointer = convert(e.locationInWindow, from: nil)
         pointerInside = bounds.contains(localPointer)
         updateCursorLayer()
+        guard !observeOnly else { return }
         let (x, y) = normalized(e)
         session?.sendMouseMove(x: x, y: y)
     }
     override func mouseMoved(with event: NSEvent) { moved(event) }
     override func mouseDragged(with event: NSEvent) {
+        if observeOnly { moved(event); return }
         // Window drag prediction: translate the window's pixels with the pointer, send the move as usual.
         if let drag, let session, let p = streamPixel(event) {
             let dx = p.0 - drag.last.0, dy = p.1 - drag.last.1
@@ -180,12 +183,14 @@ final class VideoNSView: NSView {
 
     private func button(_ e: NSEvent, _ b: Int, down: Bool) {
         if down { window?.makeFirstResponder(self) }
+        guard !observeOnly else { return }
         let (x, y) = normalized(e)
         session?.send(.mouseButton(.init(button: b, down: down, x: x, y: y, clickCount: e.clickCount, modifiers: flags(e))))
     }
     override func mouseDown(with event: NSEvent) {
         button(event, 0, down: true)
         drag = nil
+        guard !observeOnly else { return }
         // Title-bar hit test on the host's window list: a plain left press there starts a predicted drag.
         guard let session, let p = streamPixel(event), event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty, event.clickCount == 1,
               let w = session.window(at: p.0, p.1) else { return }
@@ -199,6 +204,7 @@ final class VideoNSView: NSView {
     override func otherMouseUp(with event: NSEvent) { button(event, max(2, event.buttonNumber), down: false) }
 
     override func scrollWheel(with event: NSEvent) {
+        guard !observeOnly else { return }
         let (x, y) = normalized(event)
         let precise = event.hasPreciseScrollingDeltas
         let dx = precise ? event.scrollingDeltaX : event.deltaX, dy = precise ? event.scrollingDeltaY : event.deltaY
@@ -228,12 +234,13 @@ final class VideoNSView: NSView {
     }
 
     private func key(_ e: NSEvent, down: Bool) {
+        guard !observeOnly else { return }
         session?.send(.key(.init(keyCode: e.keyCode, down: down, isRepeat: down && e.isARepeat, modifiers: flags(e),
                                  characters: down ? e.characters : nil)))
     }
     override func keyDown(with event: NSEvent) { if !handleLocal(event) { key(event, down: true) } }
     override func keyUp(with event: NSEvent) { key(event, down: false) }
-    override func flagsChanged(with event: NSEvent) { session?.send(.modifiers(.init(keyCode: event.keyCode, modifiers: flags(event)))) }
+    override func flagsChanged(with event: NSEvent) { if !observeOnly { session?.send(.modifiers(.init(keyCode: event.keyCode, modifiers: flags(event)))) } }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         // Swallow ⌘-shortcuts so the viewer's own menu does not eat them; forward to the host.
         guard window?.firstResponder === self else { return false }
