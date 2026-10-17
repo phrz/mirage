@@ -655,7 +655,7 @@ What was built is in §3.3a; the viewer, host and test bench are described in th
 on the real link, mac-daddy (Dallas, now a 3200×1800 panel at 2x: the 5K is offline) → this
 MacBook (Japan), RTT 160–240 ms, stream 2560×1440 unless noted, headless viewer over the tailnet.
 
-**Full-screen motion.** mac-daddy was at its lock screen for these runs, whose animated wallpaper
+**Full-screen motion (hotel Wi-Fi, 2026-10-17 morning JST).** mac-daddy was at its lock screen for these runs, whose animated wallpaper
 changes essentially every tile at 25 fps (the tolerant diff still prunes 84 % of the tiles SCK
 flags, because the fades are mostly below ±4). 60 s per run, display held awake by the host:
 
@@ -701,8 +701,19 @@ bench window need mac-daddy unlocked; see below):
 - Invisible whole-screen flickers (±1–2 levels) turned into a video frame plus a full lossless
   refinement pass (~400 KB) until the tile diff got a ±4 tolerance.
 
-**Pending (mac-daddy must be unlocked):** idle kbps, typing kbps into the test bench over the
-link, scroll and drag time-to-crisp, subjective notes. Commands are in experiments/testbench/README.md.
+**4G bus, one bar (2026-10-17 ~10:25 JST, MacBook on a moving bus far from towns; ping RTT
+414–451 ms).** 60 s idle at an 800 kbps cap against the unlocked, quiet desktop. The tier went
+*Extreme* after its 2 s dwell (min-RTT > 400 ms), so video was off for the rest of the run and
+everything travelled as lossless tiles. The opening picture, a full-screen lossless refinement
+(1451 rects), ran at ~700 kbps with a 7–13 ms queue and finished in ~40 s; the opening burst
+(2.2 Mbps in the first second, before the controller had a sample) cost one back-off to
+173 kbps and a 73 ms queue, then the target climbed back to the cap within 15 s. After the
+refinement the idle desktop (caret blink, menu-bar clock) cost **4–27 kbps**. No loss, no
+disconnect, QUIC RTT 395–635 ms. The capacity estimate stayed 0 because no datagram trains
+flowed, which is the expected Extreme-tier shape: the controller ran on tile acks alone.
+
+**Window measurements (4G bus, one bar; test bench on the unlocked desktop):** see the
+table below, filled as the runs land. Commands are in experiments/testbench/README.md.
 
 Platform findings from M2:
 
