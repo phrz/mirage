@@ -8,11 +8,14 @@ APP=.build/MirageViewer.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp "$BIN" "$APP/Contents/MacOS/mirage-viewer"
+mkdir -p "$APP/Contents/Resources"
+cp Resources/AppIcon/Mirage.icns "$APP/Contents/Resources/Mirage.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>CFBundleExecutable</key><string>mirage-viewer</string>
+  <key>CFBundleIconFile</key><string>Mirage</string>
   <key>CFBundleIdentifier</key><string>com.paulherz.mirage.viewer</string>
   <key>CFBundleName</key><string>Mirage Viewer</string>
   <key>CFBundleDisplayName</key><string>Mirage Viewer</string>
