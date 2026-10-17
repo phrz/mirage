@@ -136,6 +136,7 @@ final class ViewerSession: @unchecked Sendable {
             self.flow = flow
             try await flow.sendRaw(DatagramPing.encode(seq: 0))   // opens the flow on the host side
             Task.detached { [weak self] in await self?.receiveDatagrams(flow) }
+            log("connected: control, tile stream and datagram flow up")
             await MainActor.run { if let p = pendingRequest { pendingRequest = nil; requestStream(width: p.width, height: p.height) } }
             Task.detached { [weak self] in await self?.pingLoop() }
             Task.detached { [weak self] in await self?.statsLoop() }
@@ -152,8 +153,9 @@ final class ViewerSession: @unchecked Sendable {
         Task { @MainActor in
             let req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: model.bitrateKbps, maxFPS: 30)
             if req == lastRequest { return }
-            guard let sender else { pendingRequest = req; return }   // not connected yet; sent once the control stream is up
+            guard let sender else { pendingRequest = req; log("stream request \(width)x\(height) queued until connected"); return }
             lastRequest = req
+            log("stream request \(width)x\(height) cap \(req.bitrateKbps) kbps")
             sender.send(.streamRequest(req))
         }
     }

@@ -103,6 +103,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     cur.start(on: self.queue)
                     self.cursor = cur
                     cap.onStop = { [weak self] err in self?.log("capture stopped: \(err.map { "\($0)" } ?? "ok")") }
+                    if let w = self.windows?.sample(captureSeq: 0, now: Clock.nowNanos()) {
+                        output.sendControl(.windowList(.init(captureSeq: 0, windows: w.sample.windows)))
+                    }
                     self.startTimers()
                     c.resume(returning: t.info)
                 } catch { c.resume(throwing: error) }
@@ -720,6 +723,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         s.schedule(deadline: .now() + 1, repeating: 1)
         s.setEventHandler { [weak self] in
             guard let self, let rc = self.rc else { return }
+            // The window list must not depend on captures: a static desktop produces none.
+            if let w = self.windows?.sample(captureSeq: self.captureSeq, now: Clock.nowNanos()), w.changed {
+                self.output?.sendControl(.windowList(.init(captureSeq: self.captureSeq, windows: w.sample.windows)))
+            }
             self.output?.sendControl(.rateState(.init(targetKbps: rc.targetKbps, capacityKbps: rc.capacityKbps, queueMs: rc.queueMs, rung: rc.rung, scale: rc.scale,
                                                       tileBudgetKbps: self.lastBudget.tileKbps, videoKbps: self.secVideoBytes * 8 / 1000, tileKbps: self.secTileBytes * 8 / 1000, tier: rc.tier)))
             if rc.tier != self.lastTier { self.lastTier = rc.tier; self.log("link tier: \(rc.tier.name) (capacity \(rc.capacityKbps) kbps, srtt \(Int(rc.srttMs)) ms, loss \(String(format: "%.1f", rc.lossPercent)) %)") }

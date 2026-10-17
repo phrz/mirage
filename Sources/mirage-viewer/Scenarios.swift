@@ -49,7 +49,7 @@ final class ScenarioRunner {
 
     func run() async {
         // Wait for the stream and the window list.
-        for _ in 0..<100 where bench() == nil || (session.compositor?.width ?? 0) == 0 { try? await Task.sleep(for: .milliseconds(100)) }
+        for _ in 0..<250 where bench() == nil || (session.compositor?.width ?? 0) == 0 { try? await Task.sleep(for: .milliseconds(100)) }
         guard let w = bench() else { session.log("scenario: no Mirage Test Bench window on the host"); return }
         session.log("scenario \(name) for \(Int(seconds)) s against window \(w.id) \(w.frame)")
         session.watchRect = w.frame
@@ -57,14 +57,15 @@ final class ScenarioRunner {
         let end = Date().addingTimeInterval(seconds)
         let started = Date()
         defer { activeSeconds = Date().timeIntervalSince(started) }
+        // Raise the bench (a click inside its text) so the scenario drives it and not whatever covers it.
+        await click(w.frame.x + w.frame.width / 2, w.frame.maxY - Int(60 * ppp))
+        try? await Task.sleep(for: .milliseconds(800))
         switch name {
         case "idle":
             session.resetWatched()
             try? await Task.sleep(for: .seconds(seconds))
         case "typing":
-            // Click into the text (lower half, so the caret sits at the end) then type at 6 keys/s.
-            await click(w.frame.x + w.frame.width / 2, w.frame.maxY - Int(60 * ppp))
-            try? await Task.sleep(for: .seconds(1))
+            // Caret sits where the raise-click put it (lower half of the text); type at 6 keys/s.
             session.resetWatched()
             let text = Array("the quick brown fox jumps over the lazy dog while mirage streams tiles ")
             var i = 0
