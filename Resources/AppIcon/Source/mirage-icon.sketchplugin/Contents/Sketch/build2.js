@@ -99,9 +99,9 @@ function fineGrain(parent) {
   var buckets = {}; ['square', 'disc', 'chip'].forEach(function (sh) { ['dark', 'light', 'glint'].forEach(function (tn) { buckets[sh + '_' + tn] = []; }); });
   function f(v) { return v.toFixed(2); }
   for (var i = 0; i < N; i++) {
-    var u = rnd(), t = Math.pow(u, 0.85);                 // slightly denser toward the bottom
+    var u = rnd(), t = Math.pow(u, 1.15);                 // perspective packs more grains per pixel in the distance
     var y = top + t * h, x = rnd() * 1024;
-    var r = (0.28 + 0.75 * t) * (0.5 + 0.8 * rnd());      // radius in px: well under the big grains
+    var r = (0.5 + 0.45 * t) * (0.5 + 0.8 * rnd());       // radius in px: gentle perspective, specular points stay visible far off
     var tr = rnd(), tone = tr < 0.24 ? 'dark' : (tr < 0.78 ? 'light' : 'glint');   // glints: pure white sparkle
     var rot = rnd() * Math.PI, k = rnd(), d;
     if (tone === 'glint') r *= 0.9;
@@ -120,7 +120,7 @@ function fineGrain(parent) {
   }
   var g = G('Fine Grain', parent);
   // fade the specks out toward the horizon (distance haze) with an alpha mask
-  var m = rect(g, 'Grain Fade', 0, HORIZON, 1024, 1024 - HORIZON, lin([[0, 'rgba(0,0,0,0)'], [0.18, 'rgba(0,0,0,0.6)'], [0.45, 'rgba(0,0,0,1)'], [1, 'rgba(0,0,0,1)']]));
+  var m = rect(g, 'Grain Fade', 0, HORIZON, 1024, 1024 - HORIZON, lin([[0, 'rgba(0,0,0,0.35)'], [0.12, 'rgba(0,0,0,0.85)'], [0.3, 'rgba(0,0,0,1)'], [1, 'rgba(0,0,0,1)']]));
   m.sketchObject.hasClippingMask = true; m.sketchObject.clippingMaskMode = 1;
   var tones = { dark: 'rgba(150,94,44,0.34)', light: 'rgba(255,254,248,1)', glint: 'rgba(255,255,255,1)' };   // sand is never grey
   Object.keys(buckets).forEach(function (key) {
