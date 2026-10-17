@@ -199,6 +199,16 @@ history** (dirty in N of the last M frames):
    rate controller otherwise spends its budget refreshing a static picture. The first
    keyframe (161 KB at 2x, 72 KB at 1x) is the stall to engineer around: cap its QP, start
    one rung down the ladder, refine with lossless tiles, and avoid later keyframes via LTR.
+   **Tile cache (phrz, 2026-10-17).** Both ends keep a content-addressed LRU of lossless tiles
+   (hash → pixels on the client; hash → "client has it" on the host, confirmed by acks). A
+   tile the client already holds is sent as `hash @ (x,y)`, ~20 bytes instead of ~550, which
+   makes scrolling back, tab switches, re-exposed windows, reopened menus and terminal
+   scrollback nearly free. The prediction half is the novel part: the client also keeps each
+   window's scrolled-away content as an off-screen canvas in document coordinates and draws
+   from it on a scroll-back *before* the host answers; the host's hash references confirm,
+   and a mismatch (content changed) is corrected by real tiles with the same reconciliation
+   rule as scroll prediction. RDP's bitmap cache and NX's image cache do the byte-saving half
+   only.
 4. **Refinement**: when a video region stops moving for ~300 ms, its tiles are re-sent via
    path 2 (lossless), so scrolled text snaps crisp. The client composites lossless tiles over
    the video texture and invalidates them when a newer video frame covers them.
