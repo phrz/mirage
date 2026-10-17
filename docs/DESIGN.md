@@ -1055,6 +1055,13 @@ Things the runs taught:
 - The host's stale deadline bounds burst recovery (nothing from the viewer can arrive about a frame
   it never heard of, and the in-flight cap stops new frames behind it), so it sits just above the
   viewer's own give-up time (3 srtt + 350 ms after the pacer finishes), not comfortably above it.
+- On mac-daddy (148 ms, 3.5 Mbps, no loss) the first M2.5 build read a constant ~90 ms queue on an
+  idle link and decayed to the floor: the video samples had become honest about their own pacing,
+  which exposed that a tile message's one-way delay carries its own serialization (a 30 KB
+  refinement block is 70–90 ms at 3.5 Mbps), and the M2 base had only hidden that because
+  keyframe serialization inflated it. Only tile messages that serialize in ~10 ms at the target
+  rate are delay samples now; large blocks are not (they cannot be the minimum either), and the
+  baseline is a 20 s windowed minimum for both sample sources (review M6).
 - Replacing the HEVC session while a frame is inside it never calls that frame's completion; the
   `encoding` flag then stayed set and video stopped for good after a ladder step. The rebuild now
   waits for an idle encoder, and a 2 s watchdog releases the pipeline if it ever happens again.

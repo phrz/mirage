@@ -119,15 +119,7 @@ public struct RateController {
             if now - minRTTWindowStart > 30_000_000_000 { minRTTNanos = minRTTCandidate; minRTTCandidate = .infinity; minRTTWindowStart = now }
         }
         // One-way delay proxy (receiver clock − host clock); its minimum is the base, the rest is queue.
-        let owd = Double(lastReceived) - Double(sentNanos)
-        if baseOWDWindowStart == 0 { baseOWDWindowStart = now }
-        baseOWDCandidate = min(baseOWDCandidate, owd)
-        if owd < baseOWD { baseOWD = owd }
-        if now - baseOWDWindowStart > 20_000_000_000 {   // base ages out every 20 s so a route change is tracked
-            baseOWD = baseOWDCandidate; baseOWDCandidate = .infinity; baseOWDWindowStart = now
-        }
-        owdEWMA = owdEWMA.isNaN ? owd : owdEWMA * 0.7 + owd * 0.3
-        queueMs = max(0, (owdEWMA - baseOWD) / 1e6)
+        noteOWD(Double(lastReceived) - Double(sentNanos), now: now)
         // Delivery rate from the datagram train.
         if fragments >= tuning.minTrainFragments, lastReceived > firstReceived, lastReceived - firstReceived >= tuning.minTrainNanos {
             let kbps = Double(bytes) * 8 / (Double(lastReceived - firstReceived) / 1e9) / 1000
@@ -144,14 +136,31 @@ public struct RateController {
     }
 
     /// A delay-only sample (tile-stream ack): updates the queue estimate without a rate sample.
-    public mutating func delaySample(sentNanos: UInt64, receivedNanos: UInt64, now: UInt64) {
-        let owd = Double(receivedNanos) - Double(sentNanos)
+    /// A reliable-stream (tile) message's delay: host enqueue → viewer apply. Its one-way delay includes
+    /// the message's own serialization and QUIC's send buffering, which for a 30 KB refinement block at
+    /// 3.5 Mbps is ~70–90 ms of pure size, not path queue. Only messages small enough to serialize in
+    /// ~10 ms at the target rate are delay samples; larger ones are ignored (they can never be the
+    /// minimum either). Mac-daddy, 2026-10-17 evening: once the video samples became honest about
+    /// their own pacing (M2.5), the big blocks' size read as a constant ~90 ms queue on an idle link
+    /// and the target decayed to the floor; this is the fix.
+    public mutating func delaySample(sentNanos: UInt64, receivedNanos: UInt64, bytes: Int = 0, now: UInt64) {
+        let smallBytes = max(1200, Int(Double(targetKbps) * 1000 / 8 * 0.010))
+        guard bytes <= smallBytes else { return }
+        noteOWD(Double(receivedNanos) - Double(sentNanos), now: now)
+        adjust(now: now)
+    }
+
+    /// Windowed-minimum baseline (20 s, so a route change or an inflated opening is forgotten) and the
+    /// smoothed one-way delay above it, which is the queue estimate.
+    private mutating func noteOWD(_ owd: Double, now: UInt64) {
         if baseOWDWindowStart == 0 { baseOWDWindowStart = now }
         baseOWDCandidate = min(baseOWDCandidate, owd)
         if owd < baseOWD { baseOWD = owd }
+        if now - baseOWDWindowStart > 20_000_000_000 {
+            baseOWD = baseOWDCandidate; baseOWDCandidate = .infinity; baseOWDWindowStart = now
+        }
         owdEWMA = owdEWMA.isNaN ? owd : owdEWMA * 0.7 + owd * 0.3
         queueMs = max(0, (owdEWMA - baseOWD) / 1e6)
-        adjust(now: now)
     }
 
     public mutating func lossDetected(now: UInt64) {

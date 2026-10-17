@@ -273,7 +273,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let now = Clock.nowNanos()
             self.refinementInFlight = max(0, self.refinementInFlight - sent.refinement)
             if sent.block { self.freshBlockAcked(); self.freshBlocksStep(now: now) }
-            self.rc?.delaySample(sentNanos: sent.nanos, receivedNanos: tileAck.receivedNanos, now: now)
+            self.rc?.delaySample(sentNanos: sent.nanos, receivedNanos: tileAck.receivedNanos, bytes: sent.bytes, now: now)
             // Prune by age (a big refinement block legitimately outlives dozens of interactive acks).
             for (k, v) in self.tileSent where now - v.nanos > 20_000_000_000 { self.tileSent[k] = nil; self.refinementInFlight = max(0, self.refinementInFlight - v.refinement) }
         }

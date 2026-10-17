@@ -382,3 +382,47 @@ final class ReviewHighFindingsTests: XCTestCase {
         XCTAssertNotEqual(rc.tier, .extreme)
     }
 }
+
+final class DelayControllerTests: XCTestCase {
+    /// Mac-daddy regression (2026-10-17): a clean connection on a 148 ms, 3.5 Mbps, loss-free link read a
+    /// constant ~90 ms queue after the opening refinement burst and decayed to the floor. Synthetic acks:
+    /// 3 s of big refinement blocks whose one-way delay carries their own serialization, then an idle link
+    /// with tiny caret tiles and a few paced video frames; the target must be back at the cap within a
+    /// few seconds and the tier must never leave Constrained.
+    func testTargetRecoversToCapAfterOpeningBurstOnIdleLink() {
+        var rc = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 1108 * 720)
+        let base = 74_000_000.0            // one-way delay, 148 ms RTT
+        var now: UInt64 = 1_000_000_000
+        // Opening: paced keyframes (honest samples: sent = pace end), then 3 s of 30 KB blocks every 300 ms
+        // whose delay is base + 70–90 ms of serialization at 3.5 Mbps.
+        for _ in 0..<5 {
+            rc.frameAcked(sentNanos: now, firstReceived: now + UInt64(base), lastReceived: now + UInt64(base) + 2_000_000, fragments: 1, bytes: 8000, now: now + 150_000_000, rttNanos: 148_000_000)
+            now += 200_000_000
+        }
+        for _ in 0..<10 {
+            rc.delaySample(sentNanos: now, receivedNanos: now + UInt64(base) + 85_000_000, bytes: 30_000, now: now + 160_000_000)
+            now += 300_000_000
+        }
+        let afterBurst = rc.targetKbps
+        // Idle: a 250 B caret tile every 500 ms for 8 s, delay = base + 3 ms.
+        for _ in 0..<16 {
+            rc.delaySample(sentNanos: now, receivedNanos: now + UInt64(base) + 3_000_000, bytes: 250, now: now + 80_000_000)
+            now += 500_000_000
+        }
+        XCTAssertLessThan(rc.queueMs, 40, "an idle link reads no queue: big blocks' serialization is not path delay")
+        XCTAssertGreaterThanOrEqual(rc.targetKbps, 760, "target back at the cap after the opening burst (was \(afterBurst) after it)")
+        XCTAssertEqual(rc.tier, .constrained)
+        XCTAssertNotEqual(rc.rung, RateController.tinyRung)
+    }
+
+    /// The old behaviour, kept as a guard: large messages fed as delay samples would read as queue.
+    func testLargeTileMessagesAreNotDelaySamples() {
+        var rc = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 1108 * 720)
+        var now: UInt64 = 1_000_000_000
+        rc.delaySample(sentNanos: now, receivedNanos: now + 74_000_000, bytes: 200, now: now + 150_000_000)
+        for _ in 0..<20 { now += 300_000_000; rc.delaySample(sentNanos: now, receivedNanos: now + 74_000_000 + 90_000_000, bytes: 30_000, now: now + 160_000_000) }
+        XCTAssertLessThan(rc.queueMs, 10)
+        XCTAssertEqual(rc.targetKbps, 800)
+    }
+}
+
