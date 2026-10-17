@@ -331,6 +331,18 @@ third candidate, GPU diff inside dirty rects, wide copy-rect search. One host-pr
 that effort down when the host is genuinely busy, for example under a large AI job, and the
 current effort level is visible in the stats.
 
+**Foveated two-layer mode (phrz, 2026-10-17).** On constrained and extreme links quality is a
+function of distance to the input locus (pointer, caret, focused element), the same locus the
+scheduler rule uses. Two layers rather than per-region QP, which VideoToolbox's low-latency
+mode does not offer: a *base layer*, the whole screen as one low HEVC rung (half or quarter
+resolution, MetalFX-upscaled) so a complete picture always exists; and a *fovea*, a generous
+window (about a third of the screen, so pointer lag and attention stay inside it) carried as
+native-resolution tiles and copy-rects at top priority, or as a second small HEVC stream while
+it is in motion, following the pointer smoothly. The client composites the fovea over the
+upscaled base with a feathered edge. In Extreme, far-field text may be sent luma-only first
+and receive chroma later: text is legible in luma and it halves the bytes. On Local and Normal
+tiers the fovea covers the screen and the mode is inert.
+
 ### 3.4 Rate control and adaptation
 
 - Client sends receive timestamps for every packet; host runs a GCC/BBR-style **delivery-rate
