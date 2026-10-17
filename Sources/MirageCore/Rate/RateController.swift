@@ -151,25 +151,27 @@ public struct RateController {
     }
 
     /// A delay-only sample (tile-stream ack): updates the queue estimate without a rate sample.
-    /// A reliable-stream (tile) message's delay: host enqueue → viewer apply. Its one-way delay includes
-    /// the message's own serialization and QUIC's send buffering, which for a 30 KB refinement block at
-    /// 3.5 Mbps is ~70–90 ms of pure size, not path queue. Only messages small enough to serialize in
-    /// ~10 ms at the target rate are delay samples; larger ones are ignored (they can never be the
-    /// minimum either). Mac-daddy, 2026-10-17 evening: once the video samples became honest about
-    /// their own pacing (M2.5), the big blocks' size read as a constant ~90 ms queue on an idle link
-    /// and the target decayed to the floor; this is the fix.
+    /// A reliable-stream (tile) message's delay, host enqueue → viewer apply. Not a path-delay sample:
+    /// it measures head-of-line waiting on our own stream (a small tile queued behind a 30 KB
+    /// refinement block waits that block's 70–90 ms of serialization at 3.5 Mbps) and QUIC's own send
+    /// buffering, which read as a constant 85 ms "queue" on an idle mac-daddy link whatever the tile
+    /// size. Path delay comes from the probe and video samples only; this is kept for accounting
+    /// (`tileDelayMs`, the stream's backlog as the viewer experiences it).
     public mutating func delaySample(sentNanos: UInt64, receivedNanos: UInt64, bytes: Int = 0, now: UInt64) {
-        let smallBytes = max(1200, Int(Double(targetKbps) * 1000 / 8 * 0.010))
-        guard bytes <= smallBytes else { return }
-        noteOWD(Double(receivedNanos) - Double(sentNanos), now: now, source: "tile")
-        adjust(now: now)
+        let owd = Double(receivedNanos) - Double(sentNanos)
+        if tileOWDMin.isInfinite || owd < tileOWDMin { tileOWDMin = owd }
+        tileOWDEWMA = tileOWDEWMA.isNaN ? owd : tileOWDEWMA * 0.7 + owd * 0.3
+        tileDelayMs = max(0, (tileOWDEWMA - tileOWDMin) / 1e6)
     }
+    private var tileOWDMin: Double = .infinity
+    private var tileOWDEWMA: Double = .nan
+    /// Tile-stream backlog above its own minimum (diagnostic; not an input to the controller).
+    public private(set) var tileDelayMs = 0.0
 
     /// A delay probe's echo: the host sent a 32-byte datagram at `sentNanos` (host clock), the viewer
-    /// stamped it `receivedNanos` (its clock) and sent it straight back, arriving `now`. A first-class
-    /// sample, serialization-free, that exists whatever the picture is doing: the host sends one
-    /// whenever a second has passed without any other delay sample (an idle desktop after the opening
-    /// burst had none, so the estimate froze at its last inflated value; mac-daddy, 2026-10-17).
+    /// stamped it `receivedNanos` (its clock) and sent it straight back, arriving `now`. The host sends
+    /// one every second unconditionally (0.3 kbps): with video it is the second path-delay source, on an
+    /// idle picture the only one, and its RTT is the srtt source when video is idle.
     public mutating func probeSample(sentNanos: UInt64, receivedNanos: UInt64, now: UInt64) {
         let rtt = Double(now &- sentNanos)
         srttNanos = srttNanos * 0.8 + rtt * 0.2

@@ -1222,14 +1222,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         s.schedule(deadline: .now() + 1, repeating: 1)
         s.setEventHandler { [weak self] in
             guard let self, let rc = self.rc else { return }
-            // Delay estimate upkeep: decay a stale estimate, and send a 32-byte delay probe whenever no
-            // sample has arrived for a second (an idle picture produces none).
+            // Delay estimate upkeep: decay a stale estimate (probes lost), and send the 32-byte delay
+            // probe: every second, unconditionally. Probe and video acks are the only path-delay inputs.
             let tnow = Clock.nowNanos()
             self.rc?.tick(now: tnow)
-            if self.rc!.sampleAgeNanos(now: tnow) > 1_000_000_000 || self.rc!.lastSampleNanos == 0 {
-                self.probeSeq += 1
-                self.output?.sendDatagram(DatagramPing.encode(seq: self.probeSeq))
-            }
+            self.probeSeq += 1
+            self.output?.sendDatagram(DatagramPing.encode(seq: self.probeSeq))
             // The window list must not depend on captures: a static desktop produces none.
             if let w = self.windows?.sample(captureSeq: self.captureSeq, now: Clock.nowNanos()), w.changed {
                 self.publishWindows(w.sample.windows, captureSeq: self.captureSeq, now: Clock.nowNanos())
@@ -1284,7 +1282,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                        unacked.count, statSkippedBudget, statDropped, statLost, enc, statInput)
                 + (statNacks > 0 ? " nacks \(statNacks) resent \(statNackResent)" : "") + " fresh \(fresh)"
                 + String(format: " control %.0f kbps effort %@ fovea %@%@", Double(statControlBytes) * 8 / 5 / 1000, effortLevel, foveaActive ? "on" : "off", statFoveaTiles > 0 ? " (\(statFoveaTiles) tiles)" : "")
-                + " delay src \(rc?.lastSampleSource ?? "none") age \((rc?.sampleAgeNanos(now: Clock.nowNanos()) ?? 0) / 1_000_000) ms")
+                + String(format: " delay src %@ age %d ms tile-backlog %.0f ms", rc?.lastSampleSource ?? "none", Int((rc?.sampleAgeNanos(now: Clock.nowNanos()) ?? 0) / 1_000_000), rc?.tileDelayMs ?? 0))
             statControlBytes = 0; statFoveaTiles = 0
             statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0
             statTileBytes = 0; statTileRects = 0; statRefineBytes = 0; statCopyRects = 0; statDirtyTiles = 0; statDiffPruned = 0; statTileSkipped = 0

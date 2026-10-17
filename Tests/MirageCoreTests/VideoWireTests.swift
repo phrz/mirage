@@ -385,44 +385,46 @@ final class ReviewHighFindingsTests: XCTestCase {
 
 final class DelayControllerTests: XCTestCase {
     /// Mac-daddy regression (2026-10-17): a clean connection on a 148 ms, 3.5 Mbps, loss-free link read a
-    /// constant ~90 ms queue after the opening refinement burst and decayed to the floor. Synthetic acks:
-    /// 3 s of big refinement blocks whose one-way delay carries their own serialization, then an idle link
-    /// with tiny caret tiles and a few paced video frames; the target must be back at the cap within a
-    /// few seconds and the tier must never leave Constrained.
+    /// constant ~90 ms queue after the opening refinement burst and decayed to the floor, because tile acks
+    /// (head-of-line waiting on our own stream) fed the path-delay estimate. Synthetic acks: paced
+    /// keyframes, 3 s of tile acks 85 ms late, then an idle link with 1 Hz probes at the baseline; the
+    /// target must be back at the cap within a few seconds and the tier must never leave Constrained.
     func testTargetRecoversToCapAfterOpeningBurstOnIdleLink() {
         var rc = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 1108 * 720)
         let base = 74_000_000.0            // one-way delay, 148 ms RTT
         var now: UInt64 = 1_000_000_000
-        // Opening: paced keyframes (honest samples: sent = pace end), then 3 s of 30 KB blocks every 300 ms
-        // whose delay is base + 70–90 ms of serialization at 3.5 Mbps.
         for _ in 0..<5 {
             rc.frameAcked(sentNanos: now, firstReceived: now + UInt64(base), lastReceived: now + UInt64(base) + 2_000_000, fragments: 1, bytes: 8000, now: now + 150_000_000, rttNanos: 148_000_000)
             now += 200_000_000
         }
         for _ in 0..<10 {
             rc.delaySample(sentNanos: now, receivedNanos: now + UInt64(base) + 85_000_000, bytes: 30_000, now: now + 160_000_000)
+            rc.delaySample(sentNanos: now, receivedNanos: now + UInt64(base) + 85_000_000, bytes: 300, now: now + 160_000_000)
             now += 300_000_000
         }
-        let afterBurst = rc.targetKbps
-        // Idle: a 250 B caret tile every 500 ms for 8 s, delay = base + 3 ms.
-        for _ in 0..<16 {
-            rc.delaySample(sentNanos: now, receivedNanos: now + UInt64(base) + 3_000_000, bytes: 250, now: now + 80_000_000)
-            now += 500_000_000
-        }
-        XCTAssertLessThan(rc.queueMs, 40, "an idle link reads no queue: big blocks' serialization is not path delay")
-        XCTAssertGreaterThanOrEqual(rc.targetKbps, 760, "target back at the cap after the opening burst (was \(afterBurst) after it)")
+        XCTAssertLessThan(rc.queueMs, 15, "tile acks never feed the path-delay estimate")
+        for _ in 0..<6 { rc.tick(now: now); rc.probeSample(sentNanos: now, receivedNanos: now + UInt64(base), now: now + 148_000_000); now += 1_000_000_000 }
+        XCTAssertLessThan(rc.queueMs, 15)
+        XCTAssertEqual(rc.targetKbps, 800)
         XCTAssertEqual(rc.tier, .constrained)
         XCTAssertNotEqual(rc.rung, RateController.tinyRung)
     }
 
-    /// The old behaviour, kept as a guard: large messages fed as delay samples would read as queue.
-    func testLargeTileMessagesAreNotDelaySamples() {
+    /// Genuine path queuing seen by the video and probe samples still backs the target off.
+    func testVideoAndProbeQueuingStillBackOff() {
         var rc = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 1108 * 720)
+        let base = 74_000_000.0
         var now: UInt64 = 1_000_000_000
-        rc.delaySample(sentNanos: now, receivedNanos: now + 74_000_000, bytes: 200, now: now + 150_000_000)
-        for _ in 0..<20 { now += 300_000_000; rc.delaySample(sentNanos: now, receivedNanos: now + 74_000_000 + 90_000_000, bytes: 30_000, now: now + 160_000_000) }
-        XCTAssertLessThan(rc.queueMs, 10)
-        XCTAssertEqual(rc.targetKbps, 800)
+        rc.probeSample(sentNanos: now, receivedNanos: now + UInt64(base), now: now + 148_000_000)
+        for _ in 0..<20 {   // 2 s of frames arriving 150 ms late: a queue is building on the path
+            now += 100_000_000
+            rc.frameAcked(sentNanos: now, firstReceived: now + UInt64(base) + 150_000_000, lastReceived: now + UInt64(base) + 152_000_000, fragments: 1, bytes: 6000, now: now + 300_000_000, rttNanos: 300_000_000)
+        }
+        XCTAssertLessThan(rc.targetKbps, 700, "video samples 150 ms late must cost a decrease (\(rc.targetKbps))")
+        var rc2 = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 1108 * 720)
+        now = 1_000_000_000
+        for _ in 0..<6 { rc2.probeSample(sentNanos: now, receivedNanos: now + UInt64(base) + (now > 2_000_000_000 ? 150_000_000 : 0), now: now + 148_000_000); now += 1_000_000_000 }
+        XCTAssertLessThan(rc2.targetKbps, 700, "probe samples 150 ms late must cost a decrease too (\(rc2.targetKbps))")
     }
 }
 
@@ -437,7 +439,7 @@ final class TransientSpikeTests: XCTestCase {
         func idle(_ seconds: Double) {
             let n = Int(seconds / 0.1)
             for _ in 0..<n {
-                rc.delaySample(sentNanos: now, receivedNanos: now + UInt64(base) + 3_000_000, bytes: 250, now: now + 80_000_000)
+                if now % 1_000_000_000 == 0 { rc.probeSample(sentNanos: now, receivedNanos: now + UInt64(base) + 3_000_000, now: now + 148_000_000) }
                 rc.frameAcked(sentNanos: now, firstReceived: now + UInt64(base), lastReceived: now + UInt64(base) + 2_000_000, fragments: 1, bytes: 3000, now: now + 150_000_000, rttNanos: 148_000_000)
                 now += 100_000_000
             }
@@ -479,12 +481,19 @@ final class IdleDelayEstimateTests: XCTestCase {
             rc.delaySample(sentNanos: now + 50_000_000, receivedNanos: now + 50_000_000 + UInt64(base) + UInt64(60_000_000 + i * 1_000_000), bytes: 400, now: now + 200_000_000)
             now += 300_000_000
         }
+        // The burst's video samples sit 60 ms above the baseline: a real, transient queue.
+        for _ in 0..<5 {
+            rc.frameAcked(sentNanos: now, firstReceived: now + UInt64(base) + 60_000_000, lastReceived: now + UInt64(base) + 62_000_000, fragments: 1, bytes: 8000, now: now + 210_000_000, rttNanos: 205_000_000)
+            now += 200_000_000
+        }
         XCTAssertGreaterThan(rc.queueMs, 40, "the burst did inflate the estimate")
-        // Then a static screen: nothing but the host's 1 Hz delay probes at the baseline (or nothing at all).
+        // Then a static screen: the caption's small tiles keep arriving 85 ms late (head-of-line on our own
+        // stream), and the host's 1 Hz delay probes at the baseline (or, probes lost, nothing at all).
         var queueAt3s = Double.infinity
         for sec in 1...6 {
             now += 1_000_000_000
             rc.tick(now: now)
+            rc.delaySample(sentNanos: now, receivedNanos: now + UInt64(base) + 85_000_000, bytes: 300, now: now + 200_000_000)
             if probes { rc.probeSample(sentNanos: now, receivedNanos: now + UInt64(base), now: now + 145_000_000) }
             if sec == 3 { queueAt3s = rc.queueMs }
         }
