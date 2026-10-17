@@ -65,6 +65,10 @@ public struct RateController {
     private var srttNanos: Double = 250_000_000
     private var belowSince: UInt64 = 0, aboveSince: UInt64 = 0
     private var lastRungChange: UInt64 = 0
+    /// Achieved vs wanted video frame rate while motion is active (review §2.2: density alone never
+    /// engaged the ladder on full-screen motion; 4 fps at 800 kbps was the result).
+    private var fpsShortfallSince: UInt64 = 0
+    public private(set) var achievedFPS = 0.0
 
     public init(initialKbps: Int, maxKbps: Int, nativePixels: Int) {
         targetKbps = min(initialKbps, maxKbps); self.maxKbps = maxKbps; self.nativePixels = nativePixels
@@ -155,6 +159,19 @@ public struct RateController {
         if ackedFrames + lostFrames > 200 { ackedFrames /= 2; lostFrames /= 2 }   // sliding loss window
         tiers.update(capacityKbps: capacityKbps, rttMs: minRttMs, lossPercent: lossPercent, now: now)
         updateRung(now: now)
+    }
+
+    /// Reports the frame rate video actually achieved over the last second while motion was active,
+    /// against the frame rate wanted. A sustained shortfall (< 60 % for 2 s) drops a rung.
+    public mutating func videoRate(achievedFPS: Double, wantedFPS: Double, active: Bool, now: UInt64) {
+        self.achievedFPS = achievedFPS
+        guard active, wantedFPS > 0 else { fpsShortfallSince = 0; return }
+        if achievedFPS < 0.6 * wantedFPS {
+            if fpsShortfallSince == 0 { fpsShortfallSince = now }
+            if now - fpsShortfallSince > 2_000_000_000, rung < policy.maxRung, now - lastRungChange > 3_000_000_000 {
+                rung += 1; lastRungChange = now; fpsShortfallSince = 0; belowSince = 0; aboveSince = 0
+            }
+        } else { fpsShortfallSince = 0 }
     }
 
     private mutating func updateRung(now: UInt64) {

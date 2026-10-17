@@ -263,3 +263,19 @@ final class LinkTierTests: XCTestCase {
         XCTAssertEqual(rc.policy.maxRung, RateController.tinyRung)
     }
 }
+
+final class LadderFPSTests: XCTestCase {
+    func testSustainedFPSShortfallDropsARung() {
+        var rc = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 2560 * 1440)
+        var now: UInt64 = 10_000_000_000
+        // Climb away from the tiny rung first.
+        for _ in 0..<900 { rc.frameAcked(sentNanos: now, firstReceived: now + 100_000_000, lastReceived: now + 110_000_000, fragments: 4, bytes: 4000, now: now + 200_000_000, rttNanos: 200_000_000); now += 33_000_000 }
+        let before = rc.rung
+        XCTAssertLessThan(before, RateController.tinyRung)
+        for _ in 0..<4 { rc.videoRate(achievedFPS: 4, wantedFPS: 30, active: true, now: now); now += 1_000_000_000 }
+        XCTAssertEqual(rc.rung, before + 1, "4 fps against 30 wanted for 3 s drops one rung")
+        rc.videoRate(achievedFPS: 28, wantedFPS: 30, active: true, now: now); now += 1_000_000_000
+        rc.videoRate(achievedFPS: 28, wantedFPS: 30, active: true, now: now)
+        XCTAssertEqual(rc.rung, before + 1, "a healthy rate does not drop further")
+    }
+}

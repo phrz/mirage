@@ -74,7 +74,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var statFrames = 0, statBytes = 0, statDropped = 0, statSkippedBudget = 0, statLost = 0
     private var statEncodeNanos: UInt64 = 0
     private var statInput = 0, statTileBytes = 0, statTileRects = 0, statRefineBytes = 0, statCopyRects = 0, statDirtyTiles = 0, statDiffPruned = 0, statTileSkipped = 0
-    private var secTileBytes = 0, secVideoBytes = 0   // per rateState second
+    private var secTileBytes = 0, secVideoBytes = 0, secVideoFrames = 0   // per rateState second
     private var statCaptures = 0
     private var statCaptureNanos: UInt64 = 0
     private var tileKbpsEWMA = 0.0
@@ -393,6 +393,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         refillTiles(now: now)
         if !plan.lossless.isEmpty {
+            // Priority 1: changed pixels near the input locus (pointer or caret) always go, now, on the
+            // interactive stream, whatever the budget; they are small and they are what the person is
+            // looking at. Priority 2: other changed pixels, budget permitting. Refinement yields to real
+            // change (three tiles or more), not to a caret blink or a menu-bar clock.
+            if plan.lossless.count >= 3 { lastDirectNanos = now }
+            let (near, far) = splitByLocus(plan.lossless, tracker: tracker)
+            if !near.isEmpty {
+                let bytes = submitLossless(tiles: near, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
+                tileTokens -= Double(bytes)
+                plan.lossless = far
+            }
+        }
+        if !plan.lossless.isEmpty {
             if tileTokens > 0 {
                 let bytes = submitLossless(tiles: plan.lossless, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
                 tileTokens -= Double(bytes)
@@ -558,6 +571,27 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     private func header(windowID: UInt32, nanos: UInt64) -> TileMessage.Header {
         .init(captureSeq: captureSeq, inputSeq: lastInputSeq, windowID: windowID, captureNanos: nanos)
+    }
+
+    /// Fills every tile not in `keep` with its mean colour (the client ignores them: masked out).
+    private func flattenCanvas(_ canvas: CVPixelBuffer, except keep: Set<Int>, tracker: TileTracker) {
+        CVPixelBufferLockBaseAddress(canvas, [])
+        defer { CVPixelBufferUnlockBaseAddress(canvas, []) }
+        let base = CVPixelBufferGetBaseAddress(canvas)!, stride = CVPixelBufferGetBytesPerRow(canvas)
+        var flattened = 0
+        for i in 0..<tracker.tileCount where !keep.contains(i) {
+            let r = tracker.rect(of: i)
+            var sb = 0, sg = 0, sr = 0, n = 0
+            for y in Swift.stride(from: r.y, to: r.maxY, by: 8) {
+                let row = base.advanced(by: y * stride).assumingMemoryBound(to: UInt8.self)
+                for x in Swift.stride(from: r.x, to: r.maxX, by: 8) { sb += Int(row[x * 4]); sg += Int(row[x * 4 + 1]); sr += Int(row[x * 4 + 2]); n += 1 }
+            }
+            guard n > 0 else { continue }
+            var px: UInt32 = 0xFF00_0000 | UInt32(sr / n) << 16 | UInt32(sg / n) << 8 | UInt32(sb / n)
+            for y in r.y..<r.maxY { memset_pattern4(base.advanced(by: y * stride + r.x * 4), &px, r.width * 4) }
+            flattened += 1
+        }
+        if flattened > 0 { log("keyframe: flattened \(flattened) masked-out tiles") }
     }
 
     private func copyToCanvas(_ canvas: CVPixelBuffer, tiles: [Int], from f: ShiftDetector.Frame, tracker: TileTracker) {
@@ -771,6 +805,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             tiles.formUnion(pendingVideoTiles)
             tracker.markVideo(Array(tiles), now: now)
             self.tracker = tracker
+            // Review #6: tiles the client already has crisp are masked out of this keyframe, so their
+            // pixels are wasted bits; flatten each to its mean colour before encoding.
+            flattenCanvas(canvas, except: tiles, tracker: tracker)
             // A forced keyframe ignores MinAllowedFrameQP (measured: ~125 KB regardless); a fresh
             // session's first IDR honours it (~18 KB). Recovery therefore replaces the session.
             if (try? rebuildEncoder()) != nil, let fresh = encoder { enc = fresh } else { opts.forceKeyframe = true }
@@ -857,7 +894,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         tokens -= Double(payload.count)
         unacked[seq] = InFlight(sentNanos: Clock.nowNanos(), bytes: payload.count, ltrToken: f.ltrToken)
-        statFrames += 1; statBytes += payload.count; statEncodeNanos += f.encodeNanos; secVideoBytes += payload.count
+        statFrames += 1; statBytes += payload.count; statEncodeNanos += f.encodeNanos; secVideoBytes += payload.count; secVideoFrames += 1
         if f.keyframe {
             log("keyframe \(payload.count) bytes (\(frags.count) datagrams, \(mask.count) tiles masked)")
             switch fresh {
@@ -965,7 +1002,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if !first, self.fresh == .done { self.rc?.dropToTinyRung(now: Clock.nowNanos()); self.lastRebuildNanos = Clock.nowNanos(); if (try? self.rebuildEncoder()) != nil { self.wantKeyframe = true; self.beginFreshPicture(reason: "tier change") } }
             }
             self.tileKbpsEWMA = self.tileKbpsEWMA * 0.5 + Double(self.secTileBytes * 8 / 1000) * 0.5
-            self.secVideoBytes = 0; self.secTileBytes = 0
+            let active = Clock.nowNanos() - self.videoActiveNanos < 1_000_000_000
+            self.rc?.videoRate(achievedFPS: Double(self.secVideoFrames), wantedFPS: Double(min(self.request?.maxFPS ?? 30, rc.policy.maxVideoFPS)), active: active, now: Clock.nowNanos())
+            self.secVideoBytes = 0; self.secTileBytes = 0; self.secVideoFrames = 0
             let front: (app: String, id: UInt32, title: String) = self.windows?.frontmost() ?? (app: "", id: 0, title: "")
             self.output?.sendControl(.hostStatus(.init(consoleLocked: InputInjector.consoleLocked(), frontmostApp: front.app, frontmostWindowID: front.id, frontmostWindowTitle: front.title)))
         }
