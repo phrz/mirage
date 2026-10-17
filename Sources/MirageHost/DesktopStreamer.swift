@@ -306,6 +306,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         return r.ack
     }
 
+    public func handle(probeEcho sentNanos: UInt64, receivedNanos: UInt64) {
+        queue.async { self.rc?.probeSample(sentNanos: sentNanos, receivedNanos: receivedNanos, now: Clock.nowNanos()); self.applyBudget(now: Clock.nowNanos()) }
+    }
+    private var probeSeq: UInt64 = 0
+
     /// The connection went away: capture and sending stop, every piece of session state stays (tracker,
     /// controller and tier, encoder rung, frame and tile sequences, input sequence). Whatever was in
     /// flight is treated as lost: unacked tile messages have their rects queued for a lossless resend,
@@ -1217,6 +1222,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         s.schedule(deadline: .now() + 1, repeating: 1)
         s.setEventHandler { [weak self] in
             guard let self, let rc = self.rc else { return }
+            // Delay estimate upkeep: decay a stale estimate, and send a 32-byte delay probe whenever no
+            // sample has arrived for a second (an idle picture produces none).
+            let tnow = Clock.nowNanos()
+            self.rc?.tick(now: tnow)
+            if self.rc!.sampleAgeNanos(now: tnow) > 1_000_000_000 || self.rc!.lastSampleNanos == 0 {
+                self.probeSeq += 1
+                self.output?.sendDatagram(DatagramPing.encode(seq: self.probeSeq))
+            }
             // The window list must not depend on captures: a static desktop produces none.
             if let w = self.windows?.sample(captureSeq: self.captureSeq, now: Clock.nowNanos()), w.changed {
                 self.publishWindows(w.sample.windows, captureSeq: self.captureSeq, now: Clock.nowNanos())
@@ -1270,7 +1283,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                        statCaptures, capMs, statDirtyTiles, statDiffPruned, rc?.targetKbps ?? 0, rc?.capacityKbps ?? 0, rc?.queueMs ?? 0, rc?.rung ?? 0, srttNanos / 1e6,
                        unacked.count, statSkippedBudget, statDropped, statLost, enc, statInput)
                 + (statNacks > 0 ? " nacks \(statNacks) resent \(statNackResent)" : "") + " fresh \(fresh)"
-                + String(format: " control %.0f kbps effort %@ fovea %@%@", Double(statControlBytes) * 8 / 5 / 1000, effortLevel, foveaActive ? "on" : "off", statFoveaTiles > 0 ? " (\(statFoveaTiles) tiles)" : ""))
+                + String(format: " control %.0f kbps effort %@ fovea %@%@", Double(statControlBytes) * 8 / 5 / 1000, effortLevel, foveaActive ? "on" : "off", statFoveaTiles > 0 ? " (\(statFoveaTiles) tiles)" : "")
+                + " delay src \(rc?.lastSampleSource ?? "none") age \((rc?.sampleAgeNanos(now: Clock.nowNanos()) ?? 0) / 1_000_000) ms")
             statControlBytes = 0; statFoveaTiles = 0
             statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0
             statTileBytes = 0; statTileRects = 0; statRefineBytes = 0; statCopyRects = 0; statDirtyTiles = 0; statDiffPruned = 0; statTileSkipped = 0

@@ -46,6 +46,10 @@ public struct RateController {
     public var maxKbps: Int
     public private(set) var capacityKbps: Int = 0
     public private(set) var queueMs: Double = 0
+    /// Which sample last moved the queue estimate ("video", "tile", "probe") and when; the stats line
+    /// prints both so a frozen or starved estimate is visible from the field.
+    public private(set) var lastSampleSource = "none"
+    public private(set) var lastSampleNanos: UInt64 = 0
     public private(set) var rung = 0
     public var scale: Double { Self.scales[rung] }
     public let nativePixels: Int
@@ -130,7 +134,7 @@ public struct RateController {
             if now - minRTTWindowStart > 30_000_000_000 { minRTTNanos = minRTTCandidate; minRTTCandidate = .infinity; minRTTWindowStart = now }
         }
         // One-way delay proxy (receiver clock − host clock); its minimum is the base, the rest is queue.
-        noteOWD(Double(lastReceived) - Double(sentNanos), now: now)
+        noteOWD(Double(lastReceived) - Double(sentNanos), now: now, source: "video")
         // Delivery rate from the datagram train.
         if fragments >= tuning.minTrainFragments, lastReceived > firstReceived, lastReceived - firstReceived >= tuning.minTrainNanos {
             let kbps = Double(bytes) * 8 / (Double(lastReceived - firstReceived) / 1e9) / 1000
@@ -157,21 +161,62 @@ public struct RateController {
     public mutating func delaySample(sentNanos: UInt64, receivedNanos: UInt64, bytes: Int = 0, now: UInt64) {
         let smallBytes = max(1200, Int(Double(targetKbps) * 1000 / 8 * 0.010))
         guard bytes <= smallBytes else { return }
-        noteOWD(Double(receivedNanos) - Double(sentNanos), now: now)
+        noteOWD(Double(receivedNanos) - Double(sentNanos), now: now, source: "tile")
         adjust(now: now)
+    }
+
+    /// A delay probe's echo: the host sent a 32-byte datagram at `sentNanos` (host clock), the viewer
+    /// stamped it `receivedNanos` (its clock) and sent it straight back, arriving `now`. A first-class
+    /// sample, serialization-free, that exists whatever the picture is doing: the host sends one
+    /// whenever a second has passed without any other delay sample (an idle desktop after the opening
+    /// burst had none, so the estimate froze at its last inflated value; mac-daddy, 2026-10-17).
+    public mutating func probeSample(sentNanos: UInt64, receivedNanos: UInt64, now: UInt64) {
+        let rtt = Double(now &- sentNanos)
+        srttNanos = srttNanos * 0.8 + rtt * 0.2
+        if minRTTWindowStart == 0 { minRTTWindowStart = now }
+        minRTTCandidate = min(minRTTCandidate, rtt); minRTTNanos = min(minRTTNanos, rtt)
+        if now - minRTTWindowStart > 30_000_000_000 { minRTTNanos = minRTTCandidate; minRTTCandidate = .infinity; minRTTWindowStart = now }
+        noteOWD(Double(receivedNanos) - Double(sentNanos), now: now, source: "probe")
+        adjust(now: now)
+    }
+
+    /// Nanoseconds since the last delay sample of any kind (0 = none yet).
+    public func sampleAgeNanos(now: UInt64) -> UInt64 { lastSampleNanos == 0 ? 0 : now &- lastSampleNanos }
+
+    /// Time-driven (once a second): a queue estimate that no sample has refreshed for over a second
+    /// decays toward zero with a 1 s time constant instead of holding; an idle link has no queue, and
+    /// holding the last (possibly inflated) reading made the controller act on stale data for as long
+    /// as the screen stayed still.
+    public mutating func tick(now: UInt64) {
+        guard lastSampleNanos > 0, !owdEWMA.isNaN, baseOWD.isFinite else { return }
+        let age = Double(now &- lastSampleNanos) / 1e9
+        if age > 1 {
+            let dt = min(age - 1, 5)
+            let factor = exp(-dt)
+            owdEWMA = baseOWD + (owdEWMA - baseOWD) * factor
+            queueMs = max(0, (owdEWMA - baseOWD) / 1e6)
+            if age > 2 { lastSampleSource = "decay" }
+            adjust(now: now)
+        }
     }
 
     /// Windowed-minimum baseline (20 s, so a route change or an inflated opening is forgotten) and the
     /// smoothed one-way delay above it, which is the queue estimate.
-    private mutating func noteOWD(_ owd: Double, now: UInt64) {
+    private mutating func noteOWD(_ owd: Double, now: UInt64, source: String) {
         if baseOWDWindowStart == 0 { baseOWDWindowStart = now }
         baseOWDCandidate = min(baseOWDCandidate, owd)
         if owd < baseOWD { baseOWD = owd }
         if now - baseOWDWindowStart > 20_000_000_000 {
             baseOWD = baseOWDCandidate; baseOWDCandidate = .infinity; baseOWDWindowStart = now
         }
-        owdEWMA = owdEWMA.isNaN ? owd : owdEWMA * 0.7 + owd * 0.3
+        // Smoothing with a ~300 ms time constant, so the weight of a sample follows the time since the
+        // last one: 30 fps video samples smooth over ~10 frames, a once-a-second probe on an idle link
+        // replaces the estimate almost entirely (sparse samples must not take four seconds to converge).
+        let dt = lastSampleNanos > 0 ? Double(now &- lastSampleNanos) / 1e9 : 1
+        let alpha = min(0.95, max(0.1, 1 - exp(-dt / 0.3)))
+        owdEWMA = owdEWMA.isNaN ? owd : owdEWMA * (1 - alpha) + owd * alpha
         queueMs = max(0, (owdEWMA - baseOWD) / 1e6)
+        lastSampleSource = source; lastSampleNanos = now
     }
 
     public mutating func lossDetected(now: UInt64) {

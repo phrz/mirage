@@ -25,6 +25,8 @@ public protocol DesktopStreamer: AnyObject, Sendable {
     func handle(input: ControlMessage)
     /// Input datagram with redundancy; returns what to acknowledge (nil = not ready, the viewer will repeat).
     func handle(inputPacket: InputPacket) -> InputAck?
+    /// The viewer echoed a host delay probe: host send clock, viewer receive clock.
+    func handle(probeEcho sentNanos: UInt64, receivedNanos: UInt64)
     /// The connection went away: stop capturing and sending but keep every piece of state a resumed
     /// connection needs (tracker, rate controller and tier, encoder rung, sequence numbers, input state).
     func suspend() async

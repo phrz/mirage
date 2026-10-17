@@ -465,3 +465,47 @@ final class TransientSpikeTests: XCTestCase {
     }
 }
 
+final class IdleDelayEstimateTests: XCTestCase {
+    private func burstThenIdle(_ rc: inout RateController, probes: Bool) -> (queueAt3s: Double, target: Int) {
+        let base = 72_500_000.0            // 145 ms RTT
+        var now: UInt64 = 1_000_000_000
+        for _ in 0..<5 {
+            rc.frameAcked(sentNanos: now, firstReceived: now + UInt64(base), lastReceived: now + UInt64(base) + 2_000_000, fragments: 1, bytes: 8000, now: now + 150_000_000, rttNanos: 145_000_000)
+            now += 200_000_000
+        }
+        // The opening burst: big blocks (ignored) and the small tiles that ride behind them, 60–70 ms late.
+        for i in 0..<10 {
+            rc.delaySample(sentNanos: now, receivedNanos: now + UInt64(base) + 85_000_000, bytes: 30_000, now: now + 160_000_000)
+            rc.delaySample(sentNanos: now + 50_000_000, receivedNanos: now + 50_000_000 + UInt64(base) + UInt64(60_000_000 + i * 1_000_000), bytes: 400, now: now + 200_000_000)
+            now += 300_000_000
+        }
+        XCTAssertGreaterThan(rc.queueMs, 40, "the burst did inflate the estimate")
+        // Then a static screen: nothing but the host's 1 Hz delay probes at the baseline (or nothing at all).
+        var queueAt3s = Double.infinity
+        for sec in 1...6 {
+            now += 1_000_000_000
+            rc.tick(now: now)
+            if probes { rc.probeSample(sentNanos: now, receivedNanos: now + UInt64(base), now: now + 145_000_000) }
+            if sec == 3 { queueAt3s = rc.queueMs }
+        }
+        return (queueAt3s, rc.targetKbps)
+    }
+
+    func testIdleLinkWithProbesReadsNoQueueAndHoldsTheCap() {
+        var rc = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 1108 * 720)
+        let r = burstThenIdle(&rc, probes: true)
+        XCTAssertLessThan(r.queueAt3s, 15, "queue \(r.queueAt3s) ms three seconds into an idle link")
+        XCTAssertEqual(r.target, 800)
+        XCTAssertEqual(rc.lastSampleSource, "probe")
+        XCTAssertEqual(rc.tier, .constrained)
+    }
+
+    func testStaleEstimateDecaysWithoutSamples() {
+        var rc = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 1108 * 720)
+        let r = burstThenIdle(&rc, probes: false)
+        XCTAssertLessThan(r.queueAt3s, 15, "a queue estimate nobody refreshed decays toward zero: \(r.queueAt3s) ms")
+        XCTAssertEqual(r.target, 800)
+        XCTAssertEqual(rc.lastSampleSource, "decay")
+    }
+}
+

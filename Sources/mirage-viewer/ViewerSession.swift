@@ -403,7 +403,13 @@ final class ViewerSession: @unchecked Sendable {
             } else if let ack = InputAck.decode(d) {
                 inputAck(ack)
             } else if let ping = DatagramPing.decode(d) {
-                rttSample(sentNanos: ping.sentNanos, echoNanos: ping.echoNanos, now: now)
+                if ping.echoNanos == 0 {
+                    // A host delay probe: stamp it with our clock and send it straight back (the host's
+                    // serialization-free one-way-delay sample for its rate controller).
+                    flow.connection.send(content: DatagramPing.echo(d, now: now), completion: .contentProcessed { _ in })
+                } else {
+                    rttSample(sentNanos: ping.sentNanos, echoNanos: ping.echoNanos, now: now)
+                }
             }
         }
     }

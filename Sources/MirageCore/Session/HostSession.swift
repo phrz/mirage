@@ -82,7 +82,11 @@ public enum HostSession {
             guard d.count >= 2, d[d.startIndex] == datagramMagic else { continue }
             switch d[d.startIndex + 1] {
             case DatagramType.ping.rawValue:
-                try await flow.sendRaw(DatagramPing.echo(d))   // the viewer's keepalive: RTT, loss and clock offset
+                if let p = DatagramPing.decode(d), p.echoNanos != 0 {
+                    conn.streamer?.handle(probeEcho: p.sentNanos, receivedNanos: p.echoNanos)   // the viewer's reply to a host delay probe
+                } else {
+                    try await flow.sendRaw(DatagramPing.echo(d))   // the viewer's keepalive: RTT, loss and clock offset
+                }
             case DatagramType.input.rawValue:
                 // Input with redundancy (see InputPacket): the streamer applies it once and says what to ack.
                 guard conn.deviceID != nil, let p = InputPacket.decode(d), let ack = conn.streamer?.handle(inputPacket: p) else { continue }
