@@ -29,8 +29,23 @@ process spawn overhead measured per tool and subtracted, median of 5 runs. `benc
 | AVIF lossless s10 | 21 / 3 / 2 | 41 / 4 / 3 |
 | HEIC lossless | 16 / 32 / 8.5 | 28 / 22 / 7 |
 
-(Per-64-px-tile class breakdown, including QOI and JXL/AVIF/HEIC, in
-`../tilebench/results-codecs-64.txt`.)
+## Per 64×64 tile, mean bytes by content class (quarter of all tiles sampled; three captures)
+
+| class | zlib | QOI | **WebP-ll** | WebP near-ll | JXL-ll e3 | JXL-ll e7 | JXL d=1 | AVIF-ll s10 | AVIF-ll s6 | HEIC-ll |
+|---|---|---|---|---|---|---|---|---|---|---|
+| uniform | 30 | 91 | 44 | 44 | 225 | 154 | 211 | 439 | 439 | 1426 |
+| flat ≤16 colours | 139–149 | 356–392 | **89–95** | same | 230–300 | 197–218 | 330–346 | 685–967 | 524–592 | 1694–1829 |
+| text ≤256 colours | 780–954 | 1152–1299 | **527–547** | 532–548 | 870–1167 | 706–837 | 578–1082 | 1862–3731 | 1332–2208 | 2401–3495 |
+| rich >256 colours | 4538–4981 | 4368–4495 | 3147–3305 | 2578–2870 | 3573–3592 | 3253–3305 | **810–1110** | 5164–5662 | 4290–4763 | 5888–6025 |
+
+Full breakdown in `../tilebench/results-codecs-64.txt`. Note the uniform-tile floor: WebP's
+container costs 44 bytes for a flat tile; zlib's 30. Both argue for merging tiles into rects
+and for a one-byte "solid colour" tile type, which M2's protocol should have.
+
+One genuinely useful surprise: **JPEG XL at distance 1 (visually lossless) is ~3x smaller
+than WebP near-lossless on rich/photographic tiles** (810–1110 B vs 2578–2870 B). Those tiles
+are mostly handled by the video path anyway, but if a lossy still codec is ever wanted for
+settled photographic regions, JXL d=1 is it, not WebP near-lossless.
 
 ## Conclusions
 

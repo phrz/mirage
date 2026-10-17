@@ -84,16 +84,55 @@ func writePNG(_ img: Img, tx: Int, ty: Int, to url: URL) {
     let dst = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil)!
     CGImageDestinationAddImage(dst, sub, nil); CGImageDestinationFinalize(dst)
 }
+let spawnGate = DispatchSemaphore(value: 4)   // bound concurrent child processes (pipes = file descriptors)
 func run(_ tool: String, _ args: [String], stdin: [UInt8]? = nil) -> Int {
+    spawnGate.wait(); defer { spawnGate.signal() }
     let p = Process(); p.executableURL = URL(fileURLWithPath: tool); p.arguments = args
     let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
     var inPipe: Pipe?
-    if stdin != nil { inPipe = Pipe(); p.standardInput = inPipe }
-    try! p.run()
+    if stdin != nil { inPipe = Pipe(); p.standardInput = inPipe } else { p.standardInput = FileHandle.nullDevice }
+    do { try p.run() } catch { return -1 }
     if let stdin, let inPipe { inPipe.fileHandleForWriting.write(Data(stdin)); try? inPipe.fileHandleForWriting.close() }
     let data = out.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
     return data.count
 }
+/// Runs an external encoder that writes an output file; returns bytes.
+func externalEncode(_ img: Img, tx: Int, ty: Int, tool: String, args: (String, String) -> [String], ext: String) -> Int {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent("tb-\(tx)-\(ty)-\(ext)")
+    let inPNG = base.appendingPathExtension("png"), out = base.appendingPathExtension(ext)
+    writePNG(img, tx: tx, ty: ty, to: inPNG)
+    _ = run(tool, args(inPNG.path, out.path))
+    let n = (try? FileManager.default.attributesOfItem(atPath: out.path)[.size] as? Int) ?? -1
+    try? FileManager.default.removeItem(at: inPNG); try? FileManager.default.removeItem(at: out)
+    return n
+}
+
+// QOI (Quite OK Image) lossless, in-process: the fastest credible lossless baseline.
+func qoiEncode(_ rgb: [UInt8]) -> Int {
+    var out = 14 + 8
+    var index = [UInt32](repeating: 0xFFFFFFFF, count: 64)
+    var prev: (UInt8, UInt8, UInt8) = (0, 0, 0)
+    var runLen = 0
+    let n = rgb.count / 3
+    for i in 0..<n {
+        let r = rgb[i*3], g = rgb[i*3+1], b = rgb[i*3+2]
+        if (r, g, b) == prev { runLen += 1; if runLen == 62 || i == n - 1 { out += 1; runLen = 0 }; continue }
+        if runLen > 0 { out += 1; runLen = 0 }
+        let key = UInt32(r) << 16 | UInt32(g) << 8 | UInt32(b)
+        let h = Int((Int(r) * 3 + Int(g) * 5 + Int(b) * 7 + 255 * 11) % 64)
+        if index[h] == key { out += 1 }
+        else {
+            index[h] = key
+            let dr = Int(r) - Int(prev.0), dg = Int(g) - Int(prev.1), db = Int(b) - Int(prev.2)
+            if (-2...1).contains(dr) && (-2...1).contains(dg) && (-2...1).contains(db) { out += 1 }
+            else if (-32...31).contains(dg) && (-8...7).contains(dr - dg) && (-8...7).contains(db - dg) { out += 2 }
+            else { out += 4 }
+        }
+        prev = (r, g, b)
+    }
+    return out
+}
+
 func webpLossless(_ img: Img, tx: Int, ty: Int, near: Int? = nil) -> Int {
     let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("tb-\(tx)-\(ty)-\(near ?? 0).png")
     writePNG(img, tx: tx, ty: ty, to: tmp)
@@ -137,7 +176,7 @@ func vtFrame(_ img: Img, codec: CMVideoCodecType, quality: Float, qp: Int?) -> I
 }
 
 struct Acc { var n = 0; var sums = [String: Int](); mutating func add(_ k: String, _ v: Int) { sums[k, default: 0] += v } }
-let codecs = ["raw", "lz4", "lzfse", "zlib", "sub+lzfse", "paeth+lzfse", "pal+lzfse", "best-apple"] + (useCLI ? ["webp-ll", "webp-nl60", "zstd19"] : [])
+let codecs = ["raw", "zlib", "pal+lzfse", "qoi"] + (useCLI ? ["webp-ll", "webp-nl60", "jxl-ll-e3", "jxl-ll-e7", "jxl-d1", "avif-ll-s10", "avif-ll-s6", "heic-ll"] : [])
 
 for path in CommandLine.arguments.dropFirst() {
     let img = load(path)
@@ -145,6 +184,7 @@ for path in CommandLine.arguments.dropFirst() {
     var classes = ["uniform": Acc(), "flat≤16": Acc(), "text≤256": Acc(), "rich>256": Acc()]
     let lock = NSLock()
     DispatchQueue.concurrentPerform(iterations: tx * ty) { i in
+        if useCLI && i % 4 != 0 { return }   // sample a quarter of the tiles when external encoders are involved
         let x = i % tx, y = i / tx
         let rgb = rgbTile(img, x, y)
         let uc = uniqueColors(rgb)
@@ -158,10 +198,16 @@ for path in CommandLine.arguments.dropFirst() {
         r["paeth+lzfse"] = compress(paeth(rgb), COMPRESSION_LZFSE)
         if let p = palettize(rgb) { r["pal+lzfse"] = compress(p.indices, COMPRESSION_LZFSE) + p.paletteBytes } else { r["pal+lzfse"] = r["paeth+lzfse"]! }
         r["best-apple"] = min(r["lzfse"]!, r["sub+lzfse"]!, r["paeth+lzfse"]!, r["pal+lzfse"]!) + 1 // +1 byte selector
+        r["qoi"] = qoiEncode(rgb)
         if useCLI {
             r["webp-ll"] = webpLossless(img, tx: x, ty: y)
             r["webp-nl60"] = webpLossless(img, tx: x, ty: y, near: 60)
-            r["zstd19"] = run("/opt/homebrew/bin/zstd", ["-19", "-c", "-q"], stdin: paeth(rgb))
+            r["jxl-ll-e3"] = externalEncode(img, tx: x, ty: y, tool: "/opt/homebrew/bin/cjxl", args: { [$0, $1, "-d", "0", "-e", "3", "--quiet"] }, ext: "e3.jxl")
+            r["jxl-ll-e7"] = externalEncode(img, tx: x, ty: y, tool: "/opt/homebrew/bin/cjxl", args: { [$0, $1, "-d", "0", "-e", "7", "--quiet"] }, ext: "e7.jxl")
+            r["jxl-d1"] = externalEncode(img, tx: x, ty: y, tool: "/opt/homebrew/bin/cjxl", args: { [$0, $1, "-d", "1", "-e", "3", "--quiet"] }, ext: "d1.jxl")
+            r["avif-ll-s10"] = externalEncode(img, tx: x, ty: y, tool: "/opt/homebrew/bin/avifenc", args: { ["-l", "-s", "10", "-j", "1", $0, $1] }, ext: "s10.avif")
+            r["avif-ll-s6"] = externalEncode(img, tx: x, ty: y, tool: "/opt/homebrew/bin/avifenc", args: { ["-l", "-s", "6", "-j", "1", $0, $1] }, ext: "s6.avif")
+            r["heic-ll"] = externalEncode(img, tx: x, ty: y, tool: "/opt/homebrew/bin/heif-enc", args: { ["-L", "-o", $1, $0] }, ext: "heic")
         }
         lock.lock(); classes[cls]!.n += 1; for (k, v) in r { classes[cls]!.add(k, v) }; lock.unlock()
     }
