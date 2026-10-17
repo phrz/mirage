@@ -66,7 +66,7 @@ public struct ShiftDetector {
     /// Refines an approximate 2-D offset (e.g. a window-list frame delta that is a few px off because
     /// the list was sampled after the pixels were composited): textured 16×16 patches of the old
     /// rect are searched in the new frame within ±`radius` of (dx, dy); the modal offset wins.
-    public func refine(old: Frame, new: Frame, rect: PixelRect, dx: Int, dy: Int, radius: Int = 8) -> (dx: Int, dy: Int)? {
+    public func refine(old: Frame, new: Frame, rect: PixelRect, dx: Int, dy: Int, radius: Int = 24) -> (dx: Int, dy: Int)? {
         let bounds = PixelRect(x: 0, y: 0, width: min(old.width, new.width), height: min(old.height, new.height))
         let r = rect.intersection(bounds)
         guard r.width >= 64, r.height >= 64 else { return nil }
@@ -94,7 +94,11 @@ public struct ShiftDetector {
                 if best.sad <= Int64(p * p) * 12 { votes[(best.ox + 1000) * 4096 + best.oy + 1000, default: 0] += 1 }
             }
         }
-        guard textured >= 3, let (key, n) = votes.max(by: { $0.value < $1.value }), n >= 3, n * 2 >= textured else { return nil }
+        guard textured >= 3, let (key, n) = votes.max(by: { $0.value < $1.value }), n >= 3, n * 2 >= textured else {
+            debug?("shift refine around (\(dx),\(dy)): no consensus (textured \(textured), votes \(votes.values.sorted(by: >).prefix(3).map { $0 }))")
+            return nil
+        }
+        debug?("shift refine around (\(dx),\(dy)) → (\(dx + key / 4096 - 1000),\(dy + key % 4096 - 1000)) with \(n)/\(textured) patches")
         return (dx + key / 4096 - 1000, dy + key % 4096 - 1000)
     }
 

@@ -15,8 +15,11 @@ final class ScenarioRunner {
     private(set) var activeSeconds = 0.0
     init(session: ViewerSession, name: String, seconds: Double) { self.session = session; self.name = name; self.seconds = seconds }
 
+    private var lastBench: ControlMessage.WindowInfo?
+    /// The bench window, or the last one seen (a window-list update can momentarily drop it).
     private func bench() -> ControlMessage.WindowInfo? {
-        session.windowsSnapshot().first { $0.title.contains("Mirage Test Bench") }
+        if let w = session.windowsSnapshot().first(where: { $0.title.contains("Mirage Test Bench") }) { lastBench = w }
+        return lastBench
     }
     private func normalized(_ x: Int, _ y: Int) -> (Double, Double) {
         let c = session.compositor
