@@ -134,17 +134,17 @@ function buildIcon(ab, opts) {
   var reflMask = rect(refl, 'Reflection Fade', cx - 80, HORIZON, 60 * scale + 160, BAND, lin([
     [0, 'rgba(0,0,0,1)'], [0.25, 'rgba(0,0,0,0.9)'], [0.5, 'rgba(0,0,0,0.55)'], [0.75, 'rgba(0,0,0,0.2)'], [1, 'rgba(0,0,0,0)']]));
   reflMask.sketchObject.hasClippingMask = true; reflMask.sketchObject.clippingMaskMode = 1;
-  path(refl, 'Reflected Pointer', displacedReflection(scale, cx, cy),
-    lin([[0, 'rgba(70,84,110,0.48)'], [1, 'rgba(70,84,110,0.2)']]), { blur: blur(5) });
+  var reflD = displacedReflection(scale, cx, cy);
+  path(refl, 'Reflected Keyline', reflD, solid('rgba(255,255,255,0.7)'), {
+    borders: [{ color: 'rgba(255,255,255,0.7)', thickness: 6 * scale / 3, position: Style.BorderPosition.Outside }], blur: blur(5) });
+  path(refl, 'Reflected Pointer', reflD,
+    lin([[0, 'rgba(70,84,110,0.55)'], [1, 'rgba(70,84,110,0.25)']]), { blur: blur(5) });
   // bright turbulent air veils the inverted image
   rect(refl, 'Air Veil', cx - 80, HORIZON, 60 * scale + 160, BAND, lin([[0, 'rgba(226,238,252,0.55)'], [1, 'rgba(226,238,252,0)']]));
   refl.adjustToFit();
 
-  // ---- CURSOR: the macOS pointer standing on the vanishing line, its base dissolving into the sheet of light
+  // ---- CURSOR: the macOS pointer standing on the vanishing line
   var cur = G('Cursor', icon);
-  var curMask = rect(cur, 'Base Dissolve Mask', cx - 40, cy - 40, 60 * scale + 80, HORIZON - cy + 40, lin([
-    [0, 'rgba(0,0,0,1)'], [0.86, 'rgba(0,0,0,1)'], [0.95, 'rgba(0,0,0,0.6)'], [1, 'rgba(0,0,0,0.15)']]));
-  curMask.sketchObject.hasClippingMask = true; curMask.sketchObject.clippingMaskMode = 1;
   arrow(cur, 'Pointer Keyline', solid('#FFFFFF'), {
     borders: [{ color: '#FFFFFF', thickness: 6 * scale / 3, position: Style.BorderPosition.Outside }],
     shadows: [{ color: 'rgba(10,20,50,0.16)', blur: 30, x: 0, y: 12, spread: 0 }]

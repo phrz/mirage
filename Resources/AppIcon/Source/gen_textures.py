@@ -94,10 +94,14 @@ cover = np.zeros((H, W), np.float32)
 for m in masks:
     cover = np.maximum(cover, np.asarray(m, np.float32) / 255.0)
 cover_soft = np.asarray(Image.fromarray((cover * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.45 * S)), np.float32) / 255.0
-# relief: each grain casts a small soft shadow down-right (sun upper-left) onto the sand around it
+# relief: each grain casts a small, soft, warm shadow down-right (sun upper-left) onto the sand
 shadow = np.asarray(Image.fromarray((shift(cover, 1.1 * S, 0.7 * S) * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.9 * S)), np.float32) / 255.0
-shadow = shadow * (1 - cover_soft) * spk_fade * lerp(0.25, 0.55, Y)
-base = base * (1 - shadow[..., None] * np.array([1.0, 0.92, 0.8]))
+shadow = shadow * (1 - cover_soft) * spk_fade * lerp(0.14, 0.32, Y)
+base = base * (1 - shadow[..., None] * np.array([0.75, 0.9, 1.0]))
+# thin warm contact edge around each grain where it meets the sand
+dil = np.asarray(Image.fromarray((cover * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(5)), np.float32) / 255.0
+ring = np.clip(dil - cover, 0, 1) * spk_fade
+base = base * (1 - ring[..., None] * np.array([0.10, 0.17, 0.28]))
 # paint the grains
 for (col, _, _), m in zip(classes, masks):
     a = np.asarray(m.filter(ImageFilter.GaussianBlur(0.4 * S)), np.float32) / 255.0 * spk_fade
@@ -105,7 +109,8 @@ for (col, _, _), m in zip(classes, masks):
 # shade the grains themselves: lit crescent top-left, shaded crescent bottom-right
 hi = np.clip(cover_soft - shift(cover_soft, 0.7 * S, 0.7 * S), 0, 1) * spk_fade
 lo = np.clip(cover_soft - shift(cover_soft, -0.7 * S, -0.7 * S), 0, 1) * spk_fade
-base = base * (1 + 0.35 * hi[..., None]) * (1 - 0.30 * lo[..., None])
+# inner shadow is warm: the grain's underside is lit by light bouncing off the sand
+base = base * (1 + 0.35 * hi[..., None]) * (1 - lo[..., None] * np.array([0.18, 0.30, 0.46]))
 
 # ---- atmospheric haze toward the horizon
 haze_col = np.array([0.94, 0.95, 0.97])
