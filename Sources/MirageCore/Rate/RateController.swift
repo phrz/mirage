@@ -39,7 +39,12 @@ public struct RateController {
     public var scale: Double { Self.scales[rung] }
     public let nativePixels: Int
     /// Link tier (DESIGN §3.9) from the controller's own estimates, with hysteresis; `policy` is what the host applies.
-    public private(set) var tiers = TierSelector()
+    public private(set) var tiers = TierSelector(initial: .constrained)
+    /// Windowed minimum RTT: the tier must not react to queues we built ourselves.
+    private var minRTTNanos: Double = .infinity
+    private var minRTTCandidate: Double = .infinity
+    private var minRTTWindowStart: UInt64 = 0
+    public var minRttMs: Double { minRTTNanos.isFinite ? minRTTNanos / 1e6 : srttNanos / 1e6 }
     public var tier: LinkTier { tiers.tier }
     public var policy: LinkTier.Policy { tier.policy }
     private var ackedFrames = 0, lostFrames = 0
@@ -58,12 +63,20 @@ public struct RateController {
 
     public init(initialKbps: Int, maxKbps: Int, nativePixels: Int) {
         targetKbps = min(initialKbps, maxKbps); self.maxKbps = maxKbps; self.nativePixels = nativePixels
+        // Start at the rung the initial target can afford: the first keyframe is the stall (DESIGN §3.3).
+        let kpix = Double(nativePixels) / 1000
+        while rung < Self.scales.count - 1, Double(targetKbps) < kpix * Self.scales[rung] * Self.scales[rung] * tuning.kbpsPerKpixelDown { rung += 1 }
     }
 
     /// One acked frame: when the host sent its first datagram, when the viewer saw the first and
     /// last datagram, how many datagrams, how many bytes.
     public mutating func frameAcked(sentNanos: UInt64, firstReceived: UInt64, lastReceived: UInt64, fragments: Int, bytes: Int, now: UInt64, rttNanos: Double?) {
-        if let rtt = rttNanos { srttNanos = srttNanos * 0.8 + rtt * 0.2 }
+        if let rtt = rttNanos {
+            srttNanos = srttNanos * 0.8 + rtt * 0.2
+            if minRTTWindowStart == 0 { minRTTWindowStart = now }
+            minRTTCandidate = min(minRTTCandidate, rtt); minRTTNanos = min(minRTTNanos, rtt)
+            if now - minRTTWindowStart > 30_000_000_000 { minRTTNanos = minRTTCandidate; minRTTCandidate = .infinity; minRTTWindowStart = now }
+        }
         // One-way delay proxy (receiver clock − host clock); its minimum is the base, the rest is queue.
         let owd = Double(lastReceived) - Double(sentNanos)
         if baseOWDWindowStart == 0 { baseOWDWindowStart = now }
@@ -125,7 +138,7 @@ public struct RateController {
         }
         targetKbps = min(targetKbps, max(ceiling, tuning.minKbps))
         if ackedFrames + lostFrames > 200 { ackedFrames /= 2; lostFrames /= 2 }   // sliding loss window
-        tiers.update(capacityKbps: capacityKbps, rttMs: srttNanos / 1e6, lossPercent: lossPercent, now: now)
+        tiers.update(capacityKbps: capacityKbps, rttMs: minRttMs, lossPercent: lossPercent, now: now)
         updateRung(now: now)
     }
 

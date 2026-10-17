@@ -55,12 +55,12 @@ final class ScenarioRunner {
         session.watchRect = w.frame
         let ppp = await MainActor.run { session.pixelsPerPoint }
         let end = Date().addingTimeInterval(seconds)
+        let started = Date()
+        defer { activeSeconds = Date().timeIntervalSince(started) }
         switch name {
         case "idle":
             session.resetWatched()
-            let t0 = Date()
             try? await Task.sleep(for: .seconds(seconds))
-            activeSeconds = Date().timeIntervalSince(t0)
         case "typing":
             // Click into the text (lower half, so the caret sits at the end) then type at 6 keys/s.
             await click(w.frame.x + w.frame.width / 2, w.frame.maxY - Int(60 * ppp))
@@ -68,8 +68,6 @@ final class ScenarioRunner {
             session.resetWatched()
             let text = Array("the quick brown fox jumps over the lazy dog while mirage streams tiles ")
             var i = 0
-            let t0 = Date()
-            defer { activeSeconds = Date().timeIntervalSince(t0) }
             while Date() < end {
                 let ch = text[i % text.count]; i += 1
                 let code: UInt16 = ch == " " ? 49 : 0

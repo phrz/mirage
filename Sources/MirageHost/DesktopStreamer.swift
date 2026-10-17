@@ -371,6 +371,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if tileTokens > 0 {
                 let bytes = submitLossless(tiles: plan.lossless, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
                 tileTokens -= Double(bytes)
+            } else if plan.lossless.count >= 12, rc?.policy.videoEnabled ?? true {
+                // The tile budget is spent and this is a lot of fresh content (a scroll's exposed strip at
+                // native scale is megapixels per second): show it through video now, refine it later.
+                plan.video.append(contentsOf: plan.lossless)
+                plan.videoRegion = plan.videoRegion.union(tracker.boundingRect(plan.lossless))
+                tracker.markVideo(plan.lossless, now: now)
+                statTileSkipped += plan.lossless.count
             } else {
                 tracker.defer(plan.lossless, now: now); statTileSkipped += plan.lossless.count
             }
@@ -612,7 +619,20 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let maxPayload = out.maxDatagramSize - VideoFragment.headerSize
         let frags = VideoFragment.fragments(frameSeq: seq, flags: flags, captureNanos: f.captureNanos, payload: payload, maxPayload: maxPayload,
                                             captureSeq: captureSeq, inputSeq: inputSeq, region: region)
-        for d in frags { out.sendDatagram(d) }
+        if payload.count > 16_000 {
+            // A big (key)frame sent as one burst is the surest way to build a queue and lose datagrams;
+            // pace it at ~1.5x the video budget in 10 ms slices instead.
+            let bytesPerSec = Double(max(150, lastBudget.videoKbps)) * 1000 / 8 * 1.5
+            let perSlice = max(2, Int(bytesPerSec * 0.01 / Double(maxPayload)))
+            var i = 0, slice = 0
+            while i < frags.count {
+                let chunk = Array(frags[i..<min(frags.count, i + perSlice)])
+                queue.asyncAfter(deadline: .now() + .milliseconds(10 * slice)) { for d in chunk { out.sendDatagram(d) } }
+                i += perSlice; slice += 1
+            }
+        } else {
+            for d in frags { out.sendDatagram(d) }
+        }
         tokens -= Double(payload.count)
         unacked[seq] = InFlight(sentNanos: Clock.nowNanos(), bytes: payload.count, ltrToken: f.ltrToken)
         statFrames += 1; statBytes += payload.count; statEncodeNanos += f.encodeNanos; secVideoBytes += payload.count
@@ -648,13 +668,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// Pushes the controller's decisions into the encoder (rate, rung) at most every 500 ms.
     private var lastBudgetApply: UInt64 = 0
+    private var lastRebuildNanos: UInt64 = 0
     private func applyBudget(now: UInt64) {
         guard let rc, now - lastBudgetApply > 500_000_000 else { return }
         lastBudgetApply = now
         let b = rc.budget(videoActive: now - videoActiveNanos < 500_000_000, recentTileKbps: Int(tileKbpsEWMA))
-        let rungChanged = encoder.map { Int(Double(target?.pixelWidth ?? 0) * rc.scale) & ~1 != $0.width } ?? false
-        if rungChanged {
+        let wantedWidth = max(64, Int(Double(target?.pixelWidth ?? 0) * rc.scale)) & ~1
+        let rungChanged = encoder.map { wantedWidth != $0.width } ?? false
+        // A rung change costs a keyframe: at most one per 5 s, and never to a *larger* picture while the link is queuing.
+        let growing = encoder.map { wantedWidth > $0.width } ?? false
+        if rungChanged, now - lastRebuildNanos > 5_000_000_000, !(growing && rc.queueMs > 60) {
             lastBudget = b
+            lastRebuildNanos = now
             if (try? rebuildEncoder()) != nil { wantKeyframe = true; log("ladder: rung \(rc.rung) (scale \(rc.scale)), target \(rc.targetKbps) kbps") }
         } else if abs(b.videoKbps - lastBudget.videoKbps) > lastBudget.videoKbps / 10 || b.tileKbps != lastBudget.tileKbps {
             lastBudget = b
