@@ -25,10 +25,12 @@ final class App: NSObject, NSApplicationDelegate {
         cap.font = NSFont.systemFont(ofSize: 13, weight: .medium)
         cap.textColor = .white
         cap.lineBreakMode = .byTruncatingTail
-        let band = NSView(frame: NSRect(x: 0, y: size.height - captionHeight, width: size.width, height: captionHeight))
-        band.wantsLayer = true; band.layer?.backgroundColor = NSColor(calibratedRed: 0.42, green: 0.2, blue: 0.75, alpha: 1).cgColor
+        // An NSBox, not a layer-backed view: layer-backing the window makes the text view re-render every
+        // frame, which the measuring host sees as a full-window change (measured: 1.5 Mbps of refinement).
+        let band = NSBox(frame: NSRect(x: 0, y: size.height - captionHeight, width: size.width, height: captionHeight))
+        band.boxType = .custom; band.borderWidth = 0; band.fillColor = NSColor(calibratedRed: 0.42, green: 0.2, blue: 0.75, alpha: 1)
         band.autoresizingMask = [.width, .minYMargin]
-        band.addSubview(cap)
+        band.contentView?.addSubview(cap)
         caption = cap
         let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: size.width, height: size.height - captionHeight))
         scroll.hasVerticalScroller = true; scroll.autoresizingMask = [.width, .height]
@@ -50,7 +52,7 @@ final class App: NSObject, NSApplicationDelegate {
         w.contentView = content
         w.makeKeyAndOrderFront(nil)
         updateCaption()
-        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in self?.updateCaption() }
+        Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.updateCaption() }
         w.makeFirstResponder(tv)
         tv.setSelectedRange(NSRange(location: text.utf16.count, length: 0))
         tv.scrollRangeToVisible(NSRange(location: 0, length: 0))
@@ -58,11 +60,12 @@ final class App: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
     func updateCaption() {
+        // Only redraw when the status really changed: every caption change is a pixel change the host must send.
         let status = (try? String(contentsOfFile: statusPath, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if status != lastStatus { lastStatus = status; started = Date() }
-        let secs = Int(Date().timeIntervalSince(started))
-        let what = status.isEmpty ? "idle, waiting for the next scenario" : "\(status), running for \(secs) s"
-        caption.stringValue = "Mirage M2 measurement bench (started by Claude) — \(what) — this window is being scrolled, typed into and dragged by a script; safe to ignore, it closes itself"
+        guard status != lastStatus || caption.stringValue.isEmpty else { return }
+        lastStatus = status
+        let what = status.isEmpty ? "idle, waiting for the next scenario" : status
+        caption.stringValue = "Mirage M2 measurement bench (started by Claude) — \(what) — a script scrolls, types into and drags this window; safe to ignore, it closes itself"
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
 }
