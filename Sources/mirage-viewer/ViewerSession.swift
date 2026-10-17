@@ -74,7 +74,7 @@ final class ViewerSession: @unchecked Sendable {
         var tileKbps: Double, tileRects: Int, copyRects: Int, targetKbps: Int, capacityKbps: Int, queueMs: Double, rung: Int, scale: Double
         var tier: String?
     }
-    private(set) var samples: [Sample] = []
+    private(set) var samples: [Sample] = []   // appended on the main actor; read by the scenario runner (benign race on a value array)
     private let startDate = Date()
     private var lastMoveSent: UInt64 = 0
     private var pendingMove: ControlMessage.MouseMove?

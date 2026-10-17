@@ -57,6 +57,15 @@ final class ScenarioRunner {
         let end = Date().addingTimeInterval(seconds)
         let started = Date()
         defer { activeSeconds = Date().timeIntervalSince(started) }
+        // Let the opening keyframe's full-screen lossless refinement finish first (up to 60 s): the
+        // measurements are about the interaction, not the first picture.
+        var quiet = 0
+        for _ in 0..<60 {
+            try? await Task.sleep(for: .seconds(1))
+            if let last = session.samples.last, last.tileKbps + last.kbps < 60 { quiet += 1 } else { quiet = 0 }
+            if quiet >= 2 { break }
+        }
+        session.log("scenario \(name): stream quiet after refinement, starting")
         // Raise the bench (a click inside its text) so the scenario drives it and not whatever covers it.
         await click(w.frame.x + w.frame.width / 2, w.frame.maxY - Int(60 * ppp))
         try? await Task.sleep(for: .milliseconds(800))

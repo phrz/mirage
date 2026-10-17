@@ -48,7 +48,8 @@ public struct RateController {
     public var tier: LinkTier { tiers.tier }
     public var policy: LinkTier.Policy { tier.policy }
     private var ackedFrames = 0, lostFrames = 0
-    public var lossPercent: Double { ackedFrames + lostFrames == 0 ? 0 : Double(lostFrames) * 100 / Double(ackedFrames + lostFrames) }
+    /// Needs a few dozen frames before it means anything (one lost keyframe out of two is not "50 % loss").
+    public var lossPercent: Double { ackedFrames + lostFrames < 30 ? 0 : Double(lostFrames) * 100 / Double(ackedFrames + lostFrames) }
 
     private var baseOWD: Double = .infinity       // min(receiverNanos − hostNanos), includes the clock offset
     private var baseOWDWindowStart: UInt64 = 0

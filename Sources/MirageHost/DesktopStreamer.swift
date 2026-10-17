@@ -72,6 +72,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var statEncodeNanos: UInt64 = 0
     private var statInput = 0, statTileBytes = 0, statTileRects = 0, statRefineBytes = 0, statCopyRects = 0, statDirtyTiles = 0, statDiffPruned = 0, statTileSkipped = 0
     private var secTileBytes = 0, secVideoBytes = 0   // per rateState second
+    private var statCaptures = 0
+    private var statCaptureNanos: UInt64 = 0
     private var tileKbpsEWMA = 0.0
     private var lastTier: LinkTier? = nil
     private var statTimer: DispatchSourceTimer?
@@ -79,7 +81,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     public init(log: @escaping @Sendable (String) -> Void) {
         self.log = log
         hostLog = log
-        if ProcessInfo.processInfo.environment["MIRAGE_DEBUG_SHIFT"] != nil { detector.debug = { log($0) } }
+        // Env var, or a marker file for the LaunchAgent: ~/Library/Application Support/Mirage/debug-shift
+        let marker = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Mirage/debug-shift").path
+        if ProcessInfo.processInfo.environment["MIRAGE_DEBUG_SHIFT"] != nil || FileManager.default.fileExists(atPath: marker) { detector.debug = { log($0) } }
     }
 
     // MARK: DesktopStreamer
@@ -276,6 +280,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard var tracker, request != nil, output != nil, let windows else { return }
         captureSeq &+= 1
         let now = Clock.nowNanos()
+        statCaptures += 1
+        defer { statCaptureNanos += Clock.nowNanos() - now }
         // Inputs injected less than ~40 ms before the capture are not in these pixels yet (window server + app render).
         lastInputSeq = injector?.inputSeq(before: nanos &- 40_000_000) ?? 0
         var moved: [WindowTracker.Delta] = []
@@ -742,11 +748,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let fps = Double(statFrames) / 5
             let vkbps = Double(statBytes) * 8 / 5 / 1000, tkbps = Double(statTileBytes) * 8 / 5 / 1000
             let enc = statFrames > 0 ? Double(statEncodeNanos) / Double(statFrames) / 1e6 : 0
-            log(String(format: "video %.1f fps %.0f kbps (%dx%d) | tiles %.0f kbps %d rects (refine %.0f kbps) copy-rects %d backlog %d skipped %d | dirty %d pruned %d | target %d cap %d queue %.0f ms rung %d srtt %.0f ms | inflight %d skipped %d dropped %d lost %d encode %.1f ms input %d",
+            let capMs = statCaptures > 0 ? Double(statCaptureNanos) / Double(statCaptures) / 1e6 : 0
+            log(String(format: "video %.1f fps %.0f kbps (%dx%d) | tiles %.0f kbps %d rects (refine %.0f kbps) copy-rects %d backlog %d skipped %d | captures %d (%.1f ms each) dirty %d pruned %d | target %d cap %d queue %.0f ms rung %d srtt %.0f ms | inflight %d skipped %d dropped %d lost %d encode %.1f ms input %d",
                        fps, vkbps, encoder?.width ?? 0, encoder?.height ?? 0, tkbps, statTileRects, Double(statRefineBytes) * 8 / 5 / 1000, statCopyRects, tracker?.pendingTotal ?? 0, statTileSkipped,
-                       statDirtyTiles, statDiffPruned, rc?.targetKbps ?? 0, rc?.capacityKbps ?? 0, rc?.queueMs ?? 0, rc?.rung ?? 0, srttNanos / 1e6,
+                       statCaptures, capMs, statDirtyTiles, statDiffPruned, rc?.targetKbps ?? 0, rc?.capacityKbps ?? 0, rc?.queueMs ?? 0, rc?.rung ?? 0, srttNanos / 1e6,
                        unacked.count, statSkippedBudget, statDropped, statLost, enc, statInput))
-            statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0
+            statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0
             statTileBytes = 0; statTileRects = 0; statRefineBytes = 0; statCopyRects = 0; statDirtyTiles = 0; statDiffPruned = 0; statTileSkipped = 0
         }
         t.resume()
