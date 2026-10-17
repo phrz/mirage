@@ -101,7 +101,10 @@ base = base * (1 - shadow[..., None] * np.array([0.75, 0.9, 1.0]))
 # thin warm contact edge around each grain where it meets the sand
 dil = np.asarray(Image.fromarray((cover * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(5)), np.float32) / 255.0
 ring = np.clip(dil - cover, 0, 1) * spk_fade
-base = base * (1 - ring[..., None] * np.array([0.10, 0.17, 0.28]))
+# the edge darkens toward the grain's lower-right (away from the sun), stays faint on the lit side
+br = np.asarray(Image.fromarray((shift(cover, 1.4 * S, 1.4 * S) * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(0.6 * S)), np.float32) / 255.0
+ring = ring * (0.15 + 0.85 * np.clip(br * 1.6, 0, 1))
+base = base * (1 - ring[..., None] * np.array([0.14, 0.24, 0.38]))
 # paint the grains
 for (col, _, _), m in zip(classes, masks):
     a = np.asarray(m.filter(ImageFilter.GaussianBlur(0.4 * S)), np.float32) / 255.0 * spk_fade

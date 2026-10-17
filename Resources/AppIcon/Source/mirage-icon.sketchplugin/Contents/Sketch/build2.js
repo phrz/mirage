@@ -59,8 +59,8 @@ var BAND = 56;   // px below the horizon where the mirage sheet has faded out (m
 function warpY(r) { return (0.8 + 0.075 * r) * Math.sin(r / 2.6 + 0.6) + (0.4 + 0.03 * r) * Math.sin(r / 6.1 + 2.0); }
 function warpX(r) { return 1.1 * Math.sin(r / 0.9) + 0.6 * Math.sin(r / 1.7 + 1.0); }
 function displacedReflection(scale, cx, cy) {
-  var squash = 0.5, bottom = cy + 95 * scale;
-  function map(p) { var X = cx + p[0] * scale, Y = cy + p[1] * scale; return [X, HORIZON + (bottom - Y) * squash]; }
+  var squash = 0.5;
+  function map(p) { var X = cx + p[0] * scale, Y = cy + p[1] * scale; return [X, HORIZON + (HORIZON - Y) * squash]; }
   var out = [];
   for (var i = 0; i < ARROW_PTS.length; i++) {
     var a = map(ARROW_PTS[i]), b = map(ARROW_PTS[(i + 1) % ARROW_PTS.length]);
@@ -136,9 +136,9 @@ function buildIcon(ab, opts) {
   reflMask.sketchObject.hasClippingMask = true; reflMask.sketchObject.clippingMaskMode = 1;
   var reflD = displacedReflection(scale, cx, cy);
   path(refl, 'Reflected Keyline', reflD, solid('rgba(255,255,255,0.7)'), {
-    borders: [{ color: 'rgba(255,255,255,0.7)', thickness: 6 * scale / 3, position: Style.BorderPosition.Outside }], blur: blur(5) });
+    borders: [{ color: 'rgba(255,255,255,0.7)', thickness: 6 * scale / 3 * 0.75, position: Style.BorderPosition.Outside }], blur: blur(10) });
   path(refl, 'Reflected Pointer', reflD,
-    lin([[0, 'rgba(70,84,110,0.55)'], [1, 'rgba(70,84,110,0.25)']]), { blur: blur(5) });
+    lin([[0, 'rgba(70,84,110,0.55)'], [1, 'rgba(70,84,110,0.25)']]), { blur: blur(10) });
   // bright turbulent air veils the inverted image
   rect(refl, 'Air Veil', cx - 80, HORIZON, 60 * scale + 160, BAND, lin([[0, 'rgba(226,238,252,0.55)'], [1, 'rgba(226,238,252,0)']]));
   refl.adjustToFit();
@@ -170,7 +170,7 @@ function onRun(context) {
   var page = doc.selectedPage; page.name = 'Icon';
 
   var A = new Artboard({ name: 'Mirage 1024', parent: page, frame: new Rectangle(0, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
-  buildIcon(A, { window: false, cursorScale: 3.3, cursorX: 432, cursorY: HORIZON - 95 * 3.3 });
+  buildIcon(A, { window: false, cursorScale: 3.3, cursorX: 432, cursorY: HORIZON - 95 * 3.3 - 2 * 3.3 });
   dbg('A built');
   var variants = new sketch.Page({ name: 'Variants', parent: doc });
   var B = new Artboard({ name: 'Mirage 1024 (window variant)', parent: variants, frame: new Rectangle(0, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
