@@ -17,6 +17,13 @@ public struct RateController {
         public var decrease = 0.85
         public var increasePerSecond = 0.08
         public var lossDecrease = 0.8
+        /// After a decrease, once the queue has been under `underuseMs` for this long, the target is
+        /// re-probed toward the ceiling multiplicatively (×`probeIncrease` per RTT, at least every
+        /// `probeMinIntervalNanos`) instead of crawling back at 8 %/s: a one-sample RTT spike on an
+        /// otherwise idle link (mac-daddy, 812 ms once) must not cost 10 s of half rate.
+        public var probeAfterNanos: UInt64 = 1_000_000_000
+        public var probeIncrease = 1.25
+        public var probeMinIntervalNanos: UInt64 = 250_000_000
         /// Delivery-rate samples need at least this many datagrams and this much spread.
         public var minTrainFragments = 3
         public var minTrainNanos: UInt64 = 2_000_000
@@ -81,6 +88,10 @@ public struct RateController {
     private var rateSamples: [(nanos: UInt64, kbps: Double)] = []
     private var lastDecreaseNanos: UInt64 = 0
     private var lastIncreaseNanos: UInt64 = 0
+    /// Post-decrease recovery: re-probing toward the ceiling once the queue has cleared.
+    private var probing = false
+    private var underSince: UInt64 = 0
+    private var lastProbeNanos: UInt64 = 0
     private var srttNanos: Double = 250_000_000
     private var belowSince: UInt64 = 0, aboveSince: UInt64 = 0
     private var lastRungChange: UInt64 = 0
@@ -167,25 +178,38 @@ public struct RateController {
         lostFrames += 1
         if Double(now - lastDecreaseNanos) > srttNanos {
             targetKbps = max(tuning.minKbps, Int(Double(targetKbps) * tuning.lossDecrease))
-            lastDecreaseNanos = now
+            lastDecreaseNanos = now; probing = true; underSince = 0
         }
     }
 
     private mutating func adjust(now: UInt64) {
         let ceiling = capacityKbps > 0 ? min(maxKbps, max(tuning.minKbps, Int(Double(capacityKbps) * tuning.capacityFraction))) : maxKbps
         if queueMs > tuning.overuseMs {
+            underSince = 0
             if Double(now - lastDecreaseNanos) > srttNanos {
                 targetKbps = max(tuning.minKbps, Int(Double(targetKbps) * tuning.decrease))
-                lastDecreaseNanos = now
+                lastDecreaseNanos = now; probing = true
             }
-        } else if queueMs < tuning.underuseMs, Double(now - lastDecreaseNanos) > 2 * srttNanos {
-            if lastIncreaseNanos == 0 { lastIncreaseNanos = now }
-            let dt = Double(now - lastIncreaseNanos) / 1e9
-            if dt >= 0.1 {
-                targetKbps = min(ceiling, targetKbps + max(10, Int(Double(targetKbps) * tuning.increasePerSecond * dt)))
-                lastIncreaseNanos = now
+        } else if queueMs < tuning.underuseMs {
+            if underSince == 0 { underSince = now }
+            if probing, targetKbps < ceiling, now - underSince >= tuning.probeAfterNanos, now - lastProbeNanos >= max(UInt64(srttNanos), tuning.probeMinIntervalNanos) {
+                // Recovery from a transient: the queue has been clear for a second, so climb back
+                // multiplicatively, one step per RTT, until the ceiling (then the slow additive rule again).
+                targetKbps = min(ceiling, Int(Double(targetKbps) * tuning.probeIncrease))
+                lastProbeNanos = now; lastIncreaseNanos = now
+                if targetKbps >= ceiling { probing = false }
+            } else if Double(now - lastDecreaseNanos) > 2 * srttNanos {
+                if lastIncreaseNanos == 0 { lastIncreaseNanos = now }
+                let dt = Double(now - lastIncreaseNanos) / 1e9
+                if dt >= 0.1 {
+                    targetKbps = min(ceiling, targetKbps + max(10, Int(Double(targetKbps) * tuning.increasePerSecond * dt)))
+                    lastIncreaseNanos = now
+                }
             }
+        } else {
+            underSince = 0
         }
+        if targetKbps >= ceiling { probing = false }
         targetKbps = min(targetKbps, max(ceiling, tuning.minKbps))
         if ackedFrames + lostFrames > 200 { ackedFrames /= 2; lostFrames /= 2 }   // sliding loss window
         // The link, not the cap, is holding the target down when the target sits well under the cap

@@ -426,3 +426,42 @@ final class DelayControllerTests: XCTestCase {
     }
 }
 
+final class TransientSpikeTests: XCTestCase {
+    /// Mac-daddy follow-up: one 812 ms RTT sample on an idle link dropped the target to 417 and it was
+    /// still there 6 s later. A spike lasting one RTT, then an idle link: the target must be back at
+    /// 90 % of the cap within 3 s of the spike.
+    func testTargetReprobesToCapWithinThreeSecondsAfterOneRttSpike() {
+        var rc = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 1108 * 720)
+        let base = 74_000_000.0
+        var now: UInt64 = 1_000_000_000
+        func idle(_ seconds: Double) {
+            let n = Int(seconds / 0.1)
+            for _ in 0..<n {
+                rc.delaySample(sentNanos: now, receivedNanos: now + UInt64(base) + 3_000_000, bytes: 250, now: now + 80_000_000)
+                rc.frameAcked(sentNanos: now, firstReceived: now + UInt64(base), lastReceived: now + UInt64(base) + 2_000_000, fragments: 1, bytes: 3000, now: now + 150_000_000, rttNanos: 148_000_000)
+                now += 100_000_000
+            }
+        }
+        idle(5)
+        XCTAssertEqual(rc.targetKbps, 800); XCTAssertLessThan(rc.queueMs, 10)
+        // The spike: one frame and one tile sample 660 ms late (812 ms RTT), and the frame the host gave up on.
+        rc.frameAcked(sentNanos: now, firstReceived: now + UInt64(base) + 660_000_000, lastReceived: now + UInt64(base) + 662_000_000, fragments: 1, bytes: 3000, now: now + 812_000_000, rttNanos: 812_000_000)
+        rc.delaySample(sentNanos: now, receivedNanos: now + UInt64(base) + 660_000_000, bytes: 250, now: now + 812_000_000)
+        rc.lossDetected(now: now + 900_000_000)
+        now += 1_000_000_000
+        let dropped = rc.targetKbps
+        XCTAssertLessThan(dropped, 700, "the spike did cost a decrease (\(dropped))")
+        let spikeEnd = now
+        var recoveredAt: UInt64? = nil
+        for _ in 0..<60 {
+            idle(0.1)
+            if rc.targetKbps >= 720 { recoveredAt = now; break }
+        }
+        guard let recoveredAt else { return XCTFail("target never recovered: \(rc.targetKbps)") }
+        XCTAssertLessThanOrEqual(Double(recoveredAt - spikeEnd) / 1e9, 3.0, "back to 90 % of the cap within 3 s (took \(Double(recoveredAt - spikeEnd) / 1e9) s from \(dropped))")
+        idle(2)
+        XCTAssertEqual(rc.targetKbps, 800)
+        XCTAssertEqual(rc.tier, .constrained)
+    }
+}
+
