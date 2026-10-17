@@ -886,8 +886,24 @@ refinement the idle desktop (caret blink, menu-bar clock) cost **4–27 kbps**. 
 disconnect, QUIC RTT 395–635 ms. The capacity estimate stayed 0 because no datagram trains
 flowed, which is the expected Extreme-tier shape: the controller ran on tile acks alone.
 
-**Window measurements (4G bus, one bar; test bench on the unlocked desktop):** see the
-table below, filled as the runs land. Commands are in experiments/testbench/README.md.
+**Window measurements, Shibuya hotel (2026-10-17 evening JST; RTT 144 ms, ~3.5 Mbps up; host
+2711e3e+; test bench on the unlocked desktop, stream 3200×1800 native, headless, guards passed,
+no loss).** "kbps" is the post-refinement median of everything on the wire; "into window" is the
+lossless bytes that landed inside the bench window, direct (changed pixels) in brackets.
+
+| Scenario, 800 kbps cap | kbps | into window | Copy-rects | Predictions confirmed / mismatched | Time-to-crisp | Other |
+|---|---|---|---|---|---|---|
+| idle (quiet desktop, caret blinking) | 26 | 30 (14) | – | – | – | queue p95 8 ms |
+| typing 6 keys/s | 45 | 63 (50) | 1 | – | – | |
+| login-field typing, 2 keys/s | 17 | 22 (16) | – | – | – | **first changed pixels in the field 176 ms median after each keystroke** (RTT 145): one RTT plus serialization |
+| scroll bursts (40 × 30 pt at 30 Hz) | 27 median, 147 mean | 251 (18) | 272 | 263 / 3 of 273 | 3.0 s median, 5.0 s max | queue p95 36 ms |
+| window drag (6×3 px per 16 ms) | 55 median, 287 mean | 648 (27) | 277 | 34 / 25 of 61 | 4.6 s median | the window list reports a diagonal move axis by axis and the alternating bursts reverse while earlier moves are unconfirmed: each reversal reads as a sign conflict |
+| fovea (pointer over the text from the start) | 16 | 496 (15) | – | – | – | text under the pointer lossless 0.9 s after stream start on loopback; the hotel run measured 21.7 s with a metric that ignored blocks landing before the pointer was known (fixed in 56abb5c; re-measured below) |
+
+Fresh connection at an 800 kbps cap (coordinator's capture, 89e2ff7's predecessor): a whole
+picture at ~1.7 s, crisp text by 4 s, idle ~15 kbps afterwards.
+
+ROWS_2000
 
 Platform findings from M2:
 
