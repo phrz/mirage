@@ -541,7 +541,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if foveaActive, let l = injector?.locus { cx = Int(l.x * Double(tracker.width)); cy = Int(l.y * Double(tracker.height)) }
                 blocks.sort { a, b in abs(a.x + a.width / 2 - cx) + abs(a.y + a.height / 2 - cy) < abs(b.x + b.width / 2 - cx) + abs(b.y + b.height / 2 - cy) }
                 fresh = .blocks(remaining: blocks, inFlightBytes: 0)
-                log("fresh picture: rung \(rc.rung) is the top the target affords; \(blocks.count) lossless blocks of \(bw)x\(bh), centre-first")
+                log("fresh picture: rung \(rc.rung) is the top the target affords; \(blocks.count) lossless blocks of \(bw)x\(bh), first around (\(cx),\(cy)): \(blocks.prefix(3).map { "\($0.x),\($0.y)" }.joined(separator: " "))")
                 self.tracker = tracker
             }
         default: break

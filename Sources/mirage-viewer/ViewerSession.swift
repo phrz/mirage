@@ -107,6 +107,9 @@ final class ViewerSession: @unchecked Sendable {
     private var pointerRect: PixelRect = .zero
     private var streamStartNanos: UInt64 = 0
     private(set) var legibleUnderPointerMs: Double? = nil
+    private var refinementLogged = 0
+    /// Receiver clock of the last lossless tile per 64-px tile (for the legibility metric).
+    private var losslessAt: [UInt64] = []
     static let debugTiles = ProcessInfo.processInfo.environment["MIRAGE_DEBUG_TILES"] != nil
     func resetWatched() { videoQueue.async { self.watchedTileBytes = 0; self.watchedTileCount = 0; self.watchedDirectBytes = 0 } }
     func windowsSnapshot() -> [ControlMessage.WindowInfo] { predictorLock.lock(); defer { predictorLock.unlock() }; return windows }
@@ -248,7 +251,7 @@ final class ViewerSession: @unchecked Sendable {
                 statsLock.unlock()
                 predictorLock.lock(); predictor.timeoutNanos = UInt64(rtt * 3) + 500_000_000; predictorLock.unlock()
             case .streamInfo(let info):
-                videoQueue.async { self.compositor?.configure(width: info.width, height: info.height); self.onChange?(); self.streamStartNanos = Clock.nowNanos(); self.legibleUnderPointerMs = nil }
+                videoQueue.async { self.compositor?.configure(width: info.width, height: info.height); self.onChange?(); self.streamStartNanos = Clock.nowNanos(); self.legibleUnderPointerMs = nil; self.losslessAt = [] }
                 Task { @MainActor in model.streamInfo = info; model.status = "streaming \(info.width)x\(info.height) from \(host)" }
             case .cursorShape(let c):
                 if let img = NSImage(data: c.png) {
@@ -317,11 +320,16 @@ final class ViewerSession: @unchecked Sendable {
             let fresh = t.tiles.filter { isFresh($0.rect, captureSeq: t.header.captureSeq) }
             let n = compositor?.applyTiles(fresh, crossfade: t.refinement) ?? 0
             statsLock.lock(); sTileBytes += t.bytes; sTileRects += n; statsLock.unlock()
-            if t.refinement { lastRefinementNanos = now }
-            if legibleUnderPointerMs == nil, streamStartNanos > 0, !pointerRect.isEmpty, t.tiles.contains(where: { $0.rect.intersects(pointerRect) }) {
-                legibleUnderPointerMs = Double(now - streamStartNanos) / 1e6
-                log(String(format: "legible under the pointer %.0f ms after the stream started", legibleUnderPointerMs!))
+            if t.refinement { lastRefinementNanos = now; if Self.debugTiles, refinementLogged < 6 { refinementLogged += 1; log("refinement batch: \(t.tiles.prefix(2).map { "\($0.rect)" })") } }
+            if let c = compositor, c.width > 0 {
+                let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
+                if losslessAt.count != cols * rows { losslessAt = Array(repeating: 0, count: cols * rows) }
+                for tile in fresh {
+                    let c0 = max(0, tile.rect.x / 64), c1 = min(cols - 1, (tile.rect.maxX - 1) / 64), r0 = max(0, tile.rect.y / 64), r1 = min(rows - 1, (tile.rect.maxY - 1) / 64)
+                    if c1 >= c0, r1 >= r0 { for r in r0...r1 { for cc in c0...c1 { losslessAt[r * cols + cc] = now } } }
+                }
             }
+            checkLegible()
             if !watchRect.isEmpty {
                 let inside = t.tiles.filter { $0.rect.intersects(watchRect) }
                 if !inside.isEmpty {
@@ -474,7 +482,21 @@ final class ViewerSession: @unchecked Sendable {
     func notePointer(x: Double, y: Double) {
         guard let c = compositor, c.width > 0 else { return }
         let px = Int(x * Double(c.width)), py = Int(y * Double(c.height))
-        videoQueue.async { self.pointerRect = PixelRect(x: px - 100, y: py - 100, width: 200, height: 200) }
+        videoQueue.async { self.pointerRect = PixelRect(x: px - 100, y: py - 100, width: 200, height: 200); self.checkLegible() }
+    }
+
+    /// Time-to-legible under the pointer: the earliest lossless arrival (since the stream started) of any
+    /// tile under the pointer rect, counted even if it landed before the pointer was known.
+    private func checkLegible() {
+        guard legibleUnderPointerMs == nil, streamStartNanos > 0, !pointerRect.isEmpty, let c = compositor, c.width > 0, !losslessAt.isEmpty else { return }
+        let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
+        let c0 = max(0, pointerRect.x / 64), c1 = min(cols - 1, (pointerRect.maxX - 1) / 64), r0 = max(0, pointerRect.y / 64), r1 = min(rows - 1, (pointerRect.maxY - 1) / 64)
+        guard c1 >= c0, r1 >= r0 else { return }
+        var earliest: UInt64 = .max
+        for r in r0...r1 { for cc in c0...c1 { let t = losslessAt[r * cols + cc]; if t > streamStartNanos, t < earliest { earliest = t } } }
+        guard earliest != .max else { return }
+        legibleUnderPointerMs = Double(earliest - streamStartNanos) / 1e6
+        log(String(format: "legible under the pointer %.0f ms after the stream started", legibleUnderPointerMs!))
     }
 
     func sendMouseMove(x: Double, y: Double) {
