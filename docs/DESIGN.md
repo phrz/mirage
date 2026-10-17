@@ -312,6 +312,19 @@ The three paths above exist; the mechanics that were not obvious from the plan:
   150 kbps, ceiling the viewer's cap. Tiles may use 45 % of the target while video is active
   (90 % otherwise); video gets the target minus what tiles actually used.
 
+**Two standing rules (phrz, 2026-10-17).**
+*Lossy first, always.* A fresh picture, in any tier including Extreme, arrives as one whole
+lossy frame within about a second at the current rate (a tiny HEVC keyframe at a low rung or a
+quarter-resolution lossy still, MetalFX-upscaled) and then sharpens centre-first with lossless
+tiles. Building a picture tile by tile from nothing is a bug, not a tier policy.
+*Host load is cheap, wire bytes are not.* Hosts are Apple silicon desktops on mains power, so
+the host spends CPU and GPU freely for wire efficiency: higher WebP effort, both grid and
+content-box hashes per residual region with the cheaper reference set sent, copy-rect as a
+third candidate, GPU diff inside dirty rects, wide copy-rect search. One host-pressure signal
+(load relative to core count, thermal state, the host's own encode and tile latency) scales
+that effort down when the host is genuinely busy, for example under a large AI job, and the
+current effort level is visible in the stats.
+
 ### 3.4 Rate control and adaptation
 
 - Client sends receive timestamps for every packet; host runs a GCC/BBR-style **delivery-rate
