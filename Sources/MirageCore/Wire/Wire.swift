@@ -7,6 +7,14 @@ public enum Mirage {
     public static let defaultPort: UInt16 = 7799
     /// Domain-separation prefix for every hash/signature in the protocol.
     public static let dsi = "mirage-v1"
+    /// QUIC idle timeout on both ends. A 30 s outage must not close the connection (§4a); dead peers are
+    /// noticed sooner by the viewer's stall watchdog (no host packet for 12 s → redial and resume) and by
+    /// ICMP unreachable when the host process is gone.
+    public static let idleTimeoutMs: Int = 45_000
+    /// Viewer keepalive: one small datagram ping this often.
+    public static let keepaliveSeconds = 10
+    /// A suspended session waits this long for its viewer to come back.
+    public static let resumeWindowSeconds = 300
 }
 
 /// Length-prefixed JSON frames on a reliable QUIC stream.
@@ -341,8 +349,11 @@ public enum ControlMessage: Codable, Equatable {
         public var frontmostApp: String
         public var frontmostWindowID: UInt32
         public var frontmostWindowTitle: String
-        public init(consoleLocked: Bool, frontmostApp: String, frontmostWindowID: UInt32, frontmostWindowTitle: String) {
-            self.consoleLocked = consoleLocked; self.frontmostApp = frontmostApp; self.frontmostWindowID = frontmostWindowID; self.frontmostWindowTitle = frontmostWindowTitle
+        /// The host records input to a file instead of injecting it (MIRAGE_INPUT_SINK); the input-integrity
+        /// scenario refuses to run unless this is true.
+        public var inputSink: Bool?
+        public init(consoleLocked: Bool, frontmostApp: String, frontmostWindowID: UInt32, frontmostWindowTitle: String, inputSink: Bool? = nil) {
+            self.consoleLocked = consoleLocked; self.frontmostApp = frontmostApp; self.frontmostWindowID = frontmostWindowID; self.frontmostWindowTitle = frontmostWindowTitle; self.inputSink = inputSink
         }
     }
     /// What the host's rate controller is doing, once a second, for the overlay and --headless JSON.

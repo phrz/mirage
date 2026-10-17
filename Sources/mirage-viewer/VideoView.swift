@@ -229,6 +229,8 @@ final class VideoNSView: NSView {
         case 126: Task { @MainActor in session?.adjustBitrate(by: 200) }; return true   // ↑
         case 125: Task { @MainActor in session?.adjustBitrate(by: -200) }; return true  // ↓
         case 12: session?.stop(); NSApp.terminate(nil); return true  // Q
+        case 36: session?.flushInput(); return true                  // ↩: send what was typed during a gap
+        case 51: session?.discardInput(); return true                // ⌫: drop it
         default: return false
         }
     }

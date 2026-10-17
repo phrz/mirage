@@ -42,7 +42,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var videoActiveNanos: UInt64 = 0
     private var tileTokens: Double = 0
     private var tileMsgSeq: UInt32 = 0
-    private var tileSent: [UInt32: (nanos: UInt64, bytes: Int, refinement: Int, block: Bool)] = [:]
+    private var tileSent: [UInt32: (nanos: UInt64, bytes: Int, refinement: Int, block: Bool, rects: [PixelRect])] = [:]
     private var lastBudget = RateController.Budget(tileKbps: 0, videoKbps: 0)
     private var refineTimer: DispatchSourceTimer?
     private var rateTimer: DispatchSourceTimer?
@@ -52,29 +52,45 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var dumped = false
 
     // Video pacing state.
-    private var seq: UInt32 = 0
+    /// Video frame sequence, monotonic across streamers of one host process (review M4: a viewer whose
+    /// stream restarted on the same connection must never see a sequence below what it delivered).
+    private var seq: UInt32 { get { Self.frameSeqLock.lock(); defer { Self.frameSeqLock.unlock() }; return Self.frameSeq } set { Self.frameSeqLock.lock(); Self.frameSeq = newValue; Self.frameSeqLock.unlock() } }
+    nonisolated(unsafe) private static var frameSeq: UInt32 = 0
+    private static let frameSeqLock = NSLock()
     private var tokens: Double = 0                 // bytes available to send
     private var lastRefill = Clock.nowNanos()
     private var lastSendNanos: UInt64 = 0
-    private struct InFlight { let sentNanos: UInt64; let bytes: Int; let ltrToken: Int64? }
+    private struct InFlight { let sentNanos: UInt64; let bytes: Int; let ltrToken: Int64?; var paceEndNanos: UInt64 = 0 }
     private var unacked: [UInt32: InFlight] = [:]
     private var srttNanos: Double = 250_000_000
     private var ackedLTR: [Int64] = []
     private var wantKeyframe = false
     private var wantLTRRefresh = false
     private var encoding = false
+    private var encodingSince: UInt64 = 0
     private var recoverySeq: UInt32 = 0
     private var recoverySentNanos: UInt64 = 0
-    /// Last ~2 s of sent frames' datagrams, for fragment NACKs.
-    private var sentFrames: [UInt32: (nanos: UInt64, datagrams: [Data])] = [:]
+    /// Last ~2 s of sent frames' datagrams, for fragment NACKs; `sent` = how many have left the pacer so far
+    /// (review H5: a NACK for a datagram still queued in the pacer is ignored).
+    private final class SentFrame { let nanos: UInt64; let datagrams: [Data]; var sent = 0; init(nanos: UInt64, datagrams: [Data]) { self.nanos = nanos; self.datagrams = datagrams } }
+    private var sentFrames: [UInt32: SentFrame] = [:]
+    /// Datagram pacer (review H6): datagrams leave at the video budget × 1.25 from a dedicated queue, the
+    /// cursor being the time the last scheduled datagram leaves; resends queue behind the frame in flight.
+    private let paceQueue = DispatchQueue(label: "mirage.host.pace", qos: .userInteractive)
+    private var paceCursorNanos: UInt64 = 0
+    private var lastFpsCap = 30.0
+    private var lastHostStatus: ControlMessage.HostStatus? = nil
+    private var lastHostStatusNanos: UInt64 = 0
     private var statNacks = 0, statNackResent = 0
+    /// Frames purged as stale whose ack may still arrive (review H3): they still teach srtt and the fresh-picture state.
+    private var recentlyPurged: [UInt32: InFlight] = [:]
     private var keyframeArmed = false
 
     // Stats (per log interval).
     private var statFrames = 0, statBytes = 0, statDropped = 0, statSkippedBudget = 0, statLost = 0
     private var statEncodeNanos: UInt64 = 0
     private var statInput = 0, statTileBytes = 0, statTileRects = 0, statRefineBytes = 0, statCopyRects = 0, statDirtyTiles = 0, statDiffPruned = 0, statTileSkipped = 0, statFoveaTiles = 0
-    private var secTileBytes = 0, secVideoBytes = 0, secVideoFrames = 0   // per rateState second
+    private var secTileBytes = 0, secVideoBytes = 0, secVideoFrames = 0, secSkippedBudget = 0   // per rateState second
     private var statCaptures = 0
     private var statCaptureNanos: UInt64 = 0
     private var tileKbpsEWMA = 0.0
@@ -147,6 +163,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     private func rebuildEncoder() throws {
         guard let t = target, let rc else { return }
+        // A session replaced while a frame is inside it never calls that frame's completion (its
+        // invalidation drops the frame), which left `encoding` stuck forever (seen in the M2.5 burst runs).
+        // Callers set wantKeyframe anyway, and the keyframe path rebuilds once the encoder is idle.
+        guard !encoding else { return }
         let scale = rc.scale
         let ew = max(64, Int(Double(t.pixelWidth) * scale)) & ~1, eh = max(64, Int(Double(t.pixelHeight) * scale)) & ~1
         encoder = try HEVCEncoder(width: ew, height: eh, bitrateKbps: max(100, lastBudget.videoKbps), expectedFPS: plannedFPS())
@@ -207,9 +227,44 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     public func handle(nack: ControlMessage.Nack) {
         queue.async {
             self.statNacks += 1
-            guard let out = self.output, let f = self.sentFrames[nack.frameSeq] else { return }
-            for i in nack.fragments where i >= 0 && i < f.datagrams.count { out.sendDatagram(f.datagrams[i]); self.statNackResent += 1 }
+            guard self.output != nil else { return }
+            guard let f = self.sentFrames[nack.frameSeq] else {
+                // Not in the ring (older than ~2 s, or lost during a burst): a resend is impossible, so the
+                // viewer gets a recovery frame now instead of after its own timeout.
+                if !self.wantKeyframe { self.log("nack for frame \(nack.frameSeq) outside the resend ring: recovery frame"); self.requestRecovery() }
+                return
+            }
+            // An empty list asks for the whole frame (a sequence gap); only datagrams that have actually
+            // left the pacer are resent (H5), and the resends are paced like everything else (H6).
+            let wanted = nack.fragments.isEmpty ? Array(0..<f.datagrams.count) : nack.fragments
+            let resend = wanted.filter { $0 >= 0 && $0 < min(f.sent, f.datagrams.count) }.map { f.datagrams[$0] }
+            guard !resend.isEmpty else { return }
+            self.statNackResent += resend.count
+            // Resends go ahead of new data: queued behind a keyframe in the pacer they would arrive after the
+            // viewer's give-up time and turn one lost datagram into a lost frame (seen in the burst runs). A
+            // few datagrams go at once; a large whole-frame resend is paced from now, not from the cursor.
+            _ = self.pace(resend, frame: nil, ahead: true)
         }
+    }
+
+    /// Schedules datagrams on the pacer at 1.25× the video budget; returns when the last one leaves.
+    /// `ahead`: do not queue behind what is already scheduled (resends).
+    private func pace(_ datagrams: [Data], frame: SentFrame?, ahead: Bool = false) -> UInt64 {
+        guard let out = output, !datagrams.isEmpty else { return Clock.nowNanos() }
+        let bytesPerSec = Double(max(150, lastBudget.videoKbps)) * 1000 / 8 * 1.25
+        let now = Clock.nowNanos()
+        if ahead && datagrams.count <= 12 { for d in datagrams { out.sendDatagram(d) }; return now }
+        let offsets = FrameAssembler.paceOffsets(count: datagrams.count, payloadBytes: out.maxDatagramSize, bytesPerSecond: bytesPerSec)
+        let start = ahead ? now : max(now, paceCursorNanos)
+        for (i, d) in datagrams.enumerated() {
+            let at = start &+ offsets[i]
+            let delay = Double(at &- now) / 1e9
+            if delay < 0.0005 { out.sendDatagram(d); frame?.sent += 1 }
+            else { paceQueue.asyncAfter(deadline: .now() + delay) { out.sendDatagram(d); if let frame { self.queue.async { frame.sent += 1 } } } }
+        }
+        let end = start &+ (offsets.last ?? 0)
+        if !ahead { paceCursorNanos = end } else { paceCursorNanos = max(paceCursorNanos, end) }
+        return end
     }
 
     public func handle(tileAck: ControlMessage.TileAck) {
@@ -235,6 +290,106 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 }
             }
             self.queue.async { self.statInput += 1 }
+        }
+    }
+
+    // Input with redundancy (InputPacket): applied exactly once, in order, whatever the loss. The receiver's
+    // state lives here, in the session, so a resumed connection continues the same sequence.
+    private var inputReceiver = InputReceiver()
+    private let inputReceiverLock = NSLock()
+    public func handle(inputPacket p: InputPacket) -> InputAck? {
+        guard injector != nil else { return nil }
+        inputReceiverLock.lock()
+        let r = inputReceiver.receive(p)
+        inputReceiverLock.unlock()
+        for m in r.apply { handle(input: m) }
+        return r.ack
+    }
+
+    /// The connection went away: capture and sending stop, every piece of session state stays (tracker,
+    /// controller and tier, encoder rung, frame and tile sequences, input sequence). Whatever was in
+    /// flight is treated as lost: unacked tile messages have their rects queued for a lossless resend,
+    /// unacked video frames are forgotten (the resume keyframe replaces them).
+    public func suspend() async {
+        let cap = capturer
+        await cap?.stop()
+        await withCheckedContinuation { c in
+            queue.async {
+                let now = Clock.nowNanos()
+                self.cursor?.stop(); self.cursor = nil
+                self.statTimer?.cancel(); self.statTimer = nil
+                self.refineTimer?.cancel(); self.refineTimer = nil
+                self.rateTimer?.cancel(); self.rateTimer = nil
+                self.capturer = nil; self.output = nil
+                self.unacked = [:]; self.sentFrames = [:]; self.recentlyPurged = [:]; self.paceCursorNanos = 0
+                if var tracker = self.tracker {
+                    var rects: [PixelRect] = []
+                    for (_, v) in self.tileSent { rects += v.rects }
+                    let tiles = tracker.tiles(covering: rects)
+                    tracker.markVideo(tiles, now: now)
+                    self.tracker = tracker
+                    if !tiles.isEmpty { self.log("suspend: \(tiles.count) tiles of unacked tile messages queued for resend") }
+                }
+                self.tileSent = [:]; self.refinementInFlight = 0
+                switch self.fresh {
+                case .base, .climb: self.fresh = .base(seq: 0)       // the resume keyframe becomes the base
+                case .blocks(let r, _, _): self.fresh = .blocks(remaining: r, inFlightBytes: 0)
+                case .done: break
+                }
+                self.suspendedAt = now
+                let inj = self.injector
+                self.inputQueue.async { inj?.releaseAll() }   // nothing stays held while nobody is connected
+                c.resume()
+            }
+        }
+    }
+    private var suspendedAt: UInt64 = 0
+
+    /// A new connection presented this session's token. The viewer kept its picture, so: rebind the
+    /// output, restart capture, and bring the picture current with a keyframe masked to the tiles the
+    /// viewer does not have crisp plus the diff of the first capture against the last frame it saw.
+    /// The ladder rung, tier, controller target and all sequences continue. A size change is a fresh picture.
+    public func resume(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
+        // Taken over from a connection the host had not yet noticed was dead: suspend that side first.
+        if capturer != nil { await suspend() }
+        let cap = ScreenCapturer(queue: queue)
+        cap.forceNextFrame = true
+        let t = try await cap.start(req) { [weak self] pb, nanos, dirty in self?.captured(pb, nanos, dirtyRects: dirty) }
+        return try await withCheckedThrowingContinuation { c in
+            queue.async {
+                do {
+                    let now = Clock.nowNanos()
+                    let gapMs = self.suspendedAt > 0 ? (now - self.suspendedAt) / 1_000_000 : 0
+                    self.output = output
+                    self.capturer = cap
+                    let old = self.target
+                    self.target = t
+                    self.request = req
+                    cap.onStop = { [weak self] err in self?.log("capture stopped: \(err.map { "\($0)" } ?? "ok")") }
+                    if old?.pixelWidth != t.pixelWidth || old?.pixelHeight != t.pixelHeight || self.encoder == nil || self.tracker == nil {
+                        try self.configure(for: t, req: req)
+                        self.log("resumed after \(gapMs) ms at a new size \(t.pixelWidth)x\(t.pixelHeight): fresh picture")
+                    } else {
+                        self.rc?.maxKbps = req.bitrateKbps
+                        self.wantKeyframe = true; self.keyframeArmed = false; self.ackedLTR = []
+                        self.tokens = self.bucketCapacity(); self.lastSendNanos = 0; self.encoding = false; self.submitted = nil
+                        self.lastRefill = now; self.lastTileRefill = now
+                        self.log("resumed after \(gapMs) ms: rung \(self.rc?.rung ?? -1), tier \(self.rc?.tier.name ?? "?"), target \(self.rc?.targetKbps ?? 0) kbps, fresh \(self.fresh); masked keyframe next")
+                    }
+                    self.injector?.setDisplay(t.display.displayID)
+                    let cur = CursorMonitor(displayID: t.display.displayID)
+                    cur.onShape = { [weak self] s in self?.output?.sendControl(.cursorShape(s)) }
+                    cur.onPosition = { [weak self] p in self?.output?.sendControl(.cursorPosition(p)) }
+                    cur.start(on: self.queue)
+                    self.cursor = cur
+                    if let w = self.windows?.sample(captureSeq: self.captureSeq, now: now) {
+                        self.publishedWindows = w.sample.windows; self.lastFullWindowsNanos = now
+                        self.sendControlCounted(.windowList(.init(captureSeq: self.captureSeq, windows: w.sample.windows)))
+                    }
+                    self.startTimers()
+                    c.resume(returning: t.info)
+                } catch { c.resume(throwing: error) }
+            }
         }
     }
 
@@ -518,7 +673,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // Climb while the target affords the next rung; each step is a whole-frame keyframe.
             let kpix = Double(tracker.width * tracker.height) / 1000
             let next = rc.rung - 1
-            if next >= rc.policy.minRung, Double(rc.targetKbps) >= kpix * RateController.scales[next] * RateController.scales[next] * rc.tuning.kbpsPerKpixelDown, rc.queueMs < 90 {
+            // Review H4: the same test tryEncode applies (the keyframe at the next rung fits one second of the
+            // video budget), plus the P-frame density rule and no standing queue.
+            let nextW = max(64, Int(Double(tracker.width) * RateController.scales[max(0, next)])) & ~1, nextH = max(64, Int(Double(tracker.height) * RateController.scales[max(0, next)])) & ~1
+            if next >= rc.policy.minRung, FrameAssembler.keyframeFits(encodedWidth: nextW, encodedHeight: nextH, videoKbps: lastBudget.videoKbps),
+               Double(rc.targetKbps) >= kpix * RateController.scales[next] * RateController.scales[next] * rc.tuning.kbpsPerKpixelDown, rc.queueMs < 90 {
                 self.rc!.climbOneRung(now: now)
                 lastRebuildNanos = now
                 if (try? rebuildEncoder()) != nil { wantKeyframe = true; progressiveKeyframe = true; fresh = .climb(seq: 0); log("fresh picture: climbing to rung \(self.rc!.rung) (scale \(self.rc!.scale))") }
@@ -748,7 +907,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let seq = tileMsgSeq
         let d = m.encode(msgSeq: seq)
         out.sendTiles(d, fast: fast)
-        queue.async { self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes, block); self.refinementInFlight += refinementBytes }
+        let rects: [PixelRect]
+        switch m {
+        case .tiles(let t): rects = t.tiles.map(\.rect)
+        case .copyRect(let c): rects = [c.rect, c.rect.offset(c.dx, c.dy)]
+        case .reset: rects = []
+        }
+        queue.async { self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes, block, rects); self.refinementInFlight += refinementBytes }
     }
 
     private func refillTiles(now: UInt64) {
@@ -810,34 +975,44 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func tryEncode(now: UInt64, latest: ShiftDetector.Frame) {
         guard var enc = encoder, let req = request, let canvas, var tracker else { return }
         refill()
-        let staleAfter = UInt64(max(3 * srttNanos, 1_000_000_000))
-        for (s, f) in unacked where now - f.sentNanos > staleAfter {
-            unacked[s] = nil; statLost += 1; requestRecovery()
+        // Review H3: a frame is stale only well after its datagrams have left the pacer plus the viewer's
+        // own give-up time; purged frames are remembered so a late ack still teaches srtt, the controller
+        // and the fresh-picture state. The frame the fresh-picture sequence waits on is purged like any
+        // other (a base keyframe swallowed whole by a loss burst produces no ack of any kind, and the
+        // in-flight cap would otherwise wait for it forever); the next keyframe takes its place.
+        let freshSeq: UInt32? = { if case .base(let s) = fresh { return s }; if case .climb(let s) = fresh { return s }; return nil }()
+        for (s, f) in unacked where now > FrameAssembler.staleDeadlineNanos(paceEndNanos: f.paceEndNanos, sentNanos: f.sentNanos, srttNanos: srttNanos) {
+            unacked[s] = nil; recentlyPurged[s] = f; statLost += 1
+            if !wantKeyframe { log("frame \(s) unacked \((now - f.sentNanos) / 1_000_000) ms after it was queued (srtt \(Int(srttNanos / 1e6)) ms): stale, recovery frame") }
+            if s == freshSeq { if case .climb = fresh { fresh = .climb(seq: 0) } else { fresh = .base(seq: 0) } }
+            requestRecovery()
         }
+        if recentlyPurged.count > 16 { for k in recentlyPurged.keys.sorted().prefix(recentlyPurged.count - 16) { recentlyPurged[k] = nil } }
         if encoding { statDropped += 1; return }
         let inflightBytes = unacked.values.reduce(0) { $0 + $1.bytes }
         // In flight may not exceed what the link drains in one base RTT plus a little: the controller
         // backs off on queuing delay, so this cap only keeps our own burst from building a queue.
         let inflightBudget = Double(max(100, lastBudget.videoKbps) * 1000 / 8) * (srttNanos / 1e9 + 0.05)
-        if !unacked.isEmpty && Double(inflightBytes) > inflightBudget { statSkippedBudget += 1; return }
-        if tokens < 0 { statSkippedBudget += 1; return }
+        if !unacked.isEmpty && Double(inflightBytes) > inflightBudget { statSkippedBudget += 1; secSkippedBudget += 1; return }
+        if tokens < 0 { statSkippedBudget += 1; secSkippedBudget += 1; return }
         let fraction = Double(pendingVideoRegion.area) / Double(tracker.width * tracker.height)
         let tierFPS = Double(rc?.policy.maxVideoFPS ?? req.maxFPS)
         let fpsCap: Double = min(tierFPS, fraction < 0.03 ? 15 : Double(req.maxFPS))
+        lastFpsCap = fpsCap
         let minInterval = UInt64(1e9 / min(fpsCap, Double(max(1, req.maxFPS))))
         if now - lastSendNanos < minInterval * 9 / 10 && !wantKeyframe { statDropped += 1; return }
 
         var opts = HEVCEncoder.FrameOptions()
         var region = pendingWholeFrame ? PixelRect(x: 0, y: 0, width: tracker.width, height: tracker.height) : pendingVideoRegion
         var tiles = pendingVideoTiles
-        if wantKeyframe, var rc, rc.rung != RateController.tinyRung {
+        if wantKeyframe, !progressiveKeyframe, var rc, rc.rung != RateController.tinyRung {
             // Lossy-first on recovery too: a keyframe at the current rung that would take more than ~1 s
             // of the video budget goes out on the tiny rung instead (the ladder climbs back afterwards).
-            let estBytes = Double(enc.width * enc.height) * 0.025
-            if estBytes > Double(max(150, lastBudget.videoKbps) * 1000 / 8) {
+            // The fresh-picture climb approved its keyframe with the same test (review H4), so it is exempt.
+            if !FrameAssembler.keyframeFits(encodedWidth: enc.width, encodedHeight: enc.height, videoKbps: lastBudget.videoKbps) {
                 rc.dropToTinyRung(now: now); self.rc = rc
                 lastRebuildNanos = now
-                log("lossy-first: recovery keyframe on the tiny rung (\(Int(estBytes / 1000)) KB estimated at rung \(rc.rung))")
+                log("lossy-first: recovery keyframe on the tiny rung (\(Int(Double(enc.width * enc.height) * 0.025 / 1000)) KB estimated at rung \(rc.rung))")
             }
         }
         if wantKeyframe {
@@ -883,7 +1058,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         submitted = (tiles, region, pendingWholeFrame)
         pendingVideoTiles = []; pendingVideoRegion = .zero; pendingWholeFrame = false
-        encoding = true
+        encoding = true; encodingSince = now
         lastSendNanos = now
         let captureSeq = self.captureSeq, inputSeq = self.lastInputSeq
         enc.encode(input, captureNanos: now, options: opts) { [weak self] result in
@@ -917,33 +1092,25 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let maxPayload = out.maxDatagramSize - VideoFragment.headerSize
         var frags = VideoFragment.fragments(frameSeq: seq, flags: flags, captureNanos: f.captureNanos, payload: payload, maxPayload: maxPayload,
                                             captureSeq: captureSeq, inputSeq: inputSeq, region: region)
-        sentFrames[seq] = (Clock.nowNanos(), frags)
-        for (k, v) in sentFrames where Clock.nowNanos() - v.nanos > 2_000_000_000 { sentFrames[k] = nil }
-        // XOR parity on key/recovery frames always, on others when the link is losing packets: one lost
-        // datagram per group of 8 is rebuilt by the viewer without a round trip.
-        if flags.contains(.recovery) || (rc?.lossPercent ?? 0) > 0.5, frags.count >= 2 {
+        // XOR parity on every frame of two or more datagrams (§4a loss: recovery by parity before NACK,
+        // keyframe last): one lost datagram per group is rebuilt by the viewer without a round trip. The
+        // group is 8 normally and 4 above 2 % measured loss; a 2–3 datagram frame pays a third for it,
+        // which is still far cheaper than the round trip or the keyframe it avoids.
+        if frags.count >= 2 {
             let payloads = (0..<frags.count).map { i -> Data in let lo = payload.startIndex + i * maxPayload; return payload.subdata(in: lo..<min(lo + maxPayload, payload.endIndex)) }
-            frags.append(contentsOf: ParityFragment.parity(frameSeq: seq, payloads: payloads))
+            frags.append(contentsOf: ParityFragment.parity(frameSeq: seq, payloads: payloads, groupSize: rc?.parityGroupSize ?? 8))
         }
-        // Intra-frame pacing (review §2.1): datagrams go out at ~1.25x the video budget in 5 ms slices
-        // rather than as one burst, so a 25 KB frame or a keyframe never builds a queue on a 1 Mbps hop.
-        let bytesPerSec = Double(max(150, lastBudget.videoKbps)) * 1000 / 8 * 1.25
-        let perSlice = max(1, Int(bytesPerSec * 0.005 / Double(maxPayload)))
-        if frags.count <= perSlice {
-            for d in frags { out.sendDatagram(d) }
-        } else {
-            var i = 0, slice = 0
-            while i < frags.count {
-                let chunk = Array(frags[i..<min(frags.count, i + perSlice)])
-                queue.asyncAfter(deadline: .now() + .milliseconds(5 * slice)) { for d in chunk { out.sendDatagram(d) } }
-                i += perSlice; slice += 1
-            }
-        }
+        let sent = SentFrame(nanos: Clock.nowNanos(), datagrams: frags)
+        sentFrames[seq] = sent
+        for (k, v) in sentFrames where Clock.nowNanos() - v.nanos > 2_000_000_000 { sentFrames[k] = nil }
+        // Intra-frame pacing (review §2.1, H6): datagrams leave at ~1.25× the video budget, interval from
+        // the rate, so a 25 KB frame or a keyframe never builds a queue on a 1 Mbps hop.
+        let paceEnd = pace(frags, frame: sent)
         tokens -= Double(payload.count)
-        unacked[seq] = InFlight(sentNanos: Clock.nowNanos(), bytes: payload.count, ltrToken: f.ltrToken)
+        unacked[seq] = InFlight(sentNanos: Clock.nowNanos(), bytes: payload.count, ltrToken: f.ltrToken, paceEndNanos: paceEnd)
         statFrames += 1; statBytes += payload.count; statEncodeNanos += f.encodeNanos; secVideoBytes += payload.count; secVideoFrames += 1
         if f.keyframe {
-            log("keyframe \(payload.count) bytes (\(frags.count) datagrams, \(mask.count) tiles masked)")
+            log("keyframe \(payload.count) bytes (\(frags.count) datagrams, \(mask.count) tiles masked, paced over \(paceEnd > Clock.nowNanos() ? (paceEnd - Clock.nowNanos()) / 1_000_000 : 0) ms)")
             switch fresh {
             case .base: fresh = .base(seq: seq); freshBaseSeq = seq
             case .climb: fresh = .climb(seq: seq)
@@ -956,13 +1123,20 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     private func acked(_ ack: ControlMessage.FrameAck) {
         let now = Clock.nowNanos()
-        if let f = unacked.removeValue(forKey: ack.seq) {
+        if let f = unacked.removeValue(forKey: ack.seq) ?? recentlyPurged.removeValue(forKey: ack.seq) {
             // Loss acks come after the assembler's timeout; they say nothing about the path's RTT.
             if !ack.lost {
-                let rtt = Double(now - f.sentNanos)
-                srttNanos = srttNanos * 0.8 + rtt * 0.2
-                rc?.frameAcked(sentNanos: f.sentNanos, firstReceived: ack.firstReceivedNanos ?? ack.receivedNanos, lastReceived: ack.receivedNanos,
-                               fragments: ack.fragments ?? 1, bytes: f.bytes, now: now, rttNanos: rtt)
+                // RTT and one-way delay are measured from when the frame's last datagram left the pacer, not
+                // from when it was queued: pacing time is ours, not the link's queue. A paced train says
+                // nothing about capacity either (it reads 1.25× our own budget), so it gives no rate sample.
+                let left = max(f.sentNanos, min(f.paceEndNanos, now))
+                let rtt = Double(now &- left)
+                let paced = f.paceEndNanos > f.sentNanos &+ 2_000_000
+                let recovered = (ack.fragmentsLost ?? 0) > 0
+                if !recovered { srttNanos = srttNanos * 0.8 + rtt * 0.2 }
+                rc?.frameAcked(sentNanos: left, firstReceived: ack.firstReceivedNanos ?? ack.receivedNanos, lastReceived: ack.receivedNanos,
+                               fragments: paced ? 1 : (ack.fragments ?? 1), bytes: f.bytes, now: now, rttNanos: rtt, recovered: recovered)
+                if let total = ack.fragments { rc?.fragmentLoss(lost: ack.fragmentsLost ?? 0, total: total, now: now) }
             }
             if !ack.lost, ack.decodedNanos != 0, ack.seq >= recoverySeq { lastRecoveryWasLTR = false }
             if !ack.lost, ack.decodedNanos != 0 { freshAcked(seq: ack.seq, now: now) }
@@ -975,7 +1149,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if ack.lost { statLost += 1; rc?.lossDetected(now: now); if ack.seq >= recoverySeq { requestRecovery() } }
         // Safety net: a viewer still skipping (not decoding) frames newer than the last recovery for
         // over a second did not get that recovery frame; send another.
-        if !ack.lost, ack.decodedNanos == 0, ack.seq > recoverySeq, now - recoverySentNanos > 1_500_000_000, !wantKeyframe {
+        let recoveryPaceEnd = unacked[recoverySeq]?.paceEndNanos ?? recoverySentNanos
+        if !ack.lost, ack.decodedNanos == 0, ack.seq > recoverySeq, now > max(recoverySentNanos, recoveryPaceEnd) &+ 1_500_000_000, !wantKeyframe {
             log("viewer skipping frames after recovery \(recoverySeq); resending keyframe")
             requestRecovery(); recoverySentNanos = now
         }
@@ -1022,6 +1197,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         r.setEventHandler { [weak self] in
             guard let self else { return }
             let now = Clock.nowNanos()
+            if self.encoding, now - self.encodingSince > 2_000_000_000 {
+                // Safety net: an encode whose completion never came (encoder replaced underneath it).
+                self.log("encoder: no completion for \((now - self.encodingSince) / 1_000_000) ms; releasing the pipeline and asking for a keyframe")
+                self.encoding = false; self.wantKeyframe = true
+                if let s = self.submitted { self.pendingVideoTiles.formUnion(s.tiles); self.pendingVideoRegion = self.pendingVideoRegion.union(s.region); self.pendingWholeFrame = self.pendingWholeFrame || s.whole; self.submitted = nil }
+            }
             self.refine(now: now)
             if !self.pendingVideoTiles.isEmpty || self.wantKeyframe, let src = self.lastFrame {
                 CVPixelBufferLockBaseAddress(src, .readOnly)
@@ -1061,10 +1242,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.log(String(format: "host effort: %@ (load/core %.2f, thermal %d, capture %.1f ms)", self.effort.rawValue, pressure.loadPerCore, pressure.thermal.rawValue, capMs))
             }
             let active = Clock.nowNanos() - self.videoActiveNanos < 1_000_000_000
-            self.rc?.videoRate(achievedFPS: Double(self.secVideoFrames), wantedFPS: Double(min(self.request?.maxFPS ?? 30, rc.policy.maxVideoFPS)), active: active, now: Clock.nowNanos())
+            // Review H7: compare with the cap the host actually applied, and only when budget held frames back.
+            self.rc?.videoRate(achievedFPS: Double(self.secVideoFrames), wantedFPS: min(Double(min(self.request?.maxFPS ?? 30, rc.policy.maxVideoFPS)), self.lastFpsCap),
+                               active: active, budgetLimited: self.secSkippedBudget > 0, now: Clock.nowNanos())
+            self.secSkippedBudget = 0
             self.secVideoBytes = 0; self.secTileBytes = 0; self.secVideoFrames = 0
             let front: (app: String, id: UInt32, title: String) = self.windows?.frontmost() ?? (app: "", id: 0, title: "")
-            self.output?.sendControl(.hostStatus(.init(consoleLocked: InputInjector.consoleLocked(), frontmostApp: front.app, frontmostWindowID: front.id, frontmostWindowTitle: front.title)))
+            let status = ControlMessage.HostStatus(consoleLocked: InputInjector.consoleLocked(), frontmostApp: front.app, frontmostWindowID: front.id, frontmostWindowTitle: front.title, inputSink: InputInjector.sinkPath != nil)
+            // On change, and every 10 s regardless (sparse when idle; the viewer's keepalive is its own datagram).
+            if status != self.lastHostStatus || Clock.nowNanos() - self.lastHostStatusNanos > 10_000_000_000 {
+                self.lastHostStatus = status; self.lastHostStatusNanos = Clock.nowNanos()
+                self.output?.sendControl(.hostStatus(status))
+            }
         }
         s.resume(); rateTimer = s
 

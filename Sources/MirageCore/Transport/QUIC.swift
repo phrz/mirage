@@ -21,7 +21,7 @@ public final class QUICClient: @unchecked Sendable {
     public init(host: String, port: UInt16 = Mirage.defaultPort) {
         endpoint = .hostPort(host: NWEndpoint.Host(host), port: NWEndpoint.Port(rawValue: port)!)
         let quic = NWProtocolQUIC.Options(alpn: [Mirage.alpn])
-        quic.idleTimeout = 10_000   // pings run every second; a dead peer is noticed in 10 s, not 30
+        quic.idleTimeout = Mirage.idleTimeoutMs   // a 30 s outage is not a close (DESIGN §4a); the viewer's stall watchdog acts sooner
         quic.initialMaxStreamsBidirectional = 64
         quic.maxDatagramFrameSize = 1350
         let box = FingerprintBox()
@@ -43,7 +43,10 @@ public final class QUICClient: @unchecked Sendable {
     }
     private let box: FingerprintBox
 
-    public func connect() async throws {
+    /// `timeout`: a dial that has not completed by then fails. While a session is resumable the viewer
+    /// dials with a short timeout and little sleep, so a fresh Initial goes out every couple of seconds
+    /// and the path's return is noticed within ~2 s (DESIGN §4a) whatever QUIC's own probe backoff is.
+    public func connect(timeout: Double = 15) async throws {
         try await withCheckedThrowingContinuation { (c: CheckedContinuation<Void, Error>) in
             var resumed = false
             group.stateUpdateHandler = { [weak self] state in
@@ -60,8 +63,8 @@ public final class QUICClient: @unchecked Sendable {
                 }
             }
             group.start(queue: queue)
-            queue.asyncAfter(deadline: .now() + 15) {
-                if !resumed { resumed = true; c.resume(throwing: MirageError.transport("connect timed out after 15 s")) }
+            queue.asyncAfter(deadline: .now() + timeout) {
+                if !resumed { resumed = true; c.resume(throwing: MirageError.transport("connect timed out after \(Int(timeout)) s")) }
             }
         }
     }
@@ -106,7 +109,7 @@ public final class QUICHost: @unchecked Sendable {
     public init(port: UInt16, tls: TLSIdentity) throws {
         self.tls = tls
         let quic = NWProtocolQUIC.Options(alpn: [Mirage.alpn])
-        quic.idleTimeout = 10_000   // pings run every second; a dead peer is noticed in 10 s, not 30
+        quic.idleTimeout = Mirage.idleTimeoutMs   // a 30 s outage is not a close (DESIGN §4a); the viewer's stall watchdog acts sooner
         quic.initialMaxStreamsBidirectional = 64
         quic.maxDatagramFrameSize = 1350
         guard let secIdentity = sec_identity_create(tls.identity) else {

@@ -32,7 +32,7 @@ public enum HostSession {
             if first.first == datagramMagic {
                 conn.setFlow(stream)
                 defer { conn.clearFlow(stream) }
-                try await serveDatagrams(stream, remote: remote, ctx: ctx)
+                try await serveDatagrams(stream, conn: conn, remote: remote, ctx: ctx)
             } else if first.first == tileStreamMagic || first.first == fastTileStreamMagic {
                 let fast = first.first == fastTileStreamMagic
                 _ = try await stream.receiveExactly(1)
@@ -55,9 +55,19 @@ public enum HostSession {
         }
         // The control stream owns the session: only its end tears the streamer and the registry entry
         // down. A datagram flow ending on its own just clears itself (see clearFlow), so the next
-        // streamRequest waits for a fresh flow instead of sending into a dead one.
+        // streamRequest waits for a fresh flow instead of sending into a dead one. A streamer whose
+        // connection ended is suspended, not stopped: the viewer may be back with the resume token
+        // within the window (an outage, an IP change, a laptop lid), and then gets the same session.
         if isControl {
-            if let s = conn.streamer { conn.streamer = nil; await s.stop(); ctx.log("[\(remote)] stream stopped") }
+            if let s = conn.streamer {
+                conn.streamer = nil
+                if let token = conn.resumeToken, let dev = conn.deviceID, !conn.superseded {
+                    await ctx.connections.suspend(token: token, deviceID: dev, streamer: s, request: conn.lastRequest)
+                    ctx.log("[\(remote)] stream suspended; resumable for \(Mirage.resumeWindowSeconds) s")
+                } else {
+                    await s.stop(); ctx.log("[\(remote)] stream stopped")
+                }
+            }
             _ = await ctx.connections.remove(connectionID)
         } else if conn.streamer != nil {
             ctx.log("[\(remote)] datagram flow closed while streaming")
@@ -65,13 +75,19 @@ public enum HostSession {
         stream.cancel()
     }
 
-    static func serveDatagrams(_ flow: MessageStream, remote: String, ctx: HostContext) async throws {
+    static func serveDatagrams(_ flow: MessageStream, conn: HostConnection, remote: String, ctx: HostContext) async throws {
         ctx.log("[\(remote)] datagram flow open (max datagram \(flow.connection.maximumDatagramSize))")
         while true {
             let d = try await flow.receiveSome()
             guard d.count >= 2, d[d.startIndex] == datagramMagic else { continue }
-            if d[d.startIndex + 1] == DatagramType.ping.rawValue {
-                try await flow.sendRaw(d)   // echo verbatim; client computes RTT and loss
+            switch d[d.startIndex + 1] {
+            case DatagramType.ping.rawValue:
+                try await flow.sendRaw(DatagramPing.echo(d))   // the viewer's keepalive: RTT, loss and clock offset
+            case DatagramType.input.rawValue:
+                // Input with redundancy (see InputPacket): the streamer applies it once and says what to ack.
+                guard conn.deviceID != nil, let p = InputPacket.decode(d), let ack = conn.streamer?.handle(inputPacket: p) else { continue }
+                try await flow.sendRaw(ack.encode())
+            default: continue
             }
         }
     }
@@ -83,7 +99,7 @@ public enum HostSession {
             let msg = try await stream.receive()
             switch msg {
             case .hello(let hello):
-                authenticated = try await authenticate(hello, stream, remote: remote, ctx: ctx)
+                authenticated = try await authenticate(hello, stream, conn: conn, remote: remote, ctx: ctx)
             case .pairRequest(let req):
                 try await pair(req, stream, remote: remote, ctx: ctx)
             case .ping(var p):
@@ -92,11 +108,13 @@ public enum HostSession {
                 if let output { output.sendControl(.pong(p)) } else { try await stream.send(.pong(p)) }
             case .streamRequest(let req):
                 guard authenticated != nil else { throw MirageError.protocolViolation("streamRequest before auth") }
+                conn.lastRequest = req
                 if let s = conn.streamer, let out = output, conn.flow === out.flow, conn.tiles === out.tiles {
                     do { out.sendControl(.streamInfo(try await s.update(req))) }
                     catch { ctx.log("[\(remote)] stream update failed: \(error)"); out.sendControl(.reject(.init(reason: "cannot reconfigure stream: \(error)"))) }
                 } else {
-                    if let s = conn.streamer { conn.streamer = nil; await s.stop(); output = nil }   // flow died; start over
+                    let resuming = conn.resumed && conn.streamer != nil && output == nil
+                    if let s = conn.streamer, !resuming { conn.streamer = nil; await s.stop(); output = nil }   // flow died; start over
                     guard let make = ctx.makeStreamer else {
                         try await stream.send(.reject(.init(reason: "host cannot stream"))); continue
                     }
@@ -108,6 +126,19 @@ public enum HostSession {
                     let fast = await conn.waitForFastTiles(timeout: .seconds(2))
                     let out = ConnectionOutput(flow: flow, tiles: tiles, fastTiles: fast, control: stream, log: ctx.log)
                     output = out
+                    if resuming, let s = conn.streamer {
+                        conn.resumed = false
+                        do {
+                            let info = try await s.resume(req, output: out)
+                            ctx.log("[\(remote)] resumed \(info.displayName) \(info.width)x\(info.height) @ \(req.bitrateKbps) kbps")
+                            out.sendControl(.streamInfo(info))
+                        } catch {
+                            ctx.log("[\(remote)] resume failed: \(error); starting over")
+                            conn.streamer = nil; await s.stop()
+                            out.sendControl(.reject(.init(reason: "cannot resume stream: \(error)")))
+                        }
+                        continue
+                    }
                     let s = make()
                     do {
                         let info = try await s.start(req, output: out)
@@ -140,7 +171,7 @@ public enum HostSession {
 
     // MARK: Authentication of a paired device
 
-    static func authenticate(_ hello: ControlMessage.Hello, _ stream: MessageStream, remote: String, ctx: HostContext) async throws -> DeviceRecord {
+    static func authenticate(_ hello: ControlMessage.Hello, _ stream: MessageStream, conn: HostConnection, remote: String, ctx: HostContext) async throws -> DeviceRecord {
         guard hello.protocolVersion == Mirage.protocolVersion else {
             try await stream.send(.reject(.init(reason: "protocol version \(hello.protocolVersion) unsupported")))
             throw MirageError.protocolViolation("version")
@@ -166,8 +197,15 @@ public enum HostSession {
             throw MirageError.authenticationFailed("signature")
         }
         let session = UUID().uuidString
-        try await stream.send(.welcome(.init(hostName: ctx.identity.name, sessionID: session)))
-        ctx.log("[\(remote)] authenticated \(device.name) (\(device.id.prefix(12)))")
+        // Resume: a token from an earlier Welcome names a session whose streamer the host kept (or still
+        // holds on a connection the viewer gave up on). Authentication ran in full above regardless.
+        var resumed = false
+        if let token = hello.resumeToken, let claimed = await ctx.connections.claim(token: token, deviceID: device.id, by: conn.id) {
+            conn.streamer = claimed.streamer; conn.resumed = true; conn.lastRequest = claimed.request; resumed = true
+        }
+        let token = resumed ? conn.resumeToken! : await ctx.connections.issueToken(for: conn.id, deviceID: device.id)
+        try await stream.send(.welcome(.init(hostName: ctx.identity.name, sessionID: session, resumeToken: token, resumed: resumed)))
+        ctx.log("[\(remote)] authenticated \(device.name) (\(device.id.prefix(12)))\(resumed ? ", resuming its session" : hello.resumeToken != nil ? " (resume token unknown or expired: new session)" : "")")
         return device
     }
 

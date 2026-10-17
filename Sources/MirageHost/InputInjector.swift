@@ -17,9 +17,20 @@ final class InputInjector {
     private let locusLock = NSLock()
     var locus: (x: Double, y: Double)? { locusLock.lock(); defer { locusLock.unlock() }; return _locus }
 
+    /// `MIRAGE_INPUT_SINK=/path`: every input the host would inject is appended to that file as one JSON
+    /// line and *nothing* is posted to the HID tap. The loopback integrity tests compare that file with
+    /// what the viewer sent, without a single event reaching the machine's real input.
+    static let sinkPath = ProcessInfo.processInfo.environment["MIRAGE_INPUT_SINK"]
+    private let sink: FileHandle?
+
     init(displayID: CGDirectDisplayID) {
         displayBounds = CGDisplayBounds(displayID)
         lastPos = CGPoint(x: displayBounds.midX, y: displayBounds.midY)
+        if let path = Self.sinkPath {
+            if !FileManager.default.fileExists(atPath: path) { FileManager.default.createFile(atPath: path, contents: nil) }
+            sink = FileHandle(forWritingAtPath: path); sink?.seekToEndOfFile()
+            hostLog("input sink: \(path) (no input is injected)")
+        } else { sink = nil }
     }
 
     func setDisplay(_ id: CGDirectDisplayID) { displayBounds = CGDisplayBounds(id) }
@@ -71,6 +82,10 @@ final class InputInjector {
             if injected.count > 512 { injected.removeFirst(injected.count - 512) }
             seqLock.unlock()
         }
+        if let sink {
+            if let d = try? JSONEncoder().encode(msg) { sink.write(d); sink.write(Data("\n".utf8)) }
+            return
+        }
         switch msg {
         case .mouseMove(let m):
             let p = point(m.x, m.y); lastPos = p
@@ -117,6 +132,7 @@ final class InputInjector {
 
     /// Releases anything still held when the viewer goes away.
     func releaseAll() {
+        guard sink == nil else { return }
         for b in buttonsDown {
             CGEvent(mouseEventSource: source, mouseType: mouseType(down: false, button: b), mouseCursorPosition: lastPos, mouseButton: cgButton(b))?.post(tap: .cghidEventTap)
         }

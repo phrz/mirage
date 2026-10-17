@@ -18,6 +18,9 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private var onFrame: ((CVPixelBuffer, UInt64, [PixelRect]) -> Void)?
     private(set) var target: Target?
     var onStop: ((Error?) -> Void)?
+    /// Deliver the next frame as fully dirty even if SCK reports no change (a resumed stream diffs it
+    /// against the last frame sent before the gap, so whatever changed meanwhile is found).
+    var forceNextFrame = false
     /// While a viewer is connected the host's display stays awake (it would otherwise sleep ~90 s
     /// after the wake we trigger, and SCK then delivers nothing).
     private var displayAssertion: IOPMAssertionID = 0
@@ -126,6 +129,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         } else {
             dirty = [PixelRect(x: 0, y: 0, width: w, height: h)]
         }
+        if forceNextFrame { forceNextFrame = false; dirty = [PixelRect(x: 0, y: 0, width: w, height: h)] }
         if dirty.isEmpty { return }   // nothing changed; SCK still delivers these around the first frames
         onFrame?(pb, Clock.nowNanos(), dirty)
     }

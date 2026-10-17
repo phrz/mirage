@@ -52,7 +52,7 @@ struct Connect: AsyncParsableCommand {
         if let flow {
             Task.detached {
                 while true {
-                    guard let d = try? await flow.receiveSome(), let (seq, sent) = DatagramPing.decode(d) else { break }
+                    guard let d = try? await flow.receiveSome(), let (seq, sent, _) = DatagramPing.decode(d) else { break }
                     _ = seq
                     await statsBox.recordDatagram(rtt: Double(Clock.nowNanos() - sent) / 1e6)
                 }

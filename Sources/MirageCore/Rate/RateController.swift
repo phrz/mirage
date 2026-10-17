@@ -52,8 +52,27 @@ public struct RateController {
     public var tier: LinkTier { tiers.tier }
     public var policy: LinkTier.Policy { tier.policy }
     private var ackedFrames = 0, lostFrames = 0
-    /// Needs a few dozen frames before it means anything (one lost keyframe out of two is not "50 % loss").
-    public var lossPercent: Double { ackedFrames + lostFrames < 30 ? 0 : Double(lostFrames) * 100 / Double(ackedFrames + lostFrames) }
+    /// Fragment loss reported by the viewer (fragments that needed parity or a NACK), over a 10 s window.
+    private var fragmentSamples: [(nanos: UInt64, lost: Int, total: Int)] = []
+    public private(set) var fragmentLossPercent = 0.0
+    /// Frames given up (unrecovered loss). Needs a few dozen frames before it means anything (one lost
+    /// keyframe out of two is not "50 % loss").
+    public var frameLossPercent: Double { ackedFrames + lostFrames < 30 ? 0 : Double(lostFrames) * 100 / Double(ackedFrames + lostFrames) }
+    /// The higher of the two, for display. The tier (§3.9: "> 2 % loss → Extreme") is driven by the loss the
+    /// recovery layer could *not* hide (`frameLossPercent`): 5 % raw loss that parity and NACKs repair at
+    /// 30 fps is not an Extreme link. The raw fragment rate sizes the parity groups instead.
+    public var lossPercent: Double { max(fragmentLossPercent, frameLossPercent) }
+
+    /// One acked frame's fragment accounting: `lost` of `total` did not arrive first time.
+    public mutating func fragmentLoss(lost: Int, total: Int, now: UInt64) {
+        guard total > 0 else { return }
+        fragmentSamples.append((now, lost, total))
+        fragmentSamples.removeAll { now - $0.nanos > 10_000_000_000 }
+        let t = fragmentSamples.reduce(0) { $0 + $1.total }, l = fragmentSamples.reduce(0) { $0 + $1.lost }
+        fragmentLossPercent = t >= 50 ? Double(l) * 100 / Double(t) : 0
+    }
+    /// Parity group size for the measured loss: one parity datagram per 8 fragments normally, per 4 above 2 %.
+    public var parityGroupSize: Int { fragmentLossPercent > 2 ? 4 : 8 }
 
     private var baseOWD: Double = .infinity       // min(receiverNanos − hostNanos), includes the clock offset
     private var baseOWDWindowStart: UInt64 = 0
@@ -89,7 +108,10 @@ public struct RateController {
 
     /// One acked frame: when the host sent its first datagram, when the viewer saw the first and
     /// last datagram, how many datagrams, how many bytes.
-    public mutating func frameAcked(sentNanos: UInt64, firstReceived: UInt64, lastReceived: UInt64, fragments: Int, bytes: Int, now: UInt64, rttNanos: Double?) {
+    /// `recovered`: the frame needed parity or a NACK, so its arrival time says nothing about the path's
+    /// queue (a NACK round trip is not queuing delay); it counts as acked and nothing else.
+    public mutating func frameAcked(sentNanos: UInt64, firstReceived: UInt64, lastReceived: UInt64, fragments: Int, bytes: Int, now: UInt64, rttNanos: Double?, recovered: Bool = false) {
+        if recovered { ackedFrames += 1; return }
         if let rtt = rttNanos {
             srttNanos = srttNanos * 0.8 + rtt * 0.2
             if minRTTWindowStart == 0 { minRTTWindowStart = now }
@@ -160,15 +182,18 @@ public struct RateController {
         // The link, not the cap, is holding the target down when the target sits well under the cap
         // after a delay- or loss-driven decrease in the last few seconds.
         let limitedByLink = targetKbps < maxKbps * 8 / 10 && now - lastDecreaseNanos < 5_000_000_000
-        tiers.update(rateKbps: targetKbps, limitedByLink: limitedByLink, rttMs: minRttMs, lossPercent: lossPercent, now: now)
+        tiers.update(rateKbps: targetKbps, limitedByLink: limitedByLink, rttMs: minRttMs, lossPercent: frameLossPercent, now: now)
         updateRung(now: now)
     }
 
     /// Reports the frame rate video actually achieved over the last second while motion was active,
-    /// against the frame rate wanted. A sustained shortfall (< 60 % for 2 s) drops a rung.
-    public mutating func videoRate(achievedFPS: Double, wantedFPS: Double, active: Bool, now: UInt64) {
+    /// against the frame rate the host actually asked for (review H7: small regions are capped at 15 fps
+    /// by the host itself, so the comparison must use that cap). A sustained shortfall (< 60 % for 2 s)
+    /// drops a rung, but only when frames were held back for *budget* (`budgetLimited`), never when the
+    /// interval gate or a quiet picture was the reason.
+    public mutating func videoRate(achievedFPS: Double, wantedFPS: Double, active: Bool, budgetLimited: Bool = true, now: UInt64) {
         self.achievedFPS = achievedFPS
-        guard active, wantedFPS > 0 else { fpsShortfallSince = 0; return }
+        guard active, wantedFPS > 0, budgetLimited else { fpsShortfallSince = 0; return }
         if achievedFPS < 0.6 * wantedFPS {
             if fpsShortfallSince == 0 { fpsShortfallSince = now }
             if now - fpsShortfallSince > 2_000_000_000, rung < policy.maxRung, now - lastRungChange > 3_000_000_000 {

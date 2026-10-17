@@ -288,3 +288,97 @@ final class LossRecoveryTests: XCTestCase {
         XCTAssertEqual(a.recoveredByParity, 1)
     }
 }
+
+final class ReviewHighFindingsTests: XCTestCase {
+    /// H1: a two-fragment frame loses its first (full-size) fragment; the known one is the short last one.
+    func testParityRebuildsMissingFirstFragmentOfTwo() {
+        let payload = Data((0..<(VideoFragment.maxPayload + 300)).map { UInt8($0 % 251) })
+        let frags = VideoFragment.fragments(frameSeq: 9, flags: [.keyframe, .recovery], captureNanos: 1, payload: payload).compactMap(VideoFragment.decode)
+        XCTAssertEqual(frags.count, 2)
+        let parity = ParityFragment.parity(frameSeq: 9, payloads: frags.map(\.payload)).compactMap(ParityFragment.decode)
+        var a = FrameAssembler()
+        _ = a.ingest(frags[1], now: 10)
+        var out: VideoFrame? = nil
+        for e in a.ingest(parity: parity[0], now: 11) { if case .completed(let f) = e { out = f } }
+        XCTAssertEqual(out?.sample, payload, "the rebuilt first fragment must be full-size, not the last one's length")
+        XCTAssertEqual(out?.fragmentsLost, 1)
+        // And the missing *last* fragment of a group whose other member is full-size.
+        var b = FrameAssembler()
+        _ = b.ingest(frags[0], now: 10)
+        var out2: VideoFrame? = nil
+        for e in b.ingest(parity: parity[0], now: 11) { if case .completed(let f) = e { out2 = f } }
+        XCTAssertEqual(out2?.sample, payload)
+    }
+
+    /// H5: a frame still arriving from the pacer is not NACKed for its tail; a hole below the highest index is.
+    func testNackAsksOnlyForFragmentsBelowTheHighestReceivedUntilTheTailIsOverdue() {
+        var a = FrameAssembler(); a.nackAfterNanos = 30_000_000; a.nackRepeatNanos = 100_000_000
+        let frags = VideoFragment.fragments(frameSeq: 1, flags: [.keyframe], captureNanos: 1, payload: Data(repeating: 1, count: 20 * VideoFragment.maxPayload)).compactMap(VideoFragment.decode)
+        // Paced arrival every 20 ms: 0, 1, (2 lost), 3, 4 then a 35 ms silence (a scheduler hiccup).
+        var t: UInt64 = 0
+        for i in [0, 1, 3, 4] { t += 20_000_000; _ = a.ingest(frags[i], now: t) }
+        let ev = a.tick(now: t + 35_000_000)
+        guard case .nack(_, let missing)? = ev.first else { return XCTFail("expected a nack for the hole, got \(ev)") }
+        XCTAssertEqual(missing, [2], "only the hole below the highest index, never the unsent tail")
+        // The tail keeps arriving; after 4× the inter-fragment gap of silence the tail is asked for too.
+        for i in 5...8 { t += 20_000_000; _ = a.ingest(frags[i], now: t) }
+        _ = a.ingest(frags[2], now: t)   // the resend lands
+        XCTAssertTrue(a.tick(now: t + 60_000_000).isEmpty, "60 ms after the last fragment: not yet overdue at a 20 ms spacing")
+        let late = a.tick(now: t + 130_000_000)
+        guard case .nack(_, let tail)? = late.first else { return XCTFail("expected the tail nack, got \(late)") }
+        XCTAssertEqual(tail, Array(9..<20))
+        // A later frame's fragment proves the tail should have landed: immediate.
+        var b = FrameAssembler(); b.nackAfterNanos = 30_000_000
+        _ = b.ingest(frags[0], now: 10); _ = b.ingest(frags[1], now: 20)
+        let f2 = VideoFragment.fragments(frameSeq: 2, flags: [], captureNanos: 2, payload: Data([1])).compactMap(VideoFragment.decode)
+        _ = b.ingest(f2[0], now: 30)
+        let ev2 = b.tick(now: 20 + 31_000_000)
+        guard case .nack(let s, let all)? = ev2.first else { return XCTFail("\(ev2)") }
+        XCTAssertEqual(s, 1); XCTAssertEqual(all, Array(2..<20))
+    }
+
+    /// H6: pacing derives its interval from the rate; below ~1.85 Mbps it used to send a datagram every 5 ms regardless.
+    func testPaceOffsetsFollowTheRate() {
+        let at440 = FrameAssembler.paceOffsets(count: 31, payloadBytes: 1200, bytesPerSecond: 440_000 / 8 * 1.25)   // 68.75 KB/s
+        XCTAssertEqual(Double(at440.last!) / 1e9, 30 * 1200 / 68750.0, accuracy: 0.001)   // ~0.52 s for a 36 KB keyframe
+        XCTAssertGreaterThan(at440[1], 17_000_000)   // 17.5 ms per datagram, not 5
+        let fast = FrameAssembler.paceOffsets(count: 100, payloadBytes: 1200, bytesPerSecond: 20_000_000 / 8)   // 20 Mbps: batches of 2 ms
+        XCTAssertEqual(fast[0], 0); XCTAssertLessThanOrEqual(fast.last!, 100_000_000)
+        XCTAssertEqual(Set(fast).count, Int(fast.last! / 2_000_000) + 1)
+    }
+
+    /// H3: the stale deadline covers the pacer time plus three RTTs; H4: one keyframe affordability predicate.
+    func testStaleDeadlineAndKeyframeFit() {
+        let d = FrameAssembler.staleDeadlineNanos(paceEndNanos: 1_900_000_000, sentNanos: 1_000_000_000, srttNanos: 450_000_000)
+        XCTAssertEqual(d, 1_900_000_000 + 1_350_000_000 + 350_000_000, "a 0.9 s paced keyframe at 450 ms RTT is not stale at 1 s")
+        XCTAssertTrue(FrameAssembler.keyframeFits(encodedWidth: 1200, encodedHeight: 675, videoKbps: 173))   // 20.25 KB vs 21.6 KB/s: just fits
+        XCTAssertTrue(FrameAssembler.keyframeFits(encodedWidth: 400, encodedHeight: 225, videoKbps: 150))
+        XCTAssertFalse(FrameAssembler.keyframeFits(encodedWidth: 3200, encodedHeight: 1800, videoKbps: 800))   // 144 KB vs 100 KB/s
+    }
+
+    /// H7 and the fragment-loss estimate in the rate controller.
+    func testRateControllerShortfallNeedsBudgetLimitAndFragmentLoss() {
+        var rc = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 3200 * 1800)
+        rc.climbOneRung(now: 1); rc.climbOneRung(now: 1); rc.climbOneRung(now: 1); rc.climbOneRung(now: 1)
+        XCTAssertEqual(rc.rung, 0)
+        var now: UInt64 = 10_000_000_000
+        // A 15 fps-capped region achieving 12 fps against a 15 fps request: no shortfall.
+        for _ in 0..<6 { rc.videoRate(achievedFPS: 12, wantedFPS: 15, active: true, budgetLimited: true, now: now); now += 1_000_000_000 }
+        XCTAssertEqual(rc.rung, 0)
+        // 5 of 30 wanted, but nothing was skipped for budget (the interval gate): no shortfall either.
+        for _ in 0..<6 { rc.videoRate(achievedFPS: 5, wantedFPS: 30, active: true, budgetLimited: false, now: now); now += 1_000_000_000 }
+        XCTAssertEqual(rc.rung, 0)
+        // 5 of 30 because the budget held frames back: one rung down after the dwell.
+        for _ in 0..<6 { rc.videoRate(achievedFPS: 5, wantedFPS: 30, active: true, budgetLimited: true, now: now); now += 1_000_000_000 }
+        XCTAssertEqual(rc.rung, 1)
+        // Fragment loss: 6 of 100 fragments needed parity or a NACK → 6 %, parity groups of 4, tier sees loss.
+        XCTAssertEqual(rc.parityGroupSize, 8)
+        for _ in 0..<10 { rc.fragmentLoss(lost: 0, total: 5, now: now) }
+        rc.fragmentLoss(lost: 6, total: 50, now: now)
+        XCTAssertEqual(rc.fragmentLossPercent, 6, accuracy: 0.01)
+        XCTAssertEqual(rc.lossPercent, 6, accuracy: 0.01)
+        XCTAssertEqual(rc.parityGroupSize, 4)
+        XCTAssertEqual(rc.frameLossPercent, 0, "recovered loss does not count against the tier")
+        XCTAssertNotEqual(rc.tier, .extreme)
+    }
+}

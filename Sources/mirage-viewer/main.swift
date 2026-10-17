@@ -16,6 +16,8 @@ struct Options {
     var statsJSON: String?
     var scenario: (String, Double)?
     var observe = false
+    /// Seconds after connecting before the video-gap (freeze) metric starts counting.
+    var steadyAfter = 3.0
 
     static func parse() -> Options {
         var o = Options()
@@ -31,6 +33,7 @@ struct Options {
         if let v = value("--stats-log") { o.statsLog = v }
         if let v = value("--duration"), let d = Double(v) { o.duration = d }
         if let v = value("--stats") { o.statsJSON = v }
+        if let v = value("--steady-after"), let d = Double(v) { o.steadyAfter = d }
         if let v = value("--scenario") { let p = v.split(separator: ":"); o.scenario = (String(p[0]), p.count > 1 ? Double(p[1]) ?? 30 : 30) }
         if let i = args.firstIndex(of: "--headless") { o.headless = true; args.remove(at: i) }
         if let i = args.firstIndex(of: "--observe") { o.observe = true; args.remove(at: i) }
@@ -48,7 +51,9 @@ struct Options {
                              no window: connect, request --window pixels (× --scale), decode for S seconds,
                              write per-second samples and medians to PATH.json, exit 0 (SSH-friendly)
                   --probe-input  (headless) after 8 s move the host pointer and open/close Spotlight
-                  --scenario NAME:SECONDS  drive the host's "Mirage Test Bench" window: idle | typing | scroll | drag (GUI or headless)
+                  --steady-after S  count video freezes (maxVideoGapMs) only from S seconds after connecting (default 3)
+                  --scenario NAME:SECONDS  drive the host's "Mirage Test Bench" window: idle | typing | scroll | drag | login | fovea (GUI or headless)
+                             keys:N sends N scripted keystrokes to a host in input-sink mode only (input-integrity test)
                   --observe  show the picture but forward no local input (watching a scripted run without disturbing it)
                   ⌃⌥⌘S toggles the stats overlay, ⌃⌥⌘Q quits; all other keys go to the host.
                 """)
@@ -101,6 +106,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model.observeOnly = options.observe || options.scenario != nil
         model.statsLog = options.statsLog.map { URL(fileURLWithPath: $0) }
         session = ViewerSession(host: host, port: options.port, pairCode: pairCode, model: model)
+        if options.scenario != nil { session.inputAutoFlush = true }
         let content = ContentView(session: session, model: model)
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: options.window.0, height: options.window.1),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
@@ -246,6 +252,22 @@ struct ContentView: View {
                     Text("reconnecting… attempt \(r.attempt), next in \(r.inSeconds) s").font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.white).padding(8).background(.orange.opacity(0.85)).cornerRadius(8).padding(12)
                 } }
+            } else if model.stalledSeconds > 0 {
+                VStack { Spacer(); HStack { Spacer()
+                    Text("no data from the host for \(model.stalledSeconds) s").font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white).padding(8).background(.orange.opacity(0.85)).cornerRadius(8).padding(12)
+                } }
+            }
+            if model.inputHeld {
+                VStack { Spacer()
+                    Text("\(model.inputQueued) keystrokes typed while the host was unreachable.  ⌃⌥⌘↩ send them   ⌃⌥⌘⌫ discard")
+                        .font(.system(size: 13, weight: .medium)).foregroundStyle(.white).padding(10).background(.blue.opacity(0.9)).cornerRadius(8).padding(.bottom, 48)
+                }
+            } else if model.inputQueued > 0 || model.inputDropped > 0 {
+                VStack { Spacer(); HStack {
+                    Text("input: \(model.inputQueued) queued" + (model.inputDropped > 0 ? ", \(model.inputDropped) dropped (queue full)" : "")).font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.white).padding(6).background(.black.opacity(0.6)).cornerRadius(6).padding(12)
+                    Spacer() } }
             }
             if let e = model.error {
                 Text(e).foregroundStyle(.white).padding().background(.red.opacity(0.8)).cornerRadius(8).padding(40)
@@ -288,6 +310,8 @@ if CommandLine.arguments.contains("--headless") {
         m.statsLog = o.statsLog.map { URL(fileURLWithPath: $0) }
         return (m, ViewerSession(host: o.host, port: o.port, pairCode: o.pair, model: m))
     }
+    session.inputAutoFlush = true   // no one is there to choose: the queue flushes when the path returns
+    session.steadyAfterNanos = UInt64(o.steadyAfter * 1e9)
     session.start()
     session.requestStream(width: Int(Double(o.window.0) * o.pixelFactor), height: Int(Double(o.window.1) * o.pixelFactor))
     if o.probeInput { Task { try? await Task.sleep(for: .seconds(8)); await session.probeInput() } }

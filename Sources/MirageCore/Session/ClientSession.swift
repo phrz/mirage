@@ -37,13 +37,14 @@ public struct ClientSession {
         return host
     }
 
-    /// Mutual Ed25519 authentication, channel-bound to the TLS leaf fingerprint.
-    public func authenticate() async throws -> ControlMessage.Welcome {
+    /// Mutual Ed25519 authentication, channel-bound to the TLS leaf fingerprint. `resumeToken` (from an
+    /// earlier Welcome) asks the host to resume that session once this connection is authenticated.
+    public func authenticate(resumeToken: Data? = nil) async throws -> ControlMessage.Welcome {
         guard let known = try store.knownHosts()[alias] else {
             throw MirageError.authenticationFailed("not paired with \(alias); run `mirage connect \(alias) --pair CODE`")
         }
         let clientNonce = DeviceIdentity.nonce()
-        try await stream.send(.hello(.init(protocolVersion: Mirage.protocolVersion, deviceID: identity.id, deviceName: identity.name, clientNonce: clientNonce)))
+        try await stream.send(.hello(.init(protocolVersion: Mirage.protocolVersion, deviceID: identity.id, deviceName: identity.name, clientNonce: clientNonce, resumeToken: resumeToken)))
         let ch = try await stream.expect("challenge") { if case .challenge(let c) = $0 { return c } else { return nil } }
         guard ch.hostID == known.hostID, ch.hostPublicKey == known.publicKey else {
             throw MirageError.authenticationFailed("host key for \(alias) changed (was \(known.hostID.prefix(12)), now \(ch.hostID.prefix(12))). Re-pair if this is expected.")
@@ -67,20 +68,34 @@ public struct ClientSession {
     }
 }
 
-/// Datagram ping format: magic(1) type(1)=ping seq(8 BE) sentNanos(8 BE) padding to `size`.
+/// Datagram ping format: magic(1) type(1)=ping seq(8 BE) sentNanos(8 BE) echoNanos(8 BE) padding to `size`.
+/// The host echoes it with its own clock written into `echoNanos` (0 from the sender), so one small
+/// datagram every 10 s gives the viewer RTT, loss and the clock offset it needs for frame age: that is
+/// the session's keepalive (DESIGN §4a: sparse).
 public enum DatagramPing {
-    public static func encode(seq: UInt64, size: Int = 64) -> Data {
+    public static let minSize = 26
+    public static func encode(seq: UInt64, size: Int = 32) -> Data {
         var d = Data([datagramMagic, DatagramType.ping.rawValue])
-        var s = seq.bigEndian; var t = Clock.nowNanos().bigEndian
+        var s = seq.bigEndian; var t = Clock.nowNanos().bigEndian; var e = UInt64(0)
         withUnsafeBytes(of: &s) { d.append(contentsOf: $0) }
         withUnsafeBytes(of: &t) { d.append(contentsOf: $0) }
+        withUnsafeBytes(of: &e) { d.append(contentsOf: $0) }
         if d.count < size { d.append(Data(repeating: 0, count: size - d.count)) }
         return d
     }
-    public static func decode(_ d: Data) -> (seq: UInt64, sentNanos: UInt64)? {
+    public static func decode(_ d: Data) -> (seq: UInt64, sentNanos: UInt64, echoNanos: UInt64)? {
         guard d.count >= 18, d[d.startIndex] == datagramMagic, d[d.startIndex+1] == DatagramType.ping.rawValue else { return nil }
         let seq = d.subdata(in: d.startIndex+2..<d.startIndex+10).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.bigEndian
         let t = d.subdata(in: d.startIndex+10..<d.startIndex+18).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.bigEndian
-        return (seq, t)
+        let e = d.count >= minSize ? d.subdata(in: d.startIndex+18..<d.startIndex+26).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.bigEndian : 0
+        return (seq, t, e)
+    }
+    /// The host's reply: the ping with the responder's clock filled in.
+    public static func echo(_ d: Data, now: UInt64 = Clock.nowNanos()) -> Data {
+        guard d.count >= minSize else { return d }
+        var out = d
+        var e = now.bigEndian
+        withUnsafeBytes(of: &e) { out.replaceSubrange(out.startIndex+18..<out.startIndex+26, with: $0) }
+        return out
     }
 }

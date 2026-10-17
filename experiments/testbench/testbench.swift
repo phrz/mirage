@@ -15,7 +15,11 @@ final class App: NSObject, NSApplicationDelegate {
         let screen = NSScreen.screens.first!
         // `--static`: cover the whole screen with a window that never changes (no caret, fixed caption),
         // so a loopback host sees a genuinely static picture (the static-picture refinement test).
-        let isStatic = CommandLine.arguments.contains("--static")
+        // `--motion`: the same full-screen cover with a continuously animating 640×480 region, so a loopback
+        // host has a picture that changes every frame (the §4a loss and burst runs need a moving picture
+        // of our own; nothing else on the display is involved).
+        let isMotion = CommandLine.arguments.contains("--motion")
+        let isStatic = CommandLine.arguments.contains("--static") || isMotion
         let size = isStatic ? NSSize(width: screen.frame.width, height: screen.frame.height - 25) : NSSize(width: 1100, height: 750)
         let origin = isStatic ? NSPoint(x: screen.frame.minX, y: screen.frame.minY) : NSPoint(x: screen.frame.minX + 240, y: screen.frame.maxY - 160 - size.height)
         let w = NSWindow(contentRect: NSRect(origin: origin, size: size), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -57,6 +61,11 @@ final class App: NSObject, NSApplicationDelegate {
         tv.string = text
         scroll.documentView = tv
         content.addSubview(scroll); content.addSubview(field); content.addSubview(band)
+        if isMotion {
+            let mv = MotionView(frame: NSRect(x: (size.width - 640) / 2, y: (size.height - 480) / 2 - 60, width: 640, height: 480))
+            content.addSubview(mv)
+            Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { _ in mv.step() }
+        }
         w.contentView = content
         w.makeKeyAndOrderFront(nil)
         updateCaption()
@@ -76,6 +85,32 @@ final class App: NSObject, NSApplicationDelegate {
         caption.stringValue = "Mirage M2 measurement bench (started by Claude) — \(what) — a script scrolls, types into and drags this window; safe to ignore, it closes itself"
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ s: NSApplication) -> Bool { true }
+}
+/// A bouncing disc over moving stripes with a frame counter: every 30 fps tick changes most of the region.
+final class MotionView: NSView {
+    var t = 0
+    var x = 100.0, y = 100.0, vx = 7.0, vy = 5.0
+    override var isOpaque: Bool { true }
+    func step() {
+        t += 1
+        x += vx; y += vy
+        if x < 40 || x > bounds.width - 40 { vx = -vx }
+        if y < 40 || y > bounds.height - 40 { vy = -vy }
+        needsDisplay = true
+    }
+    override func draw(_ dirty: NSRect) {
+        NSColor(calibratedWhite: 0.12, alpha: 1).setFill(); bounds.fill()
+        // Stripes that drift one pixel per frame (photographic-ish motion the encoder cannot skip).
+        for i in stride(from: -64, to: Int(bounds.width) + 64, by: 32) {
+            let shade = CGFloat((i / 32) % 2 == 0 ? 0.22 : 0.3)
+            NSColor(calibratedRed: shade, green: shade * 0.9, blue: shade * 1.2, alpha: 1).setFill()
+            NSRect(x: CGFloat(i + t % 64), y: 0, width: 16, height: bounds.height).fill()
+        }
+        NSColor(calibratedRed: 0.95, green: 0.55, blue: 0.2, alpha: 1).setFill()
+        NSBezierPath(ovalIn: NSRect(x: x - 36, y: y - 36, width: 72, height: 72)).fill()
+        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.monospacedSystemFont(ofSize: 28, weight: .bold), .foregroundColor: NSColor.white]
+        ("frame \(t)" as NSString).draw(at: NSPoint(x: 16, y: bounds.height - 48), withAttributes: attrs)
+    }
 }
 let app = NSApplication.shared
 app.setActivationPolicy(.regular)

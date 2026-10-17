@@ -252,6 +252,12 @@ public struct FrameAssembler {
         var recovered = 0
         /// A placeholder for a frame the viewer never saw a byte of (a sequence gap): NACKed whole.
         var isGap = false
+        /// Highest fragment index seen and the smoothed gap between arrivals: fragments below the highest
+        /// are missing; those above may still be on their way from the host's pacer (review H5).
+        var highestIndex = -1
+        var arrivalGapNanos: UInt64 = 0
+        /// A fragment of a later frame arrived: whatever this frame still misses should have landed by now.
+        var laterFrameSeen = false
     }
     private var partials: [UInt32: Partial] = [:]
     /// Highest sequence delivered (completed or lost); nothing at or below it is delivered again.
@@ -319,8 +325,11 @@ public struct FrameAssembler {
             p.parts[Int(f.fragIndex)] = f.payload; p.received += 1
             if p.nacks > 0 { recoveredByNack += 1; p.recovered += 1 }
         }
+        if Int(f.fragIndex) > p.highestIndex { p.highestIndex = Int(f.fragIndex) }
+        if p.received > 1 { let gap = now &- p.lastNanos; p.arrivalGapNanos = p.arrivalGapNanos == 0 ? gap : (p.arrivalGapNanos * 3 + gap) / 4 }
         p.lastNanos = now
         partials[f.frameSeq] = p
+        for k in partials.keys where k < f.frameSeq { partials[k]!.laterFrameSeen = true }
         tryParity(f.frameSeq)
         return events + drain(now: now)
     }
@@ -348,11 +357,15 @@ public struct FrameAssembler {
             guard missing.count == 1 else { continue }
             var acc = [UInt8](pf.payload)
             for i in lo..<hi where i != missing[0] { p.parts[i]!.withUnsafeBytes { b in for j in 0..<min(b.count, acc.count) { acc[j] ^= b[j] } } }
-            // The missing fragment's length: every fragment but the last is maxPayload-sized; the last takes the remainder.
-            let known = (lo..<hi).filter { $0 != missing[0] }.compactMap { p.parts[$0] }
-            let full = known.map(\.count).max() ?? acc.count
+            // The missing fragment's length (review H1): every fragment but the last is full-size and the
+            // parity payload is padded to the longest member, so a missing non-last fragment is acc.count
+            // bytes; the missing last fragment is the remainder, with the full size taken from a known
+            // *non-last* member (never from the short last one); a group of just the last fragment is itself.
             let isLast = missing[0] == p.count - 1
-            let len = isLast ? p.total - (p.count - 1) * full : full
+            let len: Int
+            if !isLast { len = acc.count }
+            else if let full = (lo..<hi).first(where: { $0 != p.count - 1 && p.parts[$0] != nil }).map({ p.parts[$0]!.count }) { len = p.total - (p.count - 1) * full }
+            else { len = acc.count }
             guard len > 0, len <= acc.count else { continue }
             p.parts[missing[0]] = Data(acc[0..<len]); p.received += 1; recoveredByParity += 1; p.recovered += 1
         }
@@ -392,15 +405,51 @@ public struct FrameAssembler {
             break
         }
         // Every incomplete frame (not just the head) asks for what it misses once the gap is older than a
-        // reorder, so three frames of a short burst are repaired in one round trip, not three.
+        // reorder, so three frames of a short burst are repaired in one round trip, not three. Only
+        // fragments *below* the highest one received are known to be missing; the tail may still be on
+        // its way from the host's pacer (review H5), so it is asked for only when a later frame has
+        // arrived or the silence is several times the frame's own inter-fragment spacing.
         for seq in partials.keys.sorted() {
             guard var p = partials[seq], !p.complete else { continue }
-            if p.nacks < maxNacks, now - p.lastNanos > nackAfterNanos, p.lastNackNanos == 0 || now - p.lastNackNanos > nackRepeatNanos {
-                p.nacks += 1; p.lastNackNanos = now; partials[seq] = p
-                events.append(.nack(seq: seq, fragments: p.count > 0 ? (0..<p.count).filter { p.parts[$0] == nil } : []))
+            guard p.nacks < maxNacks, now - p.lastNanos > nackAfterNanos, p.lastNackNanos == 0 || now - p.lastNackNanos > nackRepeatNanos else { continue }
+            var fragments: [Int] = []
+            if p.count > 0 {
+                let below = (0..<max(0, p.highestIndex)).filter { p.parts[$0] == nil }
+                let tailDue = p.laterFrameSeen || now - p.lastNanos > nackAfterNanos + 4 * max(p.arrivalGapNanos, 5_000_000)
+                fragments = tailDue ? (0..<p.count).filter { p.parts[$0] == nil } : below
+                if fragments.isEmpty { continue }
             }
+            p.nacks += 1; p.lastNackNanos = now; partials[seq] = p
+            events.append(.nack(seq: seq, fragments: fragments))
         }
         return events
+    }
+
+    /// Datagram pacing (review H6): the time offsets at which `count` datagrams of `payloadBytes` leave so
+    /// that they flow at `bytesPerSecond`, from the rate rather than from a fixed slice; when the
+    /// per-datagram interval is under 2 ms they go in 2 ms batches.
+    public static func paceOffsets(count: Int, payloadBytes: Int, bytesPerSecond: Double) -> [UInt64] {
+        guard count > 0 else { return [] }
+        let interval = Double(payloadBytes) / max(1, bytesPerSecond)   // seconds per datagram
+        if interval >= 0.002 { return (0..<count).map { UInt64(Double($0) * interval * 1e9) } }
+        let perBatch = max(1, Int(0.002 / interval))
+        return (0..<count).map { UInt64(Double($0 / perBatch) * 0.002 * 1e9) }
+    }
+}
+
+extension FrameAssembler {
+    /// Review H3: how long the host waits for a frame's ack before calling it stale: the time its
+    /// datagrams take to leave the pacer, then a little longer than the viewer's own give-up time for a
+    /// frame with a hole (2.5 RTT + 300 ms, after which a `lost` ack arrives): three smoothed RTTs and
+    /// 350 ms. This is also what bounds recovery after a loss burst that swallowed a whole frame, so it
+    /// must not be generous: nothing from the viewer can arrive about a frame it never heard of.
+    public static func staleDeadlineNanos(paceEndNanos: UInt64, sentNanos: UInt64, srttNanos: Double) -> UInt64 {
+        max(paceEndNanos, sentNanos) &+ UInt64(3 * srttNanos) &+ 350_000_000
+    }
+    /// Review H4: the one affordability test for a keyframe at a rung: its estimated bytes (0.025 B per
+    /// encoded pixel, measured) fit in one second of the video budget.
+    public static func keyframeFits(encodedWidth: Int, encodedHeight: Int, videoKbps: Int) -> Bool {
+        Double(encodedWidth * encodedHeight) * 0.025 <= Double(max(150, videoKbps)) * 1000 / 8
     }
 
     /// Time-driven pass (call from a timer): NACKs and timeouts even when nothing arrives.

@@ -21,6 +21,12 @@ final class ViewerModel: ObservableObject {
     @Published var hostStatus: ControlMessage.HostStatus?
     /// Non-nil while the connection is down: (attempt number, seconds until the next try).
     @Published var reconnecting: (attempt: Int, inSeconds: Int)? = nil
+    /// Seconds without any packet from the host while connected (0 = fine).
+    @Published var stalledSeconds = 0
+    /// Input channel: events waiting for the host's ack, dropped by the cap, and whether a decision is pending.
+    @Published var inputQueued = 0
+    @Published var inputDropped = 0
+    @Published var inputHeld = false
 
     struct Stats {
         var rttMs = 0.0, fps = 0.0, kbps = 0.0, frameAgeMs = 0.0, decodeMs = 0.0
@@ -31,7 +37,7 @@ final class ViewerModel: ObservableObject {
         var rate = ControlMessage.RateState(targetKbps: 0, capacityKbps: 0, queueMs: 0, rung: 0, scale: 1, tileBudgetKbps: 0, videoKbps: 0, tileKbps: 0)
         var predictions = (shown: 0, confirmed: 0, mismatched: 0, expired: 0)
         var upscaling = false
-        var nacks = 0, recoveredByNack = 0, recoveredByParity = 0
+        var nacks = 0, recoveredByNack = 0, recoveredByParity = 0, bursts = 0
     }
     struct CursorImage {
         let image: NSImage
@@ -96,7 +102,6 @@ final class ViewerSession: @unchecked Sendable {
     private var predictor = Predictor()
     private(set) var windows: [ControlMessage.WindowInfo] = []
     private var bandColors: [UInt32: SIMD4<Float>] = [:]
-    private var inputSeq: UInt64 = 0
     /// Receiver clock of the last refinement-flagged tile batch (scenario time-to-crisp).
     private(set) var lastRefinementNanos: UInt64 = 0
     /// Scenario watch rect: last lossless tile / video frame that touched it.
@@ -140,7 +145,11 @@ final class ViewerSession: @unchecked Sendable {
             // A session that lasted a while resets the backoff; a quick failure escalates it.
             if Date().timeIntervalSince(t0) > 30 { attempt = 0 }
             attempt += 1
-            let delay = attempt >= 5 ? 15 : 1 << (attempt - 1)
+            var delay = attempt >= 5 ? 15 : 1 << (attempt - 1)
+            // While the host may still hold our session (resume window), dial every second with a 4 s
+            // timeout: the §4a bar is "back within 2 s of the path returning", a failed dial costs one
+            // 1.2 KB datagram, and QUIC's own Initial retransmits back off too slowly to meet it alone.
+            if resumable { delay = min(delay, 1) }
             log("viewer: \(failure); reconnecting in \(delay) s (attempt \(attempt))")
             await MainActor.run {
                 model.reconnecting = (attempt, delay)
@@ -154,18 +163,44 @@ final class ViewerSession: @unchecked Sendable {
 
     /// The stream request we last sent, kept across reconnects.
     @MainActor private var lastRequestSent: ControlMessage.StreamRequest?
+    /// Resume token from the host's last Welcome; presented on every reconnect (DESIGN §4a outage survival).
+    private(set) var resumeToken: Data?
+    private var disconnectedAt: Date?
+    private var resumable: Bool { resumeToken != nil && Date().timeIntervalSince(disconnectedAt ?? Date()) < Double(Mirage.resumeWindowSeconds) }
+    /// Receiver clock of the last packet of any kind from the host (stall watchdog).
+    private var lastHostPacketNanos: UInt64 = 0
+    private var connectedAtNanos: UInt64 = 0
+    /// Connection generation: closures queued by a dead connection's receive loops must not touch the new one's state.
+    private var gen = 0
+    private var receiveTasks: [Task<Void, Never>] = []
+    private(set) var resumes = 0, reconnects = 0
+    /// Receiver clock when the picture last changed and the longest gap between picture changes (freeze metric).
+    private var lastPictureNanos: UInt64 = 0
+    private(set) var maxPictureGapMs = 0.0
+    private(set) var pictureGapsOver500 = 0
+    private var lastResumeNanos: UInt64 = 0
+    private(set) var resumeToPictureMs: [Double] = []
+    /// Video-only freeze metric: the longest gap between decoded frames after the first 3 s of a connection
+    /// (tiles ride a reliable stream the loss injector does not touch, so they would mask video stalls).
+    private var lastVideoNanos: UInt64 = 0
+    var steadyAfterNanos: UInt64 = 3_000_000_000
+    private(set) var maxVideoGapMs = 0.0
+    private(set) var videoGapsOver500: [Double] = []
 
     /// One connection's life: returns the reason it ended.
     private func connectOnce() async -> String {
         // Per-connection state; the compositor's picture is deliberately kept.
-        videoQueue.sync { assembler = FrameAssembler(); awaitingRecovery = false; lastRecoverySeq = 0; tileCaptureSeq = [] }
+        let myGen = videoQueue.sync { () -> Int in gen += 1; assembler = FrameAssembler(); awaitingRecovery = resumeToken != nil; lastRecoverySeq = 0; tileCaptureSeq = []; return gen }
         sender = nil
+        for t in receiveTasks { t.cancel() }
+        receiveTasks = []
+        let client = QUICClient(host: host, port: port)
+        self.client = client
+        defer { client.close(); disconnectedAt = Date(); statsLock.lock(); hostStatus = nil; statsLock.unlock() }   // review M5: no leaked groups
         do {
             let store = try Store()
             let identity = try store.identity(role: "client", name: DeviceNames.current())
-            let client = QUICClient(host: host, port: port)
-            self.client = client
-            try await client.connect()
+            try await client.connect(timeout: resumable ? 4 : 15)
             guard let fp = client.tlsFingerprint else { throw MirageError.transport("no TLS fingerprint") }
             let control = try await client.openStream()
             self.control = control
@@ -175,23 +210,41 @@ final class ViewerSession: @unchecked Sendable {
                 let h = try await session.pair(code: code)
                 log("paired with \(h.name)")
             }
-            let welcome = try await session.authenticate()
-            setStatus("authenticated to \(welcome.hostName)")
+            let welcome = try await session.authenticate(resumeToken: resumeToken)
+            let resumed = welcome.resumed == true
+            if resumeToken != nil { if resumed { resumes += 1 } else { reconnects += 1 } }
+            if let t = welcome.resumeToken { resumeToken = t }
+            if resumeToken != nil, !resumed {
+                // The host did not know us (restarted, or the window passed): a fresh stream follows. The
+                // picture stays until its first keyframe replaces it; predictions from the old session are void.
+                predictorLock.lock(); predictor = Predictor(); predictorLock.unlock()
+                videoQueue.sync { awaitingRecovery = false }
+            }
+            log(resumed ? "session resumed by \(welcome.hostName) (\(disconnectedAt.map { String(format: "%.1f s gap", Date().timeIntervalSince($0)) } ?? ""))" : "authenticated to \(welcome.hostName)")
+            setStatus(resumed ? "resumed session with \(welcome.hostName)" : "authenticated to \(welcome.hostName)")
             sender = ControlSender(stream: control, log: { [weak self] in self?.log($0) })
             // Tile stream (reliable) and datagram flow, both before the stream request so the host finds them.
             let tiles = try await client.openStream()
             try await tiles.sendRaw(Data([tileStreamMagic]))
             tileStream = tiles
-            Task.detached { [weak self] in await self?.receiveTiles(tiles) }
+            receiveTasks.append(Task.detached { [weak self] in await self?.receiveTiles(tiles, gen: myGen) })
             let fast = try await client.openStream()
             try await fast.sendRaw(Data([fastTileStreamMagic]))
             fastTileStream = fast
-            Task.detached { [weak self] in await self?.receiveTiles(fast) }
+            receiveTasks.append(Task.detached { [weak self] in await self?.receiveTiles(fast, gen: myGen) })
             let flow = try await client.openDatagramFlow()
             self.flow = flow
-            try await flow.sendRaw(DatagramPing.encode(seq: 0))   // opens the flow on the host side
-            Task.detached { [weak self] in await self?.receiveDatagrams(flow) }
-            log("connected: control, tile stream and datagram flow up")
+            pingSeq += 1
+            try await flow.sendRaw(DatagramPing.encode(seq: pingSeq))   // opens the flow on the host side; first RTT sample
+            receiveTasks.append(Task.detached { [weak self] in await self?.receiveDatagrams(flow, gen: myGen) })
+            let now = Clock.nowNanos()
+            statsLock.lock(); lastHostPacketNanos = now; connectedAtNanos = now; if resumed { lastResumeNanos = now }; statsLock.unlock()
+            // Path changes (Wi-Fi ↔ cellular): Network.framework reports viability and better paths per
+            // connection. QUIC migration itself is up to the framework; if the path came back and the
+            // connection is still stalled, the watchdog redials at once instead of waiting for its timeout.
+            control.connection.viabilityUpdateHandler = { [weak self] viable in self?.log("path \(viable ? "viable" : "not viable")"); if viable { self?.pathChanged() } }
+            control.connection.betterPathUpdateHandler = { [weak self] better in if better { self?.log("a better path is available"); self?.pathChanged() } }
+            log("connected: control, tile streams and datagram flow up")
             await MainActor.run { if let p = pendingRequest { pendingRequest = nil; requestStream(width: p.width, height: p.height) } }
             await MainActor.run { model.reconnecting = nil; model.error = nil }
             startLoopsOnce()
@@ -199,6 +252,55 @@ final class ViewerSession: @unchecked Sendable {
             return "control stream ended"
         } catch {
             return "\(error)"
+        }
+    }
+
+    /// The path changed under a stalled connection: redial now (the host resumes the session).
+    private func pathChanged() {
+        statsLock.lock(); let stalled = lastHostPacketNanos > 0 && Clock.nowNanos() - lastHostPacketNanos > 2_000_000_000; statsLock.unlock()
+        if stalled { log("path changed while stalled: redialing"); dropConnection() }
+    }
+
+    /// Tears the current connection down so `connectOnce` returns and the reconnect loop dials again.
+    /// Cancelling the group alone leaves extracted streams pending (observed on macOS 27), so each is cancelled.
+    private func dropConnection() {
+        control?.cancel(); tileStream?.cancel(); fastTileStream?.cancel(); flow?.cancel()
+        client?.close()
+    }
+
+    /// Stall watchdog (once a second): no packet of any kind from the host for 12 s while connected
+    /// means the path or the host is gone; drop the connection and redial (the resume token brings the
+    /// same session back). QUIC's own idle timeout is 45 s so a shorter outage never closes anything.
+    private func watchdog(now: UInt64) {
+        statsLock.lock(); let last = lastHostPacketNanos, since = connectedAtNanos; statsLock.unlock()
+        guard sender != nil, last > 0, since > 0 else { return }
+        let silent = Double(now - last) / 1e9
+        if silent > 12 {
+            log(String(format: "no packet from the host for %.0f s: redialing", silent))
+            statsLock.lock(); lastHostPacketNanos = 0; statsLock.unlock()
+            dropConnection()
+        } else if silent > 3 {
+            Task { @MainActor in model.stalledSeconds = Int(silent) }
+        } else {
+            Task { @MainActor in if model.stalledSeconds != 0 { model.stalledSeconds = 0 } }
+        }
+    }
+
+    private func noteHostPacket(_ now: UInt64) { statsLock.lock(); lastHostPacketNanos = now; statsLock.unlock() }
+    /// The picture changed: freeze metric and resume-to-picture time.
+    private func notePictureChange(_ now: UInt64) {
+        statsLock.lock(); let connectedAt = connectedAtNanos, resumedAt = lastResumeNanos; statsLock.unlock()
+        if connectedAt > 0 {
+            // Gaps count across reconnects: the person sees one frozen picture either way.
+            let base = lastPictureNanos > 0 ? lastPictureNanos : connectedAt
+            let gap = now > base ? Double(now - base) / 1e6 : 0
+            if gap > maxPictureGapMs { maxPictureGapMs = gap }
+            if gap > 500 { pictureGapsOver500 += 1 }
+        }
+        lastPictureNanos = max(lastPictureNanos, now)
+        if resumedAt > 0, now >= resumedAt {
+            resumeToPictureMs.append(Double(now - resumedAt) / 1e6)
+            statsLock.lock(); lastResumeNanos = 0; statsLock.unlock()
         }
     }
 
@@ -213,6 +315,7 @@ final class ViewerSession: @unchecked Sendable {
         assemblerTimer = t
         Task.detached { [weak self] in await self?.pingLoop() }
         Task.detached { [weak self] in await self?.statsLoop() }
+        startInputTimer()
     }
 
     // MARK: Stream control
@@ -238,20 +341,18 @@ final class ViewerSession: @unchecked Sendable {
     private func receiveControl(_ control: MessageStream) async throws {
         while true {
             let msg = try await control.receive()
+            noteHostPacket(Clock.nowNanos())
             switch msg {
             case .pong(let p):
-                let now = Clock.nowNanos()
-                let rtt = Double(now - p.sentNanos)
-                statsLock.lock()
-                if let echo = p.echoNanos, rtt < bestRTT {
-                    bestRTT = rtt
-                    clockOffset = Double(echo) - (Double(p.sentNanos) + rtt / 2)
-                }
-                sRTT = rtt / 1e6
-                statsLock.unlock()
-                predictorLock.lock(); predictor.timeoutNanos = UInt64(rtt * 3) + 500_000_000; predictorLock.unlock()
+                rttSample(sentNanos: p.sentNanos, echoNanos: p.echoNanos, now: Clock.nowNanos())
             case .streamInfo(let info):
-                videoQueue.async { self.compositor?.configure(width: info.width, height: info.height); self.onChange?(); self.streamStartNanos = Clock.nowNanos(); self.legibleUnderPointerMs = nil; self.losslessAt = [] }
+                videoQueue.async {
+                    // A new or resumed stream: the picture is kept (same size) until the host's first keyframe
+                    // or masked keyframe replaces what changed; the assembler starts over (review M4).
+                    self.compositor?.configure(width: info.width, height: info.height); self.onChange?()
+                    self.assembler = FrameAssembler(); self.lastRecoverySeq = 0
+                    self.streamStartNanos = Clock.nowNanos(); self.legibleUnderPointerMs = nil; self.losslessAt = []
+                }
                 Task { @MainActor in model.streamInfo = info; model.status = "streaming \(info.width)x\(info.height) from \(host)" }
             case .cursorShape(let c):
                 if let img = NSImage(data: c.png) {
@@ -276,25 +377,46 @@ final class ViewerSession: @unchecked Sendable {
         }
     }
 
-    private func receiveDatagrams(_ flow: MessageStream) async {
-        while true {
+    /// RTT and clock offset from a ping echo (stream pong or datagram ping).
+    private func rttSample(sentNanos: UInt64, echoNanos: UInt64?, now: UInt64) {
+        let rtt = Double(now &- sentNanos)
+        statsLock.lock()
+        if let echo = echoNanos, echo != 0, rtt < bestRTT {
+            bestRTT = rtt
+            clockOffset = Double(echo) - (Double(sentNanos) + rtt / 2)
+        }
+        sRTT = rtt / 1e6
+        statsLock.unlock()
+        predictorLock.lock(); predictor.timeoutNanos = UInt64(rtt * 3) + 500_000_000; predictorLock.unlock()
+        inputQueue.async { self.input.setRTT(nanos: UInt64(rtt)) }
+    }
+
+    private func receiveDatagrams(_ flow: MessageStream, gen myGen: Int) async {
+        while !Task.isCancelled {
             guard let d = try? await flow.receiveSome() else { log("datagram flow closed"); return }
+            let now = Clock.nowNanos()
+            noteHostPacket(now)
             if let frag = VideoFragment.decode(d) {
-                videoQueue.async { self.ingest(frag) }
+                videoQueue.async { guard myGen == self.gen else { return }; self.ingest(frag) }
             } else if let parity = ParityFragment.decode(d) {
-                videoQueue.async { self.handle(self.assembler.ingest(parity: parity, now: Clock.nowNanos()), now: Clock.nowNanos()) }
+                videoQueue.async { guard myGen == self.gen else { return }; self.handle(self.assembler.ingest(parity: parity, now: Clock.nowNanos()), now: Clock.nowNanos()) }
+            } else if let ack = InputAck.decode(d) {
+                inputAck(ack)
+            } else if let ping = DatagramPing.decode(d) {
+                rttSample(sentNanos: ping.sentNanos, echoNanos: ping.echoNanos, now: now)
             }
         }
     }
 
-    private func receiveTiles(_ stream: MessageStream) async {
+    private func receiveTiles(_ stream: MessageStream, gen myGen: Int) async {
         var parser = TileStreamParser()
-        while true {
+        while !Task.isCancelled {
             guard let d = try? await stream.receiveSome() else { log("tile stream closed"); return }
             do {
                 for (seq, bytes, msg) in try parser.feed(d) {
                     let now = Clock.nowNanos()
-                    videoQueue.async { self.apply(msg, seq: seq, bytes: bytes, now: now) }
+                    noteHostPacket(now)
+                    videoQueue.async { guard myGen == self.gen else { return }; self.apply(msg, seq: seq, bytes: bytes, now: now) }
                 }
             } catch { log("tile stream: \(error)"); return }
         }
@@ -351,12 +473,15 @@ final class ViewerSession: @unchecked Sendable {
             predictorLock.unlock()
             sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: c.header.captureNanos, receivedNanos: now, bytes: bytes)))
         case .reset(let w, let h):
-            compositor?.configure(width: w, height: h)
-            compositor?.clear()
+            // A fresh stream at the same size keeps the pixels (review M11: the last picture stays until the
+            // first keyframe replaces it); a size change clears. Either way nothing old is trusted any more.
+            compositor?.configure(width: w, height: h)   // clears only on a size change
             tileCaptureSeq = []
+            assembler = FrameAssembler(); lastRecoverySeq = 0   // review M4: the host's sequence may restart
             predictorLock.lock(); predictor = Predictor(); predictorLock.unlock()
         }
         onChange?()
+        if case .reset = msg {} else { notePictureChange(now) }
     }
 
     private func ingest(_ frag: VideoFragment) {
@@ -399,7 +524,7 @@ final class ViewerSession: @unchecked Sendable {
                 if awaitingRecovery && !frame.flags.contains(.recovery) {
                     statsLock.lock(); sDropped += 1; statsLock.unlock()
                     sender?.send(.frameAck(.init(seq: frame.seq, captureNanos: frame.captureNanos, receivedNanos: frame.lastFragmentNanos, decodedNanos: 0, bytes: frame.bytes, lost: false,
-                                                 firstReceivedNanos: frame.firstFragmentNanos, fragments: frame.fragments)))
+                                                 firstReceivedNanos: frame.firstFragmentNanos, fragments: frame.fragments, fragmentsLost: frame.fragmentsLost)))
                     continue
                 }
                 let t0 = Clock.nowNanos()
@@ -414,6 +539,14 @@ final class ViewerSession: @unchecked Sendable {
                         let grid = TileMask.grid(for: region)
                         let mask = frame.tileMask.flatMap { TileMask(cols: grid.cols, rows: grid.rows, bits: $0) }
                         compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive))
+                        notePictureChange(now)
+                        statsLock.lock(); let since = connectedAtNanos; statsLock.unlock()
+                        if lastVideoNanos > 0, since > 0, now > since &+ steadyAfterNanos, now > lastVideoNanos {
+                            let gap = Double(now - lastVideoNanos) / 1e6
+                            if gap > maxVideoGapMs { maxVideoGapMs = gap }
+                            if gap > 500 { videoGapsOver500.append(gap) }
+                        }
+                        lastVideoNanos = now
                         if !watchRect.isEmpty, region.intersects(watchRect) { lastWatchedVideoNanos = now }
                         predictorLock.lock(); predictor.hostUpdate(inputSeq: frame.inputSeq, rect: region, now: now); predictorLock.unlock()
                         onChange?()
@@ -426,7 +559,7 @@ final class ViewerSession: @unchecked Sendable {
                     }
                     statsLock.unlock()
                     sender?.send(.frameAck(.init(seq: frame.seq, captureNanos: frame.captureNanos, receivedNanos: frame.lastFragmentNanos, decodedNanos: t1, bytes: frame.bytes, lost: false,
-                                                 firstReceivedNanos: frame.firstFragmentNanos, fragments: frame.fragments)))
+                                                 firstReceivedNanos: frame.firstFragmentNanos, fragments: frame.fragments, fragmentsLost: frame.fragmentsLost)))
                 } catch {
                     log("decode seq \(frame.seq): \(error)")
                     awaitingRecovery = true
@@ -438,23 +571,26 @@ final class ViewerSession: @unchecked Sendable {
         }
     }
 
+    /// Keepalive: one small datagram ping every 10 s (DESIGN §4a). It also carries RTT and the clock offset.
     private func pingLoop() async {
         while !stopped {
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: .seconds(Mirage.keepaliveSeconds))
             pingSeq += 1
-            sender?.send(.ping(.init(seq: pingSeq, sentNanos: Clock.nowNanos())))
+            if let flow { try? await flow.sendRaw(DatagramPing.encode(seq: pingSeq)) }
         }
     }
 
     private func statsLoop() async {
         while !stopped {
             try? await Task.sleep(for: .seconds(1))
+            watchdog(now: Clock.nowNanos())
             statsLock.lock()
             let frames = sFrames, bytes = sBytes, lost = sLost, dec = sDecodeNanos, age = sAge, rtt = sRTT, dropped = sDropped
-            let tileBytes = sTileBytes, tileRects = sTileRects, copies = sCopyRects, rate = rateState, nacks = sNacks
-            sFrames = 0; sBytes = 0; sLost = 0; sDecodeNanos = 0; sDropped = 0; sTileBytes = 0; sTileRects = 0; sCopyRects = 0; sNacks = 0
+            let tileBytes = sTileBytes, tileRects = sTileRects, copies = sCopyRects, rate = rateState, nacks = sNacks, bursts = sBursts
+            sFrames = 0; sBytes = 0; sLost = 0; sDecodeNanos = 0; sDropped = 0; sTileBytes = 0; sTileRects = 0; sCopyRects = 0; sNacks = 0; sBursts = 0
             statsLock.unlock()
             predictorLock.lock(); let pstats = predictor.stats; predictorLock.unlock()
+            let inp = inputState()
             let w = decoder.width, h = decoder.height
             let upscaling = compositor?.usesMetalFX ?? false
             await MainActor.run {
@@ -463,8 +599,9 @@ final class ViewerSession: @unchecked Sendable {
                 s.decodeMs = frames > 0 ? Double(dec) / Double(frames) / 1e6 : s.decodeMs
                 s.frameAgeMs = age / 1e6; s.rttMs = rtt; s.width = w; s.height = h
                 s.tileKbps = Double(tileBytes) * 8 / 1000; s.tileRects += tileRects; s.copyRects += copies; s.rate = rate; s.predictions = pstats; s.upscaling = upscaling
-                s.nacks += nacks; s.recoveredByNack = self.assembler.recoveredByNack; s.recoveredByParity = self.assembler.recoveredByParity
+                s.nacks += nacks; s.recoveredByNack = self.assembler.recoveredByNack; s.recoveredByParity = self.assembler.recoveredByParity; s.bursts += bursts
                 model.stats = s
+                model.inputQueued = inp.queued; model.inputDropped = inp.dropped; model.inputHeld = inp.held
                 if frames > 0 || bytes > 0 || tileBytes > 0 {
                     samples.append(Sample(t: Date().timeIntervalSince(startDate), rttMs: rtt, frameAgeMs: age / 1e6, fps: Double(frames), kbps: Double(bytes) * 8 / 1000,
                                           decodeMs: s.decodeMs, lost: lost, skipped: dropped, width: w, height: h,
@@ -483,7 +620,40 @@ final class ViewerSession: @unchecked Sendable {
 
     // MARK: Input
 
-    private func nextSeq() -> UInt64 { predictorLock.lock(); defer { predictorLock.unlock() }; inputSeq += 1; return inputSeq }
+    // Input rides datagrams with redundancy (InputChannel): the latest pointer state and every unacked
+    // discrete event in each packet, retransmitted until the host acknowledges them, held for a
+    // decision after a long gap. One queue serializes the channel.
+    private let inputQueue = DispatchQueue(label: "mirage.viewer.input", qos: .userInteractive)
+    private var input = InputChannel()
+    private var inputTimer: DispatchSourceTimer?
+    /// Headless and scripted runs never hold the queue: it flushes by itself when the path returns.
+    var inputAutoFlush = false { didSet { inputQueue.async { self.input.autoFlush = self.inputAutoFlush } } }
+    /// What the channel looks like, for the overlay and --stats.
+    struct InputState { var queued = 0, dropped = 0, packets = 0; var held = false; var oldestMs = 0.0 }
+    func inputState() -> InputState { inputQueue.sync { let now = Clock.nowNanos(); return InputState(queued: input.queuedEvents, dropped: input.droppedByCap, packets: input.packetsSent, held: input.held, oldestMs: Double(input.oldestUnackedNanos(now: now)) / 1e6) } }
+    private(set) var keysSent: [String] = []   // scenario record: "seq:down:chars"
+
+    private func startInputTimer() {
+        guard inputTimer == nil else { return }
+        let t = DispatchSource.makeTimerSource(queue: inputQueue)
+        t.schedule(deadline: .now() + .milliseconds(20), repeating: .milliseconds(20))
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            if let d = self.input.tick(now: Clock.nowNanos()) { self.sendInputDatagram(d) }
+        }
+        t.resume(); inputTimer = t
+    }
+    /// On inputQueue.
+    private func sendInputDatagram(_ d: Data) {
+        guard let flow else { return }
+        if LossInjector.shared.shouldDrop() { return }   // test-only (MIRAGE_TEST_LOSS in the viewer's environment)
+        flow.connection.send(content: d, completion: .contentProcessed { _ in })
+    }
+    private func flushInputNow() { if let d = input.packet(now: Clock.nowNanos()) { sendInputDatagram(d) } }
+    private func inputAck(_ a: InputAck) { inputQueue.async { self.input.ack(a) } }
+    /// After a long gap: send what was typed meanwhile, or drop it.
+    func flushInput() { inputQueue.async { self.input.flush(); self.flushInputNow(); self.log("input: flushed the queue") } }
+    func discardInput() { inputQueue.async { let n = self.input.queuedEvents; self.input.discard(); self.log("input: discarded \(n) queued events") } }
 
     /// Remembers where the pointer is (stream px) for the foveation metric.
     func notePointer(x: Double, y: Double) {
@@ -508,11 +678,11 @@ final class ViewerSession: @unchecked Sendable {
 
     func sendMouseMove(x: Double, y: Double) {
         notePointer(x: x, y: y)
-        // Coalesce to ~60 Hz; the control stream is ordered so later moves supersede earlier ones anyway.
+        // Coalesce to ~60 Hz; the pointer state is latest-wins so a skipped move costs nothing.
         let now = Clock.nowNanos()
         if now - lastMoveSent < 15_000_000 { pendingMove = .init(x: x, y: y); scheduleMoveFlush(); return }
         lastMoveSent = now; pendingMove = nil
-        sender?.send(.mouseMove(.init(x: x, y: y, seq: nextSeq())))
+        send(.mouseMove(.init(x: x, y: y)))
     }
     private var flushScheduled = false
     private func scheduleMoveFlush() {
@@ -520,23 +690,23 @@ final class ViewerSession: @unchecked Sendable {
         flushScheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(16)) { [self] in
             flushScheduled = false
-            if var m = pendingMove { pendingMove = nil; lastMoveSent = Clock.nowNanos(); m.seq = nextSeq(); sender?.send(.mouseMove(m)) }
+            if let m = pendingMove { pendingMove = nil; lastMoveSent = Clock.nowNanos(); send(.mouseMove(m)) }
         }
     }
-    /// Sends an input message with a fresh sequence number; returns the number.
+    /// Queues an input message on the input channel with a fresh sequence number and sends a packet
+    /// now; returns the number (the predictor keys its epochs on it).
     @discardableResult
     func send(_ m: ControlMessage, scripted: Bool = false) -> UInt64 {
-        let seq = nextSeq()
-        var m = scripted ? m.markedScripted() : m
-        switch m {
-        case .mouseButton(var b): b.seq = seq; m = .mouseButton(b)
-        case .scroll(var s): s.seq = seq; m = .scroll(s)
-        case .key(var k): k.seq = seq; m = .key(k)
-        case .mouseMove(var mm): mm.seq = seq; m = .mouseMove(mm)
-        default: break
+        let m = scripted ? m.markedScripted() : m
+        return inputQueue.sync {
+            let seq: UInt64
+            if case .mouseMove(let mm) = m { seq = input.pointer(x: mm.x, y: mm.y) }
+            else if m.isDiscreteInput { seq = input.enqueue(m, now: Clock.nowNanos()) }
+            else { return 0 }
+            if case .key(let k) = m, scripted, seq != 0 { keysSent.append("\(seq):\(k.down ? 1 : 0):\(k.characters ?? "")") }
+            flushInputNow()
+            return seq
         }
-        sender?.send(m)
-        return seq
     }
 
     // MARK: Prediction
@@ -592,20 +762,20 @@ final class ViewerSession: @unchecked Sendable {
         probeLog = true
         log("probe: moving pointer")
         for (x, y) in [(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75), (0.5, 0.5)] {
-            send(.mouseMove(.init(x: x, y: y)))
+            send(.mouseMove(.init(x: x, y: y)), scripted: true)
             try? await Task.sleep(for: .milliseconds(300))
         }
         try? await Task.sleep(for: .seconds(1))
         let cmd: UInt64 = 1 << 20   // kCGEventFlagMaskCommand
         log("probe: ⌘Space")
-        send(.modifiers(.init(keyCode: 55, modifiers: cmd)))
-        send(.key(.init(keyCode: 49, down: true, isRepeat: false, modifiers: cmd, characters: " ")))
-        send(.key(.init(keyCode: 49, down: false, isRepeat: false, modifiers: cmd, characters: nil)))
-        send(.modifiers(.init(keyCode: 55, modifiers: 0)))
+        send(.modifiers(.init(keyCode: 55, modifiers: cmd)), scripted: true)
+        send(.key(.init(keyCode: 49, down: true, isRepeat: false, modifiers: cmd, characters: " ")), scripted: true)
+        send(.key(.init(keyCode: 49, down: false, isRepeat: false, modifiers: cmd, characters: nil)), scripted: true)
+        send(.modifiers(.init(keyCode: 55, modifiers: 0)), scripted: true)
         try? await Task.sleep(for: .seconds(2))
         log("probe: Esc")
-        send(.key(.init(keyCode: 53, down: true, isRepeat: false, modifiers: 0, characters: "\u{1B}")))
-        send(.key(.init(keyCode: 53, down: false, isRepeat: false, modifiers: 0, characters: nil)))
+        send(.key(.init(keyCode: 53, down: true, isRepeat: false, modifiers: 0, characters: "\u{1B}")), scripted: true)
+        send(.key(.init(keyCode: 53, down: false, isRepeat: false, modifiers: 0, characters: nil)), scripted: true)
         try? await Task.sleep(for: .seconds(1))
         probeLog = false
     }
@@ -613,7 +783,7 @@ final class ViewerSession: @unchecked Sendable {
     func stop() {
         stopped = true
         sender?.send(.streamStop)
-        client?.close()
+        dropConnection()
     }
 }
 
@@ -635,9 +805,21 @@ extension ViewerSession {
             var watchedTileBytes: Int?, watchedTileCount: Int?, watchedKbps: Double?, watchedDirectKbps: Double?
             var keyLatencyMs: [Double]?, keyLatencyMsMedian: Double?, keyLatencyMsMax: Double?
             var legibleUnderPointerMs: Double?
+            var resumes: Int?, reconnects: Int?, resumeToPictureMs: [Double]?, maxPictureGapMs: Double?, pictureGapsOver500ms: Int?, bursts: Int?
+            var inputPackets: Int?, inputQueued: Int?, inputDropped: Int?, keysSent: [String]?
+            var maxVideoGapMs: Double?, videoGapsOver500ms: [Double]?
+            var keepalivesSent: UInt64?
             var samples: [Sample]
         }
         let target = MainActor.assumeIsolated { lastRequest?.bitrateKbps ?? 0 }
+        let inputStateNow = inputState()
+        // The gap since the last decoded frame counts too: a stream that died stays died.
+        var videoGapMax = maxVideoGapMs, videoGaps = videoGapsOver500
+        if lastVideoNanos > 0 {
+            let tail = Double(Clock.nowNanos() &- lastVideoNanos) / 1e6
+            if tail > videoGapMax { videoGapMax = tail }
+            if tail > 500 { videoGaps.append(tail) }
+        }
         let pstats = MainActor.assumeIsolated { model.stats.predictions }
         let out = Out(host: host, seconds: samples.last?.t ?? 0, targetKbps: target,
                       width: samples.last?.width ?? 0, height: samples.last?.height ?? 0,
@@ -659,6 +841,9 @@ extension ViewerSession {
                       watchedDirectKbps: scenario.map { Double(watchedDirectBytes) * 8 / 1000 / max(1, $0.activeSeconds) },
                       keyLatencyMs: scenario?.keyLatencyMs, keyLatencyMsMedian: scenario.map { median($0.keyLatencyMs) }, keyLatencyMsMax: scenario?.keyLatencyMs.max(),
                       legibleUnderPointerMs: legibleUnderPointerMs,
+                      resumes: resumes, reconnects: reconnects, resumeToPictureMs: resumeToPictureMs, maxPictureGapMs: maxPictureGapMs, pictureGapsOver500ms: pictureGapsOver500, bursts: MainActor.assumeIsolated { model.stats.bursts },
+                      inputPackets: inputStateNow.packets, inputQueued: inputStateNow.queued, inputDropped: inputStateNow.dropped, keysSent: keysSent.isEmpty ? nil : keysSent,
+                      maxVideoGapMs: videoGapMax, videoGapsOver500ms: videoGaps, keepalivesSent: pingSeq,
                       samples: samples)
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         return (try? enc.encode(out)) ?? Data()
