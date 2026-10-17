@@ -537,6 +537,24 @@ script, so every tier is a repeatable CI-style run against loopback or mac-daddy
 | M4 | iPad + iPhone viewer | Pencil and keyboard usable against mac-daddy |
 | M5 | Prediction: scroll and typed text overlays; audio; clipboard; files | Typing in Xcode/VS Code/Safari over 1 Mbps feels local |
 
+### 4a. Resilience bar (phrz, 2026-10-17: "must be more tolerant of droppy connections")
+
+Bitrate adaptation is in place (delay-based controller, tiers). Resilience to drops is a
+separate axis and gets its own acceptance test, run with the macOS link conditioner
+(`dnctl`/`pfctl`: loss, outage, delay) and on real cellular links:
+
+| Requirement | Pass condition |
+|---|---|
+| Outage survival | A 30 s total outage returns to the same session with the last picture kept, cache and prediction state intact, no re-pairing, within 2 s of the path returning |
+| IP change | A cellular handoff or Wi-Fi→cellular switch is a QUIC connection migration, not a reconnect: no visible interruption beyond the frames lost in transit |
+| Reconnect policy | The viewer never dead-ends: exponential backoff 1→15 s forever, "reconnecting…" badge with attempt count, automatic stream resume |
+| Loss | 5 % random loss and 2 s loss bursts: no freeze longer than 500 ms; recovery by fragment NACK and parity, keyframe only as last resort |
+| Input integrity | Input is never lost or duplicated: latest pointer state wins, keystrokes queue with a visible cap during a gap, user chooses flush or drop after a long gap |
+| Idle timeout | Host and client idle timeouts long enough that a 30 s outage is not a close; keepalives sparse (one small datagram per 10 s) |
+
+This is milestone work in its own right (M2.5 or the first part of M3), not a side effect of
+the codec.
+
 ## 5. Open questions to settle by measurement, not debate
 
 - HEVC low-latency mode lacks `ConstantBitRate`; verify `DataRateLimits` holds frame sizes
