@@ -227,6 +227,23 @@ history** (dirty in N of the last M frames):
    approximate; exact pixels backfill at the lowest priority, like video building to
    lossless. RDP's glyph cache and Citrix text caching did exact box reuse a decade ago;
    pairing it with the prediction layer and the tolerant tier is the new part.
+   Why boxes win on reflow: inserting one glyph shifts every word after it, so every grid
+   tile crossing the line changes its hash, while word/line boxes move as units and keep
+   theirs; boxes lose when a line's extent wobbles by a pixel. Selection is therefore not a
+   mode: per residual region the host looks up both grid and box hashes and sends whichever
+   reference set covers more pixels, mixing freely.
+   **Client-side native scroll containers (phrz, 2026-10-17).** In both modes each scrollable
+   area becomes a native `NSScrollView`/`UIScrollView` on the client whose content is the
+   per-window document canvas (visible pixels plus cached off-screen content). That unifies
+   scroll prediction, the scrollback canvas and the cache in one object and gives native
+   momentum, rubber-banding and one-frame response for free. The client owns scroll physics;
+   the host follows positions, by setting the scroll offset through Accessibility where it
+   exists or by sending position-matched discrete deltas (never momentum events) where not,
+   so the host app never runs a second physics simulation. Document extent for springing
+   comes from Accessibility, or is learned from observed offsets with springing enabled only
+   after the host has reported an end. A mismatch detector (host offset diverging from the
+   client's) drops that window back to pixel-follow mode for nested scroll views and
+   scroll-linked animations.
    **Tile cache (phrz, 2026-10-17).** Both ends keep a content-addressed LRU of lossless tiles
    (hash → pixels on the client; hash → "client has it" on the host, confirmed by acks). A
    tile the client already holds is sent as `hash @ (x,y)`, ~20 bytes instead of ~550, which
