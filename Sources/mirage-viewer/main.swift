@@ -109,6 +109,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         w.makeKeyAndOrderFront(nil)
         window = w
         session.start()
+        // A scripted run with the window visible: the stats overlay shows the picture being measured.
+        if let (name, secs) = options.scenario {
+            let runner = ScenarioRunner(session: session, name: name, seconds: secs)
+            session.scenario = runner
+            Task { try? await Task.sleep(for: .seconds(3)); await runner.run() }
+            let s = session!
+            Timer.scheduledTimer(withTimeInterval: options.duration, repeats: false) { _ in
+                s.stop()
+                let json = s.statsJSON()
+                if let path = self.options.statsJSON { try? json.write(to: URL(fileURLWithPath: path)) }
+                FileHandle.standardOutput.write(json); FileHandle.standardOutput.write(Data("\n".utf8))
+                exit(0)
+            }
+        }
     }
 
     func windowWillClose(_ notification: Notification) {
