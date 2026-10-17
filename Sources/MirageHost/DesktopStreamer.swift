@@ -73,7 +73,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     // Stats (per log interval).
     private var statFrames = 0, statBytes = 0, statDropped = 0, statSkippedBudget = 0, statLost = 0
     private var statEncodeNanos: UInt64 = 0
-    private var statInput = 0, statTileBytes = 0, statTileRects = 0, statRefineBytes = 0, statCopyRects = 0, statDirtyTiles = 0, statDiffPruned = 0, statTileSkipped = 0
+    private var statInput = 0, statTileBytes = 0, statTileRects = 0, statRefineBytes = 0, statCopyRects = 0, statDirtyTiles = 0, statDiffPruned = 0, statTileSkipped = 0, statFoveaTiles = 0
     private var secTileBytes = 0, secVideoBytes = 0, secVideoFrames = 0   // per rateState second
     private var statCaptures = 0
     private var statCaptureNanos: UInt64 = 0
@@ -390,6 +390,25 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
 
         var plan = tracker.classify(dirty: dirty, now: now)
+        if let fov = fovea(tracker) {
+            // Fovea: motion inside it is carried as native tiles while the tile budget holds; the base
+            // layer (video) takes the rest. A fovea that moved refines its new ground first.
+            if !plan.video.isEmpty, tileTokens > 0 {
+                let inside = plan.video.filter { tracker.rect(of: $0).intersects(fov) }
+                if !inside.isEmpty, inside.count <= 120 {
+                    let set = Set(inside)
+                    plan.video.removeAll { set.contains($0) }
+                    plan.lossless.append(contentsOf: inside)
+                    if plan.video.isEmpty { plan.videoRegion = .zero; plan.wholeFrame = false } else { plan.videoRegion = tracker.boundingRect(plan.video) }
+                    statFoveaTiles += inside.count
+                }
+            }
+            if abs(fov.x - lastFovea.x) > fov.width / 4 || abs(fov.y - lastFovea.y) > fov.height / 4 {
+                lastFovea = fov
+                let n = tracker.expedite(in: fov, now: now)
+                if n > 0 { log("fovea moved to \(fov): \(n) tiles refine first") }
+            }
+        }
         if let rc, !rc.policy.videoEnabled, !plan.video.isEmpty {
             // Extreme tier: no video; motion goes lossless at the tier's frame cap through the refinement queue.
             tracker.markVideo(plan.video, now: now)
@@ -452,6 +471,24 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
     private var lastDirectNanos: UInt64 = 0
 
+    // Foveated two-layer mode (DESIGN §3.3): on Constrained/Extreme tiers a window of about a third
+    // of the screen around the input locus gets native lossless tiles and copy-rects at top priority
+    // and refines first; the base layer is the ladder's low rung. Inert on Local/Normal.
+    private var foveaActive: Bool { (rc?.tier.rawValue ?? 0) >= LinkTier.constrained.rawValue }
+    private var lastFovea: PixelRect = .zero
+    private func fovea(_ tracker: TileTracker) -> PixelRect? {
+        guard foveaActive else { return nil }
+        let l = injector?.locus ?? (0.5, 0.5)
+        let w = Int(Double(tracker.width) * 0.577), h = Int(Double(tracker.height) * 0.577)   // a third of the area
+        let x = min(max(0, Int(l.x * Double(tracker.width)) - w / 2), tracker.width - w)
+        let y = min(max(0, Int(l.y * Double(tracker.height)) - h / 2), tracker.height - h)
+        return PixelRect(x: x, y: y, width: w, height: h)
+    }
+    private func locusTile(_ tracker: TileTracker) -> (col: Int, row: Int)? {
+        guard foveaActive, let l = injector?.locus else { return nil }
+        return (min(tracker.cols - 1, Int(l.x * Double(tracker.cols))), min(tracker.rows - 1, Int(l.y * Double(tracker.rows))))
+    }
+
     /// Progressive, whole-picture refinement of a fresh picture (DESIGN §3.3): level 0 is the tiny
     /// keyframe, then the ladder climbs rung by rung as each step is acked, then lossless lands in
     /// large centre-first blocks. Per-tile refinement is gated off until this is done, and nothing
@@ -506,7 +543,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     let tiles = tracker.tiles(covering: [rect])
                     if !tiles.allSatisfy({ tracker.isCrisp($0) }) { blocks.append(rect) }
                 } }
-                let cx = tracker.width / 2, cy = tracker.height / 2
+                var cx = tracker.width / 2, cy = tracker.height / 2
+                if foveaActive, let l = injector?.locus { cx = Int(l.x * Double(tracker.width)); cy = Int(l.y * Double(tracker.height)) }
                 blocks.sort { a, b in abs(a.x + a.width / 2 - cx) + abs(a.y + a.height / 2 - cy) < abs(b.x + b.width / 2 - cx) + abs(b.y + b.height / 2 - cy) }
                 fresh = .blocks(remaining: blocks, inFlightBytes: 0)
                 log("fresh picture: rung \(rc.rung) is the top the target affords; \(blocks.count) lossless blocks of \(bw)x\(bh), centre-first")
@@ -524,7 +562,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard !remaining.isEmpty else { fresh = .done; log("fresh picture: complete"); return }
         guard let src = lastFrame, var tracker else { return }
         refillTiles(now: now)
-        guard tileTokens > 0, now - lastDirectNanos > 100_000_000 else { return }
+        // One block in flight and budget-limited: it does not yield to motion (that would starve the
+        // base picture whenever something animates), it just takes the leftover tokens.
+        guard tileTokens > 0 else { return }
         let rect = remaining.removeFirst()
         CVPixelBufferLockBaseAddress(src, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
@@ -733,7 +773,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard fresh == .done else { freshBlocksStep(now: now); return }
         let perSecond = Double(lastBudget.tileKbps * 1000 / 8)
         guard tileTokens > perSecond * 0.3 * 0.5, Double(refinementInFlight) < perSecond * 0.3 else { return }
-        let due = tracker.due(now: now, limit: 96)
+        let due = tracker.due(now: now, limit: 96, centre: locusTile(tracker))
         guard !due.isEmpty else { return }
         // Take tiles until the budget is spent (allowed to go negative once).
         var take: [Int] = []
@@ -1042,8 +1082,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                        statCaptures, capMs, statDirtyTiles, statDiffPruned, rc?.targetKbps ?? 0, rc?.capacityKbps ?? 0, rc?.queueMs ?? 0, rc?.rung ?? 0, srttNanos / 1e6,
                        unacked.count, statSkippedBudget, statDropped, statLost, enc, statInput)
                 + (statNacks > 0 ? " nacks \(statNacks) resent \(statNackResent)" : "") + " fresh \(fresh)"
-                + String(format: " control %.0f kbps effort %@", Double(statControlBytes) * 8 / 5 / 1000, effortLevel))
-            statControlBytes = 0
+                + String(format: " control %.0f kbps effort %@ fovea %@%@", Double(statControlBytes) * 8 / 5 / 1000, effortLevel, foveaActive ? "on" : "off", statFoveaTiles > 0 ? " (\(statFoveaTiles) tiles)" : ""))
+            statControlBytes = 0; statFoveaTiles = 0
             statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0
             statTileBytes = 0; statTileRects = 0; statRefineBytes = 0; statCopyRects = 0; statDirtyTiles = 0; statDiffPruned = 0; statTileSkipped = 0
         }

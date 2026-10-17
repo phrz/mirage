@@ -103,6 +103,10 @@ final class ViewerSession: @unchecked Sendable {
     var watchRect: PixelRect = .zero
     private(set) var lastWatchedTileNanos: UInt64 = 0, lastWatchedVideoNanos: UInt64 = 0
     private(set) var watchedTileBytes = 0, watchedTileCount = 0, watchedDirectBytes = 0
+    /// Foveation metric: the first lossless tile within ~100 px of the pointer after the stream started.
+    private var pointerRect: PixelRect = .zero
+    private var streamStartNanos: UInt64 = 0
+    private(set) var legibleUnderPointerMs: Double? = nil
     static let debugTiles = ProcessInfo.processInfo.environment["MIRAGE_DEBUG_TILES"] != nil
     func resetWatched() { videoQueue.async { self.watchedTileBytes = 0; self.watchedTileCount = 0; self.watchedDirectBytes = 0 } }
     func windowsSnapshot() -> [ControlMessage.WindowInfo] { predictorLock.lock(); defer { predictorLock.unlock() }; return windows }
@@ -244,7 +248,7 @@ final class ViewerSession: @unchecked Sendable {
                 statsLock.unlock()
                 predictorLock.lock(); predictor.timeoutNanos = UInt64(rtt * 3) + 500_000_000; predictorLock.unlock()
             case .streamInfo(let info):
-                videoQueue.async { self.compositor?.configure(width: info.width, height: info.height); self.onChange?() }
+                videoQueue.async { self.compositor?.configure(width: info.width, height: info.height); self.onChange?(); self.streamStartNanos = Clock.nowNanos(); self.legibleUnderPointerMs = nil }
                 Task { @MainActor in model.streamInfo = info; model.status = "streaming \(info.width)x\(info.height) from \(host)" }
             case .cursorShape(let c):
                 if let img = NSImage(data: c.png) {
@@ -314,6 +318,10 @@ final class ViewerSession: @unchecked Sendable {
             let n = compositor?.applyTiles(fresh, crossfade: t.refinement) ?? 0
             statsLock.lock(); sTileBytes += t.bytes; sTileRects += n; statsLock.unlock()
             if t.refinement { lastRefinementNanos = now }
+            if legibleUnderPointerMs == nil, streamStartNanos > 0, !pointerRect.isEmpty, t.tiles.contains(where: { $0.rect.intersects(pointerRect) }) {
+                legibleUnderPointerMs = Double(now - streamStartNanos) / 1e6
+                log(String(format: "legible under the pointer %.0f ms after the stream started", legibleUnderPointerMs!))
+            }
             if !watchRect.isEmpty {
                 let inside = t.tiles.filter { $0.rect.intersects(watchRect) }
                 if !inside.isEmpty {
@@ -462,7 +470,15 @@ final class ViewerSession: @unchecked Sendable {
 
     private func nextSeq() -> UInt64 { predictorLock.lock(); defer { predictorLock.unlock() }; inputSeq += 1; return inputSeq }
 
+    /// Remembers where the pointer is (stream px) for the foveation metric.
+    func notePointer(x: Double, y: Double) {
+        guard let c = compositor, c.width > 0 else { return }
+        let px = Int(x * Double(c.width)), py = Int(y * Double(c.height))
+        videoQueue.async { self.pointerRect = PixelRect(x: px - 100, y: py - 100, width: 200, height: 200) }
+    }
+
     func sendMouseMove(x: Double, y: Double) {
+        notePointer(x: x, y: y)
         // Coalesce to ~60 Hz; the control stream is ordered so later moves supersede earlier ones anyway.
         let now = Clock.nowNanos()
         if now - lastMoveSent < 15_000_000 { pendingMove = .init(x: x, y: y); scheduleMoveFlush(); return }
@@ -589,6 +605,7 @@ extension ViewerSession {
             var scenario: String?, crispMs: [Double]?, crispMsMedian: Double?, crispMsMax: Double?
             var watchedTileBytes: Int?, watchedTileCount: Int?, watchedKbps: Double?, watchedDirectKbps: Double?
             var keyLatencyMs: [Double]?, keyLatencyMsMedian: Double?, keyLatencyMsMax: Double?
+            var legibleUnderPointerMs: Double?
             var samples: [Sample]
         }
         let target = MainActor.assumeIsolated { lastRequest?.bitrateKbps ?? 0 }
@@ -612,6 +629,7 @@ extension ViewerSession {
                       watchedKbps: scenario.map { Double(watchedTileBytes) * 8 / 1000 / max(1, $0.activeSeconds) },
                       watchedDirectKbps: scenario.map { Double(watchedDirectBytes) * 8 / 1000 / max(1, $0.activeSeconds) },
                       keyLatencyMs: scenario?.keyLatencyMs, keyLatencyMsMedian: scenario.map { median($0.keyLatencyMs) }, keyLatencyMsMax: scenario?.keyLatencyMs.max(),
+                      legibleUnderPointerMs: legibleUnderPointerMs,
                       samples: samples)
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         return (try? enc.encode(out)) ?? Data()

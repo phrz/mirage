@@ -83,6 +83,16 @@ final class ScenarioRunner {
         session.log("scenario \(name) for \(Int(seconds)) s against window \(w.id) \(w.frame)")
         session.watchRect = w.frame
         let ppp = await MainActor.run { session.pixelsPerPoint }
+        if name == "fovea" {
+            // Pointer over the bench text from the start; the session logs when text under it became lossless.
+            let (px, py) = (w.frame.x + w.frame.width / 2, w.frame.y + w.frame.height / 2)
+            let (nx, ny) = normalized(px, py)
+            session.notePointer(x: nx, y: ny)
+            session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
+            try? await Task.sleep(for: .seconds(seconds))
+            activeSeconds = seconds
+            return
+        }
         // Let the opening keyframe's full-screen lossless refinement finish first (up to 60 s): the
         // measurements are about the interaction, not the first picture.
         var quiet = 0

@@ -137,6 +137,13 @@ public struct TileTracker {
         }
     }
 
+    /// Pending tiles inside `rect` become due now (a fovea moved over them).
+    public mutating func expedite(in rect: PixelRect, now: UInt64) -> Int {
+        var n = 0
+        for i in tiles(covering: [rect]) where cells[i].pending && cells[i].dueNanos > now { cells[i].dueNanos = now; n += 1 }
+        return n
+    }
+
     /// Lossless tiles the budget could not carry now: keep them pending, due shortly.
     public mutating func `defer`(_ tiles: [Int], now: UInt64, delayNanos: UInt64 = 50_000_000) {
         for i in tiles {
@@ -168,9 +175,9 @@ public struct TileTracker {
     /// Pending tiles whose due time has passed, oldest-pending first and viewport-centre first
     /// among equals (within 100 ms). The caller sends as many as the byte budget allows and
     /// calls `sent` for those.
-    public func due(now: UInt64, limit: Int) -> [Int] {
+    public func due(now: UInt64, limit: Int, centre: (col: Int, row: Int)? = nil) -> [Int] {
         var out: [(Int, UInt64, Int)] = []
-        let cx = cols / 2, cy = rows / 2
+        let cx = centre?.col ?? cols / 2, cy = centre?.row ?? rows / 2
         for i in 0..<cells.count where cells[i].pending && cells[i].dueNanos <= now {
             let c = i % cols, r = i / cols
             out.append((i, cells[i].pendingSince / 100_000_000, abs(c - cx) + abs(r - cy)))
