@@ -114,7 +114,7 @@ base = lerp(base, haze_col, haze[..., None])
 
 # ---- inferior mirage: sky reflected on hot sand just below the horizon, as thin stratified sheets
 sky_h = np.array([0.86, 0.93, 1.00])     # bright sky right at the horizon, as a sheet of light
-band_px = 44 * S
+band_px = 50 * S
 ypix = np.arange(H, dtype=np.float32)[:, None]
 fall = np.exp(-(ypix / band_px) ** 1.6)                              # smooth falloff with depth
 # stratification: smooth variation along y with a slow drift along x (sheets of hot air)

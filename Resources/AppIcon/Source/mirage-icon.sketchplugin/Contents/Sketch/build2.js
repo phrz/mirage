@@ -52,24 +52,25 @@ var ARROW = 'M0,0 L0,82 L19.5,64 L33.5,95 L47.5,88.5 L33.5,58.5 L60,58.5 Z';
 // Inverted, squashed copy of the pointer whose outline is displaced horizontally by a smooth
 // shimmer function of depth. Edges are subdivided so the wobble shows along vertical edges.
 var ARROW_PTS = [[0, 0], [0, 82], [19.5, 64], [33.5, 95], [47.5, 88.5], [33.5, 58.5], [60, 58.5]];
-function shimmer(r) {   // r = px below the horizon
-  var amp = 1.5 + 0.075 * r;
-  return amp * (0.55 * Math.sin(r / 9.5) + 0.45 * Math.sin(r / 4.1 + 1.3) + 0.25 * Math.sin(r / 17 + 0.4)) + 2.5 * Math.sin(r / 31);
-}
+// Heat-shimmer warp for the inverted image. Primary motion is VERTICAL: rows are pushed up/down by a
+// sine keyed on depth below the horizon (like a rippled water reflection), amplitude growing with depth.
+// A much shorter-wavelength, small horizontal jiggle rides on top.
+var BAND = 56;   // px below the horizon where the mirage sheet has faded out (matches gen_textures band)
+function warpY(r) { return (0.8 + 0.075 * r) * Math.sin(r / 2.6 + 0.6) + (0.4 + 0.03 * r) * Math.sin(r / 6.1 + 2.0); }
+function warpX(r) { return 1.1 * Math.sin(r / 0.9) + 0.6 * Math.sin(r / 1.7 + 1.0); }
 function displacedReflection(scale, cx, cy) {
-  var squash = 0.5, bottom = cy + 95 * scale, centre = cx + 30 * scale;
-  function map(p) {  // design units -> reflected absolute point (before displacement)
-    var X = cx + p[0] * scale, Y = cy + p[1] * scale;
-    return [X, HORIZON + (bottom - Y) * squash];
-  }
+  var squash = 0.5, bottom = cy + 95 * scale;
+  function map(p) { var X = cx + p[0] * scale, Y = cy + p[1] * scale; return [X, HORIZON + (bottom - Y) * squash]; }
   var out = [];
   for (var i = 0; i < ARROW_PTS.length; i++) {
     var a = map(ARROW_PTS[i]), b = map(ARROW_PTS[(i + 1) % ARROW_PTS.length]);
-    var n = Math.max(1, Math.ceil(Math.abs(b[1] - a[1]) / 1.5));
+    var len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    var n = Math.max(1, Math.ceil(len / 1.2));            // dense sampling on every edge so the y-warp shows
     for (var k = 0; k < n; k++) {
       var t = k / n, x = a[0] + (b[0] - a[0]) * t, y = a[1] + (b[1] - a[1]) * t;
-      var r = y - HORIZON, stretch = 1 + 0.0012 * r;
-      out.push([(centre + (x - centre) * stretch + shimmer(r)).toFixed(2), y.toFixed(2)]);
+      var r = Math.max(0, y - HORIZON);
+      var yy = Math.max(HORIZON, y + warpY(r)), xx = x + warpX(r);
+      out.push([xx.toFixed(2), yy.toFixed(2)]);
     }
   }
   return 'M' + out.map(function (q) { return q[0] + ',' + q[1]; }).join(' L') + ' Z';
@@ -130,13 +131,13 @@ function buildIcon(ab, opts) {
 
   // ---- MIRAGE REFLECTION (part of the ground, not the pointer): inverted, squashed, outline displaced
   var refl = G('Mirage Reflection', sand);
-  var reflMask = rect(refl, 'Reflection Fade', cx - 80, HORIZON, 60 * scale + 160, 120, lin([
-    [0, 'rgba(0,0,0,1)'], [0.3, 'rgba(0,0,0,0.85)'], [0.7, 'rgba(0,0,0,0.3)'], [1, 'rgba(0,0,0,0)']]));
+  var reflMask = rect(refl, 'Reflection Fade', cx - 80, HORIZON, 60 * scale + 160, BAND, lin([
+    [0, 'rgba(0,0,0,1)'], [0.25, 'rgba(0,0,0,0.9)'], [0.5, 'rgba(0,0,0,0.55)'], [0.75, 'rgba(0,0,0,0.2)'], [1, 'rgba(0,0,0,0)']]));
   reflMask.sketchObject.hasClippingMask = true; reflMask.sketchObject.clippingMaskMode = 1;
   path(refl, 'Reflected Pointer', displacedReflection(scale, cx, cy),
-    lin([[0, 'rgba(70,84,110,0.42)'], [1, 'rgba(70,84,110,0.18)']]), { blur: blur(2.5) });
+    lin([[0, 'rgba(70,84,110,0.48)'], [1, 'rgba(70,84,110,0.2)']]), { blur: blur(5) });
   // bright turbulent air veils the inverted image
-  rect(refl, 'Air Veil', cx - 80, HORIZON, 60 * scale + 160, 60, lin([[0, 'rgba(226,238,252,0.55)'], [1, 'rgba(226,238,252,0)']]));
+  rect(refl, 'Air Veil', cx - 80, HORIZON, 60 * scale + 160, BAND, lin([[0, 'rgba(226,238,252,0.55)'], [1, 'rgba(226,238,252,0)']]));
   refl.adjustToFit();
 
   // ---- CURSOR: the macOS pointer standing on the vanishing line, its base dissolving into the sheet of light
