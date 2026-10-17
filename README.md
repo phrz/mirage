@@ -4,7 +4,7 @@ A remote desktop for Macs and Apple devices that is designed around bad links
 (high latency, ~1 Mbps) and a tailnet instead of accounts. See [docs/DESIGN.md](docs/DESIGN.md)
 for the architecture, the teardown of Astropad's LIQUID that informed it, and the milestones.
 
-**Status: M2.** QUIC link over the tailnet, one-time 6-digit pairing (PAKE), mutual
+**Status: M2.5.** QUIC link over the tailnet, one-time 6-digit pairing (PAKE), mutual
 Ed25519 authentication, and a hybrid desktop codec: ScreenCaptureKit dirty tiles classified by
 motion history; sparse changes (typing, carets, highlights) go as pixel-exact WebP rects on a
 reliable QUIC stream, sustained motion goes through hardware HEVC (low-latency) on QUIC
@@ -16,6 +16,13 @@ copy-rects mosh-style. A delay-based rate controller on the host keeps the link 
 Measured from a Tokyo hotel to Dallas (144 ms RTT, DESIGN §6): idle 18–26 kbps, typing 45–50 kbps,
 a keystroke's pixels back in one RTT plus serialization (176–187 ms), scrolls and drags as
 copy-rects with local prediction confirmed, text under the pointer pixel-exact 2 s after connecting.
+M2.5 (DESIGN §3.3c, §4a, §6 "M2.5") made it tolerant of droppy links, measured on loopback: a session
+survives a 30 s outage and comes back in 0.23 s with the picture, caches and prediction state intact
+(resume tokens; a killed host gets a fresh stream in 2.2 s with no re-pairing); 5 % datagram loss costs
+a longest video gap of 142 ms and a 2 s loss burst is over 134–309 ms after it ends (parity on every
+frame, fragment and whole-frame NACKs, keyframes last);
+input rides datagrams with mosh-style redundancy and 1000 keystrokes under 5 % loss plus 2 s bursts
+arrive once, in order; keepalives are one small datagram per 10 s with a 45 s idle timeout.
 
 ## Build
 
@@ -96,7 +103,15 @@ clicks and typing pay the link RTT.
 The first picture of a stream is one tiny keyframe within a fraction of a second, then the
 ladder climbs and lossless lands in large blocks, never as a march of tiles; on constrained links
 quality follows the pointer (foveated). If the link drops, the viewer keeps the last picture and
-reconnects by itself. `--observe` shows the picture without forwarding any input.
+reconnects by itself (every second while the host still holds the session, then backing off to
+15 s); the host resumes the same session, with its caches, on the new connection. Keystrokes typed
+while the host is unreachable are queued (the overlay counts them); after 10 s the viewer asks:
+`⌃⌥⌘↩` sends them, `⌃⌥⌘⌫` drops them. `--observe` shows the picture without forwarding any input.
+
+`scripts/resilience-test.sh all` runs the DESIGN §4a loopback scenarios (outage, host restart, 5 %
+loss, 2 s bursts, input integrity, keepalive) against a local host in input-sink mode
+(`MIRAGE_INPUT_SINK=/path`: the host writes what it would inject to a file and injects nothing);
+`MIRAGE_TEST_LOSS=0.05 MIRAGE_TEST_BURST_MS=2000` inject loss in either process's datagram path.
 
 `--headless --duration 60 --stats out.json` connects and decodes without a window and writes
 per-second samples plus medians, for measuring a link over SSH. `--scenario typing:30` (or
@@ -150,5 +165,5 @@ Sources/MirageHost             macOS: SCStream capture (BGRA + dirty rects), til
 Sources/mirage-viewer          macOS viewer (AppKit window, CAMetalLayer, SwiftUI overlay, scripted scenarios)
 Sources/miraged, Sources/mirage  CLIs
 experiments/                   measurements that fixed the design (tilebench, seqbench, probes) and the test bench app
-scripts/                       make-viewer-app.sh, deploy-host.sh
+scripts/                       make-viewer-app.sh, deploy-host.sh, resilience-test.sh (§4a loopback scenarios + dummynet notes)
 ```

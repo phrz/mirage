@@ -396,6 +396,77 @@ tiers the fovea covers the screen and the mode is inert.
 - **Viewer.** Reconnects forever (1, 2, 4, 8, then 15 s) keeping the last picture, re-requests the
   stream; `--observe` shows the picture without forwarding input; QUIC idle timeout 10 s.
 
+### 3.3c As built in M2.5 (2026-10-17, resilience on droppy links)
+
+The §4a bar, implemented on loopback (measurements in §6 "M2.5 (loopback)"):
+
+- **Session resume.** `Welcome` carries a 32-byte resume token; a reconnecting viewer presents it in
+  `Hello` and still authenticates in full. When a control stream ends, the host *suspends* its
+  streamer instead of stopping it: capture and timers stop, everything else stays (tile tracker and
+  its crisp map, rate controller target, tier and rung, encoder, frame/tile/input sequence numbers,
+  the last frame sent) for five minutes. Tile messages that were unacked at the cut have their rects
+  queued for a lossless resend; unacked video frames are forgotten. A claim of the token moves the
+  streamer to the new connection (also away from an old connection the host has not yet noticed is
+  dead), the viewer re-sends its stream request, and `resume` restarts capture with the first frame
+  forced fully dirty so the diff against the last frame finds whatever changed during the gap, sends
+  a keyframe masked to the tiles the viewer does not hold crisp, re-publishes the window list and
+  cursor, and keeps the ladder rung. The viewer keeps its canvas and predictor across the gap; a
+  same-size `reset` (a genuinely new session, e.g. a restarted host) keeps the pixels too, until the
+  first keyframe replaces them (review M11), and resets the assembler (M4). A killed host has no
+  state to resume: the viewer gets a fresh stream, no re-pairing.
+- **Reconnect policy.** The viewer never dead-ends: backoff 1, 2, 4, 8, 15 s, but while the session is
+  resumable it dials every second with a 4 s connect timeout, because the bar is "back within 2 s of
+  the path returning" and QUIC's own Initial retransmits back off too slowly to meet it. A stall
+  watchdog redials after 12 s without any packet from the host (resume makes a wrong redial cheap:
+  one handshake and one masked keyframe); Network.framework's viability / better-path callbacks
+  redial at once when the path changes under a stalled connection. Each connection is closed on
+  exit and its receive loops are generation-tagged (M5).
+- **Idle and keepalive.** QUIC idle timeout 45 s on both ends, so a 30 s outage closes nothing
+  (an 8 s black hole survives without even a reconnect). The viewer's keepalive is one 32-byte
+  datagram ping per 10 s; the host echoes it with its clock, which also gives RTT, loss and the clock
+  offset. Host status goes on change (and every 10 s), not every second.
+- **Loss, video.** XOR parity on every frame of two or more datagrams (group 8, group 4 above 2 %
+  measured fragment loss); fragment NACKs ask only for indices below the highest received until the
+  tail is overdue (review H5); a short sequence gap gets whole-frame NACKs for every missing frame in
+  one round trip, a gap of more than 8 frames is reported as a burst so the host sends a recovery
+  keyframe at once instead of after a timeout; a complete recovery frame drops the holes before it.
+  The viewer reports per frame how many fragments needed parity or a NACK; the host's *fragment*
+  loss rate sizes parity, while the tier reads only the loss the recovery layer could not hide (frames
+  given up): 5 % raw loss repaired at 30 fps is not an Extreme link. Datagrams are paced from the rate
+  (H6) on their own queue, resends queue behind the frame in flight, and a paced frame contributes
+  no delay or dispersion sample (pacing time is ours, not the link's); a frame that needed recovery
+  contributes none either (a NACK round trip is not queuing delay). Stale-frame purging waits for the
+  pacer plus the viewer's own give-up time (H3), the fresh-picture climb and the keyframe demotion
+  share one affordability test (H4), the fps-shortfall ladder compares with the cap the host applied
+  and only when budget held frames back (H7), parity rebuilds a missing non-last fragment at full size
+  (H1), and the frame sequence is monotonic across streamers of one host process (M4).
+- **Loss, tiles and copy-rects: kept on the reliable streams.** Measured on loopback with 5 % loss
+  injected on the datagram path, video recovers every loss in under a frame interval (parity) or one
+  RTT plus 30 ms (NACK), which is exactly what QUIC's own per-stream retransmission gives a lost tile
+  packet; the interactive and refinement streams are already separate so a loss stalls only its own
+  class. Copy-rects are order-dependent and not idempotent, so a datagram variant would need its own
+  ordering layer against the tiles that touch the same pixels. Parity would only buy anything where a
+  round trip is itself a freeze (the Extreme tier's 1 s RTTs), and that is where §3.9 item 6 puts it.
+  Decision: stream, revisit for Extreme with the dummynet rig.
+- **Input.** Datagrams with redundancy (`InputPacket`): the latest pointer state and every unacked
+  discrete event (keys, buttons, scrolls, modifier changes) in each packet, oldest first; the host
+  applies each event once in sequence order and acks the highest event and pointer sequence; the
+  viewer retransmits with backoff until acked, caps the queue at 512 events (shown in the overlay),
+  and after 10 s unacked holds the keystrokes for a decision: ⌃⌥⌘↩ sends them, ⌃⌥⌘⌫ drops them.
+  Scripted and headless runs flush automatically. `MIRAGE_INPUT_SINK=/path` makes the host record
+  every input it would inject to a file and inject nothing; the input-integrity scenario refuses to
+  run against a host that is not in that mode, and the scenario runner re-checks its guards before
+  every burst and no longer ends with ⌘A+⌫ (review M8, M9).
+- **Path migration.** Not testable here (one interface). Network.framework decides whether a QUIC
+  connection migrates; what Mirage does is react to its viability / better-path callbacks and to a
+  stall by redialing with the resume token, so an IP change costs at most a handshake and a masked
+  keyframe. Untested.
+- **Test rig.** `MIRAGE_TEST_LOSS` / `MIRAGE_TEST_BURST_MS` / `MIRAGE_TEST_BURST_EVERY_S` /
+  `MIRAGE_TEST_SEED` inject loss in the host's video datagram path and the viewer's input datagram
+  path; `scripts/resilience-test.sh` runs the loopback scenarios (host in input-sink mode, the test
+  bench's `--motion` window as the moving picture) and asserts the §4a rows; its last section lists
+  the `dnctl`/`pfctl` profiles and the bus-trace replay for the conditions it cannot create itself.
+
 ### 3.4 Rate control and adaptation
 
 - Client sends receive timestamps for every packet; host runs a GCC/BBR-style **delivery-rate
@@ -614,17 +685,17 @@ Bitrate adaptation is in place (delay-based controller, tiers). Resilience to dr
 separate axis and gets its own acceptance test, run with the macOS link conditioner
 (`dnctl`/`pfctl`: loss, outage, delay) and on real cellular links:
 
-| Requirement | Pass condition |
-|---|---|
-| Outage survival | A 30 s total outage returns to the same session with the last picture kept, cache and prediction state intact, no re-pairing, within 2 s of the path returning |
-| IP change | A cellular handoff or Wi-Fi→cellular switch is a QUIC connection migration, not a reconnect: no visible interruption beyond the frames lost in transit |
-| Reconnect policy | The viewer never dead-ends: exponential backoff 1→15 s forever, "reconnecting…" badge with attempt count, automatic stream resume |
-| Loss | 5 % random loss and 2 s loss bursts: no freeze longer than 500 ms; recovery by fragment NACK and parity, keyframe only as last resort |
-| Input integrity | Input is never lost or duplicated: latest pointer state wins, keystrokes queue with a visible cap during a gap, user chooses flush or drop after a long gap |
-| Idle timeout | Host and client idle timeouts long enough that a 30 s outage is not a close; keepalives sparse (one small datagram per 10 s) |
+| Requirement | Pass condition | M2.5 status (loopback, §6) |
+|---|---|---|
+| Outage survival | A 30 s total outage returns to the same session with the last picture kept, cache and prediction state intact, no re-pairing, within 2 s of the path returning | **Pass**: host frozen 30 s, same session resumed, picture back 0.23 s after the path returned |
+| IP change | A cellular handoff or Wi-Fi→cellular switch is a QUIC connection migration, not a reconnect: no visible interruption beyond the frames lost in transit | **Untested** (one interface here); implemented as path-change → redial with the resume token |
+| Reconnect policy | The viewer never dead-ends: exponential backoff 1→15 s forever, "reconnecting…" badge with attempt count, automatic stream resume | **Pass**: host killed and restarted 30 s later, 5 attempts, no re-pairing, fresh stream 2.2 s after the host returned |
+| Loss | 5 % random loss and 2 s loss bursts: no freeze longer than 500 ms; recovery by fragment NACK and parity, keyframe only as last resort | **Pass** (datagram path): 5 % → longest video gap 142 ms, 0 frames given up; 2 s bursts → video back 134–309 ms after each burst ends. Reliable-stream loss needs the dummynet rig (sudo, documented) |
+| Input integrity | Input is never lost or duplicated: latest pointer state wins, keystrokes queue with a visible cap during a gap, user chooses flush or drop after a long gap | **Pass**: 1000 keystrokes under 5 % loss each way plus 2 s bursts, every event applied once, in order |
+| Idle timeout | Host and client idle timeouts long enough that a 30 s outage is not a close; keepalives sparse (one small datagram per 10 s) | **Pass**: 45 s idle timeout both ends, an 8 s black hole survives without a reconnect, 5 pings in 42 s |
 
 This is milestone work in its own right (M2.5 or the first part of M3), not a side effect of
-the codec.
+the codec. Built 2026-10-17 as M2.5 (§3.3c); loopback measurements in §6.
 
 ## 5. Open questions to settle by measurement, not debate
 
@@ -936,3 +1007,60 @@ Platform findings from M2:
   starts above that (40–90 ms).
 - The 1600×900 virtual display reports `CGDisplayPixelsWide` of 1600 for a 3200×1800 mode;
   take the mode's pixel size, not the display's.
+
+### M2.5 (2026-10-17, resilience on droppy links, loopback)
+
+Everything here ran on this MacBook against itself: `miraged serve --port 7800` in input-sink mode
+(`MIRAGE_INPUT_SINK`, so no input of any kind was injected), headless viewers on `localhost`, the
+test bench's `--motion` window as the moving picture, 1280×720 stream at an 800 kbps cap, loopback
+RTT ~0.5 ms. Loss was injected in Mirage's own datagram send paths (`MIRAGE_TEST_LOSS`,
+`MIRAGE_TEST_BURST_MS`); outages were made by stopping or killing the host process. The whole run
+is `scripts/resilience-test.sh all`; numbers are from its last run. What loopback cannot do (real
+delay, loss on the reliable streams, an IP change) is listed at the end.
+
+| §4a row | Scenario | Result |
+|---|---|---|
+| Outage survival | `kill -STOP` the host 12 s into the stream, 30 s, `kill -CONT` | The viewer's watchdog redialed after 13 s of silence; dials failed every 4 s until the host woke; the first dial after `SIGCONT` authenticated with the token, the host logged `resuming its session` and `resumed … rung 0, tier Local, target 800 kbps, fresh done; masked keyframe next`; **picture back 0.23 s after the path returned**, 148 ms from the resume to the first new pixels; same viewer canvas and predictor throughout; no re-pairing |
+| Idle timeout | `kill -STOP` 8 s | The QUIC connection survived (idle timeout 45 s), no reconnect, no resume; picture back 0.05 s after `SIGCONT` |
+| Reconnect policy | `kill -9` the host, restart 30 s later | 5 attempts at 1 s intervals (4 s timeouts), no re-pairing, a fresh stream 2.2 s after the host was back (a killed host keeps no session state; the viewer kept its picture until the first keyframe) |
+| Keepalive | 42 s idle | 5 datagram pings (one per 10 s plus the opener), nothing closed |
+| Loss, 5 % random | 45 s, freezes counted from 20 s (after the fresh picture's lossless blocks, which hold video to 3–8 fps at this cap: a budget matter, not loss) | 0 % baseline: 13 fps median, longest video gap 125 ms. 5 %: 13 fps median, **longest video gap 142 ms**, no gap over 500 ms, 106 fragments rebuilt from parity, 28 resent after 23 NACKs, 0 frames given up, 15 keyframes in 45 s (the ladder's fresh-picture climbs and recoveries), controller target stayed at the cap, tier Local |
+| Loss, 2 s bursts every 10 s (plus 5 %) | 48 s, freezes counted from 15 s (three bursts in the window) | Each burst is one video gap of **2.13, 2.21 and 2.31 s**: the picture was back 134, 213 and 309 ms after the burst ended; two of the three were noticed by the viewer's gap report on the first post-burst frame (recovery keyframe within ~150 ms), the third had swallowed a keyframe whole and was recovered by the host's stale deadline (3 srtt + 350 ms after the pacer finished); 48 keyframes in 48 s, most of them the fresh-picture climbs that follow each recovery; fps 20–30 between bursts, tier Local throughout |
+| Input integrity | 1000 scripted keystrokes (2000 key events) at 20 keys/s with pointer moves interleaved; 5 % loss on the viewer's input datagrams and on the host's acks, a 2 s burst each way | Host applied **2000 of 2000 events, in order, no duplicates, none missing**; 2334 datagrams for 2000 events (redundancy, not loss), nothing dropped by the queue cap; the same property holds in the unit test's simulated link |
+
+Things the runs taught:
+
+- Pacing from the rate (review H6) broke the controller until the acks were adjusted: a paced
+  frame's one-way delay read as queuing (the pacing time), and its dispersion read 1.25× our own
+  budget as the capacity ceiling, so the target decayed to the 150 kbps floor and the tier to
+  Extreme within 20 s. One-way delay is now measured from when the last datagram left the pacer,
+  paced trains give no capacity sample, and frames that needed a NACK or parity give no delay
+  sample at all.
+- The tier must not read raw fragment loss: with parity and NACKs repairing 5 % loss at 16 fps,
+  the "> 2 % loss → Extreme" rule put the stream on the tiny rung at 5 fps where every remaining
+  loss cost 500 ms. The tier now reads frames given up; raw loss sizes parity.
+- A base keyframe swallowed whole by a burst produces no ack and no gap report (nothing later is
+  sent while it holds the in-flight cap), so the fresh-picture frame must be purgeable like any
+  other; its purge re-arms the fresh picture on the next keyframe.
+- Cancelling an `NWConnectionGroup` does not end its extracted streams on macOS 27: each has to be
+  cancelled for the viewer's receive loop to notice a redial.
+- A host that is killed does not refuse the viewer's dials quickly on loopback; the 4 s connect
+  timeout and 1 s redial are what bound the recovery (2.2–2.5 s here).
+- On loopback the viewer's next Hello reached the host 7 ms before the old connection's suspend had
+  finished, and found no session: the session is now registered as suspended before the streamer's
+  own suspend runs, and a claim waits for that suspend before resuming.
+- Resends must go ahead of the pacer, not behind the frame in flight: queued behind a 17 KB
+  keyframe they arrived after the viewer's 300 ms give-up time and turned one lost datagram into a
+  lost frame, a recovery keyframe, more pacing, and so on until the tier read the losses as Extreme.
+- The host's stale deadline bounds burst recovery (nothing from the viewer can arrive about a frame
+  it never heard of, and the in-flight cap stops new frames behind it), so it sits just above the
+  viewer's own give-up time (3 srtt + 350 ms after the pacer finishes), not comfortably above it.
+- Replacing the HEVC session while a frame is inside it never calls that frame's completion; the
+  `encoding` flag then stayed set and video stopped for good after a ladder step. The rebuild now
+  waits for an idle encoder, and a 2 s watchdog releases the pipeline if it ever happens again.
+
+Not measured here, with the command that would: real delay and loss on the *reliable* streams
+(tiles, copy-rects, control) and the Extreme-tier profiles (`dnctl`/`pfctl`, the sudo section of
+`scripts/resilience-test.sh`); the recorded bus trace (`experiments/linktraces/replay.sh`); an
+IP change (needs two interfaces; the code path is a redial with the resume token).
+
