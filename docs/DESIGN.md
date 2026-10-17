@@ -211,6 +211,20 @@ history** (dirty in N of the last M frames):
    font-aware coding is verified glyph re-rendering: recognize a glyph, render it locally from
    the same font, accept it only if the rendered pixels hash-match the host's, else send
    pixels; lossless by construction.
+   **Reuse is alignment-free; the grid is bookkeeping only (phrz, 2026-10-17).** Three units,
+   three jobs: the 64 px grid for dirty tracking, masks and budgets; merged rects for
+   encoding; **content boxes** for reuse. A content box is a run found by splitting the
+   residual region on background rows and columns (a text line, a word, a control), so its
+   pixels hash the same wherever it appears: after a scroll, in another window, in another
+   app with the same font. Measured (experiments/boxcache, AppKit text): copy-rect explains
+   95 % of a scroll's changed pixels; exact content-box matches then cover 57 % of the
+   residual on scroll and 82 % on typing, versus 11 % / 10 % for grid-tile hashes over the
+   same pixels. A reference costs ~12 bytes; a keystroke lands under 1 KB. **Exactness is a
+   refinement, never a gate**: a box that matches within tolerance (subpixel AA, gamma
+   wobble) is drawn immediately from the cache and marked approximate; its exact pixels
+   backfill at the lowest priority, like video regions building to lossless. RDP's glyph
+   cache and Citrix text caching did exact box reuse a decade ago; combining it with the
+   local prediction layer and the tolerant tier is the new part.
    **Tile cache (phrz, 2026-10-17).** Both ends keep a content-addressed LRU of lossless tiles
    (hash → pixels on the client; hash → "client has it" on the host, confirmed by acks). A
    tile the client already holds is sent as `hash @ (x,y)`, ~20 bytes instead of ~550, which
