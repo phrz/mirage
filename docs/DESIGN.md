@@ -214,13 +214,19 @@ history** (dirty in N of the last M frames):
    **Tile cache (phrz, 2026-10-17).** Both ends keep a content-addressed LRU of lossless tiles
    (hash → pixels on the client; hash → "client has it" on the host, confirmed by acks). A
    tile the client already holds is sent as `hash @ (x,y)`, ~20 bytes instead of ~550, which
-   makes scrolling back, tab switches, re-exposed windows, reopened menus and terminal
-   scrollback nearly free. The prediction half is the novel part: the client also keeps each
-   window's scrolled-away content as an off-screen canvas in document coordinates and draws
-   from it on a scroll-back *before* the host answers; the host's hash references confirm,
-   and a mismatch (content changed) is corrected by real tiles with the same reconciliation
-   rule as scroll prediction. RDP's bitmap cache and NX's image cache do the byte-saving half
-   only.
+   makes same-position recurrence (tab switches, re-exposed windows, reopened menus, dialogs)
+   nearly free. It does **not** help scroll-back by itself: a 30 px wheel step moves every
+   glyph inside its tile, so grid-aligned hashes almost never repeat across a scroll
+   (REVIEW §5). Scroll-back is instead served by a **document-space canvas per window that
+   both ends track**: the host answers a scroll-back with history copy-rects into that canvas
+   and only sends tiles for content never seen, while the client draws from its canvas
+   *before* the host answers and reconciles on mismatch with the same rule as scroll
+   prediction. Consistency model: optimistic references from the host plus a client "miss"
+   message, since a 256 GB host and an iPhone will evict differently; acks are unnecessary on
+   the reliable stream. Hit rates must be measured before either is promised. Tile types also
+   get a one-byte solid-colour and a two-colour form (WebP's floor is 44–95 B for those), and
+   photographic tiles refine to visually lossless (HEVC intra tile or JPEG XL d=1, ~3x under
+   WebP near-lossless), not to bit-exact.
 4. **Refinement**: when a video region stops moving for ~300 ms, its tiles are re-sent via
    path 2 (lossless), so scrolled text snaps crisp. The client composites lossless tiles over
    the video texture and invalidates them when a newer video frame covers them.
@@ -432,14 +438,25 @@ shown to the user only as a small badge next to the purple outline.
 | Constrained | 0.5–2 Mbps or 100–400 ms | the design's main target (this Japan link): tiles for sparse change, video for motion, ladder, prediction |
 | Extreme | <0.5 Mbps or >400 ms RTT or >2 % loss | everything below |
 
+Corrections from REVIEW §5, accepted: tier selection must not rely on packet-dispersion
+capacity estimates (on this tailnet they read 20–100 Mbps for a 1 Mbps path); use the
+controller's delay-limited target rate as the proxy. "Video off" in Extreme is wrong at face
+value: 16-colour tiles of a half-resolution screen are ~45 KB, i.e. 5.6 s per frame at
+64 kbps, so Extreme keeps a tiny HEVC rung (1–2 KB per 320×240 frame) for motion and uses
+tiles for everything else. FEC and mosh-style redundancy only mean something on datagram
+paths: input moves to datagrams with redundancy (latest pointer state + unacked key sequence
+in every packet) in **every** tier, and FEC applies to the video datagrams and to a datagram
+variant of the tile path, not to the reliable QUIC stream.
+
 Extreme mode, in order of payoff:
 
 1. **Pixels become confirmation, not the primary channel.** Local prediction (cursor, scroll,
    drag, caret echo, native menus and dock) runs first; the stream catches up behind it.
    Standard controls get local pressed/hover states from their Accessibility roles and frames.
-2. **Video off.** Only lossless tiles and copy-rects; motion capped at 2–5 fps and sent as
-   paletted tiles (16 colours for UI, which cuts a text tile 2–3x) at 0.5x with MetalFX
-   upscaling; full-colour, full-resolution refinement only for the focused window.
+2. **Video nearly off.** Motion goes through a tiny HEVC rung (1–2 KB per 320×240 frame at
+   2–5 fps, MetalFX-upscaled); everything else is lossless or paletted tiles (16 colours for
+   UI cuts a text tile 2–3x); full-colour, full-resolution refinement only for the focused
+   window.
 3. **Spotlight capture.** Only the focused window (plus menus) is streamed; other windows are
    frozen snapshots with a dim overlay, refreshed on focus.
 4. **Host-side simplification while in this tier**: ask macOS to reduce transparency and
