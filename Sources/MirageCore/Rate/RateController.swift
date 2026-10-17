@@ -73,6 +73,11 @@ public struct RateController {
         rung = Self.tinyRung
     }
 
+    /// One rung up, now (the fresh-picture climb drives this as each step is acked).
+    public mutating func climbOneRung(now: UInt64) {
+        if rung > policy.minRung { rung -= 1; belowSince = 0; aboveSince = 0; lastRungChange = now }
+    }
+
     /// Lossy-first for a recovery or a newly visible picture: back to the tiny rung now, then climb again.
     public mutating func dropToTinyRung(now: UInt64) {
         rung = Self.tinyRung; belowSince = 0; aboveSince = 0; lastRungChange = now

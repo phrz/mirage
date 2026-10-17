@@ -16,6 +16,7 @@ public final class Compositor {
     private let textureCache: CVMetalTextureCache
     private var quadPipeline: MTLRenderPipelineState
     private var fillPipeline: MTLRenderPipelineState
+    private var blendPipeline: MTLRenderPipelineState
     private var yuvPipeline: MTLComputePipelineState
     private let linearSampler: MTLSamplerState
     private let nearestSampler: MTLSamplerState
@@ -26,6 +27,11 @@ public final class Compositor {
     private var videoRGB: MTLTexture?      // decoded frame converted to BGRA (encoded size)
     private var videoUp: MTLTexture?       // upscaled to native when below native
     private var scaler: MTLFXSpatialScaler?
+    private var incoming: MTLTexture?      // pixels still crossfading in (refinement, progressive steps)
+    public struct Fade: Equatable { public var rect: PixelRect; public var startNanos: UInt64 }
+    private var fades: [Fade] = []
+    /// Crossfade length for refinement and progressive steps.
+    public var crossfadeNanos: UInt64 = 150_000_000
     private var scalerSize: (Int, Int, Int, Int) = (0, 0, 0, 0)
     private let lock = NSLock()
     private var generation = 0             // bumped on every change; render() compares
@@ -50,6 +56,12 @@ public final class Compositor {
             quadPipeline = try device.makeRenderPipelineState(descriptor: rp)
             rp.fragmentFunction = lib.makeFunction(name: "fillFragment")
             fillPipeline = try device.makeRenderPipelineState(descriptor: rp)
+            rp.fragmentFunction = lib.makeFunction(name: "blendFragment")
+            rp.colorAttachments[0].isBlendingEnabled = true
+            rp.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha; rp.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            rp.colorAttachments[0].sourceAlphaBlendFactor = .one; rp.colorAttachments[0].destinationAlphaBlendFactor = .zero
+            blendPipeline = try device.makeRenderPipelineState(descriptor: rp)
+            rp.colorAttachments[0].isBlendingEnabled = false
             yuvPipeline = try device.makeComputePipelineState(function: lib.makeFunction(name: "nv12ToBGRA")!)
         } catch { return nil }
         let sd = MTLSamplerDescriptor()
@@ -69,6 +81,8 @@ public final class Compositor {
         d.storageMode = .private
         canvas = device.makeTexture(descriptor: d)
         scratch = device.makeTexture(descriptor: d)
+        incoming = device.makeTexture(descriptor: d)
+        fades = []
         clear()
     }
 
@@ -89,15 +103,17 @@ public final class Compositor {
         guard let cb = commandQueue.makeCommandBuffer() else { return }
         cb.commit(); cb.waitUntilCompleted()
     }
-    public var needsRender: Bool { lock.lock(); defer { lock.unlock() }; return generation != renderedGeneration }
+    public var needsRender: Bool { lock.lock(); defer { lock.unlock() }; return generation != renderedGeneration || !fades.isEmpty }
     public func invalidate() { bump() }
 
     // MARK: Video
 
     /// Writes the masked tiles of a decoded NV12 frame into `region` of the canvas (scaling if the
     /// frame is smaller than the region, i.e. the host is on a lower rung).
-    public func applyVideo(_ image: CVImageBuffer, region: PixelRect, mask: TileMask?, tile: Int = 64) {
-        guard let canvas, CVPixelBufferGetPlaneCount(image) == 2 else { return }
+    public func applyVideo(_ image: CVImageBuffer, region: PixelRect, mask: TileMask?, tile: Int = 64, crossfade: Bool = false) {
+        guard let canvasTex = canvas, CVPixelBufferGetPlaneCount(image) == 2 else { return }
+        let canvas = crossfade ? (incoming ?? canvasTex) : canvasTex
+        if crossfade { beginFade(region.isEmpty ? PixelRect(x: 0, y: 0, width: width, height: height) : region) }
         let vw = CVPixelBufferGetWidthOfPlane(image, 0), vh = CVPixelBufferGetHeightOfPlane(image, 0)
         guard vw > 0, vh > 0 else { return }
         var yTex: CVMetalTexture?, cTex: CVMetalTexture?
@@ -183,8 +199,10 @@ public final class Compositor {
 
     /// Decodes and uploads lossless tiles. Returns the number of tiles applied.
     @discardableResult
-    public func applyTiles(_ tiles: [TileMessage.Tile]) -> Int {
-        guard let canvas, let cb = commandQueue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return 0 }
+    public func applyTiles(_ tiles: [TileMessage.Tile], crossfade: Bool = false) -> Int {
+        guard let canvasTex = canvas, let cb = commandQueue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return 0 }
+        let canvas = crossfade ? (incoming ?? canvasTex) : canvasTex
+        if crossfade { for t in tiles { beginFade(t.rect) } }
         var n = 0
         let bounds = PixelRect(x: 0, y: 0, width: width, height: height)
         for t in tiles {
@@ -202,6 +220,35 @@ public final class Compositor {
         if n > 0 { bump() }
         return n
     }
+
+    /// Starts a crossfade for `rect`: the new pixels live in `incoming` until the fade ends, when
+    /// they are committed to the canvas. A rect still fading when overwritten is committed first.
+    private func beginFade(_ rect: PixelRect) {
+        let r = rect.intersection(PixelRect(x: 0, y: 0, width: width, height: height))
+        guard !r.isEmpty else { return }
+        lock.lock(); fades.append(Fade(rect: r, startNanos: Clock.nowNanos())); lock.unlock()
+    }
+
+    /// Commits fades that have finished (copy incoming → canvas) and returns the ones still running.
+    private func settleFades(now: UInt64, commandBuffer cb: MTLCommandBuffer) -> [(Fade, Float)] {
+        lock.lock(); let list = fades; lock.unlock()
+        var active: [(Fade, Float)] = []
+        var done: [Fade] = []
+        for f in list {
+            let t = Float(now &- f.startNanos) / Float(crossfadeNanos)
+            if t >= 1 { done.append(f) } else { active.append((f, max(0, t))) }
+        }
+        if !done.isEmpty, let canvas, let incoming, let blit = cb.makeBlitCommandEncoder() {
+            for f in done {
+                blit.copy(from: incoming, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: f.rect.x, y: f.rect.y, z: 0), sourceSize: MTLSize(width: f.rect.width, height: f.rect.height, depth: 1),
+                          to: canvas, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: f.rect.x, y: f.rect.y, z: 0))
+            }
+            blit.endEncoding()
+            lock.lock(); fades.removeAll { d in done.contains(d) }; lock.unlock()
+        }
+        return active
+    }
+    public var hasActiveFades: Bool { lock.lock(); defer { lock.unlock() }; return !fades.isEmpty }
 
     public func applyCopyRect(_ rect: PixelRect, dx: Int, dy: Int) {
         guard let canvas, let scratch, let cb = commandQueue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return }
@@ -243,6 +290,7 @@ public final class Compositor {
     /// Draws the canvas into `drawable` at `dest` (drawable pixels), then each displacement.
     public func render(to drawable: CAMetalDrawable, dest: CGRect, displacements: [Predictor.Displacement], bandColors: [UInt32: SIMD4<Float>]) {
         guard let canvas, let cb = commandQueue.makeCommandBuffer() else { return }
+        let activeFades = settleFades(now: Clock.nowNanos(), commandBuffer: cb)
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = drawable.texture; rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
         rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
@@ -269,6 +317,18 @@ public final class Compositor {
         var q = Quad(dst: ndc(full), src: uv(full))
         re.setVertexBytes(&q, length: MemoryLayout<Quad>.stride, index: 0)
         re.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        // Crossfading pixels: the incoming texture over the canvas with alpha rising over 150 ms.
+        if let incoming {
+            re.setRenderPipelineState(blendPipeline)
+            re.setFragmentTexture(incoming, index: 0); re.setFragmentSamplerState(sampler, index: 0)
+            for (f, t) in activeFades {
+                var alpha = SIMD4<Float>(t, t, t, t)
+                var fq = Quad(dst: ndc(f.rect), src: uv(f.rect))
+                re.setVertexBytes(&fq, length: MemoryLayout<Quad>.stride, index: 0)
+                re.setFragmentBytes(&alpha, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+                re.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            }
+        }
         for d in displacements {
             let r = d.rect.intersection(full)
             guard !r.isEmpty else { continue }
@@ -312,6 +372,9 @@ public final class Compositor {
         return tex.sample(s, in.uv);
     }
     fragment float4 fillFragment(VOut in [[stage_in]], constant float4& color [[buffer(0)]]) { return color; }
+    fragment float4 blendFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]], constant float4& alpha [[buffer(0)]]) {
+        float4 c = tex.sample(s, in.uv); return float4(c.rgb, alpha.x);
+    }
     kernel void nv12ToBGRA(texture2d<float, access::read> yTex [[texture(0)]], texture2d<float, access::read> cTex [[texture(1)]],
                            texture2d<float, access::write> out [[texture(2)]], uint2 gid [[thread_position_in_grid]]) {
         if (gid.x >= out.get_width() || gid.y >= out.get_height()) return;

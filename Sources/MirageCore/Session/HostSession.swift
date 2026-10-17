@@ -127,6 +127,8 @@ public enum HostSession {
                 conn.streamer?.handle(ack: ack)
             case .tileAck(let ack):
                 conn.streamer?.handle(tileAck: ack)
+            case .nack(let n):
+                conn.streamer?.handle(nack: n)
             case .mouseMove, .mouseButton, .scroll, .key, .modifiers:
                 guard authenticated != nil else { throw MirageError.protocolViolation("input before auth") }
                 conn.streamer?.handle(input: msg)

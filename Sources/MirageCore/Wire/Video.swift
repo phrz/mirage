@@ -8,6 +8,61 @@ import Foundation
 public enum DatagramType: UInt8 {
     case ping = 0x01      // echoed verbatim by the host; see DatagramPing
     case video = 0x02     // one fragment of an encoded video frame; see VideoFragment
+    case parity = 0x03    // XOR parity over a group of a frame's fragments; see ParityFragment
+}
+
+/// XOR parity datagram: magic(1) type(1) frameSeq(4) groupIndex(2) groupSize(2) firstIndex(2) then
+/// the XOR of the group's fragment payloads, each zero-padded to the longest. Recovers one lost
+/// fragment per group without a round trip (DESIGN review §2.3). Sent on key/recovery frames
+/// always, on other frames when measured loss is high.
+public struct ParityFragment: Equatable, Sendable {
+    public static let headerSize = 12
+    public var frameSeq: UInt32
+    public var groupIndex: UInt16
+    public var groupSize: UInt16
+    public var firstIndex: UInt16
+    public var payload: Data
+
+    public init(frameSeq: UInt32, groupIndex: UInt16, groupSize: UInt16, firstIndex: UInt16, payload: Data) {
+        self.frameSeq = frameSeq; self.groupIndex = groupIndex; self.groupSize = groupSize; self.firstIndex = firstIndex; self.payload = payload
+    }
+
+    public func encode() -> Data {
+        var d = Data(capacity: Self.headerSize + payload.count)
+        d.append(datagramMagic); d.append(DatagramType.parity.rawValue)
+        d.appendBE(frameSeq); d.appendBE(groupIndex); d.appendBE(groupSize); d.appendBE(firstIndex)
+        d.append(payload)
+        return d
+    }
+
+    public static func decode(_ d: Data) -> ParityFragment? {
+        guard d.count >= headerSize, d[d.startIndex] == datagramMagic, d[d.startIndex + 1] == DatagramType.parity.rawValue else { return nil }
+        var r = ByteReader(d, offset: 2)
+        let seq: UInt32 = r.read(), g: UInt16 = r.read(), n: UInt16 = r.read(), f: UInt16 = r.read()
+        guard n > 0 else { return nil }
+        return ParityFragment(frameSeq: seq, groupIndex: g, groupSize: n, firstIndex: f, payload: d.subdata(in: r.offset..<d.endIndex))
+    }
+
+    /// XOR of the payloads (zero-padded).
+    public static func xor(_ parts: [Data]) -> Data {
+        let n = parts.map(\.count).max() ?? 0
+        var out = [UInt8](repeating: 0, count: n)
+        for p in parts { p.withUnsafeBytes { b in for i in 0..<p.count { out[i] ^= b[i] } } }
+        return Data(out)
+    }
+
+    /// Parity datagrams for a frame's fragment payloads, one per group of `groupSize`.
+    public static func parity(frameSeq: UInt32, payloads: [Data], groupSize: Int = 8) -> [Data] {
+        guard payloads.count >= 2 else { return [] }
+        var out: [Data] = []
+        var g = 0, i = 0
+        while i < payloads.count {
+            let slice = Array(payloads[i..<min(payloads.count, i + groupSize)])
+            out.append(ParityFragment(frameSeq: frameSeq, groupIndex: UInt16(g), groupSize: UInt16(slice.count), firstIndex: UInt16(i), payload: xor(slice)).encode())
+            i += slice.count; g += 1
+        }
+        return out
+    }
 }
 
 /// Header of a video fragment datagram (all big-endian):
@@ -31,6 +86,8 @@ public struct VideoFragment: Equatable, Sendable {
         public static let recovery = Flags(rawValue: 1 << 2)
         /// Payload carries a tile mask for `region` (see `VideoFramePayload`): only masked tiles changed.
         public static let tileMask = Flags(rawValue: 1 << 3)
+        /// A progressive-refinement step of a fresh picture (ladder climb): the client crossfades it in.
+        public static let progressive = Flags(rawValue: 1 << 4)
     }
 
     public var frameSeq: UInt32
@@ -166,8 +223,10 @@ public struct VideoFrame: Sendable {
     public var region: PixelRect
 }
 
-/// Reassembles fragments into frames and reports frames that will never complete.
-/// Not thread-safe; drive it from one queue.
+/// Reassembles fragments into frames, delivers them strictly in sequence order (a frame with a
+/// hole holds the frames after it, which are P-frames that reference it), asks for missing
+/// fragments by NACK after a short gap, reconstructs single losses from parity, and gives a frame
+/// up only after a timeout sized from the RTT. Not thread-safe; drive it from one queue.
 public struct FrameAssembler {
     struct Partial {
         var flags: VideoFragment.Flags
@@ -181,59 +240,119 @@ public struct FrameAssembler {
         var captureSeq: UInt32
         var inputSeq: UInt64
         var region: PixelRect
+        var nacks = 0
+        var lastNackNanos: UInt64 = 0
+        var complete: Bool { received == count }
+        var parity: [UInt16: ParityFragment] = [:]   // by group index
     }
     private var partials: [UInt32: Partial] = [:]
-    private var highestCompleted: UInt32? = nil
-    /// Frames older than this many sequence numbers behind the newest seen are given up.
-    public var reorderWindow: UInt32 = 8
-    /// A frame still incomplete after this long (receiver clock) is given up.
+    /// Highest sequence delivered (completed or lost); nothing at or below it is delivered again.
+    private var delivered: UInt32? = nil
+    /// A frame still incomplete after this long (receiver clock) is given up; the viewer sets it from the RTT.
     public var timeoutNanos: UInt64 = 600_000_000
+    /// Missing fragments are asked for this long after the frame's last fragment arrived.
+    public var nackAfterNanos: UInt64 = 30_000_000
+    public var maxNacks = 2
+    /// NACKs are repeated no sooner than this (the viewer sets it to ~1 RTT).
+    public var nackRepeatNanos: UInt64 = 250_000_000
+    public private(set) var recoveredByParity = 0
+    public private(set) var recoveredByNack = 0
 
     public init() {}
 
     public enum Event {
         case completed(VideoFrame), lost(seq: UInt32)
-        var seq: UInt32 { switch self { case .completed(let f): return f.seq; case .lost(let s): return s } }
+        /// Ask the host to resend these fragments.
+        case nack(seq: UInt32, fragments: [Int])
+        var seq: UInt32 { switch self { case .completed(let f): return f.seq; case .lost(let s): return s; case .nack(let s, _): return s } }
     }
 
     public mutating func ingest(_ f: VideoFragment, now: UInt64 = Clock.nowNanos()) -> [Event] {
-        var events: [Event] = []
-        if let hc = highestCompleted, f.frameSeq <= hc {
-            // Late fragment of an older frame: if it completes a partial we no longer need, retire it quietly.
-            partials[f.frameSeq] = nil
-            return []
-        }
+        if let d = delivered, f.frameSeq <= d { return [] }
         var p = partials[f.frameSeq] ?? Partial(flags: f.flags, captureNanos: f.captureNanos, firstNanos: now, lastNanos: now,
                                                  count: Int(f.fragCount), total: Int(f.frameBytes), parts: Array(repeating: nil, count: Int(f.fragCount)),
                                                  captureSeq: f.captureSeq, inputSeq: f.inputSeq, region: f.region)
         guard Int(f.fragCount) == p.count, Int(f.fragIndex) < p.count else { return [] }
-        if p.parts[Int(f.fragIndex)] == nil { p.parts[Int(f.fragIndex)] = f.payload; p.received += 1 }
+        if p.parts[Int(f.fragIndex)] == nil {
+            p.parts[Int(f.fragIndex)] = f.payload; p.received += 1
+            if p.nacks > 0 { recoveredByNack += 1 }
+        }
         p.lastNanos = now
-        if p.received == p.count {
-            partials[f.frameSeq] = nil
-            var sample = Data(capacity: p.total)
-            for part in p.parts { sample.append(part!) }
-            let decoded = VideoFramePayload.decode(sample, hasParameterSets: f.flags.contains(.parameterSets), hasTileMask: f.flags.contains(.tileMask))
-            // Older partials are not declared lost yet: a reordered last fragment may still arrive
-            // within the window/timeout below. Their late completion is then dropped (seq <= highestCompleted).
-            if highestCompleted.map({ f.frameSeq > $0 }) ?? true { highestCompleted = f.frameSeq }
-            if let decoded {
-                events.append(.completed(VideoFrame(seq: f.frameSeq, flags: p.flags, captureNanos: p.captureNanos, firstFragmentNanos: p.firstNanos,
-                                                     lastFragmentNanos: now, parameterSets: decoded.parameterSets, tileMask: decoded.tileMask, sample: decoded.sample, bytes: sample.count,
-                                                     fragments: p.count, captureSeq: p.captureSeq, inputSeq: p.inputSeq, region: p.region)))
-            } else {
-                events.append(.lost(seq: f.frameSeq))
-            }
-        } else {
-            partials[f.frameSeq] = p
-        }
-        // Give up on stragglers: too far behind the newest frame, or too old.
-        for seq in partials.keys.sorted() {
-            guard let part = partials[seq], seq + reorderWindow < f.frameSeq || now - part.firstNanos > timeoutNanos else { continue }
-            partials[seq] = nil; events.append(.lost(seq: seq))
-        }
-        return events.sorted { a, b in a.seq < b.seq }
+        partials[f.frameSeq] = p
+        tryParity(f.frameSeq)
+        return drain(now: now)
     }
+
+    public mutating func ingest(parity pf: ParityFragment, now: UInt64 = Clock.nowNanos()) -> [Event] {
+        if let d = delivered, pf.frameSeq <= d { return [] }
+        guard var p = partials[pf.frameSeq] else {
+            // Parity before any fragment: keep it in a placeholder sized later.
+            partials[pf.frameSeq] = Partial(flags: [], captureNanos: 0, firstNanos: now, lastNanos: now, count: 0, total: 0, parts: [], captureSeq: 0, inputSeq: 0, region: .zero, parity: [pf.groupIndex: pf])
+            return []
+        }
+        p.parity[pf.groupIndex] = pf
+        partials[pf.frameSeq] = p
+        tryParity(pf.frameSeq)
+        return drain(now: now)
+    }
+
+    /// Reconstructs a single missing fragment in any group that has its parity.
+    private mutating func tryParity(_ seq: UInt32) {
+        guard var p = partials[seq], p.count > 0 else { return }
+        for (_, pf) in p.parity {
+            let lo = Int(pf.firstIndex), hi = min(p.count, lo + Int(pf.groupSize))
+            guard lo < hi else { continue }
+            let missing = (lo..<hi).filter { p.parts[$0] == nil }
+            guard missing.count == 1 else { continue }
+            var acc = [UInt8](pf.payload)
+            for i in lo..<hi where i != missing[0] { p.parts[i]!.withUnsafeBytes { b in for j in 0..<min(b.count, acc.count) { acc[j] ^= b[j] } } }
+            // The missing fragment's length: every fragment but the last is maxPayload-sized; the last takes the remainder.
+            let known = (lo..<hi).filter { $0 != missing[0] }.compactMap { p.parts[$0] }
+            let full = known.map(\.count).max() ?? acc.count
+            let isLast = missing[0] == p.count - 1
+            let len = isLast ? p.total - (p.count - 1) * full : full
+            guard len > 0, len <= acc.count else { continue }
+            p.parts[missing[0]] = Data(acc[0..<len]); p.received += 1; recoveredByParity += 1
+        }
+        partials[seq] = p
+    }
+
+    /// Delivers in order: complete frames at the head go out; a frame with a hole holds everything
+    /// behind it until it completes, is NACKed, or times out.
+    private mutating func drain(now: UInt64) -> [Event] {
+        var events: [Event] = []
+        while let seq = partials.keys.min() {
+            guard var p = partials[seq] else { break }
+            if p.count > 0, p.complete {
+                partials[seq] = nil
+                var sample = Data(capacity: p.total)
+                for part in p.parts { sample.append(part!) }
+                let decoded = VideoFramePayload.decode(sample, hasParameterSets: p.flags.contains(.parameterSets), hasTileMask: p.flags.contains(.tileMask))
+                delivered = seq
+                if let decoded {
+                    events.append(.completed(VideoFrame(seq: seq, flags: p.flags, captureNanos: p.captureNanos, firstFragmentNanos: p.firstNanos,
+                                                         lastFragmentNanos: p.lastNanos, parameterSets: decoded.parameterSets, tileMask: decoded.tileMask, sample: decoded.sample, bytes: sample.count,
+                                                         fragments: p.count, captureSeq: p.captureSeq, inputSeq: p.inputSeq, region: p.region)))
+                } else {
+                    events.append(.lost(seq: seq))
+                }
+                continue
+            }
+            if now - p.firstNanos > timeoutNanos || (p.count == 0 && now - p.firstNanos > timeoutNanos) {
+                partials[seq] = nil; delivered = seq; events.append(.lost(seq: seq)); continue
+            }
+            // Head of line has a hole: ask for the missing fragments once the gap is older than a reorder.
+            if p.count > 0, p.nacks < maxNacks, now - p.lastNanos > nackAfterNanos, now - p.lastNackNanos > nackRepeatNanos {
+                p.nacks += 1; p.lastNackNanos = now; partials[seq] = p
+                events.append(.nack(seq: seq, fragments: (0..<p.count).filter { p.parts[$0] == nil }))
+            }
+            break
+        }
+        return events
+    }
+
+    /// Time-driven pass (call from a timer): NACKs and timeouts even when nothing arrives.
+    public mutating func tick(now: UInt64) -> [Event] { drain(now: now) }
 
     public var pendingCount: Int { partials.count }
 }

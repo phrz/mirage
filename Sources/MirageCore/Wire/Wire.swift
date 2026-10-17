@@ -110,6 +110,8 @@ public enum ControlMessage: Codable, Equatable {
     case rateState(RateState)
     /// What the host is looking at: console lock state, frontmost app and window (once a second).
     case hostStatus(HostStatus)
+    /// Viewer → host: resend these fragments of a recent frame (fragment NACK).
+    case nack(Nack)
 
     // Input, client → host. Coordinates are normalized to the streamed display: (0,0) top-left, (1,1) bottom-right.
     case mouseMove(MouseMove)
@@ -282,6 +284,11 @@ public enum ControlMessage: Codable, Equatable {
         public var captureSeq: UInt32
         public var windows: [WindowInfo]
         public init(captureSeq: UInt32, windows: [WindowInfo]) { self.captureSeq = captureSeq; self.windows = windows }
+    }
+    public struct Nack: Codable, Equatable {
+        public var frameSeq: UInt32
+        public var fragments: [Int]
+        public init(frameSeq: UInt32, fragments: [Int]) { self.frameSeq = frameSeq; self.fragments = fragments }
     }
     public struct HostStatus: Codable, Equatable {
         public var consoleLocked: Bool

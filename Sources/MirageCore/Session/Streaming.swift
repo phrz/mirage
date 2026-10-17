@@ -20,6 +20,7 @@ public protocol DesktopStreamer: AnyObject, Sendable {
     func update(_ request: ControlMessage.StreamRequest) async throws -> ControlMessage.StreamInfo
     func handle(ack: ControlMessage.FrameAck)
     func handle(tileAck: ControlMessage.TileAck)
+    func handle(nack: ControlMessage.Nack)
     func handle(input: ControlMessage)
     func stop() async
 }

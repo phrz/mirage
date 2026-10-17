@@ -59,7 +59,7 @@ public enum TileMessage: Equatable, Sendable {
     }
     public struct Tiles: Equatable, Sendable {
         public var header: Header
-        /// Why these tiles were sent, for the client's stats.
+        /// Why these tiles were sent, for the client's stats; refinement crossfades in on the client.
         public var refinement: Bool
         public var tiles: [Tile]
         public init(header: Header, refinement: Bool, tiles: [Tile]) { self.header = header; self.refinement = refinement; self.tiles = tiles }

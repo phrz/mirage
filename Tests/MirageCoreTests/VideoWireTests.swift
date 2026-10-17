@@ -25,8 +25,9 @@ final class VideoWireTests: XCTestCase {
         XCTAssertEqual(VideoFramePayload.decode(sample, hasParameterSets: false)?.sample, sample)
     }
 
-    func testAssemblerReordersAndDetectsLoss() {
+    func testAssemblerDeliversInOrderNacksHolesAndTimesOut() {
         var a = FrameAssembler()
+        a.timeoutNanos = 1_000_000_000; a.nackAfterNanos = 30_000_000; a.nackRepeatNanos = 200_000_000
         let p1 = Data(repeating: 1, count: 3000), p2 = Data(repeating: 2, count: 3000)
         let f1 = VideoFragment.fragments(frameSeq: 1, flags: [], captureNanos: 1, payload: p1).compactMap(VideoFragment.decode)
         let f2 = VideoFragment.fragments(frameSeq: 2, flags: [], captureNanos: 2, payload: p2).compactMap(VideoFragment.decode)
@@ -36,32 +37,53 @@ final class VideoWireTests: XCTestCase {
         let done = a.ingest(f1[1], now: 12)
         guard case .completed(let frame)? = done.first else { return XCTFail("expected completion, got \(done)") }
         XCTAssertEqual(frame.seq, 1); XCTAssertEqual(frame.sample, p1); XCTAssertEqual(frame.firstFragmentNanos, 10)
-        // Frame 2 is missing a fragment; frame 3 completing does NOT declare it lost yet (reordering).
-        _ = a.ingest(f2[0], now: 20)
+        // Frame 2 is missing its middle fragment; frame 3 completes behind it but is HELD (in-order delivery).
+        _ = a.ingest(f2[0], now: 20); _ = a.ingest(f2[2], now: 21)
         let f3 = VideoFragment.fragments(frameSeq: 3, flags: [.keyframe], captureNanos: 3, payload: Data([7])).compactMap(VideoFragment.decode)
-        let ev = a.ingest(f3[0], now: 30)
-        XCTAssertEqual(ev.count, 1)
-        guard case .completed(let f3done)? = ev.first else { return XCTFail("expected completion, got \(ev)") }
-        XCTAssertEqual(f3done.seq, 3)
-        XCTAssertEqual(a.pendingCount, 1)
-        // A late fragment of frame 2 (older than the newest completed frame) retires it quietly.
-        XCTAssertTrue(a.ingest(f2[1], now: 31).isEmpty)
-        XCTAssertEqual(a.pendingCount, 0)
-        // A partial that nothing completes is declared lost once it is older than the timeout...
+        XCTAssertTrue(a.ingest(f3[0], now: 30).isEmpty, "frame 3 waits for frame 2")
+        XCTAssertEqual(a.pendingCount, 2)
+        // 30 ms after the gap, the assembler asks for the missing fragment.
+        let ev = a.tick(now: 21 + 31_000_000)
+        guard case .nack(let seq, let missing)? = ev.first else { return XCTFail("expected a nack, got \(ev)") }
+        XCTAssertEqual(seq, 2); XCTAssertEqual(missing, [1])
+        // The resent fragment arrives: frame 2 and then frame 3 are delivered, in order.
+        let ev2 = a.ingest(f2[1], now: 21 + 200_000_000)
+        XCTAssertEqual(ev2.count, 2)
+        guard case .completed(let d2)? = ev2.first, case .completed(let d3)? = ev2.last else { return XCTFail("\(ev2)") }
+        XCTAssertEqual(d2.seq, 2); XCTAssertEqual(d2.sample, p2); XCTAssertEqual(d3.seq, 3)
+        XCTAssertEqual(a.recoveredByNack, 1)
+        // A partial nothing completes is given up after the timeout and reported lost.
         let f4 = VideoFragment.fragments(frameSeq: 4, flags: [], captureNanos: 4, payload: p1).compactMap(VideoFragment.decode)
-        _ = a.ingest(f4[0], now: 40)
-        let f5 = VideoFragment.fragments(frameSeq: 5, flags: [], captureNanos: 5, payload: Data([1])).compactMap(VideoFragment.decode)
-        let late = a.ingest(f5[0], now: 40 + a.timeoutNanos + 1)
-        XCTAssertEqual(late.count, 2)
-        guard case .lost(let lostSeq)? = late.first else { return XCTFail("expected lost first, got \(late)") }
+        _ = a.ingest(f4[0], now: 1_000_000_000)
+        let late = a.tick(now: 1_000_000_000 + a.timeoutNanos + 1)
+        guard case .lost(let lostSeq)? = late.first else { return XCTFail("expected lost, got \(late)") }
         XCTAssertEqual(lostSeq, 4)
-        // ...or once the stream is more than reorderWindow frames past it.
-        let f6 = VideoFragment.fragments(frameSeq: 6, flags: [], captureNanos: 6, payload: p1).compactMap(VideoFragment.decode)
-        _ = a.ingest(f6[0], now: 50)
-        let far = VideoFragment.fragments(frameSeq: 6 + a.reorderWindow + 1, flags: [], captureNanos: 7, payload: Data([1])).compactMap(VideoFragment.decode)
-        let ev2 = a.ingest(far[0], now: 51)
-        XCTAssertTrue(ev2.contains { if case .lost(6) = $0 { return true } else { return false } }, "\(ev2)")
         XCTAssertEqual(a.pendingCount, 0)
+    }
+
+    func testParityRebuildsOneLostFragment() {
+        var a = FrameAssembler()
+        let payload = Data((0..<3500).map { UInt8($0 & 0xff) })
+        let frags = VideoFragment.fragments(frameSeq: 9, flags: [.keyframe], captureNanos: 1, payload: payload)
+        let decoded = frags.compactMap(VideoFragment.decode)
+        let payloads = decoded.map(\.payload)
+        let parity = ParityFragment.parity(frameSeq: 9, payloads: payloads).compactMap(ParityFragment.decode)
+        XCTAssertEqual(parity.count, 1)
+        // Lose the last (short) fragment; parity rebuilds it.
+        _ = a.ingest(decoded[0], now: 1); _ = a.ingest(decoded[1], now: 2)
+        let ev = a.ingest(parity: parity[0], now: 3)
+        guard case .completed(let f)? = ev.first else { return XCTFail("expected completion from parity, got \(ev)") }
+        XCTAssertEqual(f.sample, payload)
+        XCTAssertEqual(a.recoveredByParity, 1)
+        // Lose a middle (full-size) fragment of another frame; parity arriving first still works.
+        var b = FrameAssembler()
+        let frags2 = VideoFragment.fragments(frameSeq: 10, flags: [], captureNanos: 1, payload: payload).compactMap(VideoFragment.decode)
+        let par2 = ParityFragment.parity(frameSeq: 10, payloads: frags2.map(\.payload)).compactMap(ParityFragment.decode)
+        _ = b.ingest(parity: par2[0], now: 1)
+        _ = b.ingest(frags2[0], now: 2)
+        let ev2 = b.ingest(frags2[2], now: 3)
+        guard case .completed(let g)? = ev2.first else { return XCTFail("\(ev2)") }
+        XCTAssertEqual(g.sample, payload)
     }
 
     func testDatagramPingHasTypeByte() {

@@ -31,6 +31,7 @@ final class ViewerModel: ObservableObject {
         var rate = ControlMessage.RateState(targetKbps: 0, capacityKbps: 0, queueMs: 0, rung: 0, scale: 1, tileBudgetKbps: 0, videoKbps: 0, tileKbps: 0)
         var predictions = (shown: 0, confirmed: 0, mismatched: 0, expired: 0)
         var upscaling = false
+        var nacks = 0, recoveredByNack = 0, recoveredByParity = 0
     }
     struct CursorImage {
         let image: NSImage
@@ -60,6 +61,7 @@ final class ViewerSession: @unchecked Sendable {
     private(set) var hostStatus: ControlMessage.HostStatus?
     private let videoQueue = DispatchQueue(label: "mirage.viewer.video", qos: .userInteractive)
     private var assembler = FrameAssembler()
+    private var assemblerTimer: DispatchSourceTimer?
     private let decoder = HEVCDecoder()
     private var awaitingRecovery = false
     /// Sequence of the last decoded recovery frame: a loss verdict for an older frame is already healed.
@@ -74,7 +76,7 @@ final class ViewerSession: @unchecked Sendable {
     private var pingSeq: UInt64 = 0
     private let statsLock = NSLock()
     private var sFrames = 0, sBytes = 0, sLost = 0, sDecodeNanos: UInt64 = 0, sAge: Double = 0, sRTT = 0.0, sDropped = 0
-    private var sTileBytes = 0, sTileRects = 0, sCopyRects = 0
+    private var sTileBytes = 0, sTileRects = 0, sCopyRects = 0, sNacks = 0
     private var rateState = ControlMessage.RateState(targetKbps: 0, capacityKbps: 0, queueMs: 0, rung: 0, scale: 1, tileBudgetKbps: 0, videoKbps: 0, tileKbps: 0)
     @MainActor private var lastRequest: ControlMessage.StreamRequest?
     @MainActor private var pendingRequest: ControlMessage.StreamRequest?
@@ -197,6 +199,11 @@ final class ViewerSession: @unchecked Sendable {
     private func startLoopsOnce() {
         guard !loopsStarted else { return }
         loopsStarted = true
+        let t = DispatchSource.makeTimerSource(queue: videoQueue)
+        t.schedule(deadline: .now() + .milliseconds(20), repeating: .milliseconds(20))
+        t.setEventHandler { [weak self] in self?.assemblerTick() }
+        t.resume()
+        assemblerTimer = t
         Task.detached { [weak self] in await self?.pingLoop() }
         Task.detached { [weak self] in await self?.statsLoop() }
     }
@@ -267,6 +274,8 @@ final class ViewerSession: @unchecked Sendable {
             guard let d = try? await flow.receiveSome() else { log("datagram flow closed"); return }
             if let frag = VideoFragment.decode(d) {
                 videoQueue.async { self.ingest(frag) }
+            } else if let parity = ParityFragment.decode(d) {
+                videoQueue.async { self.handle(self.assembler.ingest(parity: parity, now: Clock.nowNanos()), now: Clock.nowNanos()) }
             }
         }
     }
@@ -302,7 +311,7 @@ final class ViewerSession: @unchecked Sendable {
         switch msg {
         case .tiles(let t):
             let fresh = t.tiles.filter { isFresh($0.rect, captureSeq: t.header.captureSeq) }
-            let n = compositor?.applyTiles(fresh) ?? 0
+            let n = compositor?.applyTiles(fresh, crossfade: t.refinement) ?? 0
             statsLock.lock(); sTileBytes += t.bytes; sTileRects += n; statsLock.unlock()
             if t.refinement { lastRefinementNanos = now }
             if !watchRect.isEmpty {
@@ -336,8 +345,26 @@ final class ViewerSession: @unchecked Sendable {
 
     private func ingest(_ frag: VideoFragment) {
         let now = Clock.nowNanos()
-        for ev in assembler.ingest(frag, now: now) {
+        handle(assembler.ingest(frag, now: now), now: now)
+    }
+
+    /// Time-driven assembler pass (NACKs and timeouts fire even when nothing arrives).
+    func assemblerTick() {
+        let now = Clock.nowNanos()
+        statsLock.lock(); let rtt = sRTT; statsLock.unlock()
+        if rtt > 0 {
+            assembler.timeoutNanos = UInt64(rtt * 1e6 * 2.5) + 300_000_000   // NACK round trip plus slack
+            assembler.nackRepeatNanos = UInt64(rtt * 1e6) + 50_000_000
+        }
+        handle(assembler.tick(now: now), now: now)
+    }
+
+    private func handle(_ events: [FrameAssembler.Event], now: UInt64) {
+        for ev in events {
             switch ev {
+            case .nack(let seq, let fragments):
+                statsLock.lock(); sNacks += 1; statsLock.unlock()
+                sender?.send(.nack(.init(frameSeq: seq, fragments: fragments)))
             case .lost(let seq):
                 // The assembler gives up on an old partial after its timeout; if a recovery frame newer
                 // than it was decoded meanwhile, nothing is missing (the host ignores such acks too).
@@ -363,7 +390,7 @@ final class ViewerSession: @unchecked Sendable {
                         let region = frame.region.isEmpty ? PixelRect(x: 0, y: 0, width: compositor.width, height: compositor.height) : frame.region
                         let grid = TileMask.grid(for: region)
                         let mask = frame.tileMask.flatMap { TileMask(cols: grid.cols, rows: grid.rows, bits: $0) }
-                        compositor.applyVideo(image, region: region, mask: mask)
+                        compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive))
                         if !watchRect.isEmpty, region.intersects(watchRect) { lastWatchedVideoNanos = now }
                         predictorLock.lock(); predictor.hostUpdate(inputSeq: frame.inputSeq, rect: region, now: now); predictorLock.unlock()
                         onChange?()
@@ -401,8 +428,8 @@ final class ViewerSession: @unchecked Sendable {
             try? await Task.sleep(for: .seconds(1))
             statsLock.lock()
             let frames = sFrames, bytes = sBytes, lost = sLost, dec = sDecodeNanos, age = sAge, rtt = sRTT, dropped = sDropped
-            let tileBytes = sTileBytes, tileRects = sTileRects, copies = sCopyRects, rate = rateState
-            sFrames = 0; sBytes = 0; sLost = 0; sDecodeNanos = 0; sDropped = 0; sTileBytes = 0; sTileRects = 0; sCopyRects = 0
+            let tileBytes = sTileBytes, tileRects = sTileRects, copies = sCopyRects, rate = rateState, nacks = sNacks
+            sFrames = 0; sBytes = 0; sLost = 0; sDecodeNanos = 0; sDropped = 0; sTileBytes = 0; sTileRects = 0; sCopyRects = 0; sNacks = 0
             statsLock.unlock()
             predictorLock.lock(); let pstats = predictor.stats; predictorLock.unlock()
             let w = decoder.width, h = decoder.height
@@ -413,6 +440,7 @@ final class ViewerSession: @unchecked Sendable {
                 s.decodeMs = frames > 0 ? Double(dec) / Double(frames) / 1e6 : s.decodeMs
                 s.frameAgeMs = age / 1e6; s.rttMs = rtt; s.width = w; s.height = h
                 s.tileKbps = Double(tileBytes) * 8 / 1000; s.tileRects += tileRects; s.copyRects += copies; s.rate = rate; s.predictions = pstats; s.upscaling = upscaling
+                s.nacks += nacks; s.recoveredByNack = self.assembler.recoveredByNack; s.recoveredByParity = self.assembler.recoveredByParity
                 model.stats = s
                 if frames > 0 || bytes > 0 || tileBytes > 0 {
                     samples.append(Sample(t: Date().timeIntervalSince(startDate), rttMs: rtt, frameAgeMs: age / 1e6, fps: Double(frames), kbps: Double(bytes) * 8 / 1000,
@@ -557,6 +585,7 @@ extension ViewerSession {
             var tileKbpsMedian: Double, totalKbpsMedian: Double, controllerTargetKbpsMedian: Double, capacityKbpsMedian: Double, queueMsMedian: Double, queueMsP95: Double, rungMax: Int, rungFinal: Int
             var framesTotal: Int, lostTotal: Int, skippedTotal: Int, tileRectsTotal: Int, copyRectsTotal: Int
             var predictionsShown: Int, predictionsConfirmed: Int, predictionsMismatched: Int
+            var nacksSent: Int?, recoveredByNack: Int?, recoveredByParity: Int?
             var scenario: String?, crispMs: [Double]?, crispMsMedian: Double?, crispMsMax: Double?
             var watchedTileBytes: Int?, watchedTileCount: Int?, watchedKbps: Double?, watchedDirectKbps: Double?
             var keyLatencyMs: [Double]?, keyLatencyMsMedian: Double?, keyLatencyMsMax: Double?
@@ -577,6 +606,7 @@ extension ViewerSession {
                       framesTotal: Int(samples.map(\.fps).reduce(0, +)), lostTotal: samples.map(\.lost).reduce(0, +), skippedTotal: samples.map(\.skipped).reduce(0, +),
                       tileRectsTotal: samples.map(\.tileRects).reduce(0, +), copyRectsTotal: samples.map(\.copyRects).reduce(0, +),
                       predictionsShown: pstats.shown, predictionsConfirmed: pstats.confirmed, predictionsMismatched: pstats.mismatched,
+                      nacksSent: MainActor.assumeIsolated { model.stats.nacks }, recoveredByNack: assembler.recoveredByNack, recoveredByParity: assembler.recoveredByParity,
                       scenario: scenario?.name, crispMs: scenario?.crispMs, crispMsMedian: scenario.map { median($0.crispMs) }, crispMsMax: scenario?.crispMs.max(),
                       watchedTileBytes: scenario == nil ? nil : watchedTileBytes, watchedTileCount: scenario == nil ? nil : watchedTileCount,
                       watchedKbps: scenario.map { Double(watchedTileBytes) * 8 / 1000 / max(1, $0.activeSeconds) },
