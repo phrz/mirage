@@ -272,6 +272,12 @@ public struct FrameAssembler {
         var p = partials[f.frameSeq] ?? Partial(flags: f.flags, captureNanos: f.captureNanos, firstNanos: now, lastNanos: now,
                                                  count: Int(f.fragCount), total: Int(f.frameBytes), parts: Array(repeating: nil, count: Int(f.fragCount)),
                                                  captureSeq: f.captureSeq, inputSeq: f.inputSeq, region: f.region)
+        if p.count == 0 {
+            // A placeholder made by parity that arrived first: take the frame's shape from this fragment.
+            let parity = p.parity
+            p = Partial(flags: f.flags, captureNanos: f.captureNanos, firstNanos: now, lastNanos: now, count: Int(f.fragCount), total: Int(f.frameBytes),
+                        parts: Array(repeating: nil, count: Int(f.fragCount)), captureSeq: f.captureSeq, inputSeq: f.inputSeq, region: f.region, parity: parity)
+        }
         guard Int(f.fragCount) == p.count, Int(f.fragIndex) < p.count else { return [] }
         if p.parts[Int(f.fragIndex)] == nil {
             p.parts[Int(f.fragIndex)] = f.payload; p.received += 1
@@ -342,7 +348,7 @@ public struct FrameAssembler {
                 partials[seq] = nil; delivered = seq; events.append(.lost(seq: seq)); continue
             }
             // Head of line has a hole: ask for the missing fragments once the gap is older than a reorder.
-            if p.count > 0, p.nacks < maxNacks, now - p.lastNanos > nackAfterNanos, now - p.lastNackNanos > nackRepeatNanos {
+            if p.count > 0, p.nacks < maxNacks, now - p.lastNanos > nackAfterNanos, p.lastNackNanos == 0 || now - p.lastNackNanos > nackRepeatNanos {
                 p.nacks += 1; p.lastNackNanos = now; partials[seq] = p
                 events.append(.nack(seq: seq, fragments: (0..<p.count).filter { p.parts[$0] == nil }))
             }

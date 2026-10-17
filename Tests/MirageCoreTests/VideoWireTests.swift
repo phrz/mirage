@@ -68,9 +68,9 @@ final class VideoWireTests: XCTestCase {
         let decoded = frags.compactMap(VideoFragment.decode)
         let payloads = decoded.map(\.payload)
         let parity = ParityFragment.parity(frameSeq: 9, payloads: payloads).compactMap(ParityFragment.decode)
-        XCTAssertEqual(parity.count, 1)
+        XCTAssertEqual(parity.count, 1); XCTAssertEqual(decoded.count, 4)
         // Lose the last (short) fragment; parity rebuilds it.
-        _ = a.ingest(decoded[0], now: 1); _ = a.ingest(decoded[1], now: 2)
+        _ = a.ingest(decoded[0], now: 1); _ = a.ingest(decoded[1], now: 2); _ = a.ingest(decoded[2], now: 2)
         let ev = a.ingest(parity: parity[0], now: 3)
         guard case .completed(let f)? = ev.first else { return XCTFail("expected completion from parity, got \(ev)") }
         XCTAssertEqual(f.sample, payload)
@@ -80,7 +80,7 @@ final class VideoWireTests: XCTestCase {
         let frags2 = VideoFragment.fragments(frameSeq: 10, flags: [], captureNanos: 1, payload: payload).compactMap(VideoFragment.decode)
         let par2 = ParityFragment.parity(frameSeq: 10, payloads: frags2.map(\.payload)).compactMap(ParityFragment.decode)
         _ = b.ingest(parity: par2[0], now: 1)
-        _ = b.ingest(frags2[0], now: 2)
+        _ = b.ingest(frags2[0], now: 2); _ = b.ingest(frags2[3], now: 2)
         let ev2 = b.ingest(frags2[2], now: 3)
         guard case .completed(let g)? = ev2.first else { return XCTFail("\(ev2)") }
         XCTAssertEqual(g.sample, payload)
