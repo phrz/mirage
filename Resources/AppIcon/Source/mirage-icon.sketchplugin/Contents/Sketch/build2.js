@@ -263,7 +263,7 @@ function onRun(context) {
   var page = doc.selectedPage; page.name = 'Icon';
 
   var A = new Artboard({ name: 'Mirage 1024', parent: page, frame: new Rectangle(0, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
-  buildIcon(A, { window: false, cursorScale: 3.3, cursorX: 432, cursorY: HORIZON - 95 * 3.3 - 2 * 3.3 - 3 }); // keyline miter at the tail reaches ~2 px past the stroke width
+  buildIcon(A, { window: false, cursorScale: 3.3, cursorX: 432, cursorY: HORIZON - 95 * 3.3 - 2 * 3.3 - 3, features: { sky: true, sand: true }, tex: 'form' }); // keyline miter at the tail reaches ~2 px past the stroke width
   dbg('A built');
   var variants = new sketch.Page({ name: 'Variants', parent: doc });
   var B = new Artboard({ name: 'Mirage 1024 (window variant)', parent: variants, frame: new Rectangle(0, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });

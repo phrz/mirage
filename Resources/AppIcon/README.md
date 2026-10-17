@@ -16,9 +16,11 @@ Everything above is generated from `Source/`:
 Rebuild from `Source/` with Sketch running:
 
 ```bash
-uv run --with numpy --with pillow python -I gen_textures.py 620
+uv run --with numpy --with pillow python -I gen_textures.py 620 --out form --form   # main icon's texture set
 ST=/Applications/Sketch.app/Contents/Resources/sketchtool/bin/sketchtool
 "$ST" run "$PWD/mirage-icon.sketchplugin" build2 --without-activating=YES
 "$ST" run "$PWD/mirage-icon.sketchplugin" export --without-activating=YES
 uv run --with numpy --with pillow python -I make_icon.py
 ```
+
+The main artboard uses the `sky` and `sand` refinements (`features` in `build2.js`) with the `form` texture set. The Study page in the Sketch document shows each candidate refinement added one at a time; `gen_textures.py` also accepts `--waver` and writes each set under `Source/export/textures/<tag>/`.
