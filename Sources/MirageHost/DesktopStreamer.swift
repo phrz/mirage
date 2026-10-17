@@ -643,6 +643,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             for (r, d) in jobs {
                 let encoded: (TileCodec.Format, Data)? = d.withUnsafeBytes { p -> (TileCodec.Format, Data)? in
                     let base = p.baseAddress!
+                    if let solid = TileCodec.solidColour(base: base, width: r.width, height: r.height, stride: r.width * 4) { return (.solid, solid) }
                     let fmt: TileCodec.Format = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4, limit: 4096) > 4096 ? .nearLossless : .lossless
                     return TileCodec.encode(base: base, width: r.width, height: r.height, stride: r.width * 4, format: fmt, effort: webp).map { (fmt, $0) }
                 }
@@ -680,6 +681,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             for (r, d) in jobs {
                 let encoded: (TileCodec.Format, Data)? = d.withUnsafeBytes { p -> (TileCodec.Format, Data)? in
                     let base = p.baseAddress!
+                    if let solid = TileCodec.solidColour(base: base, width: r.width, height: r.height, stride: r.width * 4) { return (.solid, solid) }
                     let fmt: TileCodec.Format = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4, limit: 4096) > 4096 ? .nearLossless : .lossless
                     return TileCodec.encode(base: base, width: r.width, height: r.height, stride: r.width * 4, format: fmt, effort: webp).map { (fmt, $0) }
                 }

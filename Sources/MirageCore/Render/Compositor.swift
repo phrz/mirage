@@ -207,8 +207,16 @@ public final class Compositor {
         let bounds = PixelRect(x: 0, y: 0, width: width, height: height)
         for t in tiles {
             let r = t.rect.intersection(bounds)
-            guard !r.isEmpty, let (w, h) = TileCodec.size(of: t.data), w == t.rect.width, h == t.rect.height else { continue }
-            let stride = w * 4
+            guard !r.isEmpty else { continue }
+            let w = t.rect.width, h = t.rect.height, stride = w * 4
+            if t.format == .solid {
+                guard let buf = device.makeBuffer(length: stride * h, options: .storageModeShared), TileCodec.fillSolid(t.data, into: buf.contents(), width: w, height: h, stride: stride) else { continue }
+                blit.copy(from: buf, sourceOffset: 0, sourceBytesPerRow: stride, sourceBytesPerImage: stride * h, sourceSize: MTLSize(width: r.width, height: r.height, depth: 1),
+                          to: canvas, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: r.x, y: r.y, z: 0))
+                n += 1
+                continue
+            }
+            guard let (dw, dh) = TileCodec.size(of: t.data), dw == w, dh == h else { continue }
             guard let buf = device.makeBuffer(length: stride * h, options: .storageModeShared) else { continue }
             guard TileCodec.decode(t.data, into: buf.contents(), width: w, height: h, stride: stride) else { continue }
             blit.copy(from: buf, sourceOffset: 0, sourceBytesPerRow: stride, sourceBytesPerImage: stride * h, sourceSize: MTLSize(width: r.width, height: r.height, depth: 1),

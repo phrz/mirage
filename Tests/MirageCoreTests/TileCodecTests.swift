@@ -53,3 +53,21 @@ final class TileCodecTests: XCTestCase {
         XCTAssertLessThanOrEqual(maxErr, 16)
     }
 }
+
+final class SolidTileTests: XCTestCase {
+    func testSolidDetectionAndFill() {
+        var px = [UInt8](repeating: 0x40, count: 64 * 64 * 4)
+        let solid = px.withUnsafeBytes { TileCodec.solidColour(base: $0.baseAddress!, width: 64, height: 64, stride: 256) }
+        XCTAssertEqual(solid?.count, 4)
+        px[1000] = 0x41
+        XCTAssertNil(px.withUnsafeBytes { TileCodec.solidColour(base: $0.baseAddress!, width: 64, height: 64, stride: 256) })
+        var out = [UInt8](repeating: 0, count: 16 * 4 * 8)
+        XCTAssertTrue(out.withUnsafeMutableBytes { TileCodec.fillSolid(solid!, into: $0.baseAddress!, width: 16, height: 8, stride: 64) })
+        XCTAssertEqual(out[0], 0x40); XCTAssertEqual(out[out.count - 2], 0x40); XCTAssertEqual(out[3], 0xFF)
+        // The wire carries the format byte 2.
+        let m = TileMessage.tiles(.init(header: .init(captureSeq: 1, inputSeq: 1, windowID: 0, captureNanos: 1), refinement: false, tiles: [.init(rect: PixelRect(x: 0, y: 0, width: 64, height: 64), format: .solid, data: solid!)]))
+        var p = TileStreamParser()
+        let got = try! p.feed(m.encode(msgSeq: 1))
+        XCTAssertEqual(got.first?.message, m)
+    }
+}

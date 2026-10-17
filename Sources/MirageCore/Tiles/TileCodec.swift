@@ -9,6 +9,27 @@ public enum TileCodec {
         case lossless = 0
         /// `near_lossless` 60: identical bytes on text, ~20 % smaller on photographic tiles.
         case nearLossless = 1
+        /// One colour for the whole rect: payload is 4 bytes BGRA (WebP's container alone costs 44 B).
+        case solid = 2
+    }
+
+    /// The rect's single colour as 4 BGRA bytes if every pixel is the same colour, else nil.
+    public static func solidColour(base: UnsafeRawPointer, width: Int, height: Int, stride: Int) -> Data? {
+        let first = base.loadUnaligned(as: UInt32.self) & 0x00FF_FFFF
+        for y in 0..<height {
+            let row = base.advanced(by: y * stride)
+            for x in 0..<width where row.loadUnaligned(fromByteOffset: x * 4, as: UInt32.self) & 0x00FF_FFFF != first { return nil }
+        }
+        var px = first | 0xFF00_0000
+        return Data(bytes: &px, count: 4)
+    }
+
+    /// Fills a BGRA buffer with a solid tile's colour.
+    public static func fillSolid(_ data: Data, into dst: UnsafeMutableRawPointer, width: Int, height: Int, stride: Int) -> Bool {
+        guard data.count >= 4 else { return false }
+        var px = data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        for y in 0..<height { memset_pattern4(dst.advanced(by: y * stride), &px, width * 4) }
+        return true
     }
 
     /// Encodes a `width`×`height` BGRA rect starting at `base` with `stride` bytes per row.
