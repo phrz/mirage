@@ -8,7 +8,7 @@ import WebKit
 import CryptoKit
 
 let W = 1200, H = 800, SCALE = 2   // points; pixels are 2x
-let PW = W * SCALE, PH = H * SCALE
+var PW = W * SCALE, PH = H * SCALE
 let TILE = 64
 
 struct Frame { let px: [UInt8] }   // RGBA8, PW*PH
@@ -70,7 +70,7 @@ func webKitScroll(done: @escaping ([[UInt8]]) -> Void) {
     let web = WKWebView(frame: NSRect(x: 0, y: 0, width: W, height: H))
     let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: W, height: H), styleMask: [.titled], backing: .buffered, defer: false)
     win.contentView = web
-    win.setFrameOrigin(NSPoint(x: -3000, y: -3000)); win.orderFrontRegardless()   // must be "on screen" for WebKit to render
+    win.setFrameOrigin(NSPoint(x: 80, y: 120)); win.orderFrontRegardless()   // WebKit only renders when actually on screen
     let html = "<html><body style='font: 15px -apple-system; margin:24px; line-height:1.5'>" + prose.split(separator: "\n\n").map { "<p>\($0)</p>" }.joined() + "</body></html>"
     var frames: [[UInt8]] = []
     var step = 0
@@ -85,12 +85,14 @@ func webKitScroll(done: @escaping ([[UInt8]]) -> Void) {
             }
         }
     }
-    web.navigationDelegate = NavDelegate { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } }
+    navHold = NavDelegate { DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { next() } }
+    web.navigationDelegate = navHold   // navigationDelegate is weak; keep it alive
     web.loadHTMLString(html, baseURL: nil)
     _ = win
     webHold = web
 }
 var webHold: WKWebView?
+var navHold: NavDelegate?
 final class NavDelegate: NSObject, WKNavigationDelegate {
     let onLoad: () -> Void
     init(_ f: @escaping () -> Void) { onLoad = f }
@@ -183,37 +185,59 @@ func analyze(_ name: String, _ frames: [[UInt8]]) {
         // copy-rect coverage (vertical shifts; scroll/typing-line shifts)
         let (dy, covered) = bestCopyShift(prev, cur, mask: mask)
         totCopy += min(covered, changed)
-        // residual region after copy: bounding box of changed pixels not explained by the shift
-        var minX = PW, minY = PH, maxX = -1, maxY = -1
+        // residual: pixels not explained by the shift, clustered (8 px cells, 8-connectivity) into regions
+        var unexplained = [Bool](repeating: false, count: PW * PH)
+        var anyUnexplained = false
         for i in 0..<(PW * PH) where mask[i] {
             let y = i / PW, x = i % PW; let sy = y + dy
-            var explained = false
-            if dy != 0 && sy >= 0 && sy < PH { let a = (sy * PW + x) * 4, b = i * 4; explained = prev[a] == cur[b] && prev[a+1] == cur[b+1] && prev[a+2] == cur[b+2] }
-            if !explained { minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y) }
+            var ex = false
+            if dy != 0 && sy >= 0 && sy < PH { let a = (sy * PW + x) * 4, b = i * 4; ex = prev[a] == cur[b] && prev[a+1] == cur[b+1] && prev[a+2] == cur[b+2] }
+            if !ex { unexplained[i] = true; anyUnexplained = true }
         }
-        // content boxes in the residual region, matched against history
-        if maxX >= 0 {
-            let region = Box(x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1)
-            let boxes = contentBoxes(cur, region: region, bg: bg)
-            totBoxes += boxes.count
-            for b in boxes {
-                let hsh = hash(cur, b); let area = b.w * b.h
-                if boxCache.contains(hsh) { totBoxHit += area; totRefs += 1 }
-                else {
-                    let bytes = boxBytes(cur, b)
-                    if let cands = boxPixels[b.w << 16 | b.h], cands.contains(where: { nearMatch($0, bytes) }) { totNear += area; totRefs += 1 }
-                    else { totBoxMiss += area }
-                    boxCache.insert(hsh); boxPixels[b.w << 16 | b.h, default: []].append(bytes)
+        if ProcessInfo.processInfo.environment["DEBUG"] != nil { print("   frame \(f): changed \(changed) dy=\(dy) unexplained \(unexplained.lazy.filter { $0 }.count)") }
+        if anyUnexplained {
+            let C = 8, cw = (PW + C - 1) / C, chh = (PH + C - 1) / C
+            var cell = [Bool](repeating: false, count: cw * chh)
+            for i in 0..<(PW * PH) where unexplained[i] { cell[(i / PW / C) * cw + (i % PW) / C] = true }
+            var label = [Int](repeating: -1, count: cw * chh); var regions: [Box] = []
+            for start in 0..<(cw * chh) where cell[start] && label[start] < 0 {
+                var stack = [start]; label[start] = regions.count
+                var minCX = cw, maxCX = -1, minCY = chh, maxCY = -1
+                while let c = stack.popLast() {
+                    let cx = c % cw, cy = c / cw
+                    minCX = min(minCX, cx); maxCX = max(maxCX, cx); minCY = min(minCY, cy); maxCY = max(maxCY, cy)
+                    for ddy in -1...1 { for ddx in -1...1 { let nx = cx + ddx, ny = cy + ddy
+                        if nx >= 0 && ny >= 0 && nx < cw && ny < chh { let n = ny * cw + nx; if cell[n] && label[n] < 0 { label[n] = regions.count; stack.append(n) } } } }
                 }
+                regions.append(Box(x: minCX * C, y: minCY * C, w: min(PW, (maxCX + 1) * C) - minCX * C, h: min(PH, (maxCY + 1) * C) - minCY * C))
             }
-            // grid-tile control over the same residual
-            var ty = region.y / TILE
-            while ty * TILE < region.y + region.h { var tx = region.x / TILE
-                while tx * TILE < region.x + region.w {
-                    let t = Box(x: tx * TILE, y: ty * TILE, w: TILE, h: TILE)
-                    if t.x + TILE <= PW && t.y + TILE <= PH { let hsh = hash(cur, t); totTileDirty += TILE * TILE; if tileCache.contains(hsh) { totTileHit += TILE * TILE } else { tileCache.insert(hsh) } }
-                    tx += 1 }
-                ty += 1 }
+            for region in regions {
+                // content boxes inside the region that contain unexplained pixels, matched against history
+                let boxes = contentBoxes(cur, region: region, bg: bg).filter { b in
+                    var any = false
+                    outer: for yy in b.y..<(b.y + b.h) { for xx in b.x..<(b.x + b.w) where unexplained[yy * PW + xx] { any = true; break outer } }
+                    return any
+                }
+                totBoxes += boxes.count
+                for b in boxes {
+                    let hsh = hash(cur, b); let area = b.w * b.h
+                    if boxCache.contains(hsh) { totBoxHit += area; totRefs += 1 }
+                    else {
+                        let bytes = boxBytes(cur, b)
+                        if let cands = boxPixels[b.w << 16 | b.h], cands.contains(where: { nearMatch($0, bytes) }) { totNear += area; totRefs += 1 }
+                        else { totBoxMiss += area }
+                        boxCache.insert(hsh); boxPixels[b.w << 16 | b.h, default: []].append(bytes)
+                    }
+                }
+                // grid-tile control over the same region
+                var ty = region.y / TILE
+                while ty * TILE < region.y + region.h { var tx = region.x / TILE
+                    while tx * TILE < region.x + region.w {
+                        let t = Box(x: tx * TILE, y: ty * TILE, w: TILE, h: TILE)
+                        if t.x + TILE <= PW && t.y + TILE <= PH { let hsh = hash(cur, t); totTileDirty += TILE * TILE; if tileCache.contains(hsh) { totTileHit += TILE * TILE } else { tileCache.insert(hsh) } }
+                        tx += 1 }
+                    ty += 1 }
+            }
         }
     }
     let f = Double(frames.count - 1)
@@ -228,6 +252,17 @@ func analyze(_ name: String, _ frames: [[UInt8]]) {
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
+if let dir = ProcessInfo.processInfo.environment["FRAMES"] {
+    let files = (try! FileManager.default.contentsOfDirectory(atPath: dir)).filter { $0.hasSuffix(".png") }.sorted()
+    var frames: [[UInt8]] = []
+    if let first = files.first, let d = FileManager.default.contents(atPath: dir + "/" + first), let rep = NSBitmapImageRep(data: d) { PW = rep.pixelsWide; PH = rep.pixelsHigh }   // analyze at native size: no scaling, or hashes are meaningless
+    for f in files {
+        guard let img = NSImage(contentsOfFile: dir + "/" + f) else { continue }
+        frames.append(pixels(of: img))   // scaled into the PW×PH canvas
+    }
+    analyze("captured sequence \(dir.split(separator: "/").last ?? "") (\(files.count) PNGs)", frames)
+    exit(0)
+}
 let ak = appKitSequences()
 analyze("AppKit NSTextView scroll 37pt/frame", ak.scroll)
 analyze("AppKit NSTextView typing", ak.typing)
