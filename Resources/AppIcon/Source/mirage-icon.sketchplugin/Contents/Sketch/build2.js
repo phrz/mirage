@@ -135,6 +135,8 @@ function fineGrain(parent) {
 }
 
 function buildIcon(ab, opts) {
+  var F = opts.features || {};
+  var TEX = OUT + '/export/textures/' + (opts.tex || 'base');
   var icon = G('Icon', ab);
   var mask = radius(rect(icon, 'Squircle Mask', 100, 100, 824, 824, solid('#FFFFFF')), 185, true);
   mask.sketchObject.hasClippingMask = true;
@@ -146,17 +148,24 @@ function buildIcon(ab, opts) {
   ]));
   // sun is out of frame upper-left: a wide soft brightening of the sky toward that corner
   oval(sky, 'Sun Wash', -420, -520, 1100, 1100, rad([[0, 'rgba(255,255,255,0.35)'], [1, 'rgba(255,255,255,0)']]));
+  if (F.sky) {
+    // a light source: glare toward the upper-left, deeper zenith toward the upper-right, film grain against banding
+    oval(sky, 'Sun Glare', -700, -760, 1500, 1500, rad([[0, 'rgba(255,252,240,0.7)'], [0.45, 'rgba(255,250,235,0.22)'], [1, 'rgba(255,250,235,0)']]));
+    rect(sky, 'Zenith Deepen', 0, 0, 1024, HORIZON, lin([[0, 'rgba(10,40,140,0.42)'], [0.55, 'rgba(10,40,140,0)']], { x: 1, y: 0 }, { x: 0.25, y: 1 }));
+    var grainImg = new Image({ name: 'Sky Grain', parent: sky, image: OUT + '/export/textures/sky-grain.png', frame: new Rectangle(0, 0, 1024, HORIZON) });
+    grainImg.style.blendingMode = Style.BlendingMode.Overlay; grainImg.style.opacity = 0.14;
+  }
   // atmospheric haze sitting on the horizon
   rect(sky, 'Horizon Haze', 0, HORIZON - 160, 1024, 160, lin([[0, 'rgba(236,243,250,0)'], [0.6, 'rgba(238,244,250,0.22)'], [1, 'rgba(240,245,250,0.5)']]));
 
   // ---- SAND: procedural raster plane (grain, speckle, ripples, mirage band baked in)
   var sand = G('Sand', icon);
-  var sandImg = new Image({ name: 'Sand Plane', parent: sand, image: OUT + '/export/textures/sand.png',
+  var sandImg = new Image({ name: 'Sand Plane', parent: sand, image: TEX + '/sand.png',
     frame: new Rectangle(0, HORIZON, 1024, 1024 - HORIZON) });
   var grain = fineGrain(sand);
   grain.style.opacity = 0.9;
   // the big grains (with their shadows and contact edges) sit ABOVE the fine grain
-  new Image({ name: 'Sand Grains', parent: sand, image: OUT + '/export/textures/sand-grains.png',
+  new Image({ name: 'Sand Grains', parent: sand, image: TEX + '/sand-grains.png',
     frame: new Rectangle(0, HORIZON, 1024, 1024 - HORIZON) });
   // heat shimmer: horizontal motion blur of whatever is behind, right at the horizon line
   var shimmer = G('Heat Shimmer', sand);
@@ -208,12 +217,33 @@ function buildIcon(ab, opts) {
 
   // ---- CURSOR: the macOS pointer standing on the vanishing line
   var cur = G('Cursor', icon);
-  arrow(cur, 'Pointer Keyline', solid('#FFFFFF'), {
-    borders: [{ color: '#FFFFFF', thickness: 6 * scale / 3, position: Style.BorderPosition.Outside }],
-    shadows: [{ color: 'rgba(10,20,50,0.16)', blur: 30, x: 0, y: 12, spread: 0 }]
-  });
-  arrow(cur, 'Pointer', lin([[0, '#2B2F3A'], [0.6, '#15171D'], [1, '#0A0B0F']], { x: 0.2, y: 0 }, { x: 0.8, y: 1 }));
-  arrow(cur, 'Pointer Edge Light', lin([[0, 'rgba(255,255,255,0.28)'], [0.25, 'rgba(255,255,255,0)'], [1, 'rgba(255,255,255,0)']], { x: 0, y: 0.5 }, { x: 1, y: 0.5 }));
+  if (F.cursor) {
+    // a physical object: white edge with thickness, glossy black body reflecting sky above and sand below,
+    // specular rim on the sun side, depth on the far side
+    arrow(cur, 'Pointer Keyline', lin([[0, '#FFFFFF'], [1, '#E3E7EE']], { x: 0, y: 0 }, { x: 1, y: 1 }), {
+      borders: [{ color: '#FFFFFF', thickness: 6 * scale / 3, position: Style.BorderPosition.Outside }],
+      shadows: [{ color: 'rgba(10,20,50,0.16)', blur: 30, x: 0, y: 12, spread: 0 }],
+      innerShadows: [{ color: 'rgba(40,60,100,0.25)', blur: 1.5, x: -1.5, y: -1.5, spread: 0 }]
+    });
+    var body = arrow(cur, 'Pointer', [
+      lin([[0, '#262A34'], [0.6, '#121419'], [1, '#07080B']], { x: 0.2, y: 0 }, { x: 0.8, y: 1 }),
+      lin([[0, 'rgba(140,180,240,0.55)'], [0.3, 'rgba(120,165,235,0.3)'], [0.36, 'rgba(120,165,235,0)'], [1, 'rgba(120,165,235,0)']]),   // sky reflected on the upper face, with a defined reflection edge
+      lin([[0, 'rgba(240,200,135,0)'], [0.62, 'rgba(240,200,135,0)'], [1, 'rgba(240,200,135,0.32)']])       // warm sand bounce along the base
+    ], {
+      innerShadows: [
+        { color: 'rgba(255,255,255,0.75)', blur: 0.6, x: 1.3, y: 1.3, spread: 0 },   // specular rim, sun side
+        { color: 'rgba(0,0,0,0.6)', blur: 3, x: -2, y: -2, spread: 0 }                // depth on the far edges
+      ]
+    });
+    arrow(cur, 'Pointer Edge Light', lin([[0, 'rgba(255,255,255,0.42)'], [0.18, 'rgba(255,255,255,0.06)'], [0.3, 'rgba(255,255,255,0)'], [1, 'rgba(255,255,255,0)']], { x: 0, y: 0.5 }, { x: 1, y: 0.5 }));
+  } else {
+    arrow(cur, 'Pointer Keyline', solid('#FFFFFF'), {
+      borders: [{ color: '#FFFFFF', thickness: 6 * scale / 3, position: Style.BorderPosition.Outside }],
+      shadows: [{ color: 'rgba(10,20,50,0.16)', blur: 30, x: 0, y: 12, spread: 0 }]
+    });
+    arrow(cur, 'Pointer', lin([[0, '#2B2F3A'], [0.6, '#15171D'], [1, '#0A0B0F']], { x: 0.2, y: 0 }, { x: 0.8, y: 1 }));
+    arrow(cur, 'Pointer Edge Light', lin([[0, 'rgba(255,255,255,0.28)'], [0.25, 'rgba(255,255,255,0)'], [1, 'rgba(255,255,255,0)']], { x: 0, y: 0.5 }, { x: 1, y: 0.5 }));
+  }
   cur.adjustToFit();
 
   sky.adjustToFit(); shimmer.adjustToFit(); sand.adjustToFit();
@@ -240,6 +270,20 @@ function onRun(context) {
   buildIcon(B, { window: true, cursorScale: 2.4, cursorX: 560, cursorY: 400 });
   dbg('B built');
 
+  // Study page: the candidate refinements added one at a time, left to right
+  var study = new sketch.Page({ name: 'Study', parent: doc });
+  var steps = [
+    ['1 Baseline', {}, 'base'],
+    ['2 + Cursor material', { cursor: true }, 'base'],
+    ['3 + Directional sky', { cursor: true, sky: true }, 'base'],
+    ['4 + Sand form, minerals', { cursor: true, sky: true, sand: true }, 'form'],
+    ['5 + Horizon waver', { cursor: true, sky: true, sand: true, horizon: true }, 'formwaver']
+  ];
+  steps.forEach(function (st, i) {
+    var sb = new Artboard({ name: st[0], parent: study, frame: new Rectangle(i * 1124, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
+    buildIcon(sb, { window: false, cursorScale: 3.3, cursorX: 432, cursorY: HORIZON - 95 * 3.3 - 2 * 3.3 - 3, features: st[1], tex: st[2] });
+  });
+  dbg('study built');
   doc.selectedPage = page;
   doc.centerOnLayer(A);
   doc.save(OUT + '/Mirage Icon.sketch', { saveMode: Document.SaveMode.SaveAs }, function (err) { dbg(err ? 'save error ' + err : 'saved'); });

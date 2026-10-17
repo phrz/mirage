@@ -6,7 +6,16 @@ horizon, atmospheric haze, and an inferior-mirage band (sky reflected on hot san
 import sys, os, numpy as np
 from PIL import Image, ImageFilter, ImageDraw
 
-HORIZON = int(sys.argv[1]) if len(sys.argv) > 1 else 620
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+flags = [a for a in sys.argv[1:] if a.startswith("--")]
+HORIZON = int(args[0]) if args else 620
+FORM = "--form" in flags          # large-scale swells, vignette, mineral chips
+WAVER = "--waver" in flags        # horizon hairline wavers with the heat
+OUT_DIR = "export/textures/" + (flags[flags.index("--out") + 1] if "--out" in flags else "base") if False else None
+tag = None
+for i, a in enumerate(sys.argv[1:]):
+    if a == "--out": tag = sys.argv[1:][i + 1]
+OUT_DIR = "export/textures/" + (tag or "base")
 S = 3                       # supersample vs 1024 canvas (3072 px wide)
 W = 1024 * S
 H = (1024 - HORIZON) * S
@@ -51,6 +60,14 @@ base  = lerp(far, near, smooth(Y ** 0.6)[..., None])
 # ---- large-scale tonal variation (gentle undulation / patches of darker, damp-looking sand)
 big = noise(H, W, 210 * S, octaves=3) - 0.5
 base = base * (1 + 0.10 * big[..., None] * Y[..., None] ** 0.5)
+if FORM:
+    # gentle swells under the ripples, lit on sun-facing (upper-left) slopes, shaded on the far slopes
+    sw = anoise(H, W, 520 * S, 240 * S, octaves=2)
+    slope = (np.roll(np.roll(sw, 3 * S, 0), 3 * S, 1) - np.roll(np.roll(sw, -3 * S, 0), -3 * S, 1))
+    base = base * (1 + 7.0 * slope[..., None] * (0.25 + 0.75 * Y[..., None]))
+    # soft vignette in the bottom corners for depth
+    vx = np.abs(X - 0.5) * 2; vig = np.clip(vx ** 2.2 * Y ** 1.5, 0, 1)
+    base = base * (1 - 0.16 * vig[..., None])
 
 # ---- wind ripples: spacing compresses toward the horizon (perspective), wobbly, lit edges
 # phase accumulates with 1/spacing(y); spacing grows with depth
@@ -75,6 +92,13 @@ base = base * (1 + grain[..., None])
 classes = [((1.0, 0.985, 0.93), 0.72, (0.55, 0.9)),     # quartz: colour, cumulative share, alpha range
            ((0.59, 0.47, 0.33), 0.93, (0.2, 0.4)),       # dark basalt
            ((0.78, 0.44, 0.26), 1.00, (0.3, 0.55))]      # iron-stained
+if FORM:   # a specific mineral sand: a few percent garnet, olivine and magnetite chips
+    classes = [((1.0, 0.985, 0.93), 0.66, (0.55, 0.9)),
+               ((0.59, 0.47, 0.33), 0.86, (0.2, 0.4)),
+               ((0.78, 0.44, 0.26), 0.92, (0.3, 0.55)),
+               ((0.55, 0.12, 0.14), 0.955, (0.5, 0.8)),   # garnet
+               ((0.36, 0.44, 0.20), 0.98, (0.45, 0.7)),   # olivine
+               ((0.12, 0.10, 0.10), 1.00, (0.5, 0.8))]    # magnetite
 n = 5000
 ys = (rng.random(n) ** 0.5)
 xs = rng.random(n)
@@ -139,7 +163,11 @@ breath = 0.75 + 0.25 * anoise(1, W, 120 * S, 1)[0][None, :]
 m = np.clip(fall * strata * breath, 0, 1) * 0.97
 base = lerp(base, sky_h, m[..., None])
 # hairline darkening right at the horizon (the far edge of the ground)
-edge_dark = 1 - 0.14 * np.exp(-(ypix / (1.6 * S)) ** 2)
+if WAVER:
+    wob = (anoise(1, W, 28 * S, 1, octaves=3)[0] - 0.5) * 2.4 * S     # per-column vertical offset of the edge
+    edge_dark = 1 - 0.14 * np.exp(-((ypix - wob[None, :]) / (1.6 * S)) ** 2) * (ypix - wob[None, :] > -1.5 * S)
+else:
+    edge_dark = 1 - 0.14 * np.exp(-(ypix / (1.6 * S)) ** 2)
 base = base * edge_dark[..., None]
 
 # accumulators are premultiplied; un-premultiply to straight alpha for the PNG, then haze-veil the colour
@@ -157,10 +185,14 @@ band = Image.fromarray(band_np.astype(np.uint8))
 fade = Image.linear_gradient("L").resize((W, band.height)).transpose(Image.FLIP_TOP_BOTTOM)
 img.paste(band, (0, 0), fade)
 
-os.makedirs("export/textures", exist_ok=True)
-img.save("export/textures/sand.png", optimize=True)                      # plate: sand without the big grains
+os.makedirs(OUT_DIR, exist_ok=True)
+img.save(OUT_DIR + "/sand.png", optimize=True)                      # plate: sand without the big grains
 grains = Image.fromarray((np.dstack([np.clip(GL_rgb, 0, 1), np.clip(GL_a, 0, 1)]) * 255).astype(np.uint8), "RGBA")
-grains.save("export/textures/sand-grains.png", optimize=True)            # big grains with shadows and edges
+grains.save(OUT_DIR + "/sand-grains.png", optimize=True)            # big grains with shadows and edges
 comp = img.convert("RGBA"); comp.alpha_composite(grains)
-comp.convert("RGB").resize((1024, H // S), Image.LANCZOS).save("export/textures/sand@1x.png", optimize=True)
-print("sand", img.size, "+ grains layer")
+comp.convert("RGB").resize((1024, H // S), Image.LANCZOS).save(OUT_DIR + "/sand@1x.png", optimize=True)
+print(OUT_DIR, img.size, "FORM" if FORM else "", "WAVER" if WAVER else "")
+
+# ---- fine monochrome grain tile for the sky (kills gradient banding, adds film texture)
+g = rng.normal(0.5, 0.08, (1024, 1024)).astype(np.float32)
+Image.fromarray((np.clip(g, 0, 1) * 255).astype(np.uint8), "L").save("export/textures/sky-grain.png", optimize=True)
