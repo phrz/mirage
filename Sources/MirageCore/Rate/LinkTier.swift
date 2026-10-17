@@ -4,8 +4,8 @@ import Foundation
 /// controller's own estimates with hysteresis. Everything tier-dependent reads `Policy`, so a
 /// tier is a single enum value driving fps caps, ladder bounds, video on/off and tile palette
 /// depth. M2 implements the Normal and Constrained behaviours; Local and Extreme policies are
-/// defined here so the seam exists (Extreme's video-off path works through the tile classifier,
-/// its paletted tiles, text mode and FEC do not exist yet).
+/// defined here so the seam exists (Extreme runs video-minimal on the tiny rung; its paletted
+/// tiles, text mode and FEC do not exist yet).
 public enum LinkTier: Int, Codable, Sendable, CaseIterable {
     case local = 0, normal = 1, constrained = 2, extreme = 3
 
@@ -23,10 +23,12 @@ public enum LinkTier: Int, Codable, Sendable, CaseIterable {
 
     public var policy: Policy {
         switch self {
-        case .local:       return Policy(maxVideoFPS: 60, minRung: 0, maxRung: 0, videoEnabled: true, tilePaletteColours: nil, tileShareWhileVideo: 0.6)
-        case .normal:      return Policy(maxVideoFPS: 30, minRung: 0, maxRung: 1, videoEnabled: true, tilePaletteColours: nil, tileShareWhileVideo: 0.45)
-        case .constrained: return Policy(maxVideoFPS: 30, minRung: 0, maxRung: 3, videoEnabled: true, tilePaletteColours: nil, tileShareWhileVideo: 0.45)
-        case .extreme:     return Policy(maxVideoFPS: 5, minRung: 2, maxRung: 3, videoEnabled: false, tilePaletteColours: 16, tileShareWhileVideo: 0.9)
+        // maxRung always includes the tiny rung: every tier starts there (lossy-first) and climbs.
+        case .local:       return Policy(maxVideoFPS: 60, minRung: 0, maxRung: RateController.tinyRung, videoEnabled: true, tilePaletteColours: nil, tileShareWhileVideo: 0.6)
+        case .normal:      return Policy(maxVideoFPS: 30, minRung: 0, maxRung: RateController.tinyRung, videoEnabled: true, tilePaletteColours: nil, tileShareWhileVideo: 0.45)
+        case .constrained: return Policy(maxVideoFPS: 30, minRung: 0, maxRung: RateController.tinyRung, videoEnabled: true, tilePaletteColours: nil, tileShareWhileVideo: 0.45)
+        // Video-minimal, not video-off: keyframes and motion on the tiny rung at 5 fps (1–2 KB a frame).
+        case .extreme:     return Policy(maxVideoFPS: 5, minRung: RateController.tinyRung, maxRung: RateController.tinyRung, videoEnabled: true, tilePaletteColours: 16, tileShareWhileVideo: 0.9)
         }
     }
 

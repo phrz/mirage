@@ -578,6 +578,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         var opts = HEVCEncoder.FrameOptions()
         var region = pendingWholeFrame ? PixelRect(x: 0, y: 0, width: tracker.width, height: tracker.height) : pendingVideoRegion
         var tiles = pendingVideoTiles
+        if wantKeyframe, var rc, rc.rung != RateController.tinyRung {
+            // Lossy-first on recovery too: a keyframe at the current rung that would take more than ~1 s
+            // of the video budget goes out on the tiny rung instead (the ladder climbs back afterwards).
+            let estBytes = Double(enc.width * enc.height) * 0.025
+            if estBytes > Double(max(150, lastBudget.videoKbps) * 1000 / 8) {
+                rc.dropToTinyRung(now: now); self.rc = rc
+                lastRebuildNanos = now
+                log("lossy-first: recovery keyframe on the tiny rung (\(Int(estBytes / 1000)) KB estimated at rung \(rc.rung))")
+            }
+        }
         if wantKeyframe {
             // Recovery: the canvas must be the whole current picture. The mask leaves out tiles the
             // client already has pixel-exact, so a keyframe does not degrade crisp text elsewhere.

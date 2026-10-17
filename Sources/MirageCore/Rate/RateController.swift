@@ -28,7 +28,11 @@ public struct RateController {
         public var upNanos: UInt64 = 5_000_000_000
         public init() {}
     }
-    public static let scales: [Double] = [1.0, 0.75, 0.5, 0.375]
+    /// Resolution ladder. The last rung is the "tiny" one (1/8 of native, ~400×225 on a 3200-px host):
+    /// every stream starts there so the first picture is one small keyframe within well under a
+    /// second, and the Extreme tier lives there (DESIGN §3.3 lossy-first, §3.9 video-minimal).
+    public static let scales: [Double] = [1.0, 0.75, 0.5, 0.375, 0.125]
+    public static var tinyRung: Int { scales.count - 1 }
 
     public var tuning = Tuning()
     public private(set) var targetKbps: Int
@@ -64,9 +68,14 @@ public struct RateController {
 
     public init(initialKbps: Int, maxKbps: Int, nativePixels: Int) {
         targetKbps = min(initialKbps, maxKbps); self.maxKbps = maxKbps; self.nativePixels = nativePixels
-        // Start at the rung the initial target can afford: the first keyframe is the stall (DESIGN §3.3).
-        let kpix = Double(nativePixels) / 1000
-        while rung < Self.scales.count - 1, Double(targetKbps) < kpix * Self.scales[rung] * Self.scales[rung] * tuning.kbpsPerKpixelDown { rung += 1 }
+        // Lossy-first: start on the tiny rung whatever the target, so the first picture is one small
+        // keyframe; the ladder climbs from there with its hysteresis as the target allows.
+        rung = Self.tinyRung
+    }
+
+    /// Lossy-first for a recovery or a newly visible picture: back to the tiny rung now, then climb again.
+    public mutating func dropToTinyRung(now: UInt64) {
+        rung = Self.tinyRung; belowSince = 0; aboveSince = 0; lastRungChange = now
     }
 
     /// One acked frame: when the host sent its first datagram, when the viewer saw the first and

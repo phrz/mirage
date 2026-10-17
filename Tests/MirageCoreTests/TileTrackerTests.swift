@@ -176,10 +176,12 @@ final class RateControllerTests: XCTestCase {
         XCTAssertGreaterThan(rc.capacityKbps, 600); XCTAssertLessThan(rc.capacityKbps, 1400)
     }
 
-    func testHoldsRequestedRateOnAFatLink() {
-        let rc = run(capacityKbps: 5000, maxKbps: 800, seconds: 20)
+    func testHoldsRequestedRateOnAFatLinkAndClimbsFromTheTinyRung() {
+        let start = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 2560 * 1440)
+        XCTAssertEqual(start.rung, RateController.tinyRung, "lossy-first: every stream starts tiny")
+        let rc = run(capacityKbps: 5000, maxKbps: 800, seconds: 40)
         XCTAssertEqual(rc.targetKbps, 800)
-        XCTAssertEqual(rc.rung, 0)
+        XCTAssertEqual(rc.rung, 1, "climbs one rung per 5 s of headroom; rung 0 at 1440p needs >1.1 Mbps")
     }
 
     func testLadderDropsOnSustainedShortfallAndClimbsBack() {
@@ -192,7 +194,7 @@ final class RateControllerTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(rc.rung, 1)
         XCTAssertLessThan(rc.scale, 1)
         rc.maxKbps = 2000
-        for _ in 0..<900 {   // generous link, 30 s: the 8 %/s increase ramps the target; after 5 s above the next rung's need it climbs
+        for _ in 0..<1800 {   // generous link, 60 s: the 8 %/s increase ramps the target; one climb per 5 s above the next rung's need
             rc.frameAcked(sentNanos: now, firstReceived: now + 100_000_000, lastReceived: now + 102_000_000, fragments: 4, bytes: 4000, now: now + 200_000_000, rttNanos: 200_000_000)
             now += 33_000_000
         }
@@ -236,7 +238,8 @@ final class LinkTierTests: XCTestCase {
         XCTAssertEqual(LinkTier.classify(capacityKbps: 30_000, rttMs: 30, lossPercent: 0), .normal)
         XCTAssertEqual(LinkTier.classify(capacityKbps: 900_000, rttMs: 2, lossPercent: 0), .local)
         XCTAssertEqual(LinkTier.classify(capacityKbps: 256, rttMs: 900, lossPercent: 5), .extreme)
-        XCTAssertFalse(LinkTier.extreme.policy.videoEnabled); XCTAssertEqual(LinkTier.extreme.policy.tilePaletteColours, 16)
+        XCTAssertTrue(LinkTier.extreme.policy.videoEnabled, "video-minimal, not off")
+        XCTAssertEqual(LinkTier.extreme.policy.minRung, RateController.tinyRung); XCTAssertEqual(LinkTier.extreme.policy.maxVideoFPS, 5)
     }
     func testHysteresis() {
         var sel = TierSelector()
@@ -257,6 +260,6 @@ final class LinkTierTests: XCTestCase {
         var now: UInt64 = 1_000_000_000
         for _ in 0..<120 { rc.frameAcked(sentNanos: now, firstReceived: now + 100_000_000, lastReceived: now + 110_000_000, fragments: 4, bytes: 4000, now: now + 200_000_000, rttNanos: 210_000_000); now += 33_000_000 }
         XCTAssertEqual(rc.tier, .constrained)
-        XCTAssertEqual(rc.policy.maxRung, 3)
+        XCTAssertEqual(rc.policy.maxRung, RateController.tinyRung)
     }
 }
