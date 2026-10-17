@@ -54,9 +54,6 @@ final class ScenarioRunner {
         session.log("scenario \(name) for \(Int(seconds)) s against window \(w.id) \(w.frame)")
         session.watchRect = w.frame
         let ppp = await MainActor.run { session.pixelsPerPoint }
-        let end = Date().addingTimeInterval(seconds)
-        let started = Date()
-        defer { activeSeconds = Date().timeIntervalSince(started) }
         // Let the opening keyframe's full-screen lossless refinement finish first (up to 60 s): the
         // measurements are about the interaction, not the first picture.
         var quiet = 0
@@ -66,6 +63,9 @@ final class ScenarioRunner {
             if quiet >= 2 { break }
         }
         session.log("scenario \(name): stream quiet after refinement, starting")
+        let end = Date().addingTimeInterval(seconds)
+        let started = Date()
+        defer { activeSeconds = Date().timeIntervalSince(started) }
         // Raise the bench (a click inside its text) so the scenario drives it and not whatever covers it.
         await click(w.frame.x + w.frame.width / 2, w.frame.maxY - Int(60 * ppp))
         try? await Task.sleep(for: .milliseconds(800))
