@@ -148,3 +148,17 @@ final class TileMaskTests: XCTestCase {
         XCTAssertEqual(TileMask.full(cols: 3, rows: 3).count, 9)
     }
 }
+
+final class ScriptedInputTests: XCTestCase {
+    func testScriptedFlagAndLocusRoundTrip() throws {
+        let k = ControlMessage.key(.init(keyCode: 0, down: true, isRepeat: false, modifiers: 0, characters: "a", seq: 5))
+        XCTAssertFalse(k.isScripted)
+        let s = k.markedScripted()
+        XCTAssertTrue(s.isScripted)
+        XCTAssertEqual(try Frame.decode(ControlMessage.self, from: try Frame.encode(s).dropFirst(4)).isScripted, true)
+        let m = ControlMessage.mouseMove(.init(x: 0.25, y: 0.5))
+        XCTAssertEqual(m.inputPoint?.x, 0.25); XCTAssertNil(k.inputPoint)
+        let h = ControlMessage.hostStatus(.init(consoleLocked: true, frontmostApp: "loginwindow", frontmostWindowID: 0, frontmostWindowTitle: ""))
+        XCTAssertEqual(try Frame.decode(ControlMessage.self, from: try Frame.encode(h).dropFirst(4)), h)
+    }
+}

@@ -3,6 +3,9 @@ import Foundation
 /// First byte a client sends on the reliable *tile* stream so the host can tell it from the
 /// control stream (JSON frames start with a length byte < 0x10) and the datagram flow (0xD7).
 public let tileStreamMagic: UInt8 = 0xD8
+/// Second reliable stream for *interactive* tiles (changed pixels, copy-rects): nothing queued on the
+/// refinement stream can delay them.
+public let fastTileStreamMagic: UInt8 = 0xD9
 
 /// A rect in native stream pixels (the size in `StreamInfo`), top-left origin.
 public struct PixelRect: Equatable, Hashable, Sendable, Codable {

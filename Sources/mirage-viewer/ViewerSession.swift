@@ -18,6 +18,7 @@ final class ViewerModel: ObservableObject {
     var statsLog: URL?
     /// Forward no local input (a scripted run is being watched).
     var observeOnly = false
+    @Published var hostStatus: ControlMessage.HostStatus?
 
     struct Stats {
         var rttMs = 0.0, fps = 0.0, kbps = 0.0, frameAgeMs = 0.0, decodeMs = 0.0
@@ -50,6 +51,11 @@ final class ViewerSession: @unchecked Sendable {
     private var sender: ControlSender?
     private var flow: MessageStream?
     private var tileStream: MessageStream?
+    private var fastTileStream: MessageStream?
+    /// Capture sequence last applied per 64-px tile: a refinement that was queued before a newer
+    /// interactive update of the same tile must not overwrite it.
+    private var tileCaptureSeq: [UInt32] = []
+    private(set) var hostStatus: ControlMessage.HostStatus?
     private let videoQueue = DispatchQueue(label: "mirage.viewer.video", qos: .userInteractive)
     private var assembler = FrameAssembler()
     private let decoder = HEVCDecoder()
@@ -134,6 +140,10 @@ final class ViewerSession: @unchecked Sendable {
             try await tiles.sendRaw(Data([tileStreamMagic]))
             tileStream = tiles
             Task.detached { [weak self] in await self?.receiveTiles(tiles) }
+            let fast = try await client.openStream()
+            try await fast.sendRaw(Data([fastTileStreamMagic]))
+            fastTileStream = fast
+            Task.detached { [weak self] in await self?.receiveTiles(fast) }
             let flow = try await client.openDatagramFlow()
             self.flow = flow
             try await flow.sendRaw(DatagramPing.encode(seq: 0))   // opens the flow on the host side
@@ -198,6 +208,9 @@ final class ViewerSession: @unchecked Sendable {
                 predictorLock.lock(); windows = list.windows; predictorLock.unlock()
             case .rateState(let r):
                 statsLock.lock(); rateState = r; statsLock.unlock()
+            case .hostStatus(let h):
+                statsLock.lock(); hostStatus = h; statsLock.unlock()
+                Task { @MainActor in model.hostStatus = h }
             case .reject(let r):
                 log("host: \(r.reason)")
                 Task { @MainActor in model.error = r.reason; model.status = "host refused"; lastRequest = nil }   // a later resize/bitrate change retries
@@ -229,10 +242,25 @@ final class ViewerSession: @unchecked Sendable {
         }
     }
 
+    /// True (and records the capture) unless every tile under `rect` already holds a newer capture.
+    private func isFresh(_ rect: PixelRect, captureSeq: UInt32) -> Bool {
+        guard let c = compositor, c.width > 0 else { return true }
+        let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
+        if tileCaptureSeq.count != cols * rows { tileCaptureSeq = Array(repeating: 0, count: cols * rows) }
+        let c0 = max(0, rect.x / 64), c1 = min(cols - 1, (rect.maxX - 1) / 64), r0 = max(0, rect.y / 64), r1 = min(rows - 1, (rect.maxY - 1) / 64)
+        guard c1 >= c0, r1 >= r0 else { return true }
+        var stale = true
+        for r in r0...r1 { for cc in c0...c1 where tileCaptureSeq[r * cols + cc] <= captureSeq { stale = false } }
+        if stale { return false }
+        for r in r0...r1 { for cc in c0...c1 { tileCaptureSeq[r * cols + cc] = max(tileCaptureSeq[r * cols + cc], captureSeq) } }
+        return true
+    }
+
     private func apply(_ msg: TileMessage, seq: UInt32, bytes: Int, now: UInt64) {
         switch msg {
         case .tiles(let t):
-            let n = compositor?.applyTiles(t.tiles) ?? 0
+            let fresh = t.tiles.filter { isFresh($0.rect, captureSeq: t.header.captureSeq) }
+            let n = compositor?.applyTiles(fresh) ?? 0
             statsLock.lock(); sTileBytes += t.bytes; sTileRects += n; statsLock.unlock()
             if t.refinement { lastRefinementNanos = now }
             if !watchRect.isEmpty {
@@ -258,6 +286,7 @@ final class ViewerSession: @unchecked Sendable {
         case .reset(let w, let h):
             compositor?.configure(width: w, height: h)
             compositor?.clear()
+            tileCaptureSeq = []
             predictorLock.lock(); predictor = Predictor(); predictorLock.unlock()
         }
         onChange?()
@@ -381,9 +410,9 @@ final class ViewerSession: @unchecked Sendable {
     }
     /// Sends an input message with a fresh sequence number; returns the number.
     @discardableResult
-    func send(_ m: ControlMessage) -> UInt64 {
+    func send(_ m: ControlMessage, scripted: Bool = false) -> UInt64 {
         let seq = nextSeq()
-        var m = m
+        var m = scripted ? m.markedScripted() : m
         switch m {
         case .mouseButton(var b): b.seq = seq; m = .mouseButton(b)
         case .scroll(var s): s.seq = seq; m = .scroll(s)
@@ -487,6 +516,7 @@ extension ViewerSession {
             var predictionsShown: Int, predictionsConfirmed: Int, predictionsMismatched: Int
             var scenario: String?, crispMs: [Double]?, crispMsMedian: Double?, crispMsMax: Double?
             var watchedTileBytes: Int?, watchedTileCount: Int?, watchedKbps: Double?, watchedDirectKbps: Double?
+            var keyLatencyMs: [Double]?, keyLatencyMsMedian: Double?, keyLatencyMsMax: Double?
             var samples: [Sample]
         }
         let target = MainActor.assumeIsolated { lastRequest?.bitrateKbps ?? 0 }
@@ -508,6 +538,7 @@ extension ViewerSession {
                       watchedTileBytes: scenario == nil ? nil : watchedTileBytes, watchedTileCount: scenario == nil ? nil : watchedTileCount,
                       watchedKbps: scenario.map { Double(watchedTileBytes) * 8 / 1000 / max(1, $0.activeSeconds) },
                       watchedDirectKbps: scenario.map { Double(watchedDirectBytes) * 8 / 1000 / max(1, $0.activeSeconds) },
+                      keyLatencyMs: scenario?.keyLatencyMs, keyLatencyMsMedian: scenario.map { median($0.keyLatencyMs) }, keyLatencyMsMax: scenario?.keyLatencyMs.max(),
                       samples: samples)
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         return (try? enc.encode(out)) ?? Data()

@@ -259,6 +259,10 @@ struct StatsOverlay: View {
             Text(String(format: "%@   target %d kbps   capacity %d   queue %.0f ms   rung %d (%.3gx%@)   tile budget %d", s.rate.tier?.name ?? "–", s.rate.targetKbps, s.rate.capacityKbps, s.rate.queueMs, s.rate.rung, s.rate.scale, s.upscaling ? " MetalFX" : "", s.rate.tileBudgetKbps))
             Text(String(format: "video %dx%d   decode %.1f ms   frames %d   lost %d   skipped %d   tile rects %d   copy-rects %d", s.width, s.height, s.decodeMs, s.frames, s.lost, s.dropped, s.tileRects, s.copyRects))
             Text(String(format: "predictions shown %d   confirmed %d   mismatched %d   expired %d", s.predictions.shown, s.predictions.confirmed, s.predictions.mismatched, s.predictions.expired))
+            if let h = model.hostStatus {
+                Text("host: \(h.consoleLocked ? "CONSOLE LOCKED" : "unlocked")   front: \(h.frontmostApp) — \(h.frontmostWindowTitle.prefix(40))")
+                    .foregroundStyle(h.consoleLocked ? .red : .white)
+            }
             Text("⌃⌥⌘S stats  ⌃⌥⌘↑↓ bitrate  ⌃⌥⌘Q quit").foregroundStyle(.secondary)
         }
         .font(.system(size: 11, design: .monospaced))

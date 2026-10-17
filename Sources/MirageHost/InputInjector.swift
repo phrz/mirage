@@ -11,6 +11,11 @@ final class InputInjector {
     /// (input seq, injection clock) of recent inputs, so captures can be stamped with the last input they reflect.
     private var injected: [(seq: UInt64, nanos: UInt64)] = []
     private let seqLock = NSLock()
+    private var lastRefusalLog: UInt64 = 0
+    /// Last input position (normalized), the scheduler's "input locus".
+    private var _locus: (x: Double, y: Double)? = nil
+    private let locusLock = NSLock()
+    var locus: (x: Double, y: Double)? { locusLock.lock(); defer { locusLock.unlock() }; return _locus }
 
     init(displayID: CGDirectDisplayID) {
         displayBounds = CGDisplayBounds(displayID)
@@ -45,7 +50,21 @@ final class InputInjector {
         return injected.last(where: { $0.nanos <= nanos })?.seq ?? 0
     }
 
+    /// Scripted (measurement) input is refused while the console is locked: a script must never type
+    /// into the login window. A person's input still goes through; they may be logging in on purpose.
+    static func consoleLocked() -> Bool {
+        guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
+        if let v = dict["CGSSessionScreenIsLocked"] as? Bool { return v }
+        if let v = dict["CGSSessionScreenIsLocked"] as? Int { return v != 0 }
+        return false
+    }
+
     func handle(_ msg: ControlMessage) {
+        if msg.isScripted, Self.consoleLocked() {
+            if Clock.nowNanos() - lastRefusalLog > 2_000_000_000 { lastRefusalLog = Clock.nowNanos(); hostLog("refusing scripted input: console is locked") }
+            return
+        }
+        if let p = msg.inputPoint { locusLock.lock(); _locus = p; locusLock.unlock() }
         if let seq = msg.inputSeq {
             seqLock.lock()
             injected.append((seq, Clock.nowNanos()))

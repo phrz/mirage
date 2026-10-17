@@ -8,7 +8,8 @@ public protocol StreamOutput: AnyObject, Sendable {
     /// Reliable, ordered control message (cursor shapes, stream info, ...).
     func sendControl(_ message: ControlMessage)
     /// Reliable, ordered bytes on the tile stream (already framed by `TileMessage.encode`).
-    func sendTiles(_ data: Data)
+    /// `fast` = the interactive stream (changed pixels, copy-rects), else the refinement stream.
+    func sendTiles(_ data: Data, fast: Bool)
     var maxDatagramSize: Int { get }
 }
 
@@ -29,14 +30,25 @@ public final class HostConnection: @unchecked Sendable {
     private let lock = NSLock()
     private var _flow: MessageStream?
     private var _tiles: MessageStream?
+    private var _fastTiles: MessageStream?
     private var flowWaiters: [FlowWaiter] = []
     private var tileWaiters: [FlowWaiter] = []
+    private var fastWaiters: [FlowWaiter] = []
     public var streamer: DesktopStreamer?
 
     init(id: UUID) { self.id = id }
 
     public var flow: MessageStream? { lock.lock(); defer { lock.unlock() }; return _flow }
     public var tiles: MessageStream? { lock.lock(); defer { lock.unlock() }; return _tiles }
+    public var fastTiles: MessageStream? { lock.lock(); defer { lock.unlock() }; return _fastTiles }
+    func setFastTiles(_ t: MessageStream) {
+        lock.lock(); _fastTiles = t; let w = fastWaiters; fastWaiters = []; lock.unlock()
+        for x in w { x.resume(t) }
+    }
+    func clearFastTiles(_ t: MessageStream) { lock.lock(); if _fastTiles === t { _fastTiles = nil }; lock.unlock() }
+    public func waitForFastTiles(timeout: Duration) async -> MessageStream? {
+        await wait(timeout: timeout, current: { $0._fastTiles }, register: { $0.fastWaiters.append($1) }, unregister: { c, w in c.fastWaiters.removeAll { $0 === w } })
+    }
 
     func setFlow(_ f: MessageStream) {
         lock.lock()
@@ -144,12 +156,13 @@ public final class ControlSender: @unchecked Sendable {
 final class ConnectionOutput: StreamOutput, @unchecked Sendable {
     let flow: MessageStream
     let tiles: MessageStream?
+    let fastTiles: MessageStream?
     let control: ControlSender
     let log: @Sendable (String) -> Void
     let maxDatagramSize: Int
 
-    init(flow: MessageStream, tiles: MessageStream?, control: MessageStream, log: @escaping @Sendable (String) -> Void) {
-        self.flow = flow; self.tiles = tiles; self.control = ControlSender(stream: control, log: log); self.log = log
+    init(flow: MessageStream, tiles: MessageStream?, fastTiles: MessageStream?, control: MessageStream, log: @escaping @Sendable (String) -> Void) {
+        self.flow = flow; self.tiles = tiles; self.fastTiles = fastTiles; self.control = ControlSender(stream: control, log: log); self.log = log
         let m = flow.connection.maximumDatagramSize
         maxDatagramSize = m > 0 ? min(m, VideoFragment.datagramSize) : VideoFragment.datagramSize
     }
@@ -162,9 +175,9 @@ final class ConnectionOutput: StreamOutput, @unchecked Sendable {
 
     func sendControl(_ message: ControlMessage) { control.send(message) }
 
-    func sendTiles(_ data: Data) {
+    func sendTiles(_ data: Data, fast: Bool) {
         // Network.framework queues sends in order on one connection; no await needed for ordering.
-        tiles?.connection.send(content: data, completion: .contentProcessed { [log] err in
+        ((fast ? fastTiles : nil) ?? tiles)?.connection.send(content: data, completion: .contentProcessed { [log] err in
             if let err { log("tile send: \(err)") }
         })
     }

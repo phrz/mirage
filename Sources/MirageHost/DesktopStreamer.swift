@@ -42,7 +42,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var videoActiveNanos: UInt64 = 0
     private var tileTokens: Double = 0
     private var tileMsgSeq: UInt32 = 0
-    private var tileSent: [UInt32: (nanos: UInt64, bytes: Int)] = [:]
+    private var tileSent: [UInt32: (nanos: UInt64, bytes: Int, refinement: Int)] = [:]
     private var lastBudget = RateController.Budget(tileKbps: 0, videoKbps: 0)
     private var refineTimer: DispatchSourceTimer?
     private var rateTimer: DispatchSourceTimer?
@@ -199,8 +199,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         queue.async {
             guard let sent = self.tileSent.removeValue(forKey: tileAck.msgSeq) else { return }
             let now = Clock.nowNanos()
+            self.refinementInFlight = max(0, self.refinementInFlight - sent.refinement)
             self.rc?.delaySample(sentNanos: sent.nanos, receivedNanos: tileAck.receivedNanos, now: now)
-            for k in self.tileSent.keys where k < tileAck.msgSeq &- 64 { self.tileSent[k] = nil }
+            for k in self.tileSent.keys where k < tileAck.msgSeq &- 64 { if let v = self.tileSent.removeValue(forKey: k) { self.refinementInFlight = max(0, self.refinementInFlight - v.refinement) } }
         }
     }
 
@@ -337,7 +338,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 statCopyRects += 1
             }
             let unexplained = dirty.filter { !explained.contains($0) }
-            if detector.debug != nil, unexplained.count >= 6 { log("capture \(captureSeq): dirty \(dirty.count) unexplained \(unexplained.count) moved \(moved.count) scroll \(pendingScroll != nil)") }
+            if detector.debug != nil, unexplained.count >= 6 { log("capture \(captureSeq): dirty \(dirty.count) unexplained \(unexplained.count) bb \(tracker.boundingRect(unexplained)) moved \(moved.count) scroll \(pendingScroll != nil)") }
             if let dir = ProcessInfo.processInfo.environment["MIRAGE_DUMP_DIR"], unexplained.count >= 100, !dumped {
                 dumped = true
                 for (name, f) in [("old", old), ("new", new)] {
@@ -404,6 +405,23 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         refine(now: now)
     }
 
+    /// Tiles within ~200 px (native) of the last input event, and the rest.
+    private func splitByLocus(_ tiles: [Int], tracker: TileTracker) -> ([Int], [Int]) {
+        guard let l = injector?.locus else { return ([], tiles) }
+        let lx = Int(l.x * Double(tracker.width)), ly = Int(l.y * Double(tracker.height))
+        let radius = 200
+        var near: [Int] = [], far: [Int] = []
+        for i in tiles {
+            let r = tracker.rect(of: i)
+            let cx = r.x + r.width / 2, cy = r.y + r.height / 2
+            if abs(cx - lx) <= radius + r.width / 2 && abs(cy - ly) <= radius + r.height / 2 { near.append(i) } else { far.append(i) }
+        }
+        return (near, far)
+    }
+    private var lastDirectNanos: UInt64 = 0
+    /// Refinement bytes sent but not yet acked by the viewer (bounded so refinement cannot fill the link's queue).
+    private var refinementInFlight = 0
+
     private func header(windowID: UInt32, nanos: UInt64) -> TileMessage.Header {
         .init(captureSeq: captureSeq, inputSeq: lastInputSeq, windowID: windowID, captureNanos: nanos)
     }
@@ -459,7 +477,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
             guard !out.isEmpty else { return }
             let bytes = out.reduce(0) { $0 + $1.data.count }
-            self.send(tile: .tiles(.init(header: hdr, refinement: refinement, tiles: out)), captureNanos: nanos)
+            self.send(tile: .tiles(.init(header: hdr, refinement: refinement, tiles: out)), captureNanos: nanos, fast: !refinement, refinementBytes: refinement ? bytes : 0)
             self.queue.async {
                 self.tileTokens -= Double(bytes - estimate)   // true up the estimate
                 self.statTileBytes += bytes; self.statTileRects += out.count; self.secTileBytes += bytes
@@ -469,18 +487,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         return estimate
     }
 
-    /// Sends a tile-stream message in order (all sends go through the tile queue).
+    /// Sends a tile-stream message in order (all sends go through the tile queue). Copy-rects and resets are interactive.
     private func sendTileMessage(_ m: TileMessage, captureNanos: UInt64) {
-        tileQueue.async { [weak self] in self?.send(tile: m, captureNanos: captureNanos) }
+        tileQueue.async { [weak self] in self?.send(tile: m, captureNanos: captureNanos, fast: true, refinementBytes: 0) }
     }
     /// On tileQueue.
-    private func send(tile m: TileMessage, captureNanos: UInt64) {
+    private func send(tile m: TileMessage, captureNanos: UInt64, fast: Bool, refinementBytes: Int) {
         guard let out = output else { return }
         tileMsgSeq &+= 1
         let seq = tileMsgSeq
         let d = m.encode(msgSeq: seq)
-        out.sendTiles(d)
-        queue.async { self.tileSent[seq] = (Clock.nowNanos(), d.count) }
+        out.sendTiles(d, fast: fast)
+        queue.async { self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes); self.refinementInFlight += refinementBytes }
     }
 
     private func refillTiles(now: UInt64) {
@@ -496,7 +514,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func refine(now: UInt64) {
         guard var tracker, let src = lastFrame else { return }
         refillTiles(now: now)
-        guard tileTokens > 0 else { return }
+        // Priority 4: refinement runs on leftover budget only. It yields for 150 ms after any changed
+        // pixels went out, keeps 30 % of the tile budget in reserve for them, and never has more than
+        // ~300 ms of the link in flight (so it cannot build the queue the next keystroke would wait in).
+        guard now - lastDirectNanos > 150_000_000 else { return }
+        let perSecond = Double(lastBudget.tileKbps * 1000 / 8)
+        guard tileTokens > perSecond * 0.3 * 0.5, Double(refinementInFlight) < perSecond * 0.3 else { return }
         let due = tracker.due(now: now, limit: 96)
         guard !due.isEmpty else { return }
         // Take tiles until the budget is spent (allowed to go negative once).
@@ -738,6 +761,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if rc.tier != self.lastTier { self.lastTier = rc.tier; self.log("link tier: \(rc.tier.name) (capacity \(rc.capacityKbps) kbps, srtt \(Int(rc.srttMs)) ms, loss \(String(format: "%.1f", rc.lossPercent)) %)") }
             self.tileKbpsEWMA = self.tileKbpsEWMA * 0.5 + Double(self.secTileBytes * 8 / 1000) * 0.5
             self.secVideoBytes = 0; self.secTileBytes = 0
+            let front: (app: String, id: UInt32, title: String) = self.windows?.frontmost() ?? (app: "", id: 0, title: "")
+            self.output?.sendControl(.hostStatus(.init(consoleLocked: InputInjector.consoleLocked(), frontmostApp: front.app, frontmostWindowID: front.id, frontmostWindowTitle: front.title)))
         }
         s.resume(); rateTimer = s
 

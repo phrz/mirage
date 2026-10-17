@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import CoreGraphics
 import ApplicationServices
 import MirageCore
@@ -79,6 +80,13 @@ final class WindowTracker {
         let s = Sample(captureSeq: captureSeq, windows: windows, byID: byID)
         current = s
         return (s, moved, changed)
+    }
+
+    /// The frontmost normal window (first in the on-screen list) and its owner, for the host status.
+    func frontmost() -> (app: String, id: UInt32, title: String) {
+        guard let w = current?.windows.first else { return ("", 0, "") }
+        let app = NSRunningApplication(processIdentifier: w.pid)?.localizedName ?? ""
+        return (app, w.id, w.title)
     }
 
     /// Topmost window under a stream-pixel point.

@@ -33,11 +33,12 @@ public enum HostSession {
                 conn.setFlow(stream)
                 defer { conn.clearFlow(stream) }
                 try await serveDatagrams(stream, remote: remote, ctx: ctx)
-            } else if first.first == tileStreamMagic {
+            } else if first.first == tileStreamMagic || first.first == fastTileStreamMagic {
+                let fast = first.first == fastTileStreamMagic
                 _ = try await stream.receiveExactly(1)
-                conn.setTiles(stream)
-                defer { conn.clearTiles(stream) }
-                ctx.log("[\(remote)] tile stream open")
+                if fast { conn.setFastTiles(stream) } else { conn.setTiles(stream) }
+                defer { if fast { conn.clearFastTiles(stream) } else { conn.clearTiles(stream) } }
+                ctx.log("[\(remote)] \(fast ? "interactive" : "refinement") tile stream open")
                 while true { _ = try await stream.receiveSome() }   // nothing expected client → host; detects close
             } else {
                 isControl = true
@@ -104,7 +105,8 @@ public enum HostSession {
                     }
                     let tiles = await conn.waitForTiles(timeout: .seconds(5))
                     if tiles == nil { ctx.log("[\(remote)] no tile stream; lossless tiles disabled") }
-                    let out = ConnectionOutput(flow: flow, tiles: tiles, control: stream, log: ctx.log)
+                    let fast = await conn.waitForFastTiles(timeout: .seconds(2))
+                    let out = ConnectionOutput(flow: flow, tiles: tiles, fastTiles: fast, control: stream, log: ctx.log)
                     output = out
                     let s = make()
                     do {

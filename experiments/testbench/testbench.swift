@@ -32,7 +32,12 @@ final class App: NSObject, NSApplicationDelegate {
         band.autoresizingMask = [.width, .minYMargin]
         band.contentView?.addSubview(cap)
         caption = cap
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: size.width, height: size.height - captionHeight))
+        // A password-style field (the "login-screen typing" acceptance test types into it, never into the real login).
+        let fieldHeight: CGFloat = 40
+        let field = NSSecureTextField(frame: NSRect(x: 20, y: size.height - captionHeight - fieldHeight + 6, width: 360, height: 28))
+        field.placeholderString = "password-style field for the typing-latency test"
+        field.autoresizingMask = [.minYMargin]
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: size.width, height: size.height - captionHeight - fieldHeight))
         scroll.hasVerticalScroller = true; scroll.autoresizingMask = [.width, .height]
         let tv = NSTextView(frame: NSRect(origin: .zero, size: size))
         tv.font = NSFont.monospacedSystemFont(ofSize: 14, weight: .regular)
@@ -48,7 +53,7 @@ final class App: NSObject, NSApplicationDelegate {
         }
         tv.string = text
         scroll.documentView = tv
-        content.addSubview(scroll); content.addSubview(band)
+        content.addSubview(scroll); content.addSubview(field); content.addSubview(band)
         w.contentView = content
         w.makeKeyAndOrderFront(nil)
         updateCaption()

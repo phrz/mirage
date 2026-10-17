@@ -13,6 +13,8 @@ final class ScenarioRunner {
     private(set) var bursts = 0
     /// Seconds the scenario was actively driving input (for watched-rect kbps).
     private(set) var activeSeconds = 0.0
+    /// login scenario: ms from each keystroke to the first changed pixels inside the field (9999 = none within 2 s).
+    private(set) var keyLatencyMs: [Double] = []
     init(session: ViewerSession, name: String, seconds: Double) { self.session = session; self.name = name; self.seconds = seconds }
 
     private var lastBench: ControlMessage.WindowInfo?
@@ -37,10 +39,24 @@ final class ScenarioRunner {
     }
     private func click(_ x: Int, _ y: Int) async {
         let (nx, ny) = normalized(x, y)
-        session.send(.mouseMove(.init(x: nx, y: ny)))
-        session.send(.mouseButton(.init(button: 0, down: true, x: nx, y: ny, clickCount: 1, modifiers: 0)))
+        session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
+        session.send(.mouseButton(.init(button: 0, down: true, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
         try? await Task.sleep(for: .milliseconds(60))
-        session.send(.mouseButton(.init(button: 0, down: false, x: nx, y: ny, clickCount: 1, modifiers: 0)))
+        session.send(.mouseButton(.init(button: 0, down: false, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
+    }
+
+    /// Samples the canvas where the bench's purple caption band should be (just below its title bar).
+    private func captionVisible(_ w: ControlMessage.WindowInfo, ppp: Double) async -> Bool {
+        guard let c = session.compositor else { return false }
+        let band = PixelRect(x: w.frame.x + Int(40 * ppp), y: w.frame.y + Int((28 + 20) * ppp), width: min(w.frame.width - Int(80 * ppp), 400), height: 2)
+        return await withCheckedContinuation { cont in
+            c.sampleEdgeColor(of: band, bottom: false) { col in
+                // Band colour is (0.42, 0.20, 0.75) sRGB; accept a loose match.
+                let ok = abs(col.x - 0.42) < 0.15 && abs(col.y - 0.20) < 0.15 && abs(col.z - 0.75) < 0.18
+                self.session.log(String(format: "scenario: caption band sample r %.2f g %.2f b %.2f → %@", col.x, col.y, col.z, ok ? "bench visible" : "NOT the bench"))
+                cont.resume(returning: ok)
+            }
+        }
     }
 
     /// Waits until the test window's rect stops receiving updates after a burst: time-to-crisp is the
@@ -76,6 +92,17 @@ final class ScenarioRunner {
             if quiet >= 2 { break }
         }
         session.log("scenario \(name): stream quiet after refinement, starting")
+        // Before injecting anything the script must know what it is looking at: the console unlocked,
+        // the bench frontmost, and the picture actually showing the bench (its purple caption band).
+        guard let w = bench() else { session.log("scenario \(name): ABORT, bench window gone"); return }
+        guard let status = session.hostStatus else { session.log("scenario \(name): ABORT, no host status"); return }
+        guard !status.consoleLocked else { session.log("scenario \(name): ABORT, host console is LOCKED"); return }
+        guard status.frontmostWindowID == w.id || status.frontmostApp == "Mirage Test Bench" else {
+            session.log("scenario \(name): ABORT, bench is not frontmost (front: \(status.frontmostApp) \(status.frontmostWindowID) '\(status.frontmostWindowTitle)')"); return
+        }
+        let bandOK = await captionVisible(w, ppp: ppp)
+        guard bandOK else { session.log("scenario \(name): ABORT, the picture does not show the bench's caption band"); return }
+        session.log("scenario \(name): checks passed (console unlocked, bench frontmost, caption visible)")
         let end = Date().addingTimeInterval(seconds)
         let started = Date()
         defer { activeSeconds = Date().timeIntervalSince(started) }
@@ -87,6 +114,38 @@ final class ScenarioRunner {
         case "idle":
             session.resetWatched()
             try? await Task.sleep(for: .seconds(seconds))
+        case "login":
+            // Password-style field at the top of the bench (below the caption): click it, type a character every
+            // 500 ms, and time each keystroke to the first changed pixels arriving inside the field.
+            let field = PixelRect(x: w.frame.x + Int(20 * ppp), y: w.frame.y + Int((28 + 44 + 6) * ppp), width: Int(360 * ppp), height: Int(28 * ppp))
+            await click(field.x + field.width / 2, field.y + field.height / 2)
+            try? await Task.sleep(for: .milliseconds(800))
+            session.watchRect = field
+            session.resetWatched()
+            var latencies: [Double] = []
+            let chars = Array("correct horse battery staple")
+            var i = 0
+            while Date() < end, i < chars.count {
+                let ch = chars[i]; i += 1
+                let before = session.lastWatchedTileNanos
+                let t0 = Clock.nowNanos()
+                session.send(.key(.init(keyCode: ch == " " ? 49 : 0, down: true, isRepeat: false, modifiers: 0, characters: String(ch))), scripted: true)
+                session.send(.key(.init(keyCode: ch == " " ? 49 : 0, down: false, isRepeat: false, modifiers: 0, characters: nil)), scripted: true)
+                var got: Double? = nil
+                for _ in 0..<200 {   // up to 2 s
+                    try? await Task.sleep(for: .milliseconds(10))
+                    if session.lastWatchedTileNanos > before { got = Double(session.lastWatchedTileNanos - t0) / 1e6; break }
+                }
+                latencies.append(got ?? 9999)
+                session.log(String(format: "scenario login: key %d → first changed pixels in the field after %@", i, got.map { String(format: "%.0f ms", $0) } ?? "no update within 2 s"))
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+            keyLatencyMs = latencies
+            // Clear the field so nothing lingers: select all + delete.
+            session.send(.key(.init(keyCode: 0, down: true, isRepeat: false, modifiers: 1 << 20, characters: "a")), scripted: true)
+            session.send(.key(.init(keyCode: 0, down: false, isRepeat: false, modifiers: 1 << 20, characters: nil)), scripted: true)
+            session.send(.key(.init(keyCode: 51, down: true, isRepeat: false, modifiers: 0, characters: "\u{8}")), scripted: true)
+            session.send(.key(.init(keyCode: 51, down: false, isRepeat: false, modifiers: 0, characters: nil)), scripted: true)
         case "typing":
             // Caret sits where the raise-click put it (lower half of the text); type at 6 keys/s.
             session.resetWatched()
@@ -95,21 +154,21 @@ final class ScenarioRunner {
             while Date() < end {
                 let ch = text[i % text.count]; i += 1
                 let code: UInt16 = ch == " " ? 49 : 0
-                session.send(.key(.init(keyCode: code, down: true, isRepeat: false, modifiers: 0, characters: String(ch))))
-                session.send(.key(.init(keyCode: code, down: false, isRepeat: false, modifiers: 0, characters: nil)))
+                session.send(.key(.init(keyCode: code, down: true, isRepeat: false, modifiers: 0, characters: String(ch))), scripted: true)
+                session.send(.key(.init(keyCode: code, down: false, isRepeat: false, modifiers: 0, characters: nil)), scripted: true)
                 try? await Task.sleep(for: .milliseconds(160))
             }
         case "scroll":
             let (x, y) = safePoint(w, ppp: ppp)
             let (nx, ny) = normalized(x, y)
-            session.send(.mouseMove(.init(x: nx, y: ny)))
+            session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
             var dir = -1.0
             while Date() < end {
                 let titleBar = Int(28 * ppp)
                 for _ in 0..<40 {   // 1.3 s of wheel at 30 Hz, 30 pt per event
                     let dy = 30.0 * dir
                     guard let win = bench() else { break }
-                    let seq = session.send(.scroll(.init(x: nx, y: ny, dx: 0, dy: dy, precise: true, modifiers: 0)))
+                    let seq = session.send(.scroll(.init(x: nx, y: ny, dx: 0, dy: dy, precise: true, modifiers: 0)), scripted: true)
                     let rect = session.scrollRect(for: win, titleBarPx: titleBar)
                     session.predict(kind: .scroll, windowID: win.id, rect: rect, dx: 0, dy: Int((dy * ppp).rounded()), inputSeq: seq)
                     try? await Task.sleep(for: .milliseconds(33))
@@ -124,19 +183,19 @@ final class ScenarioRunner {
                 guard let win = bench() else { break }
                 let x0 = win.frame.x + win.frame.width / 2, y0 = win.frame.y + Int(12 * ppp)
                 var (nx, ny) = normalized(x0, y0)
-                session.send(.mouseMove(.init(x: nx, y: ny)))
+                session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
                 try? await Task.sleep(for: .milliseconds(50))
-                session.send(.mouseButton(.init(button: 0, down: true, x: nx, y: ny, clickCount: 1, modifiers: 0)))
+                session.send(.mouseButton(.init(button: 0, down: true, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
                 var x = x0, y = y0
                 session.watchRect = win.frame.union(win.frame.offset(300 * dir, 150 * dir))
                 for _ in 0..<50 {   // 0.8 s drag, 6×3 px per 16 ms
                     x += 6 * dir; y += 3 * dir
                     (nx, ny) = normalized(x, y)
-                    let seq = session.send(.mouseMove(.init(x: nx, y: ny)))
+                    let seq = session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
                     session.predict(kind: .drag, windowID: win.id, rect: win.frame, dx: 6 * dir, dy: 3 * dir, inputSeq: seq)
                     try? await Task.sleep(for: .milliseconds(16))
                 }
-                session.send(.mouseButton(.init(button: 0, down: false, x: nx, y: ny, clickCount: 1, modifiers: 0)))
+                session.send(.mouseButton(.init(button: 0, down: false, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
                 await measureCrisp(burstEnd: Clock.nowNanos())
                 try? await Task.sleep(for: .milliseconds(800))
                 dir = -dir
