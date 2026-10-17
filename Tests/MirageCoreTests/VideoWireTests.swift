@@ -217,3 +217,74 @@ final class WindowListDeltaTests: XCTestCase {
         XCTAssertLessThan(try! Frame.encode(ControlMessage.windowList(d)).count, try! Frame.encode(ControlMessage.windowList(.init(captureSeq: 2, windows: [b2, c, a, a, a]))).count)
     }
 }
+
+final class LossRecoveryTests: XCTestCase {
+    private func frames(_ seqs: [UInt32], flags: VideoFragment.Flags = [], bytes: Int = 3000) -> [UInt32: [VideoFragment]] {
+        var out: [UInt32: [VideoFragment]] = [:]
+        for s in seqs { out[s] = VideoFragment.fragments(frameSeq: s, flags: flags, captureNanos: UInt64(s), payload: Data(repeating: UInt8(s & 0xff), count: bytes)).compactMap(VideoFragment.decode) }
+        return out
+    }
+
+    func testShortGapIsNackedWholeAndRepairedInOrder() {
+        var a = FrameAssembler()
+        a.timeoutNanos = 1_000_000_000; a.nackAfterNanos = 30_000_000; a.nackRepeatNanos = 200_000_000
+        let f = frames([1, 2, 3, 4])
+        for x in f[1]! { _ = a.ingest(x, now: 10) }
+        // Frames 2 and 3 vanish entirely; frame 4 arrives: placeholders for 2 and 3, 4 is held.
+        var ev: [FrameAssembler.Event] = []
+        for x in f[4]! { ev += a.ingest(x, now: 100) }
+        XCTAssertTrue(ev.isEmpty, "nothing delivered yet: \(ev)")
+        XCTAssertEqual(a.pendingCount, 3)
+        // After the reorder window both missing frames are asked for at once, whole.
+        let nacks = a.tick(now: 100 + 31_000_000)
+        XCTAssertEqual(nacks.count, 2)
+        for n in nacks { if case .nack(_, let frags) = n { XCTAssertEqual(frags, []) } else { XCTFail("\(n)") } }
+        XCTAssertEqual(Set(nacks.map(\.seq)), [2, 3])
+        // The host resends both; everything comes out in order.
+        var got: [UInt32] = []
+        for x in f[3]! + f[2]! { for e in a.ingest(x, now: 200_000_000) { if case .completed(let fr) = e { got.append(fr.seq) } } }
+        XCTAssertEqual(got, [2, 3, 4])
+        XCTAssertEqual(a.recoveredByNack, 6)
+    }
+
+    func testLongGapReportsBurstImmediately() {
+        var a = FrameAssembler()
+        let f = frames([1, 50])
+        for x in f[1]! { _ = a.ingest(x, now: 10) }
+        let ev = a.ingest(f[50]![0], now: 20)
+        guard case .gap(let from, let to)? = ev.first else { return XCTFail("expected gap, got \(ev)") }
+        XCTAssertEqual(from, 2); XCTAssertEqual(to, 49)
+        XCTAssertEqual(a.pendingCount, 1, "only frame 50 is pending; the burst is not NACKed frame by frame")
+        for x in f[50]!.dropFirst() { _ = a.ingest(x, now: 21) }
+        XCTAssertEqual(a.pendingCount, 0)
+    }
+
+    func testRecoveryFrameDropsOlderHoles() {
+        var a = FrameAssembler()
+        a.timeoutNanos = 1_000_000_000; a.nackAfterNanos = 30_000_000
+        let p = frames([1, 2])
+        let k = frames([3], flags: [.keyframe, .recovery], bytes: 500)
+        for x in p[1]! { _ = a.ingest(x, now: 10) }
+        _ = a.ingest(p[2]![0], now: 20)          // frame 2 has a hole
+        var done: [UInt32] = []
+        for x in k[3]! { for e in a.ingest(x, now: 30) { if case .completed(let fr) = e { done.append(fr.seq) } else if case .lost = e { XCTFail("no loss verdict expected") } } }
+        XCTAssertEqual(done, [3], "the keyframe needs nothing before it; the hole is dropped silently")
+        XCTAssertEqual(a.skippedForRecovery, 1)
+        XCTAssertEqual(a.pendingCount, 0)
+    }
+
+    func testFragmentsLostIsReported() {
+        var a = FrameAssembler()
+        a.nackAfterNanos = 30_000_000
+        let payload = Data((0..<9000).map { UInt8($0 & 0xff) })
+        let frags = VideoFragment.fragments(frameSeq: 7, flags: [], captureNanos: 1, payload: payload)
+        let parity = ParityFragment.parity(frameSeq: 7, payloads: frags.compactMap(VideoFragment.decode).map(\.payload)).compactMap(ParityFragment.decode)
+        let decoded = frags.compactMap(VideoFragment.decode)
+        for (i, x) in decoded.enumerated() where i != 2 { _ = a.ingest(x, now: 10) }
+        var out: VideoFrame? = nil
+        for e in a.ingest(parity: parity[0], now: 11) { if case .completed(let fr) = e { out = fr } }
+        XCTAssertEqual(out?.sample, payload)
+        XCTAssertEqual(out?.fragmentsLost, 1)
+        XCTAssertEqual(a.recoveredByParity, 1)
+    }
+}

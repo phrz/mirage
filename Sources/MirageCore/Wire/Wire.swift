@@ -73,7 +73,15 @@ public enum ControlMessage: Codable, Equatable {
         case .mouseButton(let m): return m.seq
         case .scroll(let s): return s.seq
         case .key(let k): return k.seq
+        case .modifiers(let m): return m.seq
         default: return nil
+        }
+    }
+    /// A discrete input event (everything but pointer moves): sequenced, applied exactly once.
+    public var isDiscreteInput: Bool {
+        switch self {
+        case .mouseButton, .scroll, .key, .modifiers: return true
+        default: return false
         }
     }
 
@@ -110,7 +118,7 @@ public enum ControlMessage: Codable, Equatable {
     case rateState(RateState)
     /// What the host is looking at: console lock state, frontmost app and window (once a second).
     case hostStatus(HostStatus)
-    /// Viewer → host: resend these fragments of a recent frame (fragment NACK).
+    /// Viewer → host: resend these fragments of a recent frame (fragment NACK; an empty list = the whole frame).
     case nack(Nack)
 
     // Input, client → host. Coordinates are normalized to the streamed display: (0,0) top-left, (1,1) bottom-right.
@@ -126,9 +134,12 @@ public enum ControlMessage: Codable, Equatable {
         public var deviceID: String
         public var deviceName: String
         public var clientNonce: Data
-        public init(protocolVersion: Int, deviceID: String, deviceName: String, clientNonce: Data) {
+        /// Token from an earlier `Welcome` on this host: resume that session (stream, tier, caches,
+        /// prediction state) instead of starting a new one. Authentication still runs in full.
+        public var resumeToken: Data?
+        public init(protocolVersion: Int, deviceID: String, deviceName: String, clientNonce: Data, resumeToken: Data? = nil) {
             self.protocolVersion = protocolVersion; self.deviceID = deviceID
-            self.deviceName = deviceName; self.clientNonce = clientNonce
+            self.deviceName = deviceName; self.clientNonce = clientNonce; self.resumeToken = resumeToken
         }
     }
     public struct Challenge: Codable, Equatable {
@@ -154,7 +165,14 @@ public enum ControlMessage: Codable, Equatable {
     public struct Welcome: Codable, Equatable {
         public var hostName: String
         public var sessionID: String
-        public init(hostName: String, sessionID: String) { self.hostName = hostName; self.sessionID = sessionID }
+        /// Present the token in `Hello.resumeToken` on the next connection to resume this session.
+        public var resumeToken: Data?
+        /// True when this connection resumed the session named by the client's token: the host kept
+        /// the stream state and the client keeps its picture and predictions; a masked keyframe follows.
+        public var resumed: Bool?
+        public init(hostName: String, sessionID: String, resumeToken: Data? = nil, resumed: Bool? = nil) {
+            self.hostName = hostName; self.sessionID = sessionID; self.resumeToken = resumeToken; self.resumed = resumed
+        }
     }
     public struct Reject: Codable, Equatable {
         public var reason: String
@@ -248,11 +266,14 @@ public enum ControlMessage: Codable, Equatable {
         /// this is a packet-train dispersion sample for the host's delivery-rate estimator.
         public var firstReceivedNanos: UInt64?
         public var fragments: Int?
+        /// Fragments of this frame that did not arrive on their first transmission (rebuilt from parity
+        /// or resent after a NACK): the host's fragment-loss estimate, which sizes the parity groups.
+        public var fragmentsLost: Int?
         public init(seq: UInt32, captureNanos: UInt64, receivedNanos: UInt64, decodedNanos: UInt64, bytes: Int, lost: Bool,
-                    firstReceivedNanos: UInt64? = nil, fragments: Int? = nil) {
+                    firstReceivedNanos: UInt64? = nil, fragments: Int? = nil, fragmentsLost: Int? = nil) {
             self.seq = seq; self.captureNanos = captureNanos; self.receivedNanos = receivedNanos
             self.decodedNanos = decodedNanos; self.bytes = bytes; self.lost = lost
-            self.firstReceivedNanos = firstReceivedNanos; self.fragments = fragments
+            self.firstReceivedNanos = firstReceivedNanos; self.fragments = fragments; self.fragmentsLost = fragmentsLost
         }
     }
     /// One per tile-stream message, so the controller sees the reliable stream's delay too.
@@ -406,7 +427,8 @@ public enum ControlMessage: Codable, Equatable {
     public struct Modifiers: Codable, Equatable {
         public var keyCode: UInt16
         public var modifiers: UInt64
-        public init(keyCode: UInt16, modifiers: UInt64) { self.keyCode = keyCode; self.modifiers = modifiers }
+        public var seq: UInt64?
+        public init(keyCode: UInt16, modifiers: UInt64, seq: UInt64? = nil) { self.keyCode = keyCode; self.modifiers = modifiers; self.seq = seq }
     }
 }
 

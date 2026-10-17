@@ -76,7 +76,7 @@ final class ViewerSession: @unchecked Sendable {
     private var pingSeq: UInt64 = 0
     private let statsLock = NSLock()
     private var sFrames = 0, sBytes = 0, sLost = 0, sDecodeNanos: UInt64 = 0, sAge: Double = 0, sRTT = 0.0, sDropped = 0
-    private var sTileBytes = 0, sTileRects = 0, sCopyRects = 0, sNacks = 0
+    private var sTileBytes = 0, sTileRects = 0, sCopyRects = 0, sNacks = 0, sBursts = 0
     private var rateState = ControlMessage.RateState(targetKbps: 0, capacityKbps: 0, queueMs: 0, rung: 0, scale: 1, tileBudgetKbps: 0, videoKbps: 0, tileKbps: 0)
     @MainActor private var lastRequest: ControlMessage.StreamRequest?
     @MainActor private var pendingRequest: ControlMessage.StreamRequest?
@@ -387,6 +387,13 @@ final class ViewerSession: @unchecked Sendable {
                 if seq > lastRecoverySeq { awaitingRecovery = true }
                 statsLock.lock(); sLost += 1; statsLock.unlock()
                 sender?.send(.frameAck(.init(seq: seq, captureNanos: 0, receivedNanos: now, decodedNanos: 0, bytes: 0, lost: true)))
+            case .gap(let from, let to):
+                // A loss burst: nothing of frames from...to ever arrived. Ask for a recovery frame now
+                // rather than after a timeout; frames that follow are P-frames and are skipped until it lands.
+                log("video: frames \(from)–\(to) never arrived (loss burst); asking for recovery")
+                if to > lastRecoverySeq { awaitingRecovery = true }
+                statsLock.lock(); sLost += Int(to - from + 1); sBursts += 1; statsLock.unlock()
+                sender?.send(.frameAck(.init(seq: to, captureNanos: 0, receivedNanos: now, decodedNanos: 0, bytes: 0, lost: true)))
             case .completed(let frame):
                 statsLock.lock(); sBytes += frame.bytes; statsLock.unlock()
                 if awaitingRecovery && !frame.flags.contains(.recovery) {

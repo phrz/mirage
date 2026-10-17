@@ -9,6 +9,8 @@ public enum DatagramType: UInt8 {
     case ping = 0x01      // echoed verbatim by the host; see DatagramPing
     case video = 0x02     // one fragment of an encoded video frame; see VideoFragment
     case parity = 0x03    // XOR parity over a group of a frame's fragments; see ParityFragment
+    case input = 0x04     // viewer → host input with redundancy; see InputPacket
+    case inputAck = 0x05  // host → viewer; see InputAck
 }
 
 /// XOR parity datagram: magic(1) type(1) frameSeq(4) groupIndex(2) groupSize(2) firstIndex(2) then
@@ -221,6 +223,8 @@ public struct VideoFrame: Sendable {
     public var captureSeq: UInt32
     public var inputSeq: UInt64
     public var region: PixelRect
+    /// Fragments that needed parity or a NACK (the viewer reports them in the ack).
+    public var fragmentsLost: Int = 0
 }
 
 /// Reassembles fragments into frames, delivers them strictly in sequence order (a frame with a
@@ -242,12 +246,21 @@ public struct FrameAssembler {
         var region: PixelRect
         var nacks = 0
         var lastNackNanos: UInt64 = 0
-        var complete: Bool { received == count }
+        var complete: Bool { count > 0 && received == count }
         var parity: [UInt16: ParityFragment] = [:]   // by group index
+        /// Fragments that did not arrive on their first transmission (rebuilt from parity or resent).
+        var recovered = 0
+        /// A placeholder for a frame the viewer never saw a byte of (a sequence gap): NACKed whole.
+        var isGap = false
     }
     private var partials: [UInt32: Partial] = [:]
     /// Highest sequence delivered (completed or lost); nothing at or below it is delivered again.
     private var delivered: UInt32? = nil
+    /// A sequence gap of more than this many frames is a loss burst: ask for a recovery frame at once
+    /// instead of NACKing every frame of it (the host's resend ring is only ~2 s deep anyway).
+    public var maxGapFrames: UInt32 = 8
+    /// Frames dropped unseen because a recovery frame behind them completed (they are not needed).
+    public private(set) var skippedForRecovery = 0
     /// A frame whose fragments stopped arriving this long ago (receiver clock) is given up; the viewer sets it from the RTT.
     public var timeoutNanos: UInt64 = 600_000_000
     /// Absolute cap on a frame's age, whatever keeps trickling in.
@@ -264,31 +277,52 @@ public struct FrameAssembler {
 
     public enum Event {
         case completed(VideoFrame), lost(seq: UInt32)
-        /// Ask the host to resend these fragments.
+        /// Ask the host to resend these fragments (an empty list = the whole frame).
         case nack(seq: UInt32, fragments: [Int])
-        var seq: UInt32 { switch self { case .completed(let f): return f.seq; case .lost(let s): return s; case .nack(let s, _): return s } }
+        /// A run of frames was never seen at all (a loss burst): ask the host for a recovery frame now.
+        case gap(from: UInt32, to: UInt32)
+        var seq: UInt32 { switch self { case .completed(let f): return f.seq; case .lost(let s): return s; case .nack(let s, _): return s; case .gap(_, let t): return t } }
     }
 
     public mutating func ingest(_ f: VideoFragment, now: UInt64 = Clock.nowNanos()) -> [Event] {
         if let d = delivered, f.frameSeq <= d { return [] }
+        var events: [Event] = []
+        // A sequence gap: frames between the last delivered one and this one that nothing has arrived
+        // for. A short gap gets whole-frame placeholders (NACKed from the host's ring, 1 RTT); a long
+        // one is a burst, reported at once so the host sends a recovery frame without waiting for a timeout.
+        if let d = delivered, f.frameSeq > d &+ 1, partials[f.frameSeq] == nil {
+            let missing = (d &+ 1..<f.frameSeq).filter { partials[$0] == nil }
+            if !missing.isEmpty {
+                if UInt32(missing.count) > maxGapFrames {
+                    events.append(.gap(from: missing.first!, to: missing.last!))
+                    for s in missing { partials[s] = nil }
+                    delivered = f.frameSeq &- 1
+                } else {
+                    for s in missing {
+                        partials[s] = Partial(flags: [], captureNanos: 0, firstNanos: now, lastNanos: now, count: 0, total: 0, parts: [], captureSeq: 0, inputSeq: 0, region: .zero, isGap: true)
+                    }
+                }
+            }
+        }
         var p = partials[f.frameSeq] ?? Partial(flags: f.flags, captureNanos: f.captureNanos, firstNanos: now, lastNanos: now,
                                                  count: Int(f.fragCount), total: Int(f.frameBytes), parts: Array(repeating: nil, count: Int(f.fragCount)),
                                                  captureSeq: f.captureSeq, inputSeq: f.inputSeq, region: f.region)
         if p.count == 0 {
-            // A placeholder made by parity that arrived first: take the frame's shape from this fragment.
-            let parity = p.parity
-            p = Partial(flags: f.flags, captureNanos: f.captureNanos, firstNanos: now, lastNanos: now, count: Int(f.fragCount), total: Int(f.frameBytes),
-                        parts: Array(repeating: nil, count: Int(f.fragCount)), captureSeq: f.captureSeq, inputSeq: f.inputSeq, region: f.region, parity: parity)
+            // A placeholder (parity arrived first, or a gap): take the frame's shape from this fragment.
+            let parity = p.parity, nacks = p.nacks, lastNack = p.lastNackNanos, first = p.firstNanos
+            p = Partial(flags: f.flags, captureNanos: f.captureNanos, firstNanos: first, lastNanos: now, count: Int(f.fragCount), total: Int(f.frameBytes),
+                        parts: Array(repeating: nil, count: Int(f.fragCount)), captureSeq: f.captureSeq, inputSeq: f.inputSeq, region: f.region,
+                        nacks: nacks, lastNackNanos: lastNack, parity: parity)
         }
-        guard Int(f.fragCount) == p.count, Int(f.fragIndex) < p.count else { return [] }
+        guard Int(f.fragCount) == p.count, Int(f.fragIndex) < p.count else { return events }
         if p.parts[Int(f.fragIndex)] == nil {
             p.parts[Int(f.fragIndex)] = f.payload; p.received += 1
-            if p.nacks > 0 { recoveredByNack += 1 }
+            if p.nacks > 0 { recoveredByNack += 1; p.recovered += 1 }
         }
         p.lastNanos = now
         partials[f.frameSeq] = p
         tryParity(f.frameSeq)
-        return drain(now: now)
+        return events + drain(now: now)
     }
 
     public mutating func ingest(parity pf: ParityFragment, now: UInt64 = Clock.nowNanos()) -> [Event] {
@@ -320,18 +354,22 @@ public struct FrameAssembler {
             let isLast = missing[0] == p.count - 1
             let len = isLast ? p.total - (p.count - 1) * full : full
             guard len > 0, len <= acc.count else { continue }
-            p.parts[missing[0]] = Data(acc[0..<len]); p.received += 1; recoveredByParity += 1
+            p.parts[missing[0]] = Data(acc[0..<len]); p.received += 1; recoveredByParity += 1; p.recovered += 1
         }
         partials[seq] = p
     }
 
     /// Delivers in order: complete frames at the head go out; a frame with a hole holds everything
-    /// behind it until it completes, is NACKed, or times out.
+    /// behind it until it completes, is NACKed, or times out. A complete recovery frame (keyframe or
+    /// LTR refresh) behind holes makes them irrelevant: it needs nothing before it, so they are dropped.
     private mutating func drain(now: UInt64) -> [Event] {
         var events: [Event] = []
+        if let rec = partials.filter({ $0.value.complete && $0.value.flags.contains(.recovery) }).keys.min() {
+            for s in partials.keys where s < rec { partials[s] = nil; skippedForRecovery += 1 }
+        }
         while let seq = partials.keys.min() {
             guard var p = partials[seq] else { break }
-            if p.count > 0, p.complete {
+            if p.complete {
                 partials[seq] = nil
                 var sample = Data(capacity: p.total)
                 for part in p.parts { sample.append(part!) }
@@ -340,7 +378,7 @@ public struct FrameAssembler {
                 if let decoded {
                     events.append(.completed(VideoFrame(seq: seq, flags: p.flags, captureNanos: p.captureNanos, firstFragmentNanos: p.firstNanos,
                                                          lastFragmentNanos: p.lastNanos, parameterSets: decoded.parameterSets, tileMask: decoded.tileMask, sample: decoded.sample, bytes: sample.count,
-                                                         fragments: p.count, captureSeq: p.captureSeq, inputSeq: p.inputSeq, region: p.region)))
+                                                         fragments: p.count, captureSeq: p.captureSeq, inputSeq: p.inputSeq, region: p.region, fragmentsLost: p.recovered)))
                 } else {
                     events.append(.lost(seq: seq))
                 }
@@ -351,12 +389,16 @@ public struct FrameAssembler {
             if now - p.lastNanos > timeoutNanos || now - p.firstNanos > maxFrameAgeNanos {
                 partials[seq] = nil; delivered = seq; events.append(.lost(seq: seq)); continue
             }
-            // Head of line has a hole: ask for the missing fragments once the gap is older than a reorder.
-            if p.count > 0, p.nacks < maxNacks, now - p.lastNanos > nackAfterNanos, p.lastNackNanos == 0 || now - p.lastNackNanos > nackRepeatNanos {
-                p.nacks += 1; p.lastNackNanos = now; partials[seq] = p
-                events.append(.nack(seq: seq, fragments: (0..<p.count).filter { p.parts[$0] == nil }))
-            }
             break
+        }
+        // Every incomplete frame (not just the head) asks for what it misses once the gap is older than a
+        // reorder, so three frames of a short burst are repaired in one round trip, not three.
+        for seq in partials.keys.sorted() {
+            guard var p = partials[seq], !p.complete else { continue }
+            if p.nacks < maxNacks, now - p.lastNanos > nackAfterNanos, p.lastNackNanos == 0 || now - p.lastNackNanos > nackRepeatNanos {
+                p.nacks += 1; p.lastNackNanos = now; partials[seq] = p
+                events.append(.nack(seq: seq, fragments: p.count > 0 ? (0..<p.count).filter { p.parts[$0] == nil } : []))
+            }
         }
         return events
     }
