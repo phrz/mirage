@@ -21,7 +21,22 @@ function rad(stops, from, to, aspect) {
     stops: stops.map(function (s) { return { position: s[0], color: s[1] }; }) } };
 }
 function solid(c) { return { fillType: Style.FillType.Color, color: c }; }
-function applyExtra(s, extra) { if (!extra) return s; Object.keys(extra).forEach(function (k) { s.style[k] = extra[k]; }); return s; }
+// Sketch 2026 styles carry a `blurs` array and the JS API's `style.blur` setter is a no-op (verified by
+// dumping the file), so blur goes through the native MSStyleBlur: type 0 = Gaussian, 1 = Motion, 2 = Zoom, 3 = Background.
+function setBlur(s, b) {
+  var types = {}; types[Style.BlurType.Gaussian] = 0; types[Style.BlurType.Motion] = 1; types[Style.BlurType.Zoom] = 2; types[Style.BlurType.Background] = 3;
+  var nb = MSStyleBlur.new();
+  nb.setType(types[b.blurType] !== undefined ? types[b.blurType] : 0);
+  nb.setRadius(b.radius);
+  nb.setIsEnabled(b.enabled !== false);
+  var arr = []; arr.push(nb);
+  s.sketchObject.style().setBlurs(arr);
+}
+function applyExtra(s, extra) {
+  if (!extra) return s;
+  Object.keys(extra).forEach(function (k) { if (k === 'blur') setBlur(s, extra[k]); else s.style[k] = extra[k]; });
+  return s;
+}
 function rect(parent, name, x, y, w, h, fills, extra) {
   var s = new ShapePath({ name: name, parent: parent, shapeType: ShapePath.ShapeType.Rectangle,
     frame: new Rectangle(x, y, w, h), style: { fills: arr(fills), borders: [] } });
@@ -101,7 +116,7 @@ function buildIcon(ab, opts) {
     [0, 'rgba(0,0,0,0)'], [0.3, 'rgba(0,0,0,1)'], [0.7, 'rgba(0,0,0,1)'], [1, 'rgba(0,0,0,0)']]));
   shimMask.sketchObject.hasClippingMask = true; shimMask.sketchObject.clippingMaskMode = 1;
   rect(shimmer, 'Shimmer Blur', 0, HORIZON - 14, 1024, 64, solid('rgba(255,255,255,0.01)'),
-    { blur: { blurType: Style.BlurType.Background, radius: 5, enabled: true } });
+    { blur: { blurType: Style.BlurType.Background, radius: 3, enabled: true } });
   // ---- optional WINDOW (glass frame) hovering above the horizon
   if (opts.window) {
     var win = G('Window', icon);
@@ -136,11 +151,11 @@ function buildIcon(ab, opts) {
   reflMask.sketchObject.hasClippingMask = true; reflMask.sketchObject.clippingMaskMode = 1;
   var reflD = displacedReflection(scale, cx, cy);
   path(refl, 'Reflected Keyline', reflD, solid('rgba(255,255,255,0.7)'), {
-    borders: [{ color: 'rgba(255,255,255,0.7)', thickness: 6 * scale / 3 * 0.75, position: Style.BorderPosition.Outside }], blur: blur(10) });
+    borders: [{ color: 'rgba(255,255,255,0.7)', thickness: 6 * scale / 3 * 0.75, position: Style.BorderPosition.Outside }], blur: blur(3) });
   path(refl, 'Reflected Pointer', reflD,
-    lin([[0, 'rgba(70,84,110,0.55)'], [1, 'rgba(70,84,110,0.25)']]), { blur: blur(10) });
+    lin([[0, 'rgba(62,76,104,0.78)'], [1, 'rgba(62,76,104,0.4)']]), { blur: blur(3) });
   // bright turbulent air veils the inverted image
-  rect(refl, 'Air Veil', cx - 80, HORIZON, 60 * scale + 160, BAND, lin([[0, 'rgba(226,238,252,0.55)'], [1, 'rgba(226,238,252,0)']]));
+  rect(refl, 'Air Veil', cx - 80, HORIZON, 60 * scale + 160, BAND, lin([[0, 'rgba(226,238,252,0.3)'], [1, 'rgba(226,238,252,0)']]));
   refl.adjustToFit();
 
   // ---- CURSOR: the macOS pointer standing on the vanishing line
