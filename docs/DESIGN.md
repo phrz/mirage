@@ -161,6 +161,20 @@ AX notifications. In Unified mode each remote window is a real `NSWindow` (or iP
 whose content view is a Metal layer sampling its rect of the display texture; in Desktop
 mode the whole texture is shown in one window or a full-screen Space.
 
+**Layered desktop, client-side composition (phrz, 2026-10-18).** Desktop-mode dragging can
+never be local with a single composited capture: the area a window uncovers does not exist on
+the client until the host streams it, and the dragged rectangle has no shadow and wrong
+layering. So the capture model becomes *layers in every mode*: the desktop background as one
+lossless layer, each window as its own unoccluded lossless layer (ScreenCaptureKit
+`desktopIndependentWindow` capture gives the full window even when covered), captured when a
+window is first seen and refreshed through the same dirty tracking and tile/copy-rect path,
+plus the window list with frames and z-order. The client composites the scene itself, with a
+standard macOS shadow per window. Dragging, raising, minimizing and overlap are then purely
+local in Desktop mode too, with the host told the result; the stream only keeps layers
+current. Unified mode later maps these same layers onto native `NSWindow`s. Transient windows
+(menus, sheets, popovers, tooltips) are short-lived layers of their own, and the one display
+stream remains as the fallback for anything not attributable to a window.
+
 Mode summary:
 
 | Mode | Capture | Mask |
