@@ -103,6 +103,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// excludes nothing; on unlock the capturers restart and each layer's first frame is diffed in full.
     private var screenLocked = false
     private var loggedChildSkip = false
+    /// Capture sequence from which the display stream excludes each window (filter applied), and windows the
+    /// exclusion check found visible in the display stream anyway.
+    private var excludedFrom: [UInt32: UInt32] = [:]
+    private var exclusionFailing = Set<UInt32>()
+    private var verifiedExclusions: Set<UInt32> { Set(excludedFrom.keys).subtracting(exclusionFailing) }
     /// Frames of the windows planned as layers (exposed or not yet) and, for a moment after a move, their previous
     /// frames: wherever the display stream may show a window (DisplayTaint).
     private var plannedFrames: [UInt32: PixelRect] = [:]
@@ -111,7 +116,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var lastLagLogNanos: UInt64 = 0
     private func windowAreas(now: UInt64) -> [PixelRect] {
         recentFrames.removeAll { now &- $0.nanos > 600_000_000 }
-        return Array(plannedFrames.values) + recentFrames.map(\.rect) + displayGuard.guardedRects(now: now)
+        let unexposed = plannedFrames.filter { !(layers[$0.key]?.exposed ?? false) }.map(\.value)
+        return unexposed + recentFrames.map(\.rect) + displayGuard.guardedRects(now: now)
     }
     /// Desktop pixels for these tiles are on their way to the viewer (from a capture taken about now).
     private func displaySent(_ tiles: [Int]) {
@@ -126,7 +132,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard let d = display else { return }
         var shown: [UInt32: PixelRect] = [:]
         if !screenLocked { for (id, f) in plannedFrames where layers[id]?.exposed ?? false { shown[id] = f } }
-        displayGuard.update(layered: shown, now: now)
+        displayGuard.update(layered: shown, verified: verifiedExclusions, now: now)
+        // Tiles fully under a shown window (inset by the corner radius): the underlay.
+        let inset = Int(14 * (windows?.pxPerPoint ?? 2))
+        let insetFrames = shown.values.map { PixelRect(x: $0.x + inset, y: $0.y + inset, width: $0.width - 2 * inset, height: $0.height - 2 * inset) }
+        var under = Set<Int>()
+        for i in 0..<d.tracker.tileCount { let r = d.tracker.rect(of: i); if insetFrames.contains(where: { $0.intersection(r) == r }) { under.insert(i) } }
+        if under != d.underLayer {
+            // Uncovered tiles that went out at underlay quality are refined at the normal quality now.
+            let uncoveredLossy = d.underlayLossy.subtracting(under)
+            if !uncoveredLossy.isEmpty { d.tracker.markVideo(Array(uncoveredLossy), now: now); d.underlayLossy.subtract(uncoveredLossy) }
+            d.underLayer = under
+        }
         let hidden = displayGuard.guardedTiles(d.tracker, now: now)
         guard hidden != d.occludedTiles else { return }
         let uncovered = d.occludedTiles.subtracting(hidden)
@@ -608,7 +625,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if covering.contains(where: { $0.intersection(rd) == rd }) { occluded.insert(i) }
             }
             let exposedNow = l.occludedTiles.subtracting(occluded)
-            if !exposedNow.isEmpty { _ = l.tracker.expedite(in: l.bounds, now: now, only: exposedNow) }
+            if !exposedNow.isEmpty {
+                let n = l.tracker.expedite(in: l.bounds, now: now, only: exposedNow)
+                if debugLayers { log("layer \(l.id): \(exposedNow.count) tiles uncovered on the host, \(n) made due, \(exposedNow.filter { l.tracker.isCrisp($0) }.count) crisp, pending total \(l.tracker.pendingTotal)") }
+            }
             l.occludedTiles = occluded
             let fps = l.frontmost ? 30 : (fraction <= 0.001 ? 2 : 10)
             if let cap = l.capturer, cap.fps != fps { Task { try? await cap.update(width: cap.width, height: cap.height, fps: fps) } }
@@ -632,7 +652,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 lastExcludedIDs = exposedIDs
                 let skipped = exposedIDs.count - scWindows.count
                 if debugLayers || skipped > 0 && !loggedChildSkip { loggedChildSkip = true; log("display excludes \(scWindows.count) windows (\(skipped) child windows ScreenCaptureKit does not list stay in the display stream)") }
-                cap.requestExcluded(scWindows, log: { [weak self] in self?.log($0) })
+                cap.requestExcluded(scWindows, log: { [weak self] in self?.log($0) }, applied: { [weak self] ids in
+                    self?.queue.async {
+                        guard let self else { return }
+                        let set = Set(ids)
+                        for id in Array(self.excludedFrom.keys) where !set.contains(id) { self.excludedFrom[id] = nil }
+                        for id in ids where self.excludedFrom[id] == nil { self.excludedFrom[id] = self.captureSeq &+ 1 }
+                        self.updateDisplayHidden(now: Clock.nowNanos())
+                    }
+                })
             } else {
                 catalog.ensure(Array(missingParents)) { [weak self] in self?.queue.async { guard let self, let s = self.windows?.current else { return }; self.reconcileLayers(s, now: Clock.nowNanos()) } }
             }
@@ -958,7 +986,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard blocks >= 2 else { continue }
             mad /= Double(blocks)
             let shows = mad < 24   // measured: 12 when the stream shows the window (two resamplings of it), 44–90 when excluded
-            if shows { statExclusionLag += 1 }
+            if shows { statExclusionLag += 1; if exclusionFailing.insert(l.id).inserted { updateDisplayHidden(now: now) } }
+            else if exclusionFailing.remove(l.id) != nil { updateDisplayHidden(now: now) }
             if shows || debugLayers || now - lastExclusionLogNanos > 10_000_000_000 {
                 lastExclusionLogNanos = now
                 log(String(format: "exclusion check: layer %u at %d,%d: display vs layer MAD %.1f over %d textured blocks → %@", l.id, l.frame.x, l.frame.y, mad, blocks,
@@ -1083,7 +1112,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         } }
         var cx = tracker.width / 2, cy = tracker.height / 2
         if let p = locus(in: l) { cx = p.x; cy = p.y }
-        blocks.sort { a, b in abs(a.x + a.width / 2 - cx) + abs(a.y + a.height / 2 - cy) < abs(b.x + b.width / 2 - cx) + abs(b.y + b.height / 2 - cy) }
+        // Visible blocks first (locus first among them), then the underlay (the desktop under shown windows).
+        func hiddenUnder(_ b: PixelRect) -> Bool { l.isDisplay && tracker.tiles(covering: [b]).allSatisfy { l.underLayer.contains($0) } }
+        blocks.sort { a, b in
+            let ha = hiddenUnder(a), hb = hiddenUnder(b)
+            if ha != hb { return !ha }
+            return abs(a.x + a.width / 2 - cx) + abs(a.y + a.height / 2 - cy) < abs(b.x + b.width / 2 - cx) + abs(b.y + b.height / 2 - cy)
+        }
         return blocks
     }
 
@@ -1127,7 +1162,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard !visible.isEmpty else { return }
             let rects = visible.count == all.count ? [rect] : l.tracker.mergedRects(visible)
             if l.isDisplay { displaySent(visible) }
-            let est = submitRects(l, rects, from: f, refinement: true, nanos: now)
+            let underlay = l.isDisplay && visible.allSatisfy { l.underLayer.contains($0) }
+            let est = submitRects(l, rects, from: f, refinement: true, nanos: now, photoQuality: underlay ? 75 : 90)
             tileTokens -= Double(est)
             l.tracker.sent(lossless: visible, now: now)
             let hidden = all.filter { l.occludedTiles.contains($0) && !l.tracker.isCrisp($0) }
@@ -1157,6 +1193,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             w.layered = exposed
             if exposed, let l = layers[w.id], let r = w.scrollRect { w.scrollRect = l.local(r) }
             w.cutout = exposed ? nil : (Self.cutoutSafe(w, displayArea: displayArea) ? true : nil)
+            w.excludedFrom = exposed ? excludedFrom[w.id] : nil
             return w
         }
     }
@@ -1249,7 +1286,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     /// Encodes copied rects on the tile queue and sends them (review L13: one body for tiles and blocks).
-    private func encodeAndSend(_ jobs: [(PixelRect, Data)], estimate: Int, layer: Layer, refinement: Bool, block: Bool, nanos: UInt64) {
+    private func encodeAndSend(_ jobs: [(PixelRect, Data)], estimate: Int, layer: Layer, refinement: Bool, block: Bool, nanos: UInt64, photoQuality: Float = 90) {
         let hdr = header(layer: layer.id, nanos: nanos)
         let webp = effort.webpEffort
         let alpha = !layer.isDisplay
@@ -1266,7 +1303,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     // Review #22: on constrained links a photographic rect (a wallpaper, a photo) ends at visually
                     // lossless (lossy WebP q90 at full size, ~4x under near-lossless on a 2x desktop picture), not at
                     // bit-exact; text and UI (≤ 4096 colours) stay lossless everywhere.
-                    if photographic, photoLossy, let data = TileCodec.encodeLossy(base: base, width: r.width, height: r.height, stride: r.width * 4, outWidth: r.width, outHeight: r.height, quality: 90, alpha: alpha) { return (.lossy, data) }
+                    if photographic, photoLossy || photoQuality < 90, let data = TileCodec.encodeLossy(base: base, width: r.width, height: r.height, stride: r.width * 4, outWidth: r.width, outHeight: r.height, quality: photoQuality, alpha: alpha) { return (.lossy, data) }
                     let fmt: TileCodec.Format = photographic ? .nearLossless : .lossless
                     return TileCodec.encode(base: base, width: r.width, height: r.height, stride: r.width * 4, format: fmt, effort: webp, alpha: alpha).map { (fmt, $0) }
                 }
@@ -1287,6 +1324,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.statTileBytes += bytes; self.statTileRects += out.count; self.secTileBytes += bytes
                 if refinement { self.statRefineBytes += bytes }
                 if let l = self.layers[layerID] { l.sentBytes += bytes; if refinement { l.sentRefine += out.count } else { l.sentDirect += out.count } }
+                if photoQuality < 90, let l = self.layers[layerID] { for t in out where t.format == .lossy { l.underlayLossy.formUnion(l.tracker.tiles(covering: [t.rect])) } }
                 if self.debugLayers { self.log("layer \(layerID): sent \(out.count) \(refinement ? (block ? "block" : "refinement") : "direct") rects \(bytes) B: \(out.prefix(3).map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))") }
             }
         }
@@ -1301,7 +1339,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// Copies the tiles' pixels out and encodes them on the tile queue. Returns the byte estimate charged to the budget.
     @discardableResult
-    private func submitLossless(layer: Layer, tiles: [Int], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, tracker: TileTracker, tight: [Int: PixelRect]? = nil) -> Int {
+    private func submitLossless(layer: Layer, tiles: [Int], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, tracker: TileTracker, tight: [Int: PixelRect]? = nil, photoQuality: Float = 90) -> Int {
         var rects = tracker.mergedRects(tiles)
         if let tight {
             // Shrink each merged rect to the union of its tiles' changed boxes (padded 2 px), when all are known.
@@ -1316,16 +1354,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
         }
         let (jobs, estimate) = copyOut(rects, from: f)
-        encodeAndSend(jobs, estimate: estimate, layer: layer, refinement: refinement, block: false, nanos: nanos)
+        encodeAndSend(jobs, estimate: estimate, layer: layer, refinement: refinement, block: false, nanos: nanos, photoQuality: photoQuality)
         return estimate
     }
 
     /// Encodes arbitrary rects (large lossless blocks) on the tile queue, one block in flight. Returns the byte estimate charged.
     @discardableResult
-    private func submitRects(_ layer: Layer, _ rects: [PixelRect], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64) -> Int {
+    private func submitRects(_ layer: Layer, _ rects: [PixelRect], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, photoQuality: Float = 90) -> Int {
         let (jobs, estimate) = copyOut(rects, from: f)
         blockInFlight = (layer.id, nil, nanos)
-        encodeAndSend(jobs, estimate: estimate, layer: layer, refinement: refinement, block: true, nanos: nanos)
+        encodeAndSend(jobs, estimate: estimate, layer: layer, refinement: refinement, block: true, nanos: nanos, photoQuality: photoQuality)
         return estimate
     }
 
@@ -1414,25 +1452,35 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Every window's still before any window's lossless blocks: with many large windows (a real desktop)
         // one window's blocks would otherwise hold every other window's first picture back for tens of seconds.
         if let l = ordered.first(where: { if case .still = $0.fresh { return true }; return false }) { freshStep(l, now: now); return }
-        for l in ordered {
+        // Then what people can see before what they cannot: window layers (blocks, backlog, per-tile refinement,
+        // locus window first) before the display layer, whose fresh picture includes the underlay under every
+        // window (field run: a window's last uncovered column waited 14 s behind the desktop's blocks).
+        let windowLayers = ordered.filter { !$0.isDisplay }
+        if refineStep(windowLayers, now: now) { return }
+        if let d = display { _ = refineStep([d], now: now) }
+    }
+
+    /// One refinement step over `layers` in order: a fresh picture's next block, a large-backlog block plan, or a
+    /// batch of due tiles. True if something was started (or a block is pending for one of them).
+    private func refineStep(_ layers: [Layer], now: UInt64) -> Bool {
+        for l in layers {
             switch l.fresh {
-            case .still, .blocks: freshStep(l, now: now); return
+            case .still, .blocks: freshStep(l, now: now); return true
             default: continue
             }
         }
         // A backlog of more than 40 % of a layer (after a drag or a full-screen change) is refined
         // as large locus-first blocks, one in flight, not as a march of a thousand tiles.
-        for l in ordered where l.tracker.pendingTotal * 10 > l.tracker.tileCount * 4 && l.lastFrame != nil {
+        for l in layers where l.tracker.pendingTotal * 10 > l.tracker.tileCount * 4 && l.lastFrame != nil {
             let blocks = planBlocks(l)
             if !blocks.isEmpty {
                 l.fresh = .blocks(remaining: blocks)
                 log("layer \(l.id) refinement backlog \(l.tracker.pendingTotal) tiles: \(blocks.count) large blocks, locus first")
-                freshStep(l, now: now); return
+                freshStep(l, now: now); return true
             }
         }
         let perSecond = Double(lastBudget.tileKbps * 1000 / 8)
-        guard tileTokens > perSecond * 0.3 * 0.5, Double(refinementInFlight) < perSecond * 0.3 else { return }
-        for l in ordered {
+        for l in layers {
             guard let src = l.lastFrame else { continue }
             var due = l.tracker.due(now: now, limit: 96, centre: locusTile(l))
             // Tiles covered on the host (or off the display) wait until they are uncovered (reconcileLayers expedites them then).
@@ -1441,6 +1489,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if !hidden.isEmpty { l.tracker.defer(hidden, now: now, delayNanos: 3_600_000_000_000); due.removeAll { l.occludedTiles.contains($0) } }
             }
             guard !due.isEmpty else { continue }
+            // Something visible is waiting: it goes when the refinement budget allows (and nothing behind it meanwhile).
+            guard tileTokens > perSecond * 0.3 * 0.5, Double(refinementInFlight) < perSecond * 0.3 else { return true }
             // Take tiles until the budget is spent (allowed to go negative once).
             var take: [Int] = []
             var est = 0.0
@@ -1453,11 +1503,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let f = frameView(src)
             guard f.width == l.width, f.height == l.height else { continue }
             if l.isDisplay { displaySent(take) }
-            let bytes = submitLossless(layer: l, tiles: take, from: f, refinement: true, nanos: now, tracker: l.tracker)
+            let underlay = l.isDisplay && take.allSatisfy { l.underLayer.contains($0) }
+            let bytes = submitLossless(layer: l, tiles: take, from: f, refinement: true, nanos: now, tracker: l.tracker, photoQuality: underlay ? 75 : 90)
             tileTokens -= Double(bytes)
             l.tracker.sent(lossless: take, now: now)
-            return
+            return true
         }
+        return false
     }
 
     // MARK: Video

@@ -13,8 +13,13 @@ public struct DisplayGuard {
 
     public init(historyNanos: UInt64 = 1_000_000_000, margin: Int = 128) { self.historyNanos = historyNanos; self.margin = margin }
 
+    /// Layered windows whose exclusion from the display stream is verified (applied and checked): the desktop
+    /// under them at rest is clean, so their current frame is not guarded once they have not moved for the history.
+    public private(set) var verified = Set<UInt32>()
+
     /// The current frames of the layered windows (display pixels); remembers where they have been.
-    public mutating func update(layered frames: [UInt32: PixelRect], now: UInt64) {
+    public mutating func update(layered frames: [UInt32: PixelRect], verified: Set<UInt32> = [], now: UInt64) {
+        self.verified = verified
         history.removeAll { now &- $0.nanos > historyNanos }
         // A frame is remembered from the moment the window leaves it (and a window that stops being a layer
         // leaves its last frame now).
@@ -26,7 +31,8 @@ public struct DisplayGuard {
     /// Rects no desktop pixels may be sent or committed for, now: every current frame, and for a window that
     /// moved within the history the bounding box of everywhere it was, grown by the margin.
     public func guardedRects(now: UInt64) -> [PixelRect] {
-        var out = Array(current.values)
+        // A verified window at rest guards nothing; an unverified one guards its frame.
+        var out = current.filter { !verified.contains($0.key) }.map(\.value)
         var ids = Set(current.keys)
         for h in history where now &- h.nanos <= historyNanos { ids.insert(h.id) }
         for id in ids {

@@ -169,8 +169,9 @@ final class ScenarioRunner {
                 if !free.isEmpty {
                     Task { [weak self] in
                         guard let self else { return }
-                        for wait in [1000, 3000] {
-                            try? await Task.sleep(for: .milliseconds(wait == 1000 ? 1000 : 2000))
+                        var waited = 0
+                        for wait in [100, 1000, 3000] {
+                            try? await Task.sleep(for: .milliseconds(wait - waited)); waited = wait
                             if self.session.desktopUnknown(free) {
                                 self.staleSamples += 1; self.fillSamples += 1
                                 self.session.log("scenario watch: old caption band \(free.x),\(free.y) \(wait) ms after the burst: drawn as desktop fill (no clean pixels yet)")

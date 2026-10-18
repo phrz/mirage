@@ -324,8 +324,11 @@ public enum ControlMessage: Codable, Equatable {
         /// behind it (menus, popovers, the dock, the menu bar, opaque app windows beyond the layer cap). The
         /// host leaves it nil for windows that may be transparent overlays.
         public var cutout: Bool?
-        public init(id: UInt32, pid: Int32, title: String, frame: PixelRect, z: Int, scrollRect: PixelRect? = nil, level: Int? = nil, layered: Bool? = nil, app: String? = nil, cutout: Bool? = nil) {
-            self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect; self.level = level; self.layered = layered; self.app = app; self.cutout = cutout
+        /// Layered windows: the display capture from which the display stream excludes this window. Desktop pixels
+        /// captured before it may show the window; from it on, the desktop under the window is clean.
+        public var excludedFrom: UInt32?
+        public init(id: UInt32, pid: Int32, title: String, frame: PixelRect, z: Int, scrollRect: PixelRect? = nil, level: Int? = nil, layered: Bool? = nil, app: String? = nil, cutout: Bool? = nil, excludedFrom: UInt32? = nil) {
+            self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect; self.level = level; self.layered = layered; self.app = app; self.cutout = cutout; self.excludedFrom = excludedFrom
         }
         public var isLayered: Bool { layered ?? false }
         public var windowLevel: Int { level ?? 0 }

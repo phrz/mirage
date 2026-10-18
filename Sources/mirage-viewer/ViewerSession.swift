@@ -554,6 +554,9 @@ final class ViewerSession: @unchecked Sendable {
                 let dropped = candidates.filter { !viewerGuard.allows($0.rect, now: now) }
                 candidates.removeAll { !viewerGuard.allows($0.rect, now: now) }
                 guardDrops += n - candidates.count
+                let m = candidates.count
+                candidates.removeAll { preExclusion($0.rect, captureSeq: t.header.captureSeq) }
+                preExclusionDrops += m - candidates.count
                 _ = dropped   // the canvas keeps what it had there; a dropped write contaminates nothing
             }
             let fresh = candidates.filter { isFresh(v, $0.rect, captureSeq: t.header.captureSeq) }
@@ -618,10 +621,20 @@ final class ViewerSession: @unchecked Sendable {
         if case .reset = msg {} else { notePictureChange(now) }
     }
 
+    /// A desktop write captured before a layered window was excluded from the display stream, where that window
+    /// was before its exclusion: it may show the window (the M3.1 fragments). Never committed.
+    private func preExclusion(_ rect: PixelRect, captureSeq: UInt32) -> Bool {
+        for (id, area) in preExclusionArea where area.intersects(rect) {
+            guard let from = excludedFrom[id] else { return true }   // not excluded yet: anything there may show it
+            if captureSeq < from { return true }
+        }
+        return false
+    }
+
     /// Every 2 s: ask the host to resend the unknown desktop tiles the scene shows (not under a window layer).
     private var lastRefreshAskNanos: UInt64 = 0
     private func askForUnknownDesktop(now: UInt64) {
-        guard now - lastRefreshAskNanos > 2_000_000_000, let c = compositor, c.width > 0 else { return }
+        guard now - lastRefreshAskNanos > 300_000_000, let c = compositor, c.width > 0 else { return }
         lastRefreshAskNanos = now
         let unknown = unknownDesktop
         guard !unknown.isEmpty else { return }
@@ -738,7 +751,9 @@ final class ViewerSession: @unchecked Sendable {
                     var written: [PixelRect] = []
                     for r in 0..<grid.rows { for c in 0..<grid.cols where mask[c, r] {
                         let tr = PixelRect(x: region.x + c * 64, y: region.y + r * 64, width: 64, height: 64).intersection(region)
-                        if v.id == 0, !viewerGuard.allows(tr, now: now) { mask[c, r] = false; guardDrops += 1 } else { written.append(tr) }
+                        if v.id == 0, !viewerGuard.allows(tr, now: now) { mask[c, r] = false; guardDrops += 1 }
+                        else if v.id == 0, preExclusion(tr, captureSeq: frame.captureSeq) { mask[c, r] = false; preExclusionDrops += 1 }
+                        else { written.append(tr) }
                     } }
                     compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive))
                     if v.id == 0 { markDesktopClean(written) }
@@ -948,7 +963,11 @@ final class ViewerSession: @unchecked Sendable {
         get { desktopLock.lock(); defer { desktopLock.unlock() }; return _unknownDesktop }
         set { desktopLock.lock(); _unknownDesktop = newValue; desktopLock.unlock() }
     }
-    private(set) var guardDrops = 0
+    private(set) var guardDrops = 0, preExclusionDrops = 0
+    /// Per layered window: the capture from which the display stream excludes it, and everywhere it was before
+    /// that (desktop pixels captured earlier may show it there). On the video queue.
+    private var excludedFrom: [UInt32: UInt32] = [:]
+    private var preExclusionArea: [UInt32: PixelRect] = [:]
     private var _desktopColor = SIMD4<Float>(0.3, 0.3, 0.32, 1)
     private var desktopColor: SIMD4<Float> {
         get { desktopLock.lock(); defer { desktopLock.unlock() }; return _desktopColor }
@@ -992,6 +1011,7 @@ final class ViewerSession: @unchecked Sendable {
         if let (_, r) = localRaise, lastHostListInputSeq >= r.inputSeq || now - r.since > 1_500_000_000 { localRaise = nil }
         predictorLock.unlock()
         predictorLock.lock(); let snapshot = windows; predictorLock.unlock()
+        let moved = snapshot.contains { $0.isLayered && before[$0.id] != nil && before[$0.id] != $0.frame }
         // Where a newly layered window's pixels may sit in the desktop canvas: its frame minus the desktop-layer
         // windows that were in front of it (the canvas shows those there, not it).
         let newlyLayered: [[PixelRect]] = snapshot.filter { $0.isLayered && !(before.keys.contains($0.id) && wasLayered.contains($0.id)) }.map { w in
@@ -1001,7 +1021,14 @@ final class ViewerSession: @unchecked Sendable {
         videoQueue.async { [weak self] in
             guard let self else { return }
             for w in snapshot { self.layerViews[w.id]?.lastSeenInListNanos = now }
-            self.viewerGuard.update(layered: Dictionary(snapshot.filter(\.isLayered).map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a }), now: now)
+            let layered = snapshot.filter(\.isLayered)
+            for w in layered {
+                if let e = w.excludedFrom { self.excludedFrom[w.id] = e }
+                else { self.preExclusionArea[w.id] = self.preExclusionArea[w.id].map { $0.union(w.frame) } ?? w.frame }
+                if w.excludedFrom == nil { self.excludedFrom[w.id] = nil }
+            }
+            for id in Array(self.preExclusionArea.keys) where !layered.contains(where: { $0.id == id }) && now - (self.layerViews[id]?.lastSeenInListNanos ?? 0) > 30_000_000_000 { self.preExclusionArea[id] = nil; self.excludedFrom[id] = nil }
+            self.viewerGuard.update(layered: Dictionary(layered.map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a }), verified: Set(layered.compactMap { $0.excludedFrom == nil ? nil : $0.id }), now: now)
             if let c = self.compositor, c.width > 0, !newlyLayered.isEmpty {
                 // The desktop canvas may hold this window exactly where it was when it became a layer.
                 let t = TileTracker(width: c.width, height: c.height)
@@ -1014,6 +1041,7 @@ final class ViewerSession: @unchecked Sendable {
             }
             self.enforceLayerMemory(now: now)
         }
+        if moved { askForUnknownDesktop(now: now) }   // on uncover, not on a poll
         onChange?()
     }
 
@@ -1241,7 +1269,7 @@ extension ViewerSession {
             var staleTilesDiscarded: Int?, staleTilesCommitted: Int?
             var layers: [LayerDiag]?
             var staleSamples: Int?, staleBenchPixels: Int?, staleAt: [String]?
-            var guardDrops: Int?, unknownDesktopTiles: Int?, fillSamples: Int?, unknownVisibleTiles: Int?
+            var guardDrops: Int?, unknownDesktopTiles: Int?, fillSamples: Int?, unknownVisibleTiles: Int?, preExclusionDrops: Int?
             var samples: [Sample]
         }
         let target = MainActor.assumeIsolated { lastRequest?.bitrateKbps ?? 0 }
@@ -1283,7 +1311,7 @@ extension ViewerSession {
                       staleTilesDiscarded: staleDiscards, staleTilesCommitted: staleCommits,
                       layers: videoQueue.sync { layerDiagnostics() },
                       staleSamples: scenario?.staleSamples, staleBenchPixels: scenario?.stalePurple, staleAt: scenario?.staleAt,
-                      guardDrops: videoQueue.sync { guardDrops }, unknownDesktopTiles: unknownDesktop.count, fillSamples: scenario?.fillSamples, unknownVisibleTiles: unknownVisibleCount(),
+                      guardDrops: videoQueue.sync { guardDrops }, unknownDesktopTiles: unknownDesktop.count, fillSamples: scenario?.fillSamples, unknownVisibleTiles: unknownVisibleCount(), preExclusionDrops: videoQueue.sync { preExclusionDrops },
                       samples: samples)
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         return (try? enc.encode(out)) ?? Data()

@@ -41,4 +41,18 @@ final class DisplayGuardTests: XCTestCase {
         for (i, a) in pieces.enumerated() { for b in pieces[(i + 1)...] { XCTAssertFalse(a.intersects(b)) } }
         XCTAssertEqual(r.subtracting([PixelRect(x: 0, y: 0, width: 50, height: 100), PixelRect(x: 50, y: 0, width: 50, height: 100)]), [])
     }
+
+    func testVerifiedWindowAtRestGuardsNothingButItsRecentSweepStaysGuarded() {
+        var g = DisplayGuard(historyNanos: 1_000_000_000, margin: 0)
+        let a = PixelRect(x: 0, y: 0, width: 128, height: 128), b = a.offset(256, 0)
+        g.update(layered: [5: a], verified: [5], now: 0)
+        XCTAssertTrue(g.allows(PixelRect(x: 10, y: 10, width: 4, height: 4), now: 10), "excluded and at rest: the desktop under it is clean")
+        g.update(layered: [5: a], verified: [], now: 20)
+        XCTAssertFalse(g.allows(PixelRect(x: 10, y: 10, width: 4, height: 4), now: 30), "not verified: guarded")
+        g.update(layered: [5: b], verified: [5], now: 100)
+        XCTAssertFalse(g.allows(PixelRect(x: 300, y: 10, width: 4, height: 4), now: 200), "just moved: the swept box is guarded")
+        XCTAssertFalse(g.allows(PixelRect(x: 10, y: 10, width: 4, height: 4), now: 200))
+        g.update(layered: [5: b], verified: [5], now: 1_200_000_000)
+        XCTAssertTrue(g.allows(PixelRect(x: 300, y: 10, width: 4, height: 4), now: 1_200_000_000), "at rest for the history: clean again")
+    }
 }

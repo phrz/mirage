@@ -1346,3 +1346,39 @@ the rest of the bytes from a live app window on the host screen. Residual risk: 
 drawn as a cut-out whose CGWindow frame is wider than its visible content (seen only with the test knob
 that keeps Astropad's window out of layering) shows desktop pixels in that margin over a window behind it.
 
+**Underlay instead of fill (sixth mac-daddy run, 680e63e).** The exclusion diagnosis held on mac-daddy
+("display filter applied: excluding windows [12180]" at +1.3 s, exclusion check difference 48–50,
+"excluded"). But each move left a flat grey rectangle (the unclean fill) for 4–6 s, eroding tile by tile,
+and stale bench fragments (desktop pixels captured before the filter was applied) next to it, while the
+host idled at 5 kbps. phrz's rule is "lossy whole picture first, never a tile march". Changes:
+- **The desktop under shown windows is sent ahead (the underlay).** The host records, per window, the
+  capture from which the display stream excludes it (`WindowInfo.excludedFrom`). A window that is
+  excluded, not flagged by the exclusion check, and at rest for 1 s no longer guards its frame, so the
+  desktop under it (clean by then) goes out right after the visible first picture, in large blocks,
+  visible areas first. Photographic areas go at q75 (the whole 2x desktop is ≈0.3 MB at q75), UI losslessly.
+  Uncovering a region shows real desktop from the client's canvas at once, and q75 tiles are refined to
+  the normal quality when a move uncovers them. Moving windows (their 1 s sweep) and windows not yet
+  excluded stay guarded.
+- **Viewer.** Never commits a desktop write captured before a window's `excludedFrom` where that window
+  was before its exclusion (those were the fragments). Guard and fill use the same verified rule, and the
+  viewer asks for missing desktop tiles the moment a layered window moves, not on a 2 s poll.
+- **Refinement order.** Window stills, then window blocks and per-tile refinement, then the desktop's
+  blocks (visible first, underlay after), then the desktop's per-tile refinement. Before this, a
+  window's just-uncovered column waited 14 s behind the desktop's first-picture blocks (it showed as a
+  blurry column in the GUI).
+
+Loopback, bench drifting over a bare desktop, ~150 ms RTT, 800 kbps; the vacated title band sampled in the
+desktop layer +100 ms, +1 s and +3 s after every burst:
+
+| Run | +100 ms | +1 s | +3 s |
+|---|---|---|---|
+| 1.7x stream | desktop 5/5 | desktop 5/5 | desktop 5/5 |
+| native 2x | desktop 5/5 | desktop 5/5 | desktop 5/5 |
+| 1.7x, exclusion disabled | fill 5/5 | fill 5/5 | fill 5/5 |
+
+There were no bench pixels in any sample. With the exclusion disabled no clean desktop can exist under a
+window, so the safety net shows fill; on mac-daddy the exclusion is verified. GUI at ~20 s: bench crisp
+everywhere, and the area a move vacates shows desktop-layer content with no fill and no copy. The desktop
+layer's own refinement runs at 0–31 rects per 5 s after the first picture. The bulk of the bytes in these
+runs are direct changes of the person's screen, which bare mode puts in the desktop layer.
+

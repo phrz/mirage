@@ -30,6 +30,10 @@ final class Layer {
     /// Display layer only: tiles the viewer may hold window pixels for (DisplayTaint) and the ones already queued for a re-send.
     var taint = DisplayTaint()
     var taintScheduled = Set<Int>()
+    /// Display layer: tiles fully under a shown window (the underlay, sent at q75 for photographic areas) and the
+    /// ones that went out lossy that way (refined at the normal quality once a window move uncovers them).
+    var underLayer = Set<Int>()
+    var underlayLossy = Set<Int>()
     /// Captures with any change, and tile bytes sent, since the last stats line.
     var frames = 0
     var sentBytes = 0, sentRefine = 0, sentDirect = 0

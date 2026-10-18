@@ -101,7 +101,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// applied one at a time, latest wish wins: concurrent `updateContentFilter` calls can finish out of order,
     /// leaving an older (empty) exclusion in force while the host believes the window is excluded (the
     /// suspected cause of the M3.1 ghosts on mac-daddy).
-    func requestExcluded(_ windows: [SCWindow], log: @escaping (String) -> Void) {
+    func requestExcluded(_ windows: [SCWindow], log: @escaping (String) -> Void, applied: (([UInt32]) -> Void)? = nil) {
         filterLock.lock()
         wantedExcluded = windows
         let start = !applying
@@ -116,11 +116,12 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 self.filterLock.unlock()
                 guard let stream = self.stream, let t = self.target else { continue }
                 let ids = want.map(\.windowID).sorted()
-                if Self.testNoExclude { log("TEST: display exclusion disabled (MIRAGE_TEST_NO_EXCLUDE); would exclude \(ids)"); self.excluded = []; continue }
+                if Self.testNoExclude { log("TEST: display exclusion disabled (MIRAGE_TEST_NO_EXCLUDE); would exclude \(ids)"); self.excluded = []; applied?([]); continue }
                 do {
                     try await stream.updateContentFilter(SCContentFilter(display: t.display, excludingWindows: want))
                     self.excluded = want
                     log("display filter applied: excluding windows \(ids)")
+                    applied?(ids)
                 } catch { log("display exclusion update failed: \(error)") }
             }
         }
