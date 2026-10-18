@@ -1232,3 +1232,21 @@ covered Sketch window nothing beyond its 3.7 KB still; client drags with the ove
 window stays visible across a host-side move under a full-screen overlay; a menu cut-out draws only over
 the window it overlaps; a host-layered window without a viewer canvas is reported, not silently hidden.
 
+**Screen lock (second mac-daddy run, 30aa008).** The re-recording showed only wallpaper because mac-daddy's
+screen was locked: `IOConsoleLocked` read false while `CGSSessionScreenIsLocked` was 1, and the host's new
+window-list log showed loginwindow's shields (level 2004 at display size, level 2001 at 56700×56700). The
+bench itself was correctly drawn (a display-layer window, VISIBLE), so the overlay fix held. Every lock
+guard (scripted-input refusal, window commands, `hostStatus.consoleLocked`, the runner's checks before
+each burst) already read `CGSSessionScreenIsLocked`; they now go through one predicate, `ScreenLock`
+(MirageCore, unit-tested), that is locked if *any* signal says so: `CGSSessionScreenIsLocked` (CFBoolean,
+NSNumber, Int or string), `IOConsoleLocked`, or a loginwindow window at level ≥ 2000 covering the display.
+While locked the host pauses layering (window capturers stopped, layers and their pixels kept, no layer
+refinement, the display stream excludes nothing, the list marks nothing layered, so the viewer shows the
+lock screen), announces it in `hostStatus`, and resumes on unlock (capturers restart; each layer's first
+frame is diffed in full against the last one sent). The viewer shows a banner, "<host>'s screen is locked.
+Unlock it to see its windows.", and logs each change. Loopback, with the test-only
+`MIRAGE_TEST_SCREEN_LOCK=/path` (locked while the file exists; nothing locks the person's screen): lock at
+15 s → 0 of 4 window capturers running within a second, link 4–170 kbps; unlock at 30 s → 4 capturing,
+the windows layers again; the display layer then re-sends where the windows were (it carried them while
+locked), ~10 s at 550–1100 kbps at 1512×982 here.
+

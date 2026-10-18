@@ -98,6 +98,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var statStaleDropped = 0
     private var statWindowCommands = 0
     private var debugLayers = false
+    /// The host's screen is locked (ScreenLock: any signal). Layering pauses meanwhile: window capturers stop,
+    /// layers and their pixels are kept, nothing is refined for them, the display stream (the lock screen)
+    /// excludes nothing; on unlock the capturers restart and each layer's first frame is diffed in full.
+    private var screenLocked = false
 
     public init(log: @escaping @Sendable (String) -> Void) {
         self.log = log
@@ -489,7 +493,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func reconcileLayers(_ s: WindowTracker.Sample, now: UInt64) {
         guard let t = target, let d = display else { return }
         let displayRect = d.bounds
-        let planned = plannedLayers(in: s.windows, displayPixels: t.pixelWidth * t.pixelHeight)
+        InputInjector.shieldWindow = ScreenLock.shieldPresent(s.windows, display: displayRect)
+        let signals = InputInjector.lockSignals()
+        if signals.locked != screenLocked {
+            screenLocked = signals.locked
+            log(screenLocked ? "screen locked (\(signals.description)): window layers paused, the display shows the lock screen" : "screen unlocked: window layers resume")
+            lastHostStatusNanos = 0   // announce it at the next status tick
+        }
+        let planned = screenLocked ? [] : plannedLayers(in: s.windows, displayPixels: t.pixelWidth * t.pixelHeight)
         let plannedIDs = Set(planned.map(\.id))
         var needCatalog: [UInt32] = []
         let frontID = s.windows.first(where: { $0.windowLevel == 0 })?.id
@@ -514,6 +525,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // pixels stay for a while in case it comes right back (a Space switch, a restore).
         for (id, l) in layers where id != 0 && !plannedIDs.contains(id) {
             if let cap = l.capturer { l.capturer = nil; Task { await cap.stop() } }
+            if screenLocked { l.absentSince = 0; continue }   // paused, not gone: kept for the unlock
             if l.absentSince == 0 { l.absentSince = now }
             else if now - l.absentSince > layerRetainNanos { layers[id] = nil; ax?.forget(id); log("layer \(id) released") }
         }
@@ -576,6 +588,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// to back (visible ones first), then the display.
     private func layersByPriority() -> [Layer] {
         guard let d = display else { return [] }
+        if screenLocked { return [d] }
         let locus = injector?.locus.map { (x: Int($0.x * Double(d.width)), y: Int($0.y * Double(d.height))) }
         let list = windows?.current?.windows ?? []
         var ordered: [Layer] = []
@@ -1017,7 +1030,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let displayArea = display?.bounds.area ?? 1
         return s.windows.map { w in
             var w = w
-            let exposed = layers[w.id]?.exposed ?? false
+            let exposed = !screenLocked && (layers[w.id]?.exposed ?? false)
             w.layered = exposed
             if exposed, let l = layers[w.id], let r = w.scrollRect { w.scrollRect = l.local(r) }
             w.cutout = exposed ? nil : (Self.cutoutSafe(w, displayArea: displayArea) ? true : nil)
@@ -1640,8 +1653,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                                active: active, budgetLimited: self.secSkippedBudget > 0, now: tnow)
             self.secSkippedBudget = 0
             self.secVideoBytes = 0; self.secTileBytes = 0; self.secVideoFrames = 0
+            if InputInjector.consoleLocked() != self.screenLocked, let cur = self.windows?.current { self.reconcileLayers(cur, now: tnow); self.publishWindows(now: tnow, full: false) }
             let front: (app: String, id: UInt32, title: String) = self.windows?.frontmost() ?? (app: "", id: 0, title: "")
-            let status = ControlMessage.HostStatus(consoleLocked: InputInjector.consoleLocked(), frontmostApp: front.app, frontmostWindowID: front.id, frontmostWindowTitle: front.title, inputSink: InputInjector.sinkPath != nil)
+            let status = ControlMessage.HostStatus(consoleLocked: self.screenLocked || InputInjector.consoleLocked(), frontmostApp: front.app, frontmostWindowID: front.id, frontmostWindowTitle: front.title, inputSink: InputInjector.sinkPath != nil)
             // On change, and every 10 s regardless (sparse when idle; the viewer's keepalive is its own datagram).
             if status != self.lastHostStatus || tnow - self.lastHostStatusNanos > 10_000_000_000 {
                 self.lastHostStatus = status; self.lastHostStatusNanos = tnow

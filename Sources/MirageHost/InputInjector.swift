@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import IOKit
 import MirageCore
 
 /// Posts CGEvents at the HID tap for input messages with display-normalized coordinates.
@@ -73,13 +74,32 @@ final class InputInjector {
         return injected.last(where: { $0.nanos <= nanos })?.seq ?? 0
     }
 
-    /// Scripted (measurement) input is refused while the console is locked: a script must never type
-    /// into the login window. A person's input still goes through; they may be logging in on purpose.
-    static func consoleLocked() -> Bool {
-        guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
-        if let v = dict["CGSSessionScreenIsLocked"] as? Bool { return v }
-        if let v = dict["CGSSessionScreenIsLocked"] as? Int { return v != 0 }
-        return false
+    /// Scripted (measurement) input is refused while the screen is locked: a script must never type into the
+    /// login window. A person's input still goes through; they may be logging in on purpose. Every lock signal
+    /// counts (ScreenLock); the result is cached for 250 ms (this runs per input event).
+    static func consoleLocked() -> Bool { lockSignals().locked }
+    nonisolated(unsafe) private static var cachedSignals: (nanos: UInt64, signals: ScreenLock.Signals)? = nil
+    private static let cacheLock = NSLock()
+    /// The streamer feeds the shield-window signal from its window list.
+    nonisolated(unsafe) static var shieldWindow = false
+    static let testLockPath = ProcessInfo.processInfo.environment["MIRAGE_TEST_SCREEN_LOCK"]
+    static func lockSignals() -> ScreenLock.Signals {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        let now = Clock.nowNanos()
+        if let c = cachedSignals, now - c.nanos < 250_000_000, c.signals.shieldWindow == shieldWindow { return c.signals }
+        let session = ScreenLock.sessionLocked(CGSessionCopyCurrentDictionary() as? [String: Any])
+        var io: Bool? = nil
+        let root = IORegistryGetRootEntry(kIOMainPortDefault)
+        if root != 0 {
+            io = ScreenLock.flag(IORegistryEntryCreateCFProperty(root, "IOConsoleLocked" as CFString, kCFAllocatorDefault, 0)?.takeRetainedValue())
+            IOObjectRelease(root)
+        }
+        // Test only (loopback runs must not lock the person's screen): MIRAGE_TEST_SCREEN_LOCK=/path reads as
+        // locked while that file exists.
+        let simulated = testLockPath.map { FileManager.default.fileExists(atPath: $0) } ?? false
+        let s = ScreenLock.Signals(sessionScreenIsLocked: simulated ? true : session, ioConsoleLocked: io, shieldWindow: shieldWindow)
+        cachedSignals = (now, s)
+        return s
     }
 
     func handle(_ msg: ControlMessage) {

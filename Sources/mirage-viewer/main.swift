@@ -258,6 +258,15 @@ struct ContentView: View {
                         .foregroundStyle(.white).padding(8).background(.orange.opacity(0.85)).cornerRadius(8).padding(12)
                 } }
             }
+            if model.hostStatus?.consoleLocked == true {
+                // The host's screen is locked: what streams is its lock screen (window layers are paused), not a broken picture.
+                VStack { HStack { Spacer()
+                    Label("\(model.hostName)'s screen is locked. Unlock it to see its windows.", systemImage: "lock.fill")
+                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
+                        .padding(.horizontal, 14).padding(.vertical, 9).background(.black.opacity(0.75)).cornerRadius(10).padding(.top, 14)
+                    Spacer() }; Spacer() }
+                .allowsHitTesting(false)
+            }
             if model.inputHeld {
                 VStack { Spacer()
                     Text("\(model.inputQueued) keystrokes typed while the host was unreachable.  ⌃⌥⌘↩ send them   ⌃⌥⌘⌫ discard")
@@ -288,7 +297,7 @@ struct StatsOverlay: View {
             Text(String(format: "video %dx%d   decode %.1f ms   frames %d   lost %d   skipped %d   tile rects %d   copy-rects %d   nacks %d (recovered %d, parity %d)", s.width, s.height, s.decodeMs, s.frames, s.lost, s.dropped, s.tileRects, s.copyRects, s.nacks, s.recoveredByNack, s.recoveredByParity))
             Text(String(format: "predictions shown %d   confirmed %d   mismatched %d   expired %d   layers %d (%d MB)", s.predictions.shown, s.predictions.confirmed, s.predictions.mismatched, s.predictions.expired, s.layers, s.layerMB))
             if let h = model.hostStatus {
-                Text("host: \(h.consoleLocked ? "CONSOLE LOCKED" : "unlocked")   front: \(h.frontmostApp) — \(h.frontmostWindowTitle.prefix(40))")
+                Text("host: \(h.consoleLocked ? "SCREEN LOCKED" : "unlocked")   front: \(h.frontmostApp) — \(h.frontmostWindowTitle.prefix(40))")
                     .foregroundStyle(h.consoleLocked ? .red : .white)
             }
             Text("⌃⌥⌘S stats  ⌃⌥⌘↑↓ bitrate  ⌃⌥⌘Q quit").foregroundStyle(.secondary)

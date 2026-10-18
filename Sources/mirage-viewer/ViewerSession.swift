@@ -19,6 +19,8 @@ final class ViewerModel: ObservableObject {
     /// Forward no local input (a scripted run is being watched).
     var observeOnly = false
     @Published var hostStatus: ControlMessage.HostStatus?
+    /// The host as the person named it (the alias they connected to), for messages.
+    var hostName = "the host"
     /// Non-nil while the connection is down: (attempt number, seconds until the next try).
     @Published var reconnecting: (attempt: Int, inSeconds: Int)? = nil
     /// Seconds without any packet from the host while connected (0 = fine).
@@ -145,6 +147,7 @@ final class ViewerSession: @unchecked Sendable {
 
     init(host: String, port: UInt16, pairCode: String?, model: ViewerModel) {
         self.host = host; self.port = port; self.pairCode = pairCode; self.model = model
+        MainActor.assumeIsolated { model.hostName = host }
         if let context { layerViews[0] = LayerView(id: 0, context: context) }
     }
 
@@ -396,7 +399,8 @@ final class ViewerSession: @unchecked Sendable {
             case .rateState(let r):
                 statsLock.lock(); rateState = r; statsLock.unlock()
             case .hostStatus(let h):
-                statsLock.lock(); hostStatus = h; statsLock.unlock()
+                statsLock.lock(); let wasLocked = hostStatus?.consoleLocked; hostStatus = h; statsLock.unlock()
+                if wasLocked != h.consoleLocked, h.consoleLocked || wasLocked == true { log(h.consoleLocked ? "host: \(host)'s screen is locked (window layers paused on the host)" : "host: \(host)'s screen is unlocked") }
                 Task { @MainActor in model.hostStatus = h }
             case .reject(let r):
                 log("host: \(r.reason)")
