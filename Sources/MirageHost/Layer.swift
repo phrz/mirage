@@ -98,6 +98,7 @@ final class Layer {
         case base(seq: UInt32)          // waiting for the ack of the tiny keyframe
         case climb(seq: UInt32)         // waiting for the ack of the last ladder step
         case still                      // a window layer's first picture: one lossy still, not sent yet
+        case intermediate               // the whole-layer middle level (q90-class lossy at full size), not sent yet
         case blocks(remaining: [PixelRect])
         case done
         var description: String {
@@ -105,12 +106,21 @@ final class Layer {
             case .base(let s): return "base(\(s))"
             case .climb(let s): return "climb(\(s))"
             case .still: return "still"
+            case .intermediate: return "intermediate"
             case .blocks(let r): return "blocks(\(r.count) left)"
             case .done: return "done"
             }
         }
     }
     var fresh: Fresh = .done
+
+    /// Presentation (DESIGN §3.3): refinement goes to the viewer staged (written off-screen); one `commit` presents
+    /// the whole level once the visible part of the layer is complete. Open since, last staged send, staged
+    /// messages still being encoded (the commit must follow them on the tile stream), levels presented.
+    var stagedOpenSince: UInt64? = nil
+    var lastStagedNanos: UInt64 = 0
+    var stagedEncoding = 0
+    var levelsCommitted = 0
 
     /// Layer pixel sizes are even (the capture and the HEVC canvas want that); a window layer's canvas is
     /// at most one pixel short of its frame.
@@ -131,6 +141,7 @@ final class Layer {
         occludedTiles = []
         announced = false; exposed = false
         fresh = .done
+        stagedOpenSince = nil
     }
 
     var hasVideoPending: Bool { !pendingVideoTiles.isEmpty || wantKeyframe }

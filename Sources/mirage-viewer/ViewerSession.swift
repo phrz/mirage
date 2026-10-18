@@ -84,6 +84,15 @@ final class ViewerSession: @unchecked Sendable {
         var lastSeenInListNanos: UInt64 = 0
         /// Diagnostics: bytes and tile rects received for this layer, stills, video frames decoded.
         var receivedBytes = 0, tilesApplied = 0, stills = 0, videoFrames = 0
+        /// Presentation steps (DESIGN §3.3): what the person sees change on this layer outside direct changes. "still"
+        /// (the lossy first picture), "fade" (a whole-layer level crossfading in), "commit" (a staged level presented),
+        /// "loose" (a refinement block presented on its own: must stay 0 outside the underlay).
+        var steps: [(ms: Int, kind: String)] = []
+        var looseRefinements = 0
+        let createdNanos = Clock.nowNanos()
+        /// Lossless rects written to the staged level, marked crisp when it is presented.
+        var stagedLossless: [PixelRect] = []
+        func step(_ kind: String, now: UInt64) { if steps.count < 64 { steps.append((Int(Clock.elapsed(since: createdNanos, now: now) / 1_000_000), kind)) } }
         init(id: UInt32, context: MetalContext) { self.id = id; compositor = Compositor(context: context); compositor.layerID = id; compositor.hasAlpha = id != 0 }
     }
     let context = MetalContext()
@@ -141,6 +150,7 @@ final class ViewerSession: @unchecked Sendable {
     private(set) var legibleUnderPointerMs: Double? = nil
     private var refinementLogged = 0
     static let debugTiles = ProcessInfo.processInfo.environment["MIRAGE_DEBUG_TILES"] != nil
+    static let debugPresent = ProcessInfo.processInfo.environment["MIRAGE_DEBUG_PRESENT"] != nil
     func resetWatched() { videoQueue.async { self.watchedTileBytes = 0; self.watchedTileCount = 0; self.watchedDirectBytes = 0; self.watchedVideoFrames = 0; self.watchedCopyRects = 0 } }
     func windowsSnapshot() -> [ControlMessage.WindowInfo] { predictorLock.lock(); defer { predictorLock.unlock() }; return windows }
     var scenario: ScenarioRunner?
@@ -345,6 +355,7 @@ final class ViewerSession: @unchecked Sendable {
     }
 
     private var loopsStarted = false
+    private var frameTimer: DispatchSourceTimer?
     private func startLoopsOnce() {
         guard !loopsStarted else { return }
         loopsStarted = true
@@ -353,6 +364,18 @@ final class ViewerSession: @unchecked Sendable {
         t.setEventHandler { [weak self] in self?.assemblerTick() }
         t.resume()
         assemblerTimer = t
+        if let dir = FrameRecorder.directory, let context {
+            let rec = FrameRecorder(dir: dir)
+            let ft = DispatchSource.makeTimerSource(queue: videoQueue)
+            ft.schedule(deadline: .now() + .milliseconds(200), repeating: .milliseconds(200))
+            ft.setEventHandler { [weak self] in
+                guard let self, let sc = self.scene(pxPerPoint: 2) else { return }
+                let rects = self.arrangedWindows().filter { $0.isLayered && (self.layerViews[$0.id]?.compositor.width ?? 0) > 0 }.map { ($0.id, $0.frame) }
+                rec.capture(scene: sc, layers: rects, context: context)
+            }
+            ft.resume()
+            frameTimer = ft
+        }
         Task.detached { [weak self] in await self?.pingLoop() }
         Task.detached { [weak self] in await self?.statsLoop() }
         startInputTimer()
@@ -560,9 +583,23 @@ final class ViewerSession: @unchecked Sendable {
                 _ = dropped   // the canvas keeps what it had there; a dropped write contaminates nothing
             }
             let fresh = candidates.filter { isFresh(v, $0.rect, captureSeq: t.header.captureSeq) }
-            if v.id == 0 { markDesktopClean(fresh.map(\.rect)) }
             for tile in fresh where wouldBeStale(v, tile.rect, captureSeq: t.header.captureSeq) { staleCommits += 1 }   // must never happen
-            let n = v.compositor.applyTiles(fresh, crossfade: t.refinement)
+            // Staged tiles build the layer's next level off-screen (DESIGN §3.3); where one lands on desktop the scene
+            // draws as fill (nothing clean known there, not under a window layer), that part is shown at once too: any
+            // clean picture beats the fill.
+            let staged = t.staged ? fresh : []
+            let shown = t.staged ? [] : fresh
+            let fillParts = t.staged && v.id == 0 ? visibleFillTiles(touching: staged.map(\.rect)) : []
+            if v.id == 0 { markDesktopClean(shown.map(\.rect) + fillParts) }
+            var n = 0
+            if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) seq \(seq): shown \(shown.map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)\($0.format == .lossy ? "L" : "")" }.joined(separator: " ")) staged \(staged.map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))\(t.refinement ? " (refinement)" : "")") }
+            if !shown.isEmpty { n += v.compositor.applyTiles(shown, crossfade: t.refinement && !t.staged) }
+            if !staged.isEmpty { n += v.compositor.applyTiles(staged, staged: true, alsoShow: fillParts); v.stagedLossless += staged.filter { $0.format != .lossy }.map(\.rect) }
+            if !t.staged, !shown.isEmpty {
+                let area = shown.reduce(0) { $0 + $1.rect.area }, whole = area * 10 >= max(1, v.compositor.width * v.compositor.height) * 9
+                if shown.contains(where: { $0.format == .lossy }) && whole { v.step(t.refinement ? "fade" : "still", now: now) }
+                else if t.refinement && !(v.id == 0 && shown.allSatisfy { underWindow($0.rect) }) { v.looseRefinements += 1 }
+            }
             v.receivedBytes += t.bytes; v.tilesApplied += n; v.stills += fresh.filter { $0.format == .lossy }.count
             statsLock.lock(); sTileBytes += t.bytes; sTileRects += n; statsLock.unlock()
             if t.refinement { lastRefinementNanos = now; if Self.debugTiles, refinementLogged < 6 { refinementLogged += 1; log("refinement batch (layer \(v.id)): \(t.tiles.prefix(2).map { "\($0.rect)" })") } }
@@ -570,7 +607,7 @@ final class ViewerSession: @unchecked Sendable {
             if c.width > 0 {
                 let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
                 if v.losslessAt.count != cols * rows { v.losslessAt = Array(repeating: 0, count: cols * rows) }
-                for tile in fresh where tile.format != .lossy {
+                for tile in shown where tile.format != .lossy {
                     let c0 = max(0, tile.rect.x / 64), c1 = min(cols - 1, (tile.rect.maxX - 1) / 64), r0 = max(0, tile.rect.y / 64), r1 = min(rows - 1, (tile.rect.maxY - 1) / 64)
                     if c1 >= c0, r1 >= r0 { for r in r0...r1 { for cc in c0...c1 { v.losslessAt[r * cols + cc] = now } } }
                 }
@@ -601,17 +638,36 @@ final class ViewerSession: @unchecked Sendable {
             predictor.hostUpdate(inputSeq: c.header.inputSeq, rect: c.rect.union(c.rect.offset(c.dx, c.dy)), now: now)
             predictorLock.unlock()
             sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: c.header.captureNanos, receivedNanos: now, bytes: bytes)))
+        case .commit(let layer):
+            guard let v = layerView(layer) else { break }
+            let staged = v.compositor.stagedTiles
+            v.compositor.commitStaged()
+            if staged > 0 { v.step("commit", now: now) }
+            let c = v.compositor
+            if c.width > 0, !v.stagedLossless.isEmpty {
+                let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
+                if v.losslessAt.count != cols * rows { v.losslessAt = Array(repeating: 0, count: cols * rows) }
+                for rect in v.stagedLossless {
+                    let c0 = max(0, rect.x / 64), c1 = min(cols - 1, (rect.maxX - 1) / 64), r0 = max(0, rect.y / 64), r1 = min(rows - 1, (rect.maxY - 1) / 64)
+                    if c1 >= c0, r1 >= r0 { for r in r0...r1 { for cc in c0...c1 { v.losslessAt[r * cols + cc] = now } } }
+                }
+            }
+            v.stagedLossless = []
+            if Self.debugTiles || Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(layer): level committed (\(staged) staged tiles)") }
+            checkLegible()
         case .reset(let layer, let w, let h):
             if layer == 0 {
                 // A fresh stream at the same size keeps the pixels (review M11: the last picture stays until the
                 // first keyframe replaces it); a size change clears. Either way nothing old is trusted any more.
                 compositor?.configure(width: w, height: h)   // clears only on a size change
+                compositor?.discardStaged(); displayView?.stagedLossless = []
                 displayView?.tileCaptureSeq = []
                 assembler = FrameAssembler(); for v in layerViews.values { v.lastRecoverySeq = 0 }   // review M4: the host's sequence may restart
                 predictorLock.lock(); predictor = Predictor(); predictorLock.unlock()
             } else if let v = ensureLayerView(layer) {
                 // A window layer announced (new, resized, or re-announced on resume): its canvas at the window's pixel size.
                 v.compositor.configure(width: w, height: h)
+                v.compositor.discardStaged(); v.stagedLossless = []
                 v.tileCaptureSeq = []
                 predictorLock.lock(); predictor.forget(windowID: layer); predictorLock.unlock()
                 enforceLayerMemory(now: now)
@@ -619,6 +675,20 @@ final class ViewerSession: @unchecked Sendable {
         }
         onChange?()
         if case .reset = msg {} else { notePictureChange(now) }
+    }
+
+    /// Desktop tiles (64-px rects) under `rects` that the scene draws as fill: no clean pixels known, not under a window layer.
+    private func visibleFillTiles(touching rects: [PixelRect]) -> [PixelRect] {
+        let unknown = unknownDesktop
+        guard !unknown.isEmpty, let c = compositor, c.width > 0 else { return [] }
+        let layerRects = arrangedWindows().filter(\.hidesBehind).map(\.frame)
+        let t = TileTracker(width: c.width, height: c.height)
+        return t.tiles(covering: rects).filter { i in unknown[i]?.contains { p in !layerRects.contains { $0.intersection(p.rect) == p.rect } } ?? false }.map { t.rect(of: $0) }
+    }
+
+    /// Whether a display rect lies under an opaque window layer the scene draws (the underlay: nobody sees it now).
+    private func underWindow(_ r: PixelRect) -> Bool {
+        arrangedWindows().contains { $0.hidesBehind && $0.isLayered && $0.frame.intersection(r) == r }
     }
 
     /// A desktop write captured before a layered window was excluded from the display stream, where that window
@@ -756,6 +826,8 @@ final class ViewerSession: @unchecked Sendable {
                         else { written.append(tr) }
                     } }
                     compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive))
+                    if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) video \(frame.seq)\(frame.flags.contains(.keyframe) ? " key" : "")\(frame.flags.contains(.progressive) ? " progressive" : "") region \(region) tiles \(written.count)") }
+                    if frame.flags.contains(.keyframe), region.area * 10 >= compositor.width * compositor.height * 9 { v.step(frame.flags.contains(.progressive) ? "fade" : "key", now: now) }
                     if v.id == 0 { markDesktopClean(written) }
                     v.receivedBytes += frame.bytes; v.videoFrames += 1
                     if !frame.flags.contains(.progressive) { markCapture(v, region, captureSeq: frame.captureSeq) }
@@ -1093,6 +1165,8 @@ final class ViewerSession: @unchecked Sendable {
     struct LayerDiag: Codable, Equatable {
         var id: UInt32, title: String, level: Int, layeredOnHost: Bool, canvas: String, receivedBytes: Int, tiles: Int, stills: Int, videoFrames: Int
         var frame: PixelRect, viewport: PixelRect, drawnAs: String, coveredBy: [UInt32], visible: Bool, why: String?
+        /// Presentation steps ("ms:kind") since the layer view was made, and refinement blocks presented on their own.
+        var steps: [String] = [], looseRefinements = 0
     }
     /// The drawable rect the display layer was last drawn into (GUI); nil = headless (identity).
     var lastDest: CGRect? = nil
@@ -1109,7 +1183,8 @@ final class ViewerSession: @unchecked Sendable {
             return LayerDiag(id: w.id, title: String(w.title.prefix(32)), level: w.windowLevel, layeredOnHost: w.isLayered,
                              canvas: v.map { "\($0.compositor.width)x\($0.compositor.height)" } ?? "none",
                              receivedBytes: v?.receivedBytes ?? 0, tiles: v?.tilesApplied ?? 0, stills: v?.stills ?? 0, videoFrames: v?.videoFrames ?? 0,
-                             frame: w.frame, viewport: vp, drawnAs: e?.kind.rawValue ?? "?", coveredBy: e?.coveredBy ?? [], visible: e?.visible ?? false, why: e?.why)
+                             frame: w.frame, viewport: vp, drawnAs: e?.kind.rawValue ?? "?", coveredBy: e?.coveredBy ?? [], visible: e?.visible ?? false, why: e?.why,
+                             steps: v?.steps.map { "\($0.ms):\($0.kind)" } ?? [], looseRefinements: v?.looseRefinements ?? 0)
         }
     }
     private var lastDiagLog: [LayerDiag] = []
