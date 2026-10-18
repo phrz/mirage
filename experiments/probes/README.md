@@ -91,3 +91,12 @@ The desktop without any windows (the display layer of the layered desktop) at 26
 320×320, 39 of them photographic (> 4096 colours) on this wallpaper: lossless 1007 KB/Mpx, near-lossless
 (WebP `near_lossless` 60) 677, lossy WebP q92 180, q85 118, q75 73. A whole 2x desktop is ≈3 MB
 near-lossless and ≈0.6 MB at q90, which is why photographic tiles end at q90 on constrained links.
+
+## framesheet (presentation steps, 2026-10-18)
+
+`swift experiments/probes/framesheet.swift <dir> [--from ms] [--to ms] [--verbose layer]` reads a viewer
+`MIRAGE_TEST_FRAMES` directory (the composited scene at a quarter of display size, 5 fps, with each frame's
+layer rects). Per layer it prints the runs of frames in which any 16-px block (64 native px) changed, counting
+only blocks that belong to exactly one layer, and writes `sheet.png`, a contact sheet of the frames. A level
+presented whole is a run of 1–2 frames (the 220 ms crossfade). Blocks landing one by one show up as long runs
+or as many small ones. Motion, like a window dragging itself, also shows up as long runs.

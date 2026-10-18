@@ -36,8 +36,10 @@ the host the frame through Accessibility, a host-side drag arrives as window-lis
 in neither direction does a pixel travel for it (loopback: 0 video frames, 0 copy-rects, 0 bytes of the
 dragged window per 0.8 s burst, against 8 fps of video plus 25 copy-rects and 1–1.7 s to crisp before).
 `--stats` JSON carries per-layer diagnostics (`layers`: bytes received, canvas, frame, viewport rect,
-drawn as layer / cut-out / display, visible or why not); the test bench's `--overlay` opens a transparent
-full-screen window, the case that broke the first mac-daddy run.
+drawn as layer / cut-out / display, visible or why not, presentation steps); the test bench's `--overlay`
+opens a transparent full-screen window, the case that broke the first mac-daddy run. `MIRAGE_TEST_FRAMES=<dir>`
+makes the viewer record the composited scene at 5 fps, and `experiments/probes/framesheet.swift` turns that into
+change events per layer plus a contact sheet.
 
 ## Build
 
@@ -115,8 +117,11 @@ ladder rung, copy-rects, prediction confirm/mismatch counts), `⌃⌥⌘↑/↓`
 is zero; trackpad scrolls and title-bar drags move pixels locally before the host confirms them;
 clicks and typing pay the link RTT.
 
-The first picture of a stream is one tiny keyframe within a fraction of a second, then the
-ladder climbs and lossless lands in large blocks, never as a march of tiles; on constrained links
+The first picture of a stream is one tiny keyframe within a fraction of a second. Each layer (every
+window and the desktop) then improves in at most three whole-picture steps: the lossy first picture at
+once, a middle level over the whole layer in one crossfade, and the lossless level, assembled off-screen
+and crossfaded in only once the visible part is complete. A refinement block is never shown on its own;
+changed pixels still show the moment they arrive (DESIGN §6 "Progressive presentation"). On constrained links
 quality follows the pointer (foveated). If the link drops, the viewer keeps the last picture and
 reconnects by itself (every second while the host still holds the session, then backing off to
 15 s); the host resumes the same session, with its caches, on the new connection. Keystrokes typed

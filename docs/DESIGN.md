@@ -1455,3 +1455,55 @@ and bottom; a 56700-px loginwindow shield) through the tracker, guard, taint, oc
 subtraction. Loopback after: no crash; the vacated band shows desktop 27/27 (plain) and 30/30
 (photographic backdrop), and the photographic desktop is at 5 kbps in the second 30 s.
 
+
+**Progressive presentation per layer (phrz after the tenth run, 5bd0399).** The picture was right, but the
+step from lossy to lossless still arrived block by block, and that tile-in drew the eye. Transport is
+unchanged (blocks, priority order, NACK, budgets). What changed is what the viewer shows and when. Each
+layer, every window and the desktop, now shows at most three whole-picture steps:
+1. **Level 0, at once.** A window's lossy still. For the desktop, the tiny keyframe.
+2. **A middle level over the whole layer, in one 220 ms crossfade.** For a window, one lossy WebP of the
+   whole layer at full size (q90, else q75, else a smaller q80 picture), sized to about 0.6 s of the tile
+   rate. It is sent only when the lossless level of the visible part would take more than about a second
+   at the current rate. For the desktop, the ladder climb is now one keyframe straight to the highest
+   rung the target affords, not one crossfade per rung.
+3. **The lossless level.** Assembled off-screen and presented in one 220 ms crossfade, only once the
+   whole visible part of the layer is complete.
+
+How it works:
+- **Wire (protocol 4).** A tile message flagged `staged` is part of a layer's next level. A new `commit(layer)` message
+  presents it. The tile stream is ordered, so the commit always follows its tiles.
+- **Viewer (`Compositor`, tested).** Each canvas has a staging texture for its next level. Staged tiles
+  land only there. Every other write (direct tiles, video, copy-rects) lands on the canvas and on staging,
+  and on `incoming` while a fade runs over it. A direct change is therefore shown at once and is also what
+  the commit shows there: refinement of a region that changed during assembly is dropped, never shown over
+  newer pixels. On commit, the staged tiles (merged into row runs) crossfade in together. A commit that
+  arrives during a running fade waits for the fade to end. A staged copy-rect moves the staged tiles with
+  it. Desktop the scene would draw as fill takes staged pixels at once (a clean picture beats fill).
+- **Host.** Blocks, per-tile refinement and the q75→normal upgrade are sent staged. Direct changes stay
+  immediate: changed pixels near the input locus, copy-rects, video, tiles the rate limit or the budget
+  held back (the tracker now remembers those as `direct`), and taint corrections. The underlay is also
+  immediate, since nobody sees it until a move uncovers it. A layer's level is committed when nothing
+  visible owes refinement. Pixels that just changed are waited for, so a burst's refinement joins one
+  level. After 2 s, a region still changing within the last second is left out of the level instead. For
+  the desktop the host also waits, up to 3 s, while the guard releases desktop a window just left, so an
+  uncovered region is presented once and not in two parts. Tiles under a cut-out drawn over a layer (an
+  alert, another app's window) are visible, not underlay.
+- **Order across layers.** The focused (frontmost normal-level) window first, then the other visible
+  windows by visible area, then hidden windows, then the desktop: visible part first, then the underlay.
+  All stills go before any middle level, and all middle levels before any lossless level.
+
+Loopback, checked with 5 fps frame sheets. The viewer's `MIRAGE_TEST_FRAMES=<dir>` renders the composited
+scene off-screen five times a second. `experiments/probes/framesheet.swift` lists, per layer, the runs of
+frames in which any 64-px block changed. It counts only blocks that belong to exactly one layer. `MIRAGE_DEBUG_PRESENT` makes the viewer log every staged, shown and committed write.
+- **Fresh connection** (three bench windows, one replacing its text every 8 s, 2 Mbps cap, the controller
+  starting near 1.7 Mbps): every window shows still → middle → lossless (3 steps), or still → lossless
+  where the middle level is not worth it (2 steps). Each step is one run of 1–2 frames, the 220 ms
+  crossfade. The desktop shows key → climb → lossless (3 steps). The key and the climb are 400 ms apart,
+  so the sheet reports them as one 3–4 frame run.
+- **Text burst:** the change itself in one frame (direct), then its refinement as one crossfade 0.4–1 s
+  later.
+- **Self-dragging bench:** the uncovered underlay is there at once. Its upgrade and the desktop the guard
+  releases arrive as one crossfade per move (before this change: three commits 30–150 ms apart).
+- No frame shows refined next to unrefined blocks within a layer except during a crossfade. The viewer's
+  per-layer counters (`steps`, `looseRefinements` in `--stats` layers) agree: no refinement block was ever
+  presented on its own. Watch and drag scenarios: stale bench pixels 0, fill 0, stale commits 0.

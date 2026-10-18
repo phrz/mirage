@@ -57,10 +57,13 @@ final class App: NSObject, NSApplicationDelegate {
         // `--drift`: an 800×500 window that drags *itself* in 0.8 s bursts of 6×3 pt per 16 ms every 6 s
         // (what the drag scenario does with the pointer), without taking focus and without any input
         // being injected: the window-drag path is measured while the person at the machine keeps working.
-        let isDrift = CommandLine.arguments.contains("--drift") || CommandLine.arguments.contains("--still")
+        // `--burst`: a still window whose whole text is replaced every 8 s (a burst of changed pixels, then its
+        // refinement: the presentation-steps test of DESIGN §3.3).
+        let isBurst = CommandLine.arguments.contains("--burst")
+        let isDrift = CommandLine.arguments.contains("--drift") || CommandLine.arguments.contains("--still") || isBurst
         // `--still`: the drift window without the motion (several instances make a cheap set of windows of our own
         // to measure per-window capture against), offset by --index N so they do not stack exactly.
-        let isStill = CommandLine.arguments.contains("--still")
+        let isStill = CommandLine.arguments.contains("--still") || isBurst
         let index = CommandLine.arguments.firstIndex(of: "--index").flatMap { Int(CommandLine.arguments[$0 + 1]) } ?? 0
         let isStatic = CommandLine.arguments.contains("--static") || isMotion
         let size = isStatic ? NSSize(width: screen.frame.width, height: screen.frame.height - 25) : isDrift ? NSSize(width: 800, height: 500) : NSSize(width: 1100, height: 750)
@@ -116,6 +119,19 @@ final class App: NSObject, NSApplicationDelegate {
             w.orderFrontRegardless()
             updateCaption()
             window = w
+            if isBurst {
+                var seed: UInt64 = 7
+                Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { _ in
+                    seed &+= 1
+                    var r = seed &* 0x9E3779B97F4A7C15, t = ""
+                    for i in 1...600 {
+                        var line = String(format: "%4d  ", i)
+                        for _ in 0..<9 { r = r &* 6364136223846793005 &+ 1442695040888963407; line += words[Int(r >> 33) % words.count] + " " }
+                        t += line + "\n"
+                    }
+                    tv.string = t
+                }
+            }
             if isStill { return }
             var dir: CGFloat = 1
             Timer.scheduledTimer(withTimeInterval: 6.0, repeats: true) { [weak self] _ in
