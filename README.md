@@ -4,7 +4,7 @@ A remote desktop for Macs and Apple devices that is designed around bad links
 (high latency, ~1 Mbps) and a tailnet instead of accounts. See [docs/DESIGN.md](docs/DESIGN.md)
 for the architecture, the teardown of Astropad's LIQUID that informed it, and the milestones.
 
-**Status: M2.5.** QUIC link over the tailnet, one-time 6-digit pairing (PAKE), mutual
+**Status: M3.1 (layered desktop).** QUIC link over the tailnet, one-time 6-digit pairing (PAKE), mutual
 Ed25519 authentication, and a hybrid desktop codec: ScreenCaptureKit dirty tiles classified by
 motion history; sparse changes (typing, carets, highlights) go as pixel-exact WebP rects on a
 reliable QUIC stream, sustained motion goes through hardware HEVC (low-latency) on QUIC
@@ -27,6 +27,14 @@ day against mac-daddy then fixed the delay controller (path delay from video ack
 drag path: refinement is frozen while motion is sustained so video has the whole target, a dragged
 window follows the pointer from the host's last confirmed frame, and a refinement block captured
 before a move is never committed after it.
+M3.1 (DESIGN §3.2 "layered desktop", §6 "M3.1") changed the capture model: the host captures the desktop
+without its windows as one layer and every normal window as its own unoccluded layer (ScreenCaptureKit
+per-window streams), publishes the window list with frames and z-order, and the viewer composites the
+scene itself with a shadow per window; menus, the dock and the menu bar are cut-outs of the display
+layer. Dragging a window is local on both sides: a title-bar drag moves the layer at the pointer and tells
+the host the frame through Accessibility, a host-side drag arrives as window-list frames at 30 Hz, and
+in neither direction does a pixel travel for it (loopback: 0 video frames, 0 copy-rects, 0 bytes of the
+dragged window per 0.8 s burst, against 8 fps of video plus 25 copy-rects and 1–1.7 s to crisp before).
 
 ## Build
 
@@ -158,14 +166,15 @@ Sources/MirageCore/Wire        framing, ControlMessage (auth, pairing, stream/ac
                                video datagrams + reassembly (region, tile mask, input seq), tile-stream messages
 Sources/MirageCore/Tiles       TileCodec (WebP), TileTracker (classification, refinement queue), ShiftDetector (copy-rects)
 Sources/MirageCore/Rate        RateController (one-way-delay/dispersion based target, budget split, resolution ladder)
-Sources/MirageCore/Render      Compositor (Metal canvas, MetalFX), Predictor (scroll/drag reconciliation)
+Sources/MirageCore/Render      Compositor (one Metal canvas per layer, MetalFX), SceneRenderer (layers, cut-outs, shadows), Predictor
 Sources/MirageCore/Video       VideoToolbox HEVC decoder (macOS + iOS)
 Sources/MirageCore/Crypto      CPace PAKE, device identity, sealed box
 Sources/MirageCore/Transport   QUIC client/host (Network.framework), framed streams, TLS identity
 Sources/MirageCore/Session     host and client protocol flows; DesktopStreamer protocol the host plugs into
 Sources/MirageCore/Store       on-disk state
-Sources/MirageHost             macOS: SCStream capture (BGRA + dirty rects), tile diff, copy-rect detection, window tracker,
-                               HEVC canvas encoder, tile encoder, pacing, CGEvent input, cursor monitor
+Sources/MirageHost             macOS: display + per-window SCStream capture (layers), tile diff, copy-rect detection, window tracker,
+                               AX window commands, per-layer HEVC canvas encoders, tile encoder, pacing, CGEvent input, cursor monitor,
+                               `miraged probe-layers` (per-window capture measurements)
 Sources/mirage-viewer          macOS viewer (AppKit window, CAMetalLayer, SwiftUI overlay, scripted scenarios)
 Sources/miraged, Sources/mirage  CLIs
 experiments/                   measurements that fixed the design (tilebench, seqbench, probes) and the test bench app

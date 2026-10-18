@@ -175,6 +175,33 @@ current. Unified mode later maps these same layers onto native `NSWindow`s. Tran
 (menus, sheets, popovers, tooltips) are short-lived layers of their own, and the one display
 stream remains as the fallback for anything not attributable to a window.
 
+**As built, M3.1 (2026-10-18).** Every window at CGWindow level 0 of a real app (not the dock, not the
+menu bar), front first, up to 16 windows or 48 Mpx, gets a `desktopIndependentWindow` SCStream at the
+stream's pixel scale, shadow left out, the off-screen part included, child windows included (macOS 26
+draws a titled window's traffic lights in a 66×20 child window of their own; the window list folds such
+children into their parent). The display stream excludes exactly the windows the viewer holds as layers,
+and their children, and is captured without shadows; the viewer draws a macOS-style soft shadow per layer
+(key window, inactive, menu). Everything else in the on-screen list (menus, popovers, the dock, the menu
+bar, overflow windows) stays in the display layer and the client draws it as a *cut-out* of that layer at
+its frame, in z-order, so menus still sit above windows. A new layer is announced (`reset` with its pixel
+size), gets one lossy WebP still (~0.15 s of the tile budget, upscaled on the client) and then lossless
+blocks, locus layer first, one in flight across all layers; the display layer keeps its tiny-keyframe
+ladder. Each layer has its own tile tracker, last frame, scroll detection, per-tile capture sequences on
+the viewer and, when it moves, its own HEVC canvas and encoder (at most four live, released after 10 s
+idle); the rate controller, pacer, in-flight cap and tile budget stay shared. Tiles of a layer fully
+covered on the host are tracked but not sent until uncovered. Measured facts that shaped it
+(`miraged probe-layers`, experiments/probes): a window stream delivers a frame per interval whether or
+not anything changed (33 fps for a still window, alternating two IOSurfaces, dirty rect always the whole
+window), so the tolerant CPU diff is the change detector and the interval the cost knob (30 fps for the
+frontmost window, 10 for the rest, 2 for fully covered ones); corner anti-aliasing of a still window
+jitters by ±10 levels between frames, so semi-transparent pixels get a wide tolerance; a stream starts in
+100–170 ms. Window management: a press on a layered window's title bar (right of the traffic lights)
+sends nothing; if the pointer moves the window follows it locally and the host receives
+`windowCommand(move)` at ≤ 20 Hz and on release (applied with `kAXPositionAttribute`), else the click is
+sent on release; a press anywhere in a layered window raises it locally at once; the host's window list
+carries the input sequence it reflects so the local override is retired when the host has caught up.
+Host-side drags of layered windows cost no pixels at all: the list carries the frame at up to 30 Hz.
+
 Mode summary:
 
 | Mode | Capture | Mask |
@@ -1123,3 +1150,48 @@ Not measured here, with the command that would: real delay and loss on the *reli
 `scripts/resilience-test.sh`); the recorded bus trace (`experiments/linktraces/replay.sh`); an
 IP change (needs two interfaces; the code path is a redial with the resume token).
 
+### M3.1 (2026-10-18, layered desktop with client-side composition, loopback)
+
+Built on this MacBook against itself (`miraged serve --port 7800` in input-sink mode, headless viewers on
+`localhost`, 1512×982 stream at an 800 kbps cap, the test bench as the window under test, phrz's own
+windows open and changing on the same screen). The baseline is 99e652a's host and viewer built in a
+worktree, run against the same drifting bench in the same minute.
+
+| Scenario | 99e652a (single capture) | M3.1 (layers) |
+|---|---|---|
+| Host-side drag (`--drift`: 0.8 s bursts of 6×3 pt per 16 ms), per burst | 3.6–14.6 fps of video of the moving window (median ~8), 24–26 copy-rects, time-to-crisp 1.0–1.7 s after the burst (the strip under the window re-sent lossless), link peaks of 800–1250 kbps for a second around each burst | **0 video frames, 0 copy-rects, 0 bytes of the dragged window**: 15–17 window-list frame updates per burst (19–21 Hz, the host samples CGWindowList at 30 Hz), 6–12 KB on the whole link during a burst (the list deltas plus other windows' changes), time-to-crisp 0 ms, bench layer silent afterwards |
+| Client drag (local layer drag + `windowCommand(move)`, ~18 commands per 0.8 s) | copy-rect prediction: 9.5–12.5 fps during the burst, ~24 copy-rects, time-to-crisp ~5 s (§3.3c) | window moves locally at the pointer; the host's list confirmed the final frame **53–82 ms after release** (loopback: AX set + one list sample), 7–35 KB on the link during the drag (none of it the dragged window), time-to-crisp 0 ms, 0 stale tiles committed, 0 prediction mismatches |
+| Fresh picture, 4 windows (two 1512×948, 800×532, 288×464) | one keyframe ladder for the display | display keyframe 537 B → ladder → blocks as before; window stills 2–28 KB each (288×464: 3.2 KB; 800×532: 15–28 KB; 1512×948: 8.5 KB at 464×290), all four layers announced within 0.75 s of the stream start, stills within 4 s, then lossless blocks locus-layer first |
+| §4a outage survival (30 s black hole), `scripts/resilience-test.sh outage-stop` | picture back 0.23 s after the path returned | **pass**, picture back 0.84 s (the window capturers restart on resume; the first frame of each layer is diffed in full against the last one sent) |
+| Host cost (M4 Max, 4 window layers at 10–30 fps plus the display) | – | 300–440 captures per 5 s at 0.6–0.9 ms each (~7 % of one core), 0–1 HEVC encoders live |
+
+What the numbers say: in Desktop mode a window drag no longer touches the pixel path at all, in
+either direction; what remains is the control stream (a 150-byte list delta per 33 ms while something
+moves) and, for client drags, one AX call per command on the host. The uncovered area was already on
+the client. Time-to-crisp after a drag is zero by construction; the ~5 s of §3.3c was the refinement of
+the strip the single capture had to re-send.
+
+Things the runs taught (all in `experiments/probes/README.md` under "layers"):
+
+- `desktopIndependentWindow` streams render every interval: 33 fps of identical frames for a still window,
+  the dirty rect always the whole window. Nothing in SCK says "unchanged"; the tolerant diff does, cheaply
+  (a row-wise `memcmp` first). The capture interval is therefore per layer: 30 fps frontmost, 10 fps
+  others, 2 fps fully covered.
+- The traffic lights are a separate 66×20 level-0 window on macOS 26/27, 6 pt inside the parent's corner.
+  Without `includeChildWindows` a layer has no buttons; without folding them into the parent the display
+  layer sees a tiny window dragging around and sends copy-rects for it.
+- A still window's rounded corners re-render with ±10 levels of difference between consecutive frames
+  (four 23×23 boxes "changing" at 10 fps). Semi-transparent pixels need a tolerance of ~48 and fully
+  transparent ones must never count, else every idle layer costs ~5 kbps and never settles.
+- Excluding a window from the display stream does not exclude its shadow; `ignoreShadowsDisplay` does,
+  for every window, so the viewer draws shadows for cut-outs too (menus; not the dock or menu bar).
+- Odd window heights: SCK is configured with even sizes (the encoder wants them); a layer is the even
+  size, one pixel short of its frame at most, and a frame of any other size is skipped.
+- `MetalContext` compiles the shaders once per viewer; a shader that fails to compile (a variable named
+  `half`) made `Compositor()` nil and the viewer silently decode nothing, which the compositor tests
+  skipped rather than failed. They no longer skip on this machine.
+
+Not measured here: the real link (RTT and the AX round trip decide how long a dropped window takes to
+be confirmed; the local picture does not wait for it), windows with heavy translucency (a layer captured
+alone has no backdrop blur), the look of the shadows against mac-daddy's wallpaper, and more than four
+windows at once (the cap is 16 layers / 48 Mpx; beyond it windows are cut-outs of the display layer).
