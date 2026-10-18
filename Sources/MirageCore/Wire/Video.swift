@@ -406,7 +406,7 @@ public struct FrameAssembler {
             }
             // Give up on the gap since the LAST fragment, not the age of the frame: a paced keyframe
             // arrives over a second or more and must not be declared lost while still flowing.
-            if now - p.lastNanos > timeoutNanos || now - p.firstNanos > maxFrameAgeNanos {
+            if Clock.elapsed(since: p.lastNanos, now: now) > timeoutNanos || Clock.elapsed(since: p.firstNanos, now: now) > maxFrameAgeNanos {
                 partials[seq] = nil; delivered = seq; events.append(.lost(seq: seq, layer: p.count > 0 && !p.isGap ? p.layerID : nil)); continue
             }
             break
@@ -418,11 +418,11 @@ public struct FrameAssembler {
         // arrived or the silence is several times the frame's own inter-fragment spacing.
         for seq in partials.keys.sorted() {
             guard var p = partials[seq], !p.complete else { continue }
-            guard p.nacks < maxNacks, now - p.lastNanos > nackAfterNanos, p.lastNackNanos == 0 || now - p.lastNackNanos > nackRepeatNanos else { continue }
+            guard p.nacks < maxNacks, Clock.elapsed(since: p.lastNanos, now: now) > nackAfterNanos, p.lastNackNanos == 0 || Clock.elapsed(since: p.lastNackNanos, now: now) > nackRepeatNanos else { continue }
             var fragments: [Int] = []
             if p.count > 0 {
                 let below = (0..<max(0, p.highestIndex)).filter { p.parts[$0] == nil }
-                let tailDue = p.laterFrameSeen || now - p.lastNanos > nackAfterNanos + 4 * max(p.arrivalGapNanos, 5_000_000)
+                let tailDue = p.laterFrameSeen || Clock.elapsed(since: p.lastNanos, now: now) > nackAfterNanos + 4 * max(p.arrivalGapNanos, 5_000_000)
                 fragments = tailDue ? (0..<p.count).filter { p.parts[$0] == nil } : below
                 if fragments.isEmpty { continue }
             }

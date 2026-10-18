@@ -44,7 +44,7 @@ final class Layer {
     var opaqueSampledNanos: UInt64 = 0
     var opaque = true
     func refreshOpacity(now: UInt64) {
-        guard !isDisplay, let pb = lastFrame, now - opaqueSampledNanos > 500_000_000 else { return }
+        guard !isDisplay, let pb = lastFrame, Clock.elapsed(since: opaqueSampledNanos, now: now) > 500_000_000 else { return }
         opaqueSampledNanos = now
         CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(pb)?.assumingMemoryBound(to: UInt8.self), CVPixelBufferGetWidth(pb) == width else { return }

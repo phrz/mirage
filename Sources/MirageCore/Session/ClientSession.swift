@@ -64,7 +64,7 @@ public struct ClientSession {
         try await stream.send(.ping(.init(seq: seq, sentNanos: t0)))
         let pong = try await stream.expect("pong") { if case .pong(let p) = $0, p.seq == seq { return p } else { return nil } }
         _ = pong
-        return Double(Clock.nowNanos() - t0) / 1e6
+        return Double(Clock.elapsed(since: t0, now: Clock.nowNanos())) / 1e6
     }
 }
 

@@ -68,7 +68,7 @@ final class ScenarioRunner {
             try? await Task.sleep(for: .milliseconds(100))
             let t = session.lastWatchedLargeTileNanos, v = session.lastWatchedVideoNanos
             last = max(t, v)
-            if t >= v, Clock.nowNanos() - last > 700_000_000 { break }
+            if t >= v, Clock.elapsed(since: last, now: Clock.nowNanos()) > 700_000_000 { break }
         }
         let crisp = session.lastWatchedLargeTileNanos >= session.lastWatchedVideoNanos
         let ms = last > burstEnd ? Double(last - burstEnd) / 1e6 : 0
@@ -141,7 +141,7 @@ final class ScenarioRunner {
             while Date() < end {
                 try? await Task.sleep(for: .milliseconds(20))
                 let latest = latestMotionNanos()
-                if latest > quietSince, Clock.nowNanos() - quietSince > 700_000_000 { break }
+                if latest > quietSince, Clock.elapsed(since: quietSince, now: Clock.nowNanos()) > 700_000_000 { break }
                 if latest > quietSince { quietSince = latest }
             }
             guard Date() < end else { break }
@@ -155,7 +155,7 @@ final class ScenarioRunner {
                 try? await Task.sleep(for: .milliseconds(20))
                 let latest = latestMotionNanos()
                 if latest > last { last = latest }
-                if Clock.nowNanos() - last > 300_000_000 { break }
+                if Clock.elapsed(since: last, now: Clock.nowNanos()) > 300_000_000 { break }
             }
             let dur = Double(last - burstStart) / 1e9
             let frames = session.watchedVideoFrames, copies = session.watchedCopyRects, moves = session.watchedMoves - moves0
@@ -192,7 +192,7 @@ final class ScenarioRunner {
             session.log(String(format: "scenario watch: burst %d: %.2f s of motion, %d video frames (%.1f fps), %d copy-rects, %d frame moves (%.1f/s), %.1f KB during", bursts + 1, dur, frames, dur > 0.2 ? Double(frames) / dur : 0, copies, moves, dur > 0.2 ? Double(moves) / dur : 0, during))
             let bytes1 = session.totalBytes()
             await measureCrisp(burstEnd: last)
-            try? await Task.sleep(for: .milliseconds(max(0, 3000 - Int(Double(Clock.nowNanos() - last) / 1e6))))
+            try? await Task.sleep(for: .milliseconds(max(0, 3000 - Int(Double(Clock.elapsed(since: last, now: Clock.nowNanos())) / 1e6))))
             settleKB.append(Double(session.totalBytes() - bytes1) / 1000)
             session.log(String(format: "scenario watch: burst %d: %.1f KB in the 3 s after it", bursts, settleKB.last!))
         }
@@ -297,7 +297,7 @@ final class ScenarioRunner {
                 var got: Double? = nil
                 for _ in 0..<200 {   // up to 2 s
                     try? await Task.sleep(for: .milliseconds(10))
-                    if session.lastWatchedTileNanos > before { got = Double(session.lastWatchedTileNanos - t0) / 1e6; break }
+                    if session.lastWatchedTileNanos > before { got = Double(Clock.elapsed(since: t0, now: session.lastWatchedTileNanos)) / 1e6; break }
                 }
                 latencies.append(got ?? 9999)
                 session.log(String(format: "scenario login: key %d → first changed pixels in the field after %@", i, got.map { String(format: "%.0f ms", $0) } ?? "no update within 2 s"))
@@ -367,13 +367,13 @@ final class ScenarioRunner {
                     var confirmed: Double? = nil
                     for _ in 0..<300 {
                         try? await Task.sleep(for: .milliseconds(10))
-                        if let f = session.windowsSnapshot().first(where: { $0.id == win.id })?.frame, abs(f.x - final.x) <= 2, abs(f.y - final.y) <= 2 { confirmed = Double(Clock.nowNanos() - released) / 1e6; break }
+                        if let f = session.windowsSnapshot().first(where: { $0.id == win.id })?.frame, abs(f.x - final.x) <= 2, abs(f.y - final.y) <= 2 { confirmed = Double(Clock.elapsed(since: released, now: Clock.nowNanos())) / 1e6; break }
                     }
                     confirmMs.append(confirmed ?? 9999); burstKB.append(during)
                     session.log(String(format: "scenario drag: burst %d: %.1f KB during the drag, host confirmed the frame after %@", bursts + 1, during, confirmed.map { String(format: "%.0f ms", $0) } ?? "no confirmation in 3 s"))
                     let bytes1 = session.totalBytes()
                     await measureCrisp(burstEnd: released)
-                    try? await Task.sleep(for: .milliseconds(max(0, 3000 - Int(Double(Clock.nowNanos() - released) / 1e6))))
+                    try? await Task.sleep(for: .milliseconds(max(0, 3000 - Int(Double(Clock.elapsed(since: released, now: Clock.nowNanos())) / 1e6))))
                     settleKB.append(Double(session.totalBytes() - bytes1) / 1000)
                     session.log(String(format: "scenario drag: burst %d: %.1f KB in the 3 s after the release", bursts, settleKB.last!))
                 } else {

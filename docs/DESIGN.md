@@ -1442,3 +1442,16 @@ The photographic run is the one that isolates the desktop layer: 1.2 MB in the f
 picture, including 84 KB of underlay and the upgrades), then **5 kbps in the second 30 s** (the clock)
 while the bench keeps drifting.
 
+**Viewer crash (ninth mac-daddy run, ce38da3).** About 25 s in, the viewer trapped on "arithmetic overflow" in
+`askForUnknownDesktop`. `hostWindowList` passed the clock read when the control message arrived, and the
+stats loop had meanwhile stamped `lastRefreshAskNanos` with a later reading, so `now - last` underflowed.
+The two 15:2x reports from the same day were the stall-watchdog underflow fixed in 258d391. Audit: every
+clock difference in the viewer, host and MirageCore (rate controller, frame assembler) now goes through
+`Clock.elapsed(since:now:)`, which returns 0 when the stamp is later. That is about 70 sites, including
+one more real crash candidate in `hostWindowList`, whose layer stamps are also written by
+`ensureLayerView`. Unit tests feed saturating differences, out-of-order times through the guard, predictor,
+frame assembler and rate controller, and windows hanging off every edge (negative origin; beyond the right
+and bottom; a 56700-px loginwindow shield) through the tracker, guard, taint, occlusion, scene plan and rect
+subtraction. Loopback after: no crash; the vacated band shows desktop 27/27 (plain) and 30/30
+(photographic backdrop), and the photographic desktop is at 5 kbps in the second 30 s.
+

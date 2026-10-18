@@ -197,7 +197,7 @@ final class WindowCatalog: @unchecked Sendable {
         lock.lock()
         let missing = ids.contains { windows[$0] == nil }
         let now = Clock.nowNanos()
-        guard missing, !refreshing, now - lastRefreshNanos > 250_000_000 else { lock.unlock(); return }
+        guard missing, !refreshing, Clock.elapsed(since: lastRefreshNanos, now: now) > 250_000_000 else { lock.unlock(); return }
         refreshing = true; lastRefreshNanos = now
         lock.unlock()
         Task.detached { [self] in

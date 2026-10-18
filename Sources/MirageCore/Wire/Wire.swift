@@ -522,6 +522,9 @@ public enum MirageError: Error, CustomStringConvertible {
 }
 
 public enum Clock {
+    /// Nanoseconds from `t` to `now`, 0 when `t` is later (a stamp taken on another queue after `now` was read,
+    /// out-of-order messages): clock differences never trap (M3.1 field crash in the viewer).
+    @inline(__always) public static func elapsed(since t: UInt64, now: UInt64) -> UInt64 { now > t ? now - t : 0 }
     /// Monotonic nanoseconds; safe to difference, meaningless across machines.
     public static func nowNanos() -> UInt64 {
         var ts = timespec()

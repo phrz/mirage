@@ -396,7 +396,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if sent.block, self.blockInFlight?.msgSeq == tileAck.msgSeq { self.blockInFlight = nil; self.refine(now: now) }
             self.rc?.delaySample(sentNanos: sent.nanos, receivedNanos: tileAck.receivedNanos, bytes: sent.bytes, now: now)
             // Prune by age (a big refinement block legitimately outlives dozens of interactive acks).
-            for (k, v) in self.tileSent where now - v.nanos > 20_000_000_000 { self.tileSent[k] = nil; self.refinementInFlight = max(0, self.refinementInFlight - v.refinement) }
+            for (k, v) in self.tileSent where Clock.elapsed(since: v.nanos, now: now) > 20_000_000_000 { self.tileSent[k] = nil; self.refinementInFlight = max(0, self.refinementInFlight - v.refinement) }
         }
     }
 
@@ -525,7 +525,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             queue.async {
                 do {
                     let now = Clock.nowNanos()
-                    let gapMs = self.suspendedAt > 0 ? (now - self.suspendedAt) / 1_000_000 : 0
+                    let gapMs = self.suspendedAt > 0 ? (Clock.elapsed(since: self.suspendedAt, now: now)) / 1_000_000 : 0
                     self.output = output
                     self.capturer = cap
                     self.lastExcludedIDs = Set(excluded.map(\.windowID))
@@ -613,7 +613,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         for w in planned { if let f = plannedFrames[w.id], f != w.frame { recentFrames.append((f, now)) } }
         for w in planned where (layers[w.id]?.exposed ?? false) && excludedFrom[w.id] == nil {
             let since = exposedSince[w.id] ?? now; exposedSince[w.id] = since
-            if now - since > 5_000_000_000 {
+            if Clock.elapsed(since: since, now: now) > 5_000_000_000 {
                 unexcludable.insert(w.id)
                 log("layer \(w.id) (\(w.app ?? "?")): the display stream cannot exclude it (ScreenCaptureKit does not list it); it stays part of the desktop picture")
             }
@@ -645,7 +645,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if let cap = l.capturer { l.capturer = nil; Task { await cap.stop() } }
             if screenLocked { l.absentSince = 0; continue }   // paused, not gone: kept for the unlock
             if l.absentSince == 0 { l.absentSince = now }
-            else if now - l.absentSince > layerRetainNanos { layers[id] = nil; ax?.forget(id); log("layer \(id) released") }
+            else if Clock.elapsed(since: l.absentSince, now: now) > layerRetainNanos { layers[id] = nil; ax?.forget(id); log("layer \(id) released") }
         }
         // Occlusion on the host, frontmost flag, and the capture rate per layer. Only windows that are opaque for
         // sure occlude: other layers and cut-out-safe windows (menus, the dock, app windows). A transparent
@@ -793,7 +793,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         captureSeq &+= 1
         let now = Clock.nowNanos()
         statCaptures += 1; effortCaptures += 1
-        defer { let dt = Clock.nowNanos() - now; statCaptureNanos += dt; effortCaptureNanos += dt }
+        defer { let dt = Clock.elapsed(since: now, now: Clock.nowNanos()); statCaptureNanos += dt; effortCaptureNanos += dt }
         // Inputs injected less than ~40 ms before the capture are not in these pixels yet (window server + app render).
         lastInputSeq = injector?.inputSeq(before: nanos &- 40_000_000) ?? 0
         CVPixelBufferLockBaseAddress(pb, .readOnly)
@@ -827,7 +827,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             dirty = Array(0..<tracker.tileCount)
             if !layer.isDisplay {
                 layer.announced = true
-                log("layer \(layer.id): first frame \(layer.width)x\(layer.height) after \((now - layer.createdNanos) / 1_000_000) ms; announced")
+                log("layer \(layer.id): first frame \(layer.width)x\(layer.height) after \((Clock.elapsed(since: layer.createdNanos, now: now)) / 1_000_000) ms; announced")
                 sendTileMessage(.reset(layer: layer.id, width: layer.width, height: layer.height), captureNanos: nanos)
                 tracker.markVideo(dirty, now: now)
                 layer.fresh = .still
@@ -1034,7 +1034,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let shows = mad < 24   // measured: 12 when the stream shows the window (two resamplings of it), 44–90 when excluded
             if shows { statExclusionLag += 1; if exclusionFailing.insert(l.id).inserted { updateDisplayHidden(now: now) } }
             else if exclusionFailing.remove(l.id) != nil { updateDisplayHidden(now: now) }
-            if shows || debugLayers || now - lastExclusionLogNanos > 10_000_000_000 {
+            if shows || debugLayers || Clock.elapsed(since: lastExclusionLogNanos, now: now) > 10_000_000_000 {
                 lastExclusionLogNanos = now
                 log(String(format: "exclusion check: layer %u at %d,%d: display vs layer MAD %.1f over %d textured blocks → %@", l.id, l.frame.x, l.frame.y, mad, blocks,
                            shows ? "THE DISPLAY STREAM SHOWS THIS WINDOW (exclusion not in effect; DisplayGuard keeps it out of the desktop layer)" : "excluded"))
@@ -1182,8 +1182,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let b = blockInFlight {
             // A block whose ack never comes (a viewer that dropped the message, a stale ack) must not
             // freeze the picture: after ~3 RTT + 2 s treat it as done and move on.
-            guard now - b.sentNanos > UInt64(3 * srttNanos) + 2_000_000_000 else { return }
-            log("fresh picture: block ack timed out after \((now - b.sentNanos) / 1_000_000) ms; continuing")
+            guard Clock.elapsed(since: b.sentNanos, now: now) > UInt64(3 * srttNanos) + 2_000_000_000 else { return }
+            log("fresh picture: block ack timed out after \((Clock.elapsed(since: b.sentNanos, now: now)) / 1_000_000) ms; continuing")
             blockInFlight = nil
         }
         guard let src = l.lastFrame else { return }
@@ -1271,11 +1271,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let list = currentList()
         let moving = list.contains { w in publishedWindows.first { $0.id == w.id }.map { $0.frame != w.frame } ?? false }
         if moving { lastWindowsMoveNanos = now }
-        let interval: UInt64 = now - lastWindowsMoveNanos < 500_000_000 ? 33_000_000 : 100_000_000
-        guard full || now - lastWindowsSendNanos >= interval else { return }
+        let interval: UInt64 = Clock.elapsed(since: lastWindowsMoveNanos, now: now) < 500_000_000 ? 33_000_000 : 100_000_000
+        guard full || Clock.elapsed(since: lastWindowsSendNanos, now: now) >= interval else { return }
         lastWindowsSendNanos = now
         let inputSeq = injector?.inputSeq(before: now) ?? 0
-        if full || now - lastFullWindowsNanos > 10_000_000_000 {
+        if full || Clock.elapsed(since: lastFullWindowsNanos, now: now) > 10_000_000_000 {
             publishedWindows = list; lastFullWindowsNanos = now
             sendControlCounted(.windowList(.init(captureSeq: captureSeq, windows: list, inputSeq: inputSeq)))
         } else if let d = ControlMessage.WindowList.delta(from: publishedWindows, to: list, captureSeq: captureSeq, inputSeq: inputSeq) {
@@ -1499,7 +1499,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Priority 4: refinement runs on leftover budget only. It yields for 150 ms after any changed
         // pixels went out, keeps 30 % of the tile budget in reserve for them, and never has more than
         // ~300 ms of the link in flight (so it cannot build the queue the next keystroke would wait in).
-        guard now - lastDirectNanos > 150_000_000 else { return }
+        guard Clock.elapsed(since: lastDirectNanos, now: now) > 150_000_000 else { return }
         // Sustained motion: refinement sends nothing and its queue is frozen (the blocks too). Video has
         // the whole target meanwhile; refinement resumes 300 ms after the motion stops, locus first.
         guard !motionSustained(now) else { return }
@@ -1611,7 +1611,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     private func refill() {
         let now = Clock.nowNanos()
-        let dt = Double(now - lastRefill) / 1e9
+        let dt = Double(Clock.elapsed(since: lastRefill, now: now)) / 1e9
         lastRefill = now
         tokens = min(bucketCapacity(), tokens + dt * Double(max(100, lastBudget.videoKbps) * 1000 / 8))
         tokens = max(tokens, -3 * bucketCapacity())   // bound the debt a huge keyframe can create
@@ -1622,7 +1622,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         for (s, f) in unacked where now > FrameAssembler.staleDeadlineNanos(paceEndNanos: f.paceEndNanos, sentNanos: f.sentNanos, srttNanos: srttNanos) {
             unacked[s] = nil; recentlyPurged[s] = f; statLost += 1
             guard let l = layers[f.layer] else { continue }
-            if !l.wantKeyframe { log("frame \(s) (layer \(f.layer)) unacked \((now - f.sentNanos) / 1_000_000) ms after it was queued (srtt \(Int(srttNanos / 1e6)) ms): stale, recovery frame") }
+            if !l.wantKeyframe { log("frame \(s) (layer \(f.layer)) unacked \((Clock.elapsed(since: f.sentNanos, now: now)) / 1_000_000) ms after it was queued (srtt \(Int(srttNanos / 1e6)) ms): stale, recovery frame") }
             // The frame the fresh-picture sequence waits on is purged like any other (a base keyframe
             // swallowed whole by a loss burst produces no ack of any kind, and the in-flight cap would
             // otherwise wait for it forever); the next keyframe takes its place.
@@ -1649,7 +1649,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let fpsCap: Double = min(tierFPS, fraction < 0.03 ? 15 : Double(req.maxFPS))
         l.lastFpsCap = fpsCap
         let minInterval = UInt64(1e9 / min(fpsCap, Double(max(1, req.maxFPS))))
-        if now - l.lastSendNanos < minInterval * 9 / 10 && !l.wantKeyframe { statDropped += 1; return }
+        if Clock.elapsed(since: l.lastSendNanos, now: now) < minInterval * 9 / 10 && !l.wantKeyframe { statDropped += 1; return }
 
         var opts = HEVCEncoder.FrameOptions()
         var region = l.pendingWholeFrame ? l.bounds : l.pendingVideoRegion
@@ -1763,7 +1763,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         let sent = SentFrame(nanos: Clock.nowNanos(), datagrams: frags)
         sentFrames[seq] = sent
-        for (k, v) in sentFrames where Clock.nowNanos() - v.nanos > 2_000_000_000 { sentFrames[k] = nil }
+        for (k, v) in sentFrames where Clock.elapsed(since: v.nanos, now: Clock.nowNanos()) > 2_000_000_000 { sentFrames[k] = nil }
         // Intra-frame pacing (review §2.1, H6): datagrams leave at ~1.25× the video budget, interval from
         // the rate, so a 25 KB frame or a keyframe never builds a queue on a 1 Mbps hop.
         let paceEnd = pace(frags, frame: sent)
@@ -1834,16 +1834,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var lastBudgetApply: UInt64 = 0
     private var lastRebuildNanos: UInt64 = 0
     private func applyBudget(now: UInt64) {
-        guard let rc, let d = display, now - lastBudgetApply > 500_000_000 else { return }
+        guard let rc, let d = display, Clock.elapsed(since: lastBudgetApply, now: now) > 500_000_000 else { return }
         lastBudgetApply = now
         // During sustained motion refinement is frozen, so only the interactive tile bytes (changed
         // pixels near the locus, copy-rects) are reserved and video gets the rest of the target.
-        let b = rc.budget(videoActive: now - videoActiveNanos < 500_000_000, recentTileKbps: Int(motionSustained(now) ? interactiveKbpsEWMA : tileKbpsEWMA))
+        let b = rc.budget(videoActive: Clock.elapsed(since: videoActiveNanos, now: now) < 500_000_000, recentTileKbps: Int(motionSustained(now) ? interactiveKbpsEWMA : tileKbpsEWMA))
         let wantedWidth = max(64, Int(Double(d.width) * rc.scale)) & ~1
         let rungChanged = d.encoder.map { wantedWidth != $0.width } ?? false
         // A rung change costs a keyframe: at most one per 5 s, and never to a *larger* picture while the link is queuing.
         let growing = d.encoder.map { wantedWidth > $0.width } ?? false
-        if rungChanged, d.fresh == .done, now - lastRebuildNanos > 5_000_000_000, !(growing && rc.queueMs > 60) {
+        if rungChanged, d.fresh == .done, Clock.elapsed(since: lastRebuildNanos, now: now) > 5_000_000_000, !(growing && rc.queueMs > 60) {
             lastBudget = b
             lastRebuildNanos = now
             rebuildAllEncoders(keyframes: true)
@@ -1887,9 +1887,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.publishWindows(now: now, full: false)
             }
             for l in self.layers.values {
-                if l.encoding, now - l.encodingSince > 2_000_000_000 {
+                if l.encoding, Clock.elapsed(since: l.encodingSince, now: now) > 2_000_000_000 {
                     // Safety net: an encode whose completion never came (encoder replaced underneath it).
-                    self.log("encoder (layer \(l.id)): no completion for \((now - l.encodingSince) / 1_000_000) ms; releasing the pipeline and asking for a keyframe")
+                    self.log("encoder (layer \(l.id)): no completion for \((Clock.elapsed(since: l.encodingSince, now: now)) / 1_000_000) ms; releasing the pipeline and asking for a keyframe")
                     l.encoding = false; l.wantKeyframe = true
                     if let s = l.submitted { l.pendingVideoTiles.formUnion(s.tiles); l.pendingVideoRegion = l.pendingVideoRegion.union(s.region); l.pendingWholeFrame = l.pendingWholeFrame || s.whole; l.submitted = nil }
                 }
@@ -1899,7 +1899,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     CVPixelBufferUnlockBaseAddress(src, .readOnly)
                 }
                 // An encoder idle for 10 s is released (another layer may want one).
-                if !l.isDisplay, l.encoder != nil, !l.encoding, now - l.encoderUseNanos > 10_000_000_000, !l.hasVideoPending { l.encoder = nil; l.scaled = nil; l.transfer = nil; l.canvas = nil }
+                if !l.isDisplay, l.encoder != nil, !l.encoding, Clock.elapsed(since: l.encoderUseNanos, now: now) > 10_000_000_000, !l.hasVideoPending { l.encoder = nil; l.scaled = nil; l.transfer = nil; l.canvas = nil }
             }
             self.updateDisplayHidden(now: now)
             self.scheduleTaintedResends(now: now)
@@ -1944,7 +1944,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.detector.maxShift = self.effort.shiftSearch.maxShift
                 self.log(String(format: "host effort: %@ (load/core %.2f, thermal %d, capture %.1f ms)", self.effort.rawValue, pressure.loadPerCore, pressure.thermal.rawValue, capMs))
             }
-            let active = tnow - self.videoActiveNanos < 1_000_000_000
+            let active = Clock.elapsed(since: self.videoActiveNanos, now: tnow) < 1_000_000_000
             // Review H7: compare with the cap the host actually applied, and only when budget held frames back.
             let fpsCap = self.layers.values.filter { tnow - $0.videoActiveNanos < 1_000_000_000 }.map(\.lastFpsCap).min() ?? 30
             self.rc?.videoRate(achievedFPS: Double(self.secVideoFrames), wantedFPS: min(Double(min(self.request?.maxFPS ?? 30, rc.policy.maxVideoFPS)), fpsCap),
@@ -1955,7 +1955,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let front: (app: String, id: UInt32, title: String) = self.windows?.frontmost() ?? (app: "", id: 0, title: "")
             let status = ControlMessage.HostStatus(consoleLocked: self.screenLocked || InputInjector.consoleLocked(), frontmostApp: front.app, frontmostWindowID: front.id, frontmostWindowTitle: front.title, inputSink: InputInjector.sinkPath != nil)
             // On change, and every 10 s regardless (sparse when idle; the viewer's keepalive is its own datagram).
-            if status != self.lastHostStatus || tnow - self.lastHostStatusNanos > 10_000_000_000 {
+            if status != self.lastHostStatus || Clock.elapsed(since: self.lastHostStatusNanos, now: tnow) > 10_000_000_000 {
                 self.lastHostStatus = status; self.lastHostStatusNanos = tnow
                 self.output?.sendControl(.hostStatus(status))
             }

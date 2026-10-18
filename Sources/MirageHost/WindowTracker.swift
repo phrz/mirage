@@ -65,7 +65,7 @@ final class WindowTracker {
     /// Samples the window list (throttled). Returns the new sample, the windows that moved without
     /// resizing since the previous sample, and whether anything changed; nil if throttled.
     func sample(captureSeq: UInt32, now: UInt64, force: Bool = false) -> (sample: Sample, moved: [Delta], changed: Bool)? {
-        guard force || now - lastSampleNanos >= minSampleInterval else { return nil }
+        guard force || Clock.elapsed(since: lastSampleNanos, now: now) >= minSampleInterval else { return nil }
         lastSampleNanos = now
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[CFString: Any]] else { return nil }
         var windows: [ControlMessage.WindowInfo] = []

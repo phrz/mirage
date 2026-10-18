@@ -30,7 +30,7 @@ final class AXWindows {
 
     private func perform(_ c: ControlMessage.WindowCommand, target: Target, origin: CGPoint?) -> Bool {
         guard let elem = element(for: target) else {
-            if Clock.nowNanos() - lastLogNanos > 2_000_000_000 { lastLogNanos = Clock.nowNanos(); log("ax: no accessibility window for \(target.id) (pid \(target.pid), '\(target.title.prefix(30))')") }
+            if Clock.elapsed(since: lastLogNanos, now: Clock.nowNanos()) > 2_000_000_000 { lastLogNanos = Clock.nowNanos(); log("ax: no accessibility window for \(target.id) (pid \(target.pid), '\(target.title.prefix(30))')") }
             return false
         }
         switch c.action {

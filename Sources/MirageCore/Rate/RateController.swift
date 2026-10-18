@@ -139,7 +139,7 @@ public struct RateController {
             srttNanos = srttNanos * 0.8 + rtt * 0.2
             if minRTTWindowStart == 0 { minRTTWindowStart = now }
             minRTTCandidate = min(minRTTCandidate, rtt); minRTTNanos = min(minRTTNanos, rtt)
-            if now - minRTTWindowStart > 30_000_000_000 { minRTTNanos = minRTTCandidate; minRTTCandidate = .infinity; minRTTWindowStart = now }
+            if Clock.elapsed(since: minRTTWindowStart, now: now) > 30_000_000_000 { minRTTNanos = minRTTCandidate; minRTTCandidate = .infinity; minRTTWindowStart = now }
         }
         // One-way delay proxy (receiver clock − host clock); its minimum is the base, the rest is queue.
         noteOWD(Double(lastReceived) - Double(sentNanos), now: now, source: "video")
@@ -187,7 +187,7 @@ public struct RateController {
         srttNanos = srttNanos * 0.8 + rtt * 0.2
         if minRTTWindowStart == 0 { minRTTWindowStart = now }
         minRTTCandidate = min(minRTTCandidate, rtt); minRTTNanos = min(minRTTNanos, rtt)
-        if now - minRTTWindowStart > 30_000_000_000 { minRTTNanos = minRTTCandidate; minRTTCandidate = .infinity; minRTTWindowStart = now }
+        if Clock.elapsed(since: minRTTWindowStart, now: now) > 30_000_000_000 { minRTTNanos = minRTTCandidate; minRTTCandidate = .infinity; minRTTWindowStart = now }
         _ = receivedNanos
     }
 
@@ -225,7 +225,7 @@ public struct RateController {
         if baseOWDWindowStart == 0 { baseOWDWindowStart = now }
         baseOWDCandidate = min(baseOWDCandidate, owd)
         if owd < baseOWD { baseOWD = owd }
-        if now - baseOWDWindowStart > 20_000_000_000 {
+        if Clock.elapsed(since: baseOWDWindowStart, now: now) > 20_000_000_000 {
             baseOWD = baseOWDCandidate; baseOWDCandidate = .infinity; baseOWDWindowStart = now
         }
         // Smoothing with a ~300 ms time constant, so the weight of a sample follows the time since the
@@ -240,7 +240,7 @@ public struct RateController {
 
     public mutating func lossDetected(now: UInt64) {
         lostFrames += 1
-        if Double(now - lastDecreaseNanos) > srttNanos {
+        if Double(Clock.elapsed(since: lastDecreaseNanos, now: now)) > srttNanos {
             targetKbps = max(tuning.minKbps, Int(Double(targetKbps) * tuning.lossDecrease))
             lastDecreaseNanos = now; probing = true; underSince = 0
         }
@@ -252,21 +252,21 @@ public struct RateController {
         let videoFlowing = recentVideoKbps * 5 >= targetKbps
         if queueMs > tuning.overuseMs, videoFlowing {
             underSince = 0
-            if Double(now - lastDecreaseNanos) > srttNanos {
+            if Double(Clock.elapsed(since: lastDecreaseNanos, now: now)) > srttNanos {
                 targetKbps = max(tuning.minKbps, Int(Double(targetKbps) * tuning.decrease))
                 lastDecreaseNanos = now; probing = true
             }
         } else if queueMs < tuning.underuseMs {
             if underSince == 0 { underSince = now }
-            if probing, targetKbps < ceiling, now - underSince >= tuning.probeAfterNanos, now - lastProbeNanos >= max(UInt64(srttNanos), tuning.probeMinIntervalNanos) {
+            if probing, targetKbps < ceiling, Clock.elapsed(since: underSince, now: now) >= tuning.probeAfterNanos, Clock.elapsed(since: lastProbeNanos, now: now) >= max(UInt64(srttNanos), tuning.probeMinIntervalNanos) {
                 // Recovery from a transient: the queue has been clear for a second, so climb back
                 // multiplicatively, one step per RTT, until the ceiling (then the slow additive rule again).
                 targetKbps = min(ceiling, Int(Double(targetKbps) * tuning.probeIncrease))
                 lastProbeNanos = now; lastIncreaseNanos = now
                 if targetKbps >= ceiling { probing = false }
-            } else if Double(now - lastDecreaseNanos) > 2 * srttNanos {
+            } else if Double(Clock.elapsed(since: lastDecreaseNanos, now: now)) > 2 * srttNanos {
                 if lastIncreaseNanos == 0 { lastIncreaseNanos = now }
-                let dt = Double(now - lastIncreaseNanos) / 1e9
+                let dt = Double(Clock.elapsed(since: lastIncreaseNanos, now: now)) / 1e9
                 if dt >= 0.1 {
                     targetKbps = min(ceiling, targetKbps + max(10, Int(Double(targetKbps) * tuning.increasePerSecond * dt)))
                     lastIncreaseNanos = now
@@ -280,7 +280,7 @@ public struct RateController {
         if ackedFrames + lostFrames > 200 { ackedFrames /= 2; lostFrames /= 2 }   // sliding loss window
         // The link, not the cap, is holding the target down when the target sits well under the cap
         // after a delay- or loss-driven decrease in the last few seconds.
-        let limitedByLink = targetKbps < maxKbps * 8 / 10 && now - lastDecreaseNanos < 5_000_000_000
+        let limitedByLink = targetKbps < maxKbps * 8 / 10 && Clock.elapsed(since: lastDecreaseNanos, now: now) < 5_000_000_000
         tiers.update(rateKbps: targetKbps, limitedByLink: limitedByLink, rttMs: minRttMs, lossPercent: frameLossPercent, now: now)
         updateRung(now: now)
     }
@@ -295,7 +295,7 @@ public struct RateController {
         guard active, wantedFPS > 0, budgetLimited else { fpsShortfallSince = 0; return }
         if achievedFPS < 0.6 * wantedFPS {
             if fpsShortfallSince == 0 { fpsShortfallSince = now }
-            if now - fpsShortfallSince > 2_000_000_000, rung < policy.maxRung, now - lastRungChange > 3_000_000_000 {
+            if Clock.elapsed(since: fpsShortfallSince, now: now) > 2_000_000_000, rung < policy.maxRung, Clock.elapsed(since: lastRungChange, now: now) > 3_000_000_000 {
                 rung += 1; lastRungChange = now; fpsShortfallSince = 0; belowSince = 0; aboveSince = 0
             }
         } else { fpsShortfallSince = 0 }
@@ -309,13 +309,13 @@ public struct RateController {
         if rung > p.maxRung { rung = p.maxRung; lastRungChange = now }
         if Double(targetKbps) < need, rung < p.maxRung {
             if belowSince == 0 { belowSince = now }
-            if now - belowSince > tuning.downNanos { rung += 1; belowSince = 0; aboveSince = 0; lastRungChange = now }
+            if Clock.elapsed(since: belowSince, now: now) > tuning.downNanos { rung += 1; belowSince = 0; aboveSince = 0; lastRungChange = now }
         } else { belowSince = 0 }
         if rung > p.minRung {
             let up = Self.scales[rung - 1]
             if Double(targetKbps) > kpix * up * up * tuning.kbpsPerKpixelUp {
                 if aboveSince == 0 { aboveSince = now }
-                if now - aboveSince > tuning.upNanos { rung -= 1; aboveSince = 0; belowSince = 0; lastRungChange = now }
+                if Clock.elapsed(since: aboveSince, now: now) > tuning.upNanos { rung -= 1; aboveSince = 0; belowSince = 0; lastRungChange = now }
             } else { aboveSince = 0 }
         }
     }

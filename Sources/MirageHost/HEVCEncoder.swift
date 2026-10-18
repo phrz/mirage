@@ -97,7 +97,7 @@ final class HEVCEncoder {
             if status != noErr { completion(.failure(MirageError.transport("encode failed: \(status)"))); return }
             if flags.contains(.frameDropped) { completion(.failure(MirageError.transport("encoder dropped frame"))); return }
             guard let sb else { completion(.failure(MirageError.transport("encoder produced nothing"))); return }
-            do { completion(.success(try self.extract(sb, captureNanos: captureNanos, encodeNanos: Clock.nowNanos() - t0))) }
+            do { completion(.success(try self.extract(sb, captureNanos: captureNanos, encodeNanos: Clock.elapsed(since: t0, now: Clock.nowNanos())))) }
             catch { completion(.failure(error)) }
         }
         if st != noErr { completion(.failure(MirageError.transport("VTCompressionSessionEncodeFrame: \(st)"))) }

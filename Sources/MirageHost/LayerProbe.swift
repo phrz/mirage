@@ -123,7 +123,7 @@ public final class LayerProbe: NSObject, SCStreamOutput, @unchecked Sendable {
             try s.addStreamOutput(probe, type: .screen, sampleHandlerQueue: probe.queue)
             let t0 = Clock.nowNanos()
             try await s.startCapture()
-            log(String(format: "  stream for window %u (%@) %dx%d started in %.0f ms", w.windowID, (w.title ?? "") .prefix(30) as NSString, c.width, c.height, Double(Clock.nowNanos() - t0) / 1e6))
+            log(String(format: "  stream for window %u (%@) %dx%d started in %.0f ms", w.windowID, (w.title ?? "") .prefix(30) as NSString, c.width, c.height, Double(Clock.elapsed(since: t0, now: Clock.nowNanos())) / 1e6))
             t.stream = s
             probe.queue.sync { probe.targets.append(t) }
         }
@@ -135,7 +135,7 @@ public final class LayerProbe: NSObject, SCStreamOutput, @unchecked Sendable {
         log(String(format: "after %d s with %d streams: process CPU %.2f s (%.1f %% of one core)", seconds, wanted.count, cpu, cpu / Double(seconds) * 100))
         let targets = probe.queue.sync { probe.targets }
         for t in targets {
-            log(String(format: "  window %u: %d frames (first after %.0f ms), %d dirty tiles", t.window.windowID, t.frames, t.firstFrameNanos > 0 ? Double(t.firstFrameNanos - probe.startNanos) / 1e6 : -1, t.dirtyTiles))
+            log(String(format: "  window %u: %d frames (first after %.0f ms), %d dirty tiles", t.window.windowID, t.frames, t.firstFrameNanos > 0 ? Double(Clock.elapsed(since: probe.startNanos, now: t.firstFrameNanos)) / 1e6 : -1, t.dirtyTiles))
             if let pb = t.last {
                 CVPixelBufferLockBaseAddress(pb, .readOnly)
                 let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb), stride = CVPixelBufferGetBytesPerRow(pb)

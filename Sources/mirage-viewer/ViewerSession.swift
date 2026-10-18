@@ -314,7 +314,7 @@ final class ViewerSession: @unchecked Sendable {
     private func watchdog(now: UInt64) {
         statsLock.lock(); let last = lastHostPacketNanos, since = connectedAtNanos; statsLock.unlock()
         guard sender != nil, last > 0, since > 0 else { return }
-        let silent = Double(now > last ? now - last : 0) / 1e9   // a packet noted after `now` was taken is not silence (was a UInt64 underflow trap)
+        let silent = Double(now > last ? Clock.elapsed(since: last, now: now) : 0) / 1e9   // a packet noted after `now` was taken is not silence (was a UInt64 underflow trap)
         if silent > 12 {
             log(String(format: "no packet from the host for %.0f s: redialing", silent))
             statsLock.lock(); lastHostPacketNanos = 0; statsLock.unlock()
@@ -333,13 +333,13 @@ final class ViewerSession: @unchecked Sendable {
         if connectedAt > 0 {
             // Gaps count across reconnects: the person sees one frozen picture either way.
             let base = lastPictureNanos > 0 ? lastPictureNanos : connectedAt
-            let gap = now > base ? Double(now - base) / 1e6 : 0
+            let gap = now > base ? Double(Clock.elapsed(since: base, now: now)) / 1e6 : 0
             if gap > maxPictureGapMs { maxPictureGapMs = gap }
             if gap > 500 { pictureGapsOver500 += 1 }
         }
         lastPictureNanos = max(lastPictureNanos, now)
         if resumedAt > 0, now >= resumedAt {
-            resumeToPictureMs.append(Double(now - resumedAt) / 1e6)
+            resumeToPictureMs.append(Double(Clock.elapsed(since: resumedAt, now: now)) / 1e6)
             statsLock.lock(); lastResumeNanos = 0; statsLock.unlock()
         }
     }
@@ -634,7 +634,7 @@ final class ViewerSession: @unchecked Sendable {
     /// Every 2 s: ask the host to resend the unknown desktop tiles the scene shows (not under a window layer).
     private var lastRefreshAskNanos: UInt64 = 0
     private func askForUnknownDesktop(now: UInt64) {
-        guard now - lastRefreshAskNanos > 300_000_000, let c = compositor, c.width > 0 else { return }
+        guard Clock.elapsed(since: lastRefreshAskNanos, now: now) > 300_000_000, let c = compositor, c.width > 0 else { return }
         lastRefreshAskNanos = now
         let unknown = unknownDesktop
         guard !unknown.isEmpty else { return }
@@ -666,7 +666,7 @@ final class ViewerSession: @unchecked Sendable {
     }
     /// The fill for desktop tiles with no clean pixels: the desktop's own average colour (sampled every 2 s).
     private func refreshDesktopColor(now: UInt64) {
-        desktopLock.lock(); let due = now - lastDesktopColorNanos > 2_000_000_000; if due { lastDesktopColorNanos = now }; desktopLock.unlock()
+        desktopLock.lock(); let due = Clock.elapsed(since: lastDesktopColorNanos, now: now) > 2_000_000_000; if due { lastDesktopColorNanos = now }; desktopLock.unlock()
         guard due, let c = compositor, c.width > 0 else { return }
         videoQueue.async { c.sampleEdgeColor(of: PixelRect(x: 0, y: c.height * 3 / 5, width: c.width, height: 1), bottom: false) { [weak self] col in self?.desktopColor = col } }
     }
@@ -676,7 +676,7 @@ final class ViewerSession: @unchecked Sendable {
         predictorLock.lock(); let present = Set(windows.map(\.id)); predictorLock.unlock()
         var total = layerViews.values.reduce(0) { $0 + $1.compositor.textureBytes }
         let absent = layerViews.values.filter { $0.id != 0 && !present.contains($0.id) }.sorted { $0.lastSeenInListNanos < $1.lastSeenInListNanos }
-        for v in absent where now - v.lastSeenInListNanos > 30_000_000_000 || total > layerMemoryBudget {
+        for v in absent where Clock.elapsed(since: v.lastSeenInListNanos, now: now) > 30_000_000_000 || total > layerMemoryBudget {
             total -= v.compositor.textureBytes
             v.compositor.release(); layerViews[v.id] = nil
             predictorLock.lock(); predictor.forget(windowID: v.id); predictorLock.unlock()
@@ -762,7 +762,7 @@ final class ViewerSession: @unchecked Sendable {
                     notePictureChange(now)
                     statsLock.lock(); let since = connectedAtNanos; statsLock.unlock()
                     if lastVideoNanos > 0, since > 0, now > since &+ steadyAfterNanos, now > lastVideoNanos {
-                        let gap = Double(now - lastVideoNanos) / 1e6
+                        let gap = Double(Clock.elapsed(since: lastVideoNanos, now: now)) / 1e6
                         if gap > maxVideoGapMs { maxVideoGapMs = gap }
                         if gap > 500 { videoGapsOver500.append(gap) }
                     }
@@ -771,7 +771,7 @@ final class ViewerSession: @unchecked Sendable {
                     predictorLock.lock(); predictor.hostUpdate(inputSeq: frame.inputSeq, rect: region, now: now); predictorLock.unlock()
                     onChange?()
                     statsLock.lock()
-                    sFrames += 1; sDecodeNanos += t1 - t0
+                    sFrames += 1; sDecodeNanos += Clock.elapsed(since: t0, now: t1)
                     if bestRTT.isFinite {   // frame age needs the clock offset from a pong first
                         let ageNanos = max(0, (Double(t1) + clockOffset) - Double(frame.captureNanos))
                         sAge = sAge == 0 ? ageNanos : sAge * 0.7 + ageNanos * 0.3
@@ -812,7 +812,7 @@ final class ViewerSession: @unchecked Sendable {
             predictorLock.lock(); let pstats = predictor.stats; predictorLock.unlock()
             let diags = videoQueue.sync { layerDiagnostics() }
             let shape = diags.map { "\($0.id) \($0.drawnAs) \($0.visible) \($0.why ?? "") \($0.canvas) \($0.layeredOnHost)" }
-            if shape != lastDiagLog.map({ "\($0.id) \($0.drawnAs) \($0.visible) \($0.why ?? "") \($0.canvas) \($0.layeredOnHost)" }) || Clock.nowNanos() - lastDiagLogNanos > 10_000_000_000 {
+            if shape != lastDiagLog.map({ "\($0.id) \($0.drawnAs) \($0.visible) \($0.why ?? "") \($0.canvas) \($0.layeredOnHost)" }) || Clock.elapsed(since: lastDiagLogNanos, now: Clock.nowNanos()) > 10_000_000_000 {
                 lastDiagLog = diags; lastDiagLogNanos = Clock.nowNanos()
                 for d in diags { log("layer diag: \(d.id) '\(d.title)' L\(d.level) host-layered \(d.layeredOnHost) canvas \(d.canvas) rx \(d.receivedBytes / 1000) KB (\(d.tiles) tiles, \(d.stills) stills, \(d.videoFrames) frames) frame \(d.frame.x),\(d.frame.y) \(d.frame.width)x\(d.frame.height) viewport \(d.viewport.x),\(d.viewport.y) \(d.viewport.width)x\(d.viewport.height) drawn as \(d.drawnAs) \(d.visible ? "VISIBLE" : "NOT VISIBLE") \(d.why ?? "")\(d.coveredBy.isEmpty ? "" : " covered by \(d.coveredBy)")") }
             }
@@ -914,7 +914,7 @@ final class ViewerSession: @unchecked Sendable {
         notePointer(x: x, y: y)
         // Coalesce to ~60 Hz; the pointer state is latest-wins so a skipped move costs nothing.
         let now = Clock.nowNanos()
-        if now - lastMoveSent < 15_000_000 { pendingMove = .init(x: x, y: y); scheduleMoveFlush(); return }
+        if Clock.elapsed(since: lastMoveSent, now: now) < 15_000_000 { pendingMove = .init(x: x, y: y); scheduleMoveFlush(); return }
         lastMoveSent = now; pendingMove = nil
         send(.mouseMove(.init(x: x, y: y)))
     }
@@ -1005,10 +1005,10 @@ final class ViewerSession: @unchecked Sendable {
         // Overrides the host has caught up with are dropped.
         for (id, lf) in localFrames {
             let caughtUp = lastHostListInputSeq >= lf.inputSeq && lf.releasedNanos > 0
-            let expired = lf.releasedNanos > 0 && now - lf.releasedNanos > 2_000_000_000
+            let expired = lf.releasedNanos > 0 && Clock.elapsed(since: lf.releasedNanos, now: now) > 2_000_000_000
             if caughtUp || expired { localFrames[id] = nil }
         }
-        if let (_, r) = localRaise, lastHostListInputSeq >= r.inputSeq || now - r.since > 1_500_000_000 { localRaise = nil }
+        if let (_, r) = localRaise, lastHostListInputSeq >= r.inputSeq || Clock.elapsed(since: r.since, now: now) > 1_500_000_000 { localRaise = nil }
         predictorLock.unlock()
         predictorLock.lock(); let snapshot = windows; predictorLock.unlock()
         let moved = snapshot.contains { $0.isLayered && before[$0.id] != nil && before[$0.id] != $0.frame }
@@ -1030,7 +1030,7 @@ final class ViewerSession: @unchecked Sendable {
                 else { self.preExclusionArea[w.id] = self.preExclusionArea[w.id].map { $0.union(w.frame) } ?? w.frame }
                 if w.excludedFrom == nil { self.excludedFrom[w.id] = nil }
             }
-            for id in Array(self.preExclusionArea.keys) where !layered.contains(where: { $0.id == id }) && now - (self.layerViews[id]?.lastSeenInListNanos ?? 0) > 30_000_000_000 { self.preExclusionArea[id] = nil; self.excludedFrom[id] = nil }
+            for id in Array(self.preExclusionArea.keys) where !layered.contains(where: { $0.id == id }) && Clock.elapsed(since: self.layerViews[id]?.lastSeenInListNanos ?? 0, now: now) > 30_000_000_000 { self.preExclusionArea[id] = nil; self.excludedFrom[id] = nil }
             self.viewerGuard.update(layered: Dictionary(layered.map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a }), verified: Set(layered.compactMap { $0.excludedFrom == nil ? nil : $0.id }), now: now)
             if let c = self.compositor, c.width > 0, !newlyLayered.isEmpty || !transparentIDs.isEmpty {
                 // The desktop canvas may hold this window exactly where it was when it became a layer.
@@ -1155,7 +1155,7 @@ final class ViewerSession: @unchecked Sendable {
         localFrames[windowID]?.frame = frame
         predictorLock.unlock()
         let now = Clock.nowNanos()
-        if now - lastMoveCommandNanos > 50_000_000 { lastMoveCommandNanos = now; sendWindowCommand(.init(id: windowID, action: .move, x: frame.x, y: frame.y)) }
+        if Clock.elapsed(since: lastMoveCommandNanos, now: now) > 50_000_000 { lastMoveCommandNanos = now; sendWindowCommand(.init(id: windowID, action: .move, x: frame.x, y: frame.y)) }
         onChange?()
     }
     func endLayerDrag(windowID: UInt32) {

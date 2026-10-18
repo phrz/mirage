@@ -86,7 +86,7 @@ final class InputInjector {
     static func lockSignals() -> ScreenLock.Signals {
         cacheLock.lock(); defer { cacheLock.unlock() }
         let now = Clock.nowNanos()
-        if let c = cachedSignals, now - c.nanos < 250_000_000, c.signals.shieldWindow == shieldWindow { return c.signals }
+        if let c = cachedSignals, Clock.elapsed(since: c.nanos, now: now) < 250_000_000, c.signals.shieldWindow == shieldWindow { return c.signals }
         let session = ScreenLock.sessionLocked(CGSessionCopyCurrentDictionary() as? [String: Any])
         var io: Bool? = nil
         let root = IORegistryGetRootEntry(kIOMainPortDefault)
@@ -104,7 +104,7 @@ final class InputInjector {
 
     func handle(_ msg: ControlMessage) {
         if msg.isScripted, Self.consoleLocked() {
-            if Clock.nowNanos() - lastRefusalLog > 2_000_000_000 { lastRefusalLog = Clock.nowNanos(); hostLog("refusing scripted input: console is locked") }
+            if Clock.elapsed(since: lastRefusalLog, now: Clock.nowNanos()) > 2_000_000_000 { lastRefusalLog = Clock.nowNanos(); hostLog("refusing scripted input: console is locked") }
             return
         }
         if let p = msg.inputPoint { locusLock.lock(); _locus = p; locusLock.unlock() }
