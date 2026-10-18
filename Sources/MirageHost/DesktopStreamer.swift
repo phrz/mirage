@@ -554,6 +554,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let fps = l.frontmost ? 30 : (fraction <= 0.001 ? 2 : 10)
             if let cap = l.capturer, cap.fps != fps { Task { try? await cap.update(width: cap.width, height: cap.height, fps: fps) } }
         }
+        // The display layer under window layers the viewer shows: the viewer cannot see it there, so it is not
+        // refined until a window moves off it (then once; the desktop does not change under excluded windows).
+        // Frames are inset by the corner radius (the display shows through a window's rounded corners).
+        let inset = Int(14 * (windows?.pxPerPoint ?? 2))
+        let shown = planned.filter { layers[$0.id]?.exposed ?? false }.map { w in PixelRect(x: w.frame.x + inset, y: w.frame.y + inset, width: w.frame.width - 2 * inset, height: w.frame.height - 2 * inset) }
+        var displayHidden = Set<Int>()
+        for i in 0..<d.tracker.tileCount {
+            let r = d.tracker.rect(of: i)
+            if shown.contains(where: { $0.intersection(r) == r }) { displayHidden.insert(i) }
+        }
+        let displayExposed = d.occludedTiles.subtracting(displayHidden)
+        if !displayExposed.isEmpty { d.tracker.expedite(in: d.bounds, now: now, only: displayExposed) }
+        d.occludedTiles = displayHidden
         if !needCatalog.isEmpty {
             catalog.ensure(needCatalog) { [weak self] in self?.queue.async { guard let self, let s = self.windows?.current else { return }; self.reconcileLayers(s, now: Clock.nowNanos()) } }
         }
@@ -1004,11 +1017,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
             let f = frameView(src)
             guard f.width == l.width else { return }
-            let est = submitRects(l, [rect], from: f, refinement: true, nanos: now)
-            tileTokens -= Double(est)
-            let covered = l.tracker.tiles(covering: [rect])
-            l.tracker.sent(lossless: covered, now: now)
+            // Tiles nobody can see (a window layer covers that part of the display, another window covers that part
+            // of this one) are left out of the block; they are sent when uncovered.
+            let all = l.tracker.tiles(covering: [rect])
+            let visible = all.filter { !l.occludedTiles.contains($0) }
             l.fresh = .blocks(remaining: remaining)
+            guard !visible.isEmpty else { return }
+            let rects = visible.count == all.count ? [rect] : l.tracker.mergedRects(visible)
+            let est = submitRects(l, rects, from: f, refinement: true, nanos: now)
+            tileTokens -= Double(est)
+            l.tracker.sent(lossless: visible, now: now)
+            let hidden = all.filter { l.occludedTiles.contains($0) && !l.tracker.isCrisp($0) }
+            if !hidden.isEmpty { l.tracker.defer(hidden, now: now, delayNanos: 3_600_000_000_000) }
         default: break
         }
     }
@@ -1127,6 +1147,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let webp = effort.webpEffort
         let alpha = !layer.isDisplay
         let layerID = layer.id
+        let photoLossy = photographicFinalIsLossy
         tileQueue.async { [weak self] in
             guard let self else { return }
             var out: [TileMessage.Tile] = []
@@ -1134,7 +1155,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let encoded: (TileCodec.Format, Data)? = d.withUnsafeBytes { p -> (TileCodec.Format, Data)? in
                     let base = p.baseAddress!
                     if !alpha, let solid = TileCodec.solidColour(base: base, width: r.width, height: r.height, stride: r.width * 4) { return (.solid, solid) }
-                    let fmt: TileCodec.Format = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4, limit: 4096) > 4096 ? .nearLossless : .lossless
+                    let photographic = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4, limit: 4096) > 4096
+                    // Review #22: on constrained links a photographic rect (a wallpaper, a photo) ends at visually
+                    // lossless (lossy WebP q90 at full size, ~4x under near-lossless on a 2x desktop picture), not at
+                    // bit-exact; text and UI (≤ 4096 colours) stay lossless everywhere.
+                    if photographic, photoLossy, let data = TileCodec.encodeLossy(base: base, width: r.width, height: r.height, stride: r.width * 4, outWidth: r.width, outHeight: r.height, quality: 90, alpha: alpha) { return (.lossy, data) }
+                    let fmt: TileCodec.Format = photographic ? .nearLossless : .lossless
                     return TileCodec.encode(base: base, width: r.width, height: r.height, stride: r.width * 4, format: fmt, effort: webp, alpha: alpha).map { (fmt, $0) }
                 }
                 if let (fmt, data) = encoded { out.append(.init(rect: r, format: fmt, data: data)) }
@@ -1152,9 +1178,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.statTileBytes += bytes; self.statTileRects += out.count; self.secTileBytes += bytes
                 if refinement { self.statRefineBytes += bytes }
                 if let l = self.layers[layerID] { l.sentBytes += bytes; if refinement { l.sentRefine += out.count } else { l.sentDirect += out.count } }
-                if self.debugLayers, layerID != 0 { self.log("layer \(layerID): sent \(out.count) \(refinement ? (block ? "block" : "refinement") : "direct") rects \(bytes) B: \(out.prefix(3).map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))") }
+                if self.debugLayers { self.log("layer \(layerID): sent \(out.count) \(refinement ? (block ? "block" : "refinement") : "direct") rects \(bytes) B: \(out.prefix(3).map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))") }
             }
         }
+    }
+
+    /// Photographic rects end visually lossless (q90) on a constrained link: the cap or the controller's target
+    /// at or under 2 Mbps, or the Constrained/Extreme tier.
+    private var photographicFinalIsLossy: Bool {
+        guard let rc else { return false }
+        return rc.maxKbps <= 2000 || rc.targetKbps <= 2000 || rc.tier.rawValue >= LinkTier.constrained.rawValue
     }
 
     /// Copies the tiles' pixels out and encodes them on the tile queue. Returns the byte estimate charged to the budget.
@@ -1683,8 +1716,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 + String(format: " control %.0f kbps effort %@ fovea %@%@", Double(statControlBytes) * 8 / 5 / 1000, effortLevel, foveaActive ? "on" : "off", statFoveaTiles > 0 ? " (\(statFoveaTiles) tiles)" : "")
                 + String(format: " delay src %@ age %d ms tile-backlog %.0f ms motion %@ interactive %.0f kbps stale-dropped %d", rc?.lastSampleSource ?? "none", Int((rc?.sampleAgeNanos(now: Clock.nowNanos()) ?? 0) / 1_000_000), rc?.tileDelayMs ?? 0, motionSustained(Clock.nowNanos()) ? "yes" : "no", interactiveKbpsEWMA, statStaleDropped)
                 + " | layers \(windowLayers.count) (\(windowLayers.filter { $0.capturer != nil }.count) capturing, \(windowLayers.filter { $0.encoder != nil }.count) encoders, \(windowLayers.filter { !$0.exposed }.count) pending) stills \(statStills) occluded \(statOccluded) window-cmds \(statWindowCommands)"
-                + " [" + windowLayers.sorted { $0.id < $1.id }.map { "\($0.id):\($0.frames)f/\(Int($0.visibleFraction * 100))%/\($0.sentBytes / 1000)KB(\($0.sentDirect)d+\($0.sentRefine)r)\($0.exposed ? "" : "/\($0.fresh)")" }.joined(separator: " ") + "]")
-            for l in windowLayers { l.frames = 0; l.sentBytes = 0; l.sentDirect = 0; l.sentRefine = 0 }
+                + " [0:\(display?.sentBytes ?? 0 / 1000 > 0 ? (display!.sentBytes / 1000) : 0)KB(\(display?.sentDirect ?? 0)d+\(display?.sentRefine ?? 0)r) " + windowLayers.sorted { $0.id < $1.id }.map { "\($0.id):\($0.frames)f/\(Int($0.visibleFraction * 100))%/\($0.sentBytes / 1000)KB(\($0.sentDirect)d+\($0.sentRefine)r)\($0.exposed ? "" : "/\($0.fresh)")" }.joined(separator: " ") + "]")
+            for l in layers.values { l.frames = 0; l.sentBytes = 0; l.sentDirect = 0; l.sentRefine = 0 }
             statStaleDropped = 0; statStills = 0; statOccluded = 0; statWindowCommands = 0
             statControlBytes = 0; statFoveaTiles = 0
             statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0

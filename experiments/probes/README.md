@@ -84,3 +84,10 @@ The probe lives in the host binary (same TCC grant): `miraged probe-layers --mat
   titled window; `includeChildWindows = true` draws them into the parent's capture.
 - **Shadows.** `ignoreShadowsSingleWindow` removes them from a window capture; excluding a window from a
   display capture leaves its shadow behind unless `ignoreShadowsDisplay` is set too.
+
+## codec on the desktop picture (`miraged probe-layers --mode codec`, 2026-10-18)
+
+The desktop without any windows (the display layer of the layered desktop) at 2600×1688, 40 blocks of
+320×320, 39 of them photographic (> 4096 colours) on this wallpaper: lossless 1007 KB/Mpx, near-lossless
+(WebP `near_lossless` 60) 677, lossy WebP q92 180, q85 118, q75 73. A whole 2x desktop is ≈3 MB
+near-lossless and ≈0.6 MB at q90, which is why photographic tiles end at q90 on constrained links.

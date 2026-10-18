@@ -24,7 +24,38 @@ public final class LayerProbe: NSObject, SCStreamOutput, @unchecked Sendable {
     private let queue = DispatchQueue(label: "mirage.probe.layers")
     private let startNanos = Clock.nowNanos()
 
+    /// `--mode codec`: the desktop picture without any windows (desktop layer and icons), 2600 px wide, encoded
+    /// as 320×320 blocks lossless / near-lossless / lossy q75–92; byte counts only, no pixels leave the process.
+    public static func codec(log: @escaping (String) -> Void) async throws {
+    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+    let d = content.displays[0]
+    let keep = content.windows.filter { $0.windowLayer < 0 }   // desktop picture and icons only
+    let f = SCContentFilter(display: d, including: keep)
+    let c = SCStreamConfiguration(); c.width = 2600; c.height = 1688; c.pixelFormat = kCVPixelFormatType_32BGRA; c.showsCursor = false
+    let img = try await SCScreenshotManager.captureImage(contentFilter: f, configuration: c)
+    let w = img.width, h = img.height
+    var px = [UInt8](repeating: 0, count: w * h * 4)
+    let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)!
+    ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
+    var totals: [String: Int] = [:]; var photoBlocks = 0, blocks = 0
+    px.withUnsafeBytes { p in
+        for by in stride(from: 0, to: h - 320, by: 320) { for bx in stride(from: 0, to: w - 320, by: 320) {
+            let base = p.baseAddress!.advanced(by: by * w * 4 + bx * 4)
+            blocks += 1
+            let colours = TileCodec.colourCount(base: base, width: 320, height: 320, stride: w * 4, limit: 4096)
+            if colours > 4096 { photoBlocks += 1 }
+            totals["lossless", default: 0] += TileCodec.encode(base: base, width: 320, height: 320, stride: w * 4, format: .lossless, effort: 4)!.count
+            totals["near-lossless", default: 0] += TileCodec.encode(base: base, width: 320, height: 320, stride: w * 4, format: .nearLossless, effort: 4)!.count
+            for q in [75, 85, 92] { totals["lossy q\(q)", default: 0] += TileCodec.encodeLossy(base: base, width: 320, height: 320, stride: w * 4, outWidth: 320, outHeight: 320, quality: Float(q), alpha: false)!.count }
+        } }
+    }
+    let mpx = Double(blocks * 320 * 320) / 1e6
+    log("blocks \(blocks), photographic (>4096 colours) \(photoBlocks)")
+    for (k, v) in totals.sorted(by: { $0.value > $1.value }) { log(String(format: "%-14@ %8.0f KB per Mpx  (whole 2600x1688 desktop ≈ %5.0f KB)", k as NSString, Double(v) / 1000 / mpx, Double(v) / 1000 / mpx * 2600 * 1688 / 1e6)) }
+    }
+
     public static func run(match: String, seconds: Int, scale: Double, dump: String?, mode: String = "window", log: @escaping (String) -> Void) async throws {
+        if mode == "codec" { try await codec(log: log); return }
         let probe = LayerProbe()
         hostLog = log
         // What the window list looks like: owner, level, size, alpha, per window (titles only for matched windows).

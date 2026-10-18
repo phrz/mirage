@@ -1250,3 +1250,26 @@ Unlock it to see its windows.", and logs each change. Loopback, with the test-on
 the windows layers again; the display layer then re-sends where the windows were (it carried them while
 locked), ~10 s at 550–1100 kbps at 1512×982 here.
 
+**Steady refinement after the drag fix (third mac-daddy run, a1c707a).** The bench result was the one we
+wanted (drawn as a layer, visible, crisp, shadowed, no ghost, 0 video), but tiles ran 860–956 kbps for
+~15 s and 350–675 kbps for the rest of the 40 s with nothing changing but the bench and the clock, while the
+bench layer took only ~370 KB. Loopback at a 1.7x stream (2600×1688, 800 kbps, drifting bench) showed where
+it goes, with the host's per-layer accounting now including the display layer: the **display layer's
+fresh-picture refinement**, 400–530 KB per 5 s for ~35 s (≈2.5 MB), then quiet. Not the bench moves: the
+display layer sent one direct rect per 5 s (the clock) and nothing on moves (the desktop does not change
+under an excluded window). Two reasons it was that large:
+- It refined the whole desktop, including everything under layered windows, which the viewer cannot see.
+- The desktop is a photographic wallpaper. Measured on this one (`miraged probe-layers --mode codec`:
+  the desktop picture without windows, 320×320 blocks at 2600 px): lossless 1007 KB/Mpx, near-lossless
+  677, lossy WebP q92 180, q85 118, q75 73, i.e. ≈3.0 MB for the whole desktop near-lossless against
+  ≈0.5–0.8 MB at q85–q92.
+Fix: display tiles under a layered window (frame inset by the corner radius) are treated as covered: left
+out of the fresh picture's blocks (blocks are now filtered per tile) and of per-tile refinement, and
+refined once when a window move first uncovers them. Photographic rects (> 4096 colours) end at visually
+lossless on constrained links (cap or target ≤ 2 Mbps, or the Constrained/Extreme tier): lossy WebP q90 at
+full size, review #22; text and UI stay lossless everywhere. Same loopback run after: **1.36 MB on the wire
+in 60 s instead of 3.95 MB**, refinement done at ~19 s instead of ~44 s, display layer ≈220 KB instead of
+≈2.5 MB, then 8–63 kbps (a live app window on the host screen); bench a visible layer through every burst,
+10–14 KB per burst, 0 stale tiles. Not done: re-refining photographic tiles to lossless when the link
+improves to Normal/Local.
+
