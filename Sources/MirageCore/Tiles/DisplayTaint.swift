@@ -30,5 +30,7 @@ public struct DisplayTaint: Equatable {
         }.sorted()
     }
 
+    /// The viewer reports it holds no clean pixels for these tiles.
+    public mutating func mark(_ tiles: [Int]) { tainted.formUnion(tiles) }
     public mutating func reset() { tainted = [] }
 }

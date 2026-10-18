@@ -28,6 +28,21 @@ public struct PixelRect: Equatable, Hashable, Sendable, Codable {
     public func intersects(_ o: PixelRect) -> Bool { !intersection(o).isEmpty }
     public func offset(_ dx: Int, _ dy: Int) -> PixelRect { PixelRect(x: x + dx, y: y + dy, width: width, height: height) }
     public var area: Int { max(0, width) * max(0, height) }
+    /// This rect minus `o`: up to four disjoint rects (top band, bottom band, left and right of the overlap).
+    public func subtracting(_ o: PixelRect) -> [PixelRect] {
+        let i = intersection(o)
+        guard !i.isEmpty else { return isEmpty ? [] : [self] }
+        var out: [PixelRect] = []
+        if i.y > y { out.append(PixelRect(x: x, y: y, width: width, height: i.y - y)) }
+        if i.maxY < maxY { out.append(PixelRect(x: x, y: i.maxY, width: width, height: maxY - i.maxY)) }
+        if i.x > x { out.append(PixelRect(x: x, y: i.y, width: i.x - x, height: i.height)) }
+        if i.maxX < maxX { out.append(PixelRect(x: i.maxX, y: i.y, width: maxX - i.maxX, height: i.height)) }
+        return out
+    }
+    /// This rect minus every rect in `others`.
+    public func subtracting(_ others: [PixelRect]) -> [PixelRect] {
+        others.reduce([self]) { pieces, o in pieces.flatMap { $0.subtracting(o) } }
+    }
 }
 
 /// Messages on the tile stream, host → client. Framing: [type u8][msgSeq u32][length u32][body].

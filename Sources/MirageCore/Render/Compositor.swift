@@ -327,6 +327,13 @@ public final class Compositor {
         return active
     }
     var incomingTexture: MTLTexture? { incoming }
+    /// Commits finished crossfades without rendering (review M1: a headless viewer, or one whose window is
+    /// hidden, never rendered, so refinement and progressive steps never reached the canvas).
+    public func settle(now: UInt64 = Clock.nowNanos()) {
+        guard hasActiveFades, let cb = commandQueue.makeCommandBuffer() else { return }
+        _ = settleFades(now: now, commandBuffer: cb)
+        cb.commit()
+    }
     public var hasActiveFades: Bool { lock.lock(); defer { lock.unlock() }; return !fades.isEmpty }
 
     /// Newer pixels (a copy-rect, a video frame, a direct tile) arrived under a crossfade still in
@@ -469,8 +476,13 @@ public struct LayerScene {
     /// Displacements in each layer's own coordinates (layer 0 = the display layer).
     public var displacements: [Displacement]
     public var bandColors: [UInt32: SIMD4<Float>]
-    public init(background: Compositor?, items: [Item], displacements: [Displacement], bandColors: [UInt32: SIMD4<Float>]) {
+    /// Desktop rects the viewer holds no clean pixels for (they may still show a window from before it became a
+    /// layer): filled with `fillColor` over the display layer, under every window.
+    public var displayFill: [PixelRect] = []
+    public var fillColor = SIMD4<Float>(0.3, 0.3, 0.32, 1)
+    public init(background: Compositor?, items: [Item], displacements: [Displacement], bandColors: [UInt32: SIMD4<Float>], displayFill: [PixelRect] = [], fillColor: SIMD4<Float>? = nil) {
         self.background = background; self.items = items; self.displacements = displacements; self.bandColors = bandColors
+        self.displayFill = displayFill; if let fillColor { self.fillColor = fillColor }
     }
 }
 
@@ -561,8 +573,18 @@ public enum SceneRenderer {
             re.setFragmentBytes(&u, length: MemoryLayout<ShadowUniform>.stride, index: 0)
             re.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
-        // 1. The display layer, whole.
+        // 1. The display layer, whole, then the desktop areas it holds no clean pixels for.
         drawCanvas(bg, frame: display, layerID: 0, alpha: nil)
+        if !scene.displayFill.isEmpty {
+            var color = scene.fillColor
+            re.setRenderPipelineState(context.fillPipeline)
+            re.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+            for r in scene.displayFill {
+                var fq = Compositor.Quad(dst: ndc(px(r.intersection(display))), src: SIMD4(repeating: 0))
+                re.setVertexBytes(&fq, length: MemoryLayout<Compositor.Quad>.stride, index: 0)
+                re.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+            }
+        }
         // 2. Items back to front.
         for item in scene.items.reversed() {
             switch item {

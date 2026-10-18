@@ -548,7 +548,16 @@ final class ViewerSession: @unchecked Sendable {
         switch msg {
         case .tiles(let t):
             guard let v = layerView(t.header.windowID) else { sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: t.header.captureNanos, receivedNanos: now, bytes: bytes))); return }
-            let fresh = t.tiles.filter { isFresh(v, $0.rect, captureSeq: t.header.captureSeq) }
+            var candidates = t.tiles
+            if v.id == 0 {
+                let n = candidates.count
+                let dropped = candidates.filter { !viewerGuard.allows($0.rect, now: now) }
+                candidates.removeAll { !viewerGuard.allows($0.rect, now: now) }
+                guardDrops += n - candidates.count
+                _ = dropped   // the canvas keeps what it had there; a dropped write contaminates nothing
+            }
+            let fresh = candidates.filter { isFresh(v, $0.rect, captureSeq: t.header.captureSeq) }
+            if v.id == 0 { markDesktopClean(fresh.map(\.rect)) }
             for tile in fresh where wouldBeStale(v, tile.rect, captureSeq: t.header.captureSeq) { staleCommits += 1 }   // must never happen
             let n = v.compositor.applyTiles(fresh, crossfade: t.refinement)
             v.receivedBytes += t.bytes; v.tilesApplied += n; v.stills += fresh.filter { $0.format == .lossy }.count
@@ -609,6 +618,46 @@ final class ViewerSession: @unchecked Sendable {
         if case .reset = msg {} else { notePictureChange(now) }
     }
 
+    /// Every 2 s: ask the host to resend the unknown desktop tiles the scene shows (not under a window layer).
+    private var lastRefreshAskNanos: UInt64 = 0
+    private func askForUnknownDesktop(now: UInt64) {
+        guard now - lastRefreshAskNanos > 2_000_000_000, let c = compositor, c.width > 0 else { return }
+        lastRefreshAskNanos = now
+        let unknown = unknownDesktop
+        guard !unknown.isEmpty else { return }
+        let layerRects = arrangedWindows().filter(\.isLayered).map(\.frame)
+        let visible = unknown.filter { _, parts in parts.contains { part in !layerRects.contains { $0.intersection(part) == part } } }.keys.sorted().prefix(4000)
+        guard !visible.isEmpty else { return }
+        sender?.send(.refreshTiles(.init(layer: 0, tiles: visible.map { UInt32($0) })))
+    }
+
+    func unknownVisibleCount() -> Int {
+        guard let c = compositor, c.width > 0 else { return 0 }
+        _ = c
+        let layerRects = arrangedWindows().filter(\.isLayered).map(\.frame)
+        return unknownDesktop.filter { _, parts in parts.contains { part in !layerRects.contains { $0.intersection(part) == part } } }.count
+    }
+    /// Whether the scene draws any of `rect` as fill (no clean desktop pixels known there).
+    func desktopUnknown(_ rect: PixelRect) -> Bool {
+        guard let c = compositor, c.width > 0 else { return false }
+        _ = c
+        return unknownDesktop.values.contains { $0.contains { $0.intersects(rect) } }
+    }
+    /// Desktop tiles fully written by a host update that passed the guard hold clean desktop now.
+    private func markDesktopClean(_ rects: [PixelRect]) {
+        guard !unknownDesktop.isEmpty, let c = compositor, c.width > 0 else { return }
+        let t = TileTracker(width: c.width, height: c.height)
+        var u = unknownDesktop
+        for r in rects { for i in t.tiles(covering: [r]) where t.rect(of: i).intersection(r) == t.rect(of: i) { u[i] = nil } }
+        unknownDesktop = u
+    }
+    /// The fill for desktop tiles with no clean pixels: the desktop's own average colour (sampled every 2 s).
+    private func refreshDesktopColor(now: UInt64) {
+        desktopLock.lock(); let due = now - lastDesktopColorNanos > 2_000_000_000; if due { lastDesktopColorNanos = now }; desktopLock.unlock()
+        guard due, let c = compositor, c.width > 0 else { return }
+        videoQueue.async { c.sampleEdgeColor(of: PixelRect(x: 0, y: c.height * 3 / 5, width: c.width, height: 1), bottom: false) { [weak self] col in self?.desktopColor = col } }
+    }
+
     /// Layers absent from the window list are released after a while, sooner under memory pressure.
     private func enforceLayerMemory(now: UInt64) {
         predictorLock.lock(); let present = Set(windows.map(\.id)); predictorLock.unlock()
@@ -630,6 +679,7 @@ final class ViewerSession: @unchecked Sendable {
     /// Time-driven assembler pass (NACKs and timeouts fire even when nothing arrives).
     func assemblerTick() {
         let now = Clock.nowNanos()
+        for v in layerViews.values { v.compositor.settle(now: now) }
         statsLock.lock(); let rtt = sRTT; statsLock.unlock()
         if rtt > 0 {
             assembler.timeoutNanos = UInt64(rtt * 1e6 * 2.5) + 300_000_000   // NACK round trip plus slack
@@ -684,8 +734,14 @@ final class ViewerSession: @unchecked Sendable {
                     if compositor.width == 0 { compositor.configure(width: v.decoder.width, height: v.decoder.height) }
                     let region = frame.region.isEmpty ? PixelRect(x: 0, y: 0, width: compositor.width, height: compositor.height) : frame.region
                     let grid = TileMask.grid(for: region)
-                    let mask = frame.tileMask.flatMap { TileMask(cols: grid.cols, rows: grid.rows, bits: $0) }
+                    var mask = frame.tileMask.flatMap { TileMask(cols: grid.cols, rows: grid.rows, bits: $0) } ?? TileMask.full(cols: grid.cols, rows: grid.rows)
+                    var written: [PixelRect] = []
+                    for r in 0..<grid.rows { for c in 0..<grid.cols where mask[c, r] {
+                        let tr = PixelRect(x: region.x + c * 64, y: region.y + r * 64, width: 64, height: 64).intersection(region)
+                        if v.id == 0, !viewerGuard.allows(tr, now: now) { mask[c, r] = false; guardDrops += 1 } else { written.append(tr) }
+                    } }
                     compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive))
+                    if v.id == 0 { markDesktopClean(written) }
                     v.receivedBytes += frame.bytes; v.videoFrames += 1
                     if !frame.flags.contains(.progressive) { markCapture(v, region, captureSeq: frame.captureSeq) }
                     notePictureChange(now)
@@ -732,6 +788,7 @@ final class ViewerSession: @unchecked Sendable {
         while !stopped {
             try? await Task.sleep(for: .seconds(1))
             watchdog(now: Clock.nowNanos())
+            askForUnknownDesktop(now: Clock.nowNanos())
             statsLock.lock()
             let frames = sFrames, bytes = sBytes, lost = sLost, dec = sDecodeNanos, age = sAge, rtt = sRTT, dropped = sDropped
             let tileBytes = sTileBytes, tileRects = sTileRects, copies = sCopyRects, rate = rateState, nacks = sNacks, bursts = sBursts
@@ -880,6 +937,24 @@ final class ViewerSession: @unchecked Sendable {
     /// window clicked shows in front. Each override lasts until the host's list reflects the input that
     /// caused it (its `inputSeq`), or a moment after the interaction ends.
     private struct LocalFrame { var frame: PixelRect; var inputSeq: UInt64; var releasedNanos: UInt64 }
+    /// Viewer half of the DisplayGuard (host frames, 0.5 s history): desktop writes where a layered window is or
+    /// just was are dropped, never committed. `unknownDesktop`: desktop tiles that were under a window when it
+    /// became a layer, so the canvas may still hold that window there; filled with the desktop colour wherever
+    /// they show, until a clean write lands. Both on the video queue.
+    private var viewerGuard = DisplayGuard(historyNanos: 500_000_000, margin: 0)
+    private var _unknownDesktop: [Int: [PixelRect]] = [:]
+    private let desktopLock = NSLock()
+    private var unknownDesktop: [Int: [PixelRect]] {
+        get { desktopLock.lock(); defer { desktopLock.unlock() }; return _unknownDesktop }
+        set { desktopLock.lock(); _unknownDesktop = newValue; desktopLock.unlock() }
+    }
+    private(set) var guardDrops = 0
+    private var _desktopColor = SIMD4<Float>(0.3, 0.3, 0.32, 1)
+    private var desktopColor: SIMD4<Float> {
+        get { desktopLock.lock(); defer { desktopLock.unlock() }; return _desktopColor }
+        set { desktopLock.lock(); _desktopColor = newValue; desktopLock.unlock() }
+    }
+    private var lastDesktopColorNanos: UInt64 = 0
     private var localFrames: [UInt32: LocalFrame] = [:]
     private struct LocalRaise { var inputSeq: UInt64; var since: UInt64 }
     private var localRaise: (id: UInt32, LocalRaise)? = nil
@@ -889,6 +964,7 @@ final class ViewerSession: @unchecked Sendable {
     var watchWindowID: UInt32 = 0
     private(set) var lastWatchedMoveNanos: UInt64 = 0, watchedMoves = 0
     private var hostListSeq: UInt64 = 0
+    private var wasLayered = Set<UInt32>()
 
     private func isWatchedLayered() -> Bool { predictorLock.lock(); defer { predictorLock.unlock() }; return windows.first { $0.id == watchWindowID }?.isLayered ?? false }
     /// The canvas showing a window (its own layer, or the display layer) and the window's origin in it.
@@ -915,9 +991,27 @@ final class ViewerSession: @unchecked Sendable {
         }
         if let (_, r) = localRaise, lastHostListInputSeq >= r.inputSeq || now - r.since > 1_500_000_000 { localRaise = nil }
         predictorLock.unlock()
+        predictorLock.lock(); let snapshot = windows; predictorLock.unlock()
+        // Where a newly layered window's pixels may sit in the desktop canvas: its frame minus the desktop-layer
+        // windows that were in front of it (the canvas shows those there, not it).
+        let newlyLayered: [[PixelRect]] = snapshot.filter { $0.isLayered && !(before.keys.contains($0.id) && wasLayered.contains($0.id)) }.map { w in
+            w.frame.subtracting(snapshot.filter { $0.z < w.z && !$0.isLayered && $0.windowLevel == 0 }.map(\.frame))
+        }
+        wasLayered = Set(snapshot.filter(\.isLayered).map(\.id))
         videoQueue.async { [weak self] in
             guard let self else { return }
-            for w in self.windows { self.layerViews[w.id]?.lastSeenInListNanos = now }
+            for w in snapshot { self.layerViews[w.id]?.lastSeenInListNanos = now }
+            self.viewerGuard.update(layered: Dictionary(snapshot.filter(\.isLayered).map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a }), now: now)
+            if let c = self.compositor, c.width > 0, !newlyLayered.isEmpty {
+                // The desktop canvas may hold this window exactly where it was when it became a layer.
+                let t = TileTracker(width: c.width, height: c.height)
+                var u = self.unknownDesktop
+                for pieces in newlyLayered { for p in pieces { for i in t.tiles(covering: [p]) {
+                    let part = t.rect(of: i).intersection(p)
+                    if !part.isEmpty { u[i, default: []].append(part) }
+                } } }
+                self.unknownDesktop = u
+            }
             self.enforceLayerMemory(now: now)
         }
         onChange?()
@@ -950,7 +1044,12 @@ final class ViewerSession: @unchecked Sendable {
         let (disp, colors) = displacements()
         let layered = Set(plan.entries.filter { $0.kind == .layer }.map(\.id))
         let sd = disp.map { LayerScene.Displacement(layerID: layered.contains($0.windowID) ? $0.windowID : 0, displacement: $0) }
-        return LayerScene(background: bg, items: items, displacements: sd, bandColors: colors)
+        // Unknown desktop tiles that the scene shows (no window layer over them).
+        refreshDesktopColor(now: Clock.nowNanos())
+        let fillColor = desktopColor
+        let layerRects = plan.entries.filter { $0.kind == .layer }.map(\.frame)
+        let fill = unknownDesktop.values.flatMap { $0 }.filter { part in !layerRects.contains { $0.intersection(part) == part } }
+        return LayerScene(background: bg, items: items, displacements: sd, bandColors: colors, displayFill: fill, fillColor: fillColor)
     }
 
     /// Per-layer diagnostics (DESIGN §6 M3.1 field regression): what the viewer holds for every window the
@@ -1142,6 +1241,7 @@ extension ViewerSession {
             var staleTilesDiscarded: Int?, staleTilesCommitted: Int?
             var layers: [LayerDiag]?
             var staleSamples: Int?, staleBenchPixels: Int?, staleAt: [String]?
+            var guardDrops: Int?, unknownDesktopTiles: Int?, fillSamples: Int?, unknownVisibleTiles: Int?
             var samples: [Sample]
         }
         let target = MainActor.assumeIsolated { lastRequest?.bitrateKbps ?? 0 }
@@ -1183,6 +1283,7 @@ extension ViewerSession {
                       staleTilesDiscarded: staleDiscards, staleTilesCommitted: staleCommits,
                       layers: videoQueue.sync { layerDiagnostics() },
                       staleSamples: scenario?.staleSamples, staleBenchPixels: scenario?.stalePurple, staleAt: scenario?.staleAt,
+                      guardDrops: videoQueue.sync { guardDrops }, unknownDesktopTiles: unknownDesktop.count, fillSamples: scenario?.fillSamples, unknownVisibleTiles: unknownVisibleCount(),
                       samples: samples)
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         return (try? enc.encode(out)) ?? Data()

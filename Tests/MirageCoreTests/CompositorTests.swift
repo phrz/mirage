@@ -55,4 +55,17 @@ final class CompositorTests: XCTestCase {
         XCTAssertGreaterThan(pixel(px, 128, 100, 100).1, 240, "masked tile is white")
         XCTAssertLessThan(pixel(px, 128, 10, 10).1, 40, "unmasked tile untouched")
     }
+
+    /// Review T6/M1: a crossfaded refinement tile reaches the canvas without any render once its fade is over.
+    func testCrossfadeSettlesWithoutRendering() throws {
+        guard let c = Compositor() else { throw XCTSkip("no Metal device") }
+        c.configure(width: 128, height: 64)
+        c.crossfadeNanos = 1_000_000
+        c.applyTiles([.init(rect: PixelRect(x: 0, y: 0, width: 64, height: 64), format: .solid, data: Data([0, 0, 255, 255]))], crossfade: true)
+        XCTAssertTrue(c.hasActiveFades)
+        usleep(5_000)
+        c.settle()
+        XCTAssertFalse(c.hasActiveFades)
+        XCTAssertEqual(pixel(readback(c), 128, 10, 10).2, 255, "the faded-in tile is on the canvas")
+    }
 }

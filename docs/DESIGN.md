@@ -1302,3 +1302,47 @@ Two safety nets came with it:
 Also fixed: the viewer's stall watchdog could trap on a UInt64 underflow when a packet was noted after
 it read the clock (crash seen under the test delay; a real race).
 
+**Ghosts, second round (fifth mac-daddy run, 258d391).** Worse to the eye: at 7 s a full second copy of the
+bench at its previous position, eroding over seconds and reappearing after the bench had covered the spot
+again and left. The exclusion line was logged and the detector stayed silent, so the desktop stream still
+carried the window while it covered an area. The detector missed it because a white window over white
+yields fewer than four sampled colours. Two changes: find out, and make it impossible regardless.
+- **Why the exclusion may not hold.** Each exclusion change started its own `updateContentFilter` task.
+  Concurrent calls can finish out of order, leaving an older filter in force (at startup "exclude nothing",
+  then "exclude the bench" a moment later) while the host believes the window is excluded. Updates are now
+  serialized, latest wish wins, and each applied filter is logged ("display filter applied: excluding
+  windows [...]"). Whether that was mac-daddy's cause needs that log line from the next run.
+- **Exclusion check, once a second.** For each shown layer, the 6 most textured 32×32 blocks of its own
+  capture are compared with the display capture at the same place (mean absolute difference). Measured:
+  44–142 when excluded, 10–17 when the display stream shows the window. Below 24 it logs "THE DISPLAY
+  STREAM SHOWS THIS WINDOW".
+- **DisplayGuard (MirageCore, tested)**, on both ends:
+  - *Host:* desktop tiles touching a layered window's current frame, or the box it swept in the last 1 s
+    grown by 128 px, are never sent, keyframes and video included. They come back only from a capture
+    taken after the window left, through the taint re-send.
+  - *Viewer:* drops any desktop write touching a layered window's current frame or its last 0.5 s.
+  - *Viewer, first-picture contamination:* when a window becomes a layer, the part of its frame not
+    covered by desktop-layer windows in front of it is marked as possibly holding the window. Wherever such
+    a part shows, it is filled with the desktop's average colour until a clean write lands; every 2 s the
+    viewer asks the host (`refreshTiles`) for the ones that show.
+- **Headless fidelity (review M1).** Crossfades now settle on the video queue every 20 ms, so a headless
+  viewer's canvas matches what a window would show (with the first picture keeping windows in the desktop
+  until their still lands, refinement was the only cleanup, and headless never committed it).
+- **Test knobs.** `MIRAGE_TEST_NO_EXCLUDE` (host: the display stream excludes nothing, mac-daddy's failure)
+  and `probe-layers --mode list` (what ScreenCaptureKit lists against CGWindowList).
+
+Loopback, bench drifting over a bare desktop (`MIRAGE_LAYER_APPS`), ~150 ms RTT (`MIRAGE_TEST_DELAY_MS=145`),
+800 kbps, desktop layer sampled at the bench's previous title band +1 s and +3 s after every burst:
+
+| Run | Bench pixels at the old place | Fill shown | Visible unknown at end |
+|---|---|---|---|
+| 1.7x stream | 0 of 10 | 2 (the +1 s samples) | 0 |
+| native 2x (3024×1964 request) | 0 of 10 | 2 | 0 |
+| 1.7x, exclusion disabled | 0 of 8 | 2 | 0 |
+
+The GUI worst case (exclusion disabled) shows the bench moving with no copy left behind. The normal
+all-layers run: desktop layer 89 KB in the first 5 s and then nothing, the bench its still and blocks, and
+the rest of the bytes from a live app window on the host screen. Residual risk: a desktop-layer window
+drawn as a cut-out whose CGWindow frame is wider than its visible content (seen only with the test knob
+that keeps Astropad's window out of layering) shows desktop pixels in that margin over a window behind it.
+

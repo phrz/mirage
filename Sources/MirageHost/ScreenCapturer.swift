@@ -97,12 +97,38 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         return t
     }
 
-    /// Changes the set of windows left out of the display picture (layers started or stopped).
-    func setExcluded(_ windows: [SCWindow]) async throws {
-        guard let stream, let t = target else { return }
-        excluded = windows
-        try await stream.updateContentFilter(SCContentFilter(display: t.display, excludingWindows: windows))
+    /// Changes the set of windows left out of the display picture (layers started or stopped). Updates are
+    /// applied one at a time, latest wish wins: concurrent `updateContentFilter` calls can finish out of order,
+    /// leaving an older (empty) exclusion in force while the host believes the window is excluded (the
+    /// suspected cause of the M3.1 ghosts on mac-daddy).
+    func requestExcluded(_ windows: [SCWindow], log: @escaping (String) -> Void) {
+        filterLock.lock()
+        wantedExcluded = windows
+        let start = !applying
+        applying = true
+        filterLock.unlock()
+        guard start else { return }
+        Task { [weak self] in
+            while let self {
+                self.filterLock.lock()
+                guard let want = self.wantedExcluded else { self.applying = false; self.filterLock.unlock(); return }
+                self.wantedExcluded = nil
+                self.filterLock.unlock()
+                guard let stream = self.stream, let t = self.target else { continue }
+                let ids = want.map(\.windowID).sorted()
+                if Self.testNoExclude { log("TEST: display exclusion disabled (MIRAGE_TEST_NO_EXCLUDE); would exclude \(ids)"); self.excluded = []; continue }
+                do {
+                    try await stream.updateContentFilter(SCContentFilter(display: t.display, excludingWindows: want))
+                    self.excluded = want
+                    log("display filter applied: excluding windows \(ids)")
+                } catch { log("display exclusion update failed: \(error)") }
+            }
+        }
     }
+    private let filterLock = NSLock()
+    private var wantedExcluded: [SCWindow]? = nil
+    private var applying = false
+    static let testNoExclude = ProcessInfo.processInfo.environment["MIRAGE_TEST_NO_EXCLUDE"] != nil
 
     func update(_ req: ControlMessage.StreamRequest) async throws -> Target {
         guard let stream, let old = target else { throw MirageError.transport("not capturing") }

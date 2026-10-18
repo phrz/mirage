@@ -131,6 +131,9 @@ public enum ControlMessage: Codable, Equatable {
     /// Viewer → host (M3, layered desktop): a window-management result decided locally (a drag, a raise,
     /// a minimize) that the host applies through Accessibility.
     case windowCommand(WindowCommand)
+    /// Viewer → host: these tiles of a layer have no clean pixels on the viewer (it dropped a write that might
+    /// have held a window, or they predate the window becoming a layer); resend them once clear of windows.
+    case refreshTiles(RefreshTiles)
 
     // Input, client → host. Coordinates are normalized to the streamed display: (0,0) top-left, (1,1) bottom-right.
     case mouseMove(MouseMove)
@@ -359,6 +362,11 @@ public enum ControlMessage: Codable, Equatable {
             if changed.isEmpty && removed.isEmpty { return nil }
             return WindowList(captureSeq: captureSeq, changed: changed, removed: removed, inputSeq: inputSeq)
         }
+    }
+    public struct RefreshTiles: Codable, Equatable {
+        public var layer: UInt32
+        public var tiles: [UInt32]
+        public init(layer: UInt32, tiles: [UInt32]) { self.layer = layer; self.tiles = tiles }
     }
     /// Client → host: apply a window-management decision the client already shows (DESIGN §3.5 item 2).
     /// `move` carries the new frame origin in native stream pixels of the display.

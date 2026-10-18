@@ -104,7 +104,7 @@ final class ScenarioRunner {
     private(set) var layered = false
     /// Layered desktop: after each burst, samples of the *display* layer where the bench's caption band was
     /// before the burst (only where the bench no longer is). Purple there = window pixels in the desktop layer.
-    private(set) var staleSamples = 0, stalePurple = 0
+    private(set) var staleSamples = 0, stalePurple = 0, fillSamples = 0
     private(set) var staleAt: [String] = []
     private func displayShowsBench(at band: PixelRect, label: String) async -> Bool? {
         guard let c = session.compositor else { return nil }
@@ -171,7 +171,10 @@ final class ScenarioRunner {
                         guard let self else { return }
                         for wait in [1000, 3000] {
                             try? await Task.sleep(for: .milliseconds(wait == 1000 ? 1000 : 2000))
-                            if let purple = await self.displayShowsBench(at: free, label: "") {
+                            if self.session.desktopUnknown(free) {
+                                self.staleSamples += 1; self.fillSamples += 1
+                                self.session.log("scenario watch: old caption band \(free.x),\(free.y) \(wait) ms after the burst: drawn as desktop fill (no clean pixels yet)")
+                            } else if let purple = await self.displayShowsBench(at: free, label: "") {
                                 self.staleSamples += 1
                                 if purple { self.stalePurple += 1; self.staleAt.append("\(free.x),\(free.y)+\(wait)ms") }
                                 self.session.log("scenario watch: old caption band \(free.x),\(free.y) \(wait) ms after the burst: display layer shows \(purple ? "BENCH PIXELS (stale)" : "the desktop")")

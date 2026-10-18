@@ -111,7 +111,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var lastLagLogNanos: UInt64 = 0
     private func windowAreas(now: UInt64) -> [PixelRect] {
         recentFrames.removeAll { now &- $0.nanos > 600_000_000 }
-        return Array(plannedFrames.values) + recentFrames.map(\.rect)
+        return Array(plannedFrames.values) + recentFrames.map(\.rect) + displayGuard.guardedRects(now: now)
     }
     /// Desktop pixels for these tiles are on their way to the viewer (from a capture taken about now).
     private func displaySent(_ tiles: [Int]) {
@@ -119,6 +119,24 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         d.taint.sent(tiles, tracker: d.tracker, windowAreas: windowAreas(now: Clock.nowNanos()))
         d.taintScheduled.subtract(tiles)
     }
+    /// DisplayGuard: desktop tiles under a shown layer, or where one was in the last second (plus a margin), are
+    /// never sent; they come back from a capture taken after the window left (via the taint re-send).
+    private var displayGuard = DisplayGuard(historyNanos: 1_000_000_000, margin: 128)
+    private func updateDisplayHidden(now: UInt64) {
+        guard let d = display else { return }
+        var shown: [UInt32: PixelRect] = [:]
+        if !screenLocked { for (id, f) in plannedFrames where layers[id]?.exposed ?? false { shown[id] = f } }
+        displayGuard.update(layered: shown, now: now)
+        let hidden = displayGuard.guardedTiles(d.tracker, now: now)
+        guard hidden != d.occludedTiles else { return }
+        let uncovered = d.occludedTiles.subtracting(hidden)
+        if !uncovered.isEmpty {
+            let n = d.tracker.expedite(in: d.bounds, now: now, only: uncovered)
+            if debugLayers { log("display: \(uncovered.count) tiles clear of windows for 1 s, \(n) pending made due; guarded now \(hidden.count)") }
+        }
+        d.occludedTiles = hidden
+    }
+
     /// Visible tainted desktop tiles are refined from the current desktop (after motion settles, like any refinement).
     private func scheduleTaintedResends(now: UInt64) {
         guard let d = display, !screenLocked else { return }
@@ -153,7 +171,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let sample = tracker.sample(captureSeq: 0, now: now, force: true)
         let cap = ScreenCapturer(queue: queue)
         let planned = sample.map { plannedLayers(in: $0.sample.windows, displayPixels: t.pixelWidth * t.pixelHeight) } ?? []
-        let excluded = planned.flatMap { w in [w.id] + (sample?.sample.children[w.id] ?? []) }.compactMap { catalog.window($0) }
+        _ = planned
+        let excluded: [SCWindow] = []   // a window stays in the display picture until its own still has landed
         _ = try await cap.start(req, target: t, excluding: excluded) { [weak self] pb, nanos, dirty in self?.queue.async { self?.captured(pb, nanos, dirtyRects: dirty, layerID: 0) } }
         return try await withCheckedThrowingContinuation { c in
             queue.async {
@@ -331,6 +350,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     public func handle(input: ControlMessage) {
         if case .windowCommand(let c) = input { queue.async { self.handle(windowCommand: c) }; return }
+        if case .refreshTiles(let r) = input {
+            queue.async {
+                guard r.layer == 0, let d = self.display else { return }
+                let tiles = r.tiles.map(Int.init).filter { $0 >= 0 && $0 < d.tracker.tileCount }
+                d.taint.mark(tiles); d.taintScheduled.subtract(tiles)
+                if self.debugLayers { self.log("viewer asks for \(tiles.count) desktop tiles it holds no clean pixels for") }
+            }
+            return
+        }
         inputQueue.async {
             self.injector?.handle(input)
             if case .scroll(let s) = input, let t = self.target, let w = self.windows {
@@ -585,23 +613,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let fps = l.frontmost ? 30 : (fraction <= 0.001 ? 2 : 10)
             if let cap = l.capturer, cap.fps != fps { Task { try? await cap.update(width: cap.width, height: cap.height, fps: fps) } }
         }
-        // The display layer under window layers the viewer shows: the viewer cannot see it there, so it is not
-        // refined until a window moves off it (then once; the desktop does not change under excluded windows).
-        // Frames are inset by the corner radius (the display shows through a window's rounded corners).
-        let inset = Int(14 * (windows?.pxPerPoint ?? 2))
-        let shown = planned.filter { layers[$0.id]?.exposed ?? false }.map { w in PixelRect(x: w.frame.x + inset, y: w.frame.y + inset, width: w.frame.width - 2 * inset, height: w.frame.height - 2 * inset) }
-        var displayHidden = Set<Int>()
-        for i in 0..<d.tracker.tileCount {
-            let r = d.tracker.rect(of: i)
-            if shown.contains(where: { $0.intersection(r) == r }) { displayHidden.insert(i) }
-        }
-        let displayExposed = d.occludedTiles.subtracting(displayHidden)
-        if !displayExposed.isEmpty {
-            let n = d.tracker.expedite(in: d.bounds, now: now, only: displayExposed)
-            if debugLayers { log("display: \(displayExposed.count) tiles uncovered, \(n) pending made due, \(displayExposed.filter { d.tracker.isCrisp($0) }.count) already crisp, hidden now \(displayHidden.count)") }
-        }
-        if debugLayers, displayHidden.count != d.occludedTiles.count { log("display: hidden \(d.occludedTiles.count) → \(displayHidden.count) (shown \(shown.count): \(shown.map { "\($0.x),\($0.y) \($0.width)x\($0.height)" }.joined(separator: "; ")))") }
-        d.occludedTiles = displayHidden
+        updateDisplayHidden(now: now)
         if !needCatalog.isEmpty {
             catalog.ensure(needCatalog) { [weak self] in self?.queue.async { guard let self, let s = self.windows?.current else { return }; self.reconcileLayers(s, now: Clock.nowNanos()) } }
         }
@@ -620,7 +632,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 lastExcludedIDs = exposedIDs
                 let skipped = exposedIDs.count - scWindows.count
                 if debugLayers || skipped > 0 && !loggedChildSkip { loggedChildSkip = true; log("display excludes \(scWindows.count) windows (\(skipped) child windows ScreenCaptureKit does not list stay in the display stream)") }
-                Task { do { try await cap.setExcluded(scWindows) } catch { self.log("display exclusion update failed: \(error)") } }
+                cap.requestExcluded(scWindows, log: { [weak self] in self?.log($0) })
             } else {
                 catalog.ensure(Array(missingParents)) { [weak self] in self?.queue.async { guard let self, let s = self.windows?.current else { return }; self.reconcileLayers(s, now: Clock.nowNanos()) } }
             }
@@ -754,7 +766,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         statDirtyTiles += dirty.count
         layer.frames += 1
-        if layer.isDisplay, !recentFrames.isEmpty { checkExclusionLag(display: new, now: now) }
         if dirty.isEmpty { layer.lastFrame = pb; layer.tracker = tracker; refine(now: now); return }
         if debugLayers, dirty.count >= 4 { log("layer \(layer.id) capture \(captureSeq): \(dirty.count) dirty tiles, bb \(tracker.boundingRect(dirty))" + (dirty.count <= 8 ? " boxes " + dirty.map { "\(tightBoxes[$0].map { "\($0.x),\($0.y) \($0.width)x\($0.height)" } ?? "?")" }.joined(separator: " | ") : "")) }
 
@@ -910,32 +921,48 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         refine(now: now)
     }
 
-    /// Detector for the one way window pixels can enter the display stream that the host cannot see from the
-    /// window list: ScreenCaptureKit still drawing an excluded window for a moment while it moves. Samples 16
-    /// interior points of each recently moved layer's own capture against the display capture at that window's
-    /// frame; most of them matching means the display stream shows the window there.
-    private func checkExclusionLag(display: ShiftDetector.Frame, now: UInt64) {
-        for l in layers.values where !l.isDisplay && l.exposed {
-            guard let src = l.lastFrame, recentFrames.contains(where: { $0.rect.intersects(l.frame) }) || plannedFrames[l.id] != nil else { continue }
-            CVPixelBufferLockBaseAddress(src, .readOnly)
+    /// Exclusion check (once a second): does the display stream show a window that should be excluded? For each
+    /// shown layer, the 6 most textured 32×32 blocks of the layer's own capture are compared with the display
+    /// capture at the same place (mean absolute difference per channel). Textured blocks only: a white window over
+    /// a white window matches without proving anything. Logged when the display shows the window, and every 10 s.
+    private var lastExclusionLogNanos: UInt64 = 0
+    private func checkExclusion(now: UInt64) {
+        guard let d = display, let dsrc = d.lastFrame else { return }
+        CVPixelBufferLockBaseAddress(dsrc, .readOnly); defer { CVPixelBufferUnlockBaseAddress(dsrc, .readOnly) }
+        let disp = frameView(dsrc)
+        for l in layers.values where !l.isDisplay && l.exposed && !screenLocked {
+            guard let src = l.lastFrame, l.width >= 96, l.height >= 96 else { continue }
+            CVPixelBufferLockBaseAddress(src, .readOnly); defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
             let w = frameView(src)
-            var match = 0, total = 0
-            var colours = Set<UInt32>()   // a match on a uniform area (white on white) proves nothing
-            for gy in 1...4 { for gx in 1...4 {
-                let lx = l.width * gx / 5, ly = l.height * gy / 5
-                let dx = l.frame.x + lx, dy = l.frame.y + ly
-                guard dx >= 0, dy >= 0, dx < display.width, dy < display.height, lx < w.width, ly < w.height else { continue }
-                let a = w.base.advanced(by: ly * w.stride + lx * 4).assumingMemoryBound(to: UInt8.self)
-                let b = display.base.advanced(by: dy * display.stride + dx * 4).assumingMemoryBound(to: UInt8.self)
-                guard a[3] == 255 else { continue }
-                total += 1
-                if abs(Int(a[0]) - Int(b[0])) <= 6 && abs(Int(a[1]) - Int(b[1])) <= 6 && abs(Int(a[2]) - Int(b[2])) <= 6 { match += 1; colours.insert(UInt32(a[0] >> 4) << 8 | UInt32(a[1] >> 4) << 4 | UInt32(a[2] >> 4)) }
+            func lum(_ f: ShiftDetector.Frame, _ x: Int, _ y: Int) -> Int { let p = f.base.advanced(by: y * f.stride + x * 4).assumingMemoryBound(to: UInt8.self); return Int(p[0]) + 2 * Int(p[1]) + Int(p[2]) }
+            var candidates: [(x: Int, y: Int, v: Int)] = []
+            for gy in 0..<5 { for gx in 0..<7 {
+                let x = 16 + (w.width - 64) * gx / 6, y = 40 + (w.height - 80) * gy / 4
+                var sum = 0, sq = 0, n = 0
+                for yy in stride(from: y, to: y + 32, by: 4) { for xx in stride(from: x, to: x + 32, by: 4) { let v = lum(w, xx, yy); sum += v; sq += v * v; n += 1 } }
+                candidates.append((x, y, sq / n - (sum / n) * (sum / n)))
             } }
-            CVPixelBufferUnlockBaseAddress(src, .readOnly)
-            if total >= 8, match * 4 >= total * 3, colours.count >= 4 {
-                statExclusionLag += 1
-                if now - lastLagLogNanos > 1_000_000_000 { lastLagLogNanos = now; log("display stream shows layer \(l.id) at \(l.frame) (\(match)/\(total) samples): exclusion lag while it moves; those desktop tiles count as holding window pixels") }
-                if !recentFrames.contains(where: { $0.rect == l.frame && now &- $0.nanos < 100_000_000 }) { recentFrames.append((l.frame, now)) }
+            let textured = candidates.filter { $0.v > 200 }.sorted { $0.v > $1.v }.prefix(6)
+            var mad = 0.0, blocks = 0
+            for c in textured {
+                let dx = l.frame.x + c.x, dy = l.frame.y + c.y
+                guard dx >= 0, dy >= 0, dx + 32 <= disp.width, dy + 32 <= disp.height else { continue }
+                var diff = 0, n = 0
+                for yy in stride(from: 0, to: 32, by: 2) { for xx in stride(from: 0, to: 32, by: 2) {
+                    let a = w.base.advanced(by: (c.y + yy) * w.stride + (c.x + xx) * 4).assumingMemoryBound(to: UInt8.self)
+                    let b = disp.base.advanced(by: (dy + yy) * disp.stride + (dx + xx) * 4).assumingMemoryBound(to: UInt8.self)
+                    diff += abs(Int(a[0]) - Int(b[0])) + abs(Int(a[1]) - Int(b[1])) + abs(Int(a[2]) - Int(b[2])); n += 3
+                } }
+                mad += Double(diff) / Double(n); blocks += 1
+            }
+            guard blocks >= 2 else { continue }
+            mad /= Double(blocks)
+            let shows = mad < 24   // measured: 12 when the stream shows the window (two resamplings of it), 44–90 when excluded
+            if shows { statExclusionLag += 1 }
+            if shows || debugLayers || now - lastExclusionLogNanos > 10_000_000_000 {
+                lastExclusionLogNanos = now
+                log(String(format: "exclusion check: layer %u at %d,%d: display vs layer MAD %.1f over %d textured blocks → %@", l.id, l.frame.x, l.frame.y, mad, blocks,
+                           shows ? "THE DISPLAY STREAM SHOWS THIS WINDOW (exclusion not in effect; DisplayGuard keeps it out of the desktop layer)" : "excluded"))
             }
         }
     }
@@ -1537,6 +1564,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard VTPixelTransferSessionTransferImage(transfer, from: canvas, to: scaled) == noErr else { log("pixel transfer failed"); return }
             input = scaled
         }
+        if l.isDisplay, !l.occludedTiles.isEmpty {
+            // DisplayGuard: no desktop pixels where a layered window is or just was, keyframes included.
+            let held = tiles.intersection(l.occludedTiles)
+            if !held.isEmpty {
+                tiles.subtract(held)
+                for i in held { let c = i % l.tracker.cols - c0, r = i / l.tracker.cols - r0; if c >= 0, r >= 0, c < grid.cols, r < grid.rows { mask[c, r] = false } }
+                l.tracker.defer(Array(held), now: now, delayNanos: 3_600_000_000_000)
+            }
+        }
         if l.isDisplay { displaySent(Array(tiles)) }
         l.submitted = (tiles, region, l.pendingWholeFrame)
         l.pendingVideoTiles = []; l.pendingVideoRegion = .zero; l.pendingWholeFrame = false
@@ -1723,6 +1759,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 // An encoder idle for 10 s is released (another layer may want one).
                 if !l.isDisplay, l.encoder != nil, !l.encoding, now - l.encoderUseNanos > 10_000_000_000, !l.hasVideoPending { l.encoder = nil; l.scaled = nil; l.transfer = nil; l.canvas = nil }
             }
+            self.updateDisplayHidden(now: now)
             self.scheduleTaintedResends(now: now)
             self.refine(now: now)
             self.applyBudget(now: now)
@@ -1752,6 +1789,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.beginFreshPicture(reason: "tier change to \(rc.tier.name)")
                 }
             }
+            self.checkExclusion(now: tnow)
             self.tileKbpsEWMA = self.tileKbpsEWMA * 0.5 + Double(self.secTileBytes * 8 / 1000) * 0.5
             self.interactiveKbpsEWMA = self.interactiveKbpsEWMA * 0.5 + Double(self.secInteractiveBytes * 8 / 1000) * 0.5
             self.secInteractiveBytes = 0
