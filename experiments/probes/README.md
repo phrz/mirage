@@ -100,3 +100,19 @@ layer rects). Per layer it prints the runs of frames in which any 16-px block (6
 only blocks that belong to exactly one layer, and writes `sheet.png`, a contact sheet of the frames. A level
 presented whole is a run of 1–2 frames (the 220 ms crossfade). Blocks landing one by one show up as long runs
 or as many small ones. Motion, like a window dragging itself, also shows up as long runs.
+
+## badge (`miraged probe-layers --mode badge`, 2026-10-19)
+
+Per filter variant (desktopIndependentWindow; display excluding every other window; display excluding all
+applications except the window), one stream over the first matching bench window (`MIRAGE_PROBE_WINDOW=<id>`
+picks one) with `sourceRect` on its frame plus 16 pt. It writes a `screencapture -l` of the window per variant
+(the badge shows there) and the captured frame to `--dump`. It also reports frames while static, the alpha
+of the margin and the edges, and CPU. Results:
+
+| Variant | Badge | Margin |
+|---|---|---|
+| desktopIndependentWindow | yes | white |
+| excluding every other window | no | transparent |
+| excluding applications | no | opaque black |
+
+A covered window renders whole. The outermost pixel of a window is about 89 % alpha at 1x.

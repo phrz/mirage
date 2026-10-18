@@ -186,11 +186,21 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 /// `SCShareableContent` (tens of ms, async) when the window list names an id we do not hold.
 final class WindowCatalog: @unchecked Sendable {
     private var windows: [UInt32: SCWindow] = [:]
+    private var displays: [SCDisplay] = []
     private let lock = NSLock()
     private var refreshing = false
     private var lastRefreshNanos: UInt64 = 0
 
     func window(_ id: UInt32) -> SCWindow? { lock.lock(); defer { lock.unlock() }; return windows[id] }
+    /// Every window ScreenCaptureKit listed at the last refresh (a window layer's capture excludes all but its own).
+    var all: [SCWindow] { lock.lock(); defer { lock.unlock() }; return Array(windows.values) }
+    /// The display that holds most of `rect` (global points).
+    func display(for rect: CGRect) -> SCDisplay? {
+        lock.lock(); defer { lock.unlock() }
+        return displays.max { a, b in a.frame.intersection(rect).width * a.frame.intersection(rect).height < b.frame.intersection(rect).width * b.frame.intersection(rect).height } ?? displays.first
+    }
+    /// When the catalog was last refreshed.
+    var refreshedNanos: UInt64 { lock.lock(); defer { lock.unlock() }; return lastRefreshNanos }
 
     /// Refreshes if any of `ids` is unknown and no refresh ran in the last 250 ms; `done` runs after a refresh.
     func ensure(_ ids: [UInt32], done: @escaping @Sendable () -> Void) {
@@ -203,16 +213,18 @@ final class WindowCatalog: @unchecked Sendable {
         Task.detached { [self] in
             defer { lock.lock(); refreshing = false; lock.unlock() }
             guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else { return }
-            lock.lock()
-            windows = Dictionary(content.windows.map { ($0.windowID, $0) }, uniquingKeysWith: { a, _ in a })
-            lock.unlock()
+            store(content)
             done()
         }
     }
     func refreshNow() async {
         guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else { return }
+        store(content)
+    }
+    private func store(_ content: SCShareableContent) {
         lock.lock()
         windows = Dictionary(content.windows.map { ($0.windowID, $0) }, uniquingKeysWith: { a, _ in a })
+        displays = content.displays
         lastRefreshNanos = Clock.nowNanos()
         lock.unlock()
     }

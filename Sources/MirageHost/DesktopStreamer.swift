@@ -109,6 +109,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         let total = layers.values.reduce(0) { $0 + $1.account.total }
         log(String(format: "layer bytes, last 30 s (%.0f kbps): ", Double(total) * 8 / 30 / 1000) + rows.joined(separator: " | "))
+        // Window captures (display filter excluding all other windows): frames passed on, unchanged frames skipped,
+        // frames dropped because the window had moved (stale source rect) or showed shifted (edge check).
+        let caps = layers.values.compactMap { l -> String? in
+            guard let c = l.capturer else { return nil }
+            defer { c.resetCounts() }
+            return "\(l.id): \(c.frames) passed, \(c.skippedUnchanged) unchanged, \(c.droppedMoved) moved, \(c.droppedEdge) shifted, \(c.excludedCount) excluded"
+        }
+        if !caps.isEmpty { log("window captures, last 30 s: " + caps.joined(separator: " | ")) }
         for l in layers.values { l.account = Layer.Account() }
     }
     private var statWindowCommands = 0
@@ -637,14 +645,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if Layer.even(w.frame.width) != l.width || Layer.even(w.frame.height) != l.height {
                     // Resized on the host: the layer starts over at the new size (a still, then blocks).
                     l.resize(width: w.frame.width, height: w.frame.height)
-                    if let cap = l.capturer { Task { try? await cap.update(width: w.frame.width, height: w.frame.height, fps: cap.fps) } }
                     log("layer \(w.id) resized to \(w.frame.width)x\(w.frame.height)")
                 }
-                if l.capturer == nil { startCapturer(for: l, pid: w.pid, needCatalog: &needCatalog) }
+                if l.capturer == nil { startCapturer(for: l, sample: s, needCatalog: &needCatalog) }
             } else {
                 let l = Layer(id: w.id, width: w.frame.width, height: w.frame.height, frame: w.frame, now: now)
                 layers[w.id] = l
-                startCapturer(for: l, pid: w.pid, needCatalog: &needCatalog)
+                startCapturer(for: l, sample: s, needCatalog: &needCatalog)
             }
         }
         // Layers no longer planned (window gone, minimized, dropped out of the cap): capture stops; the
@@ -681,8 +688,26 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
             l.occludedTiles = occluded
             let fps = l.frontmost ? 30 : (fraction <= 0.001 ? 2 : 10)
-            if let cap = l.capturer, cap.fps != fps { Task { try? await cap.update(width: cap.width, height: cap.height, fps: fps) } }
+            if let cap = l.capturer {
+                // The capture follows the window (sourceRect on its frame) and leaves out every window that comes over it.
+                if let pf = s.pointBounds[w.id] { cap.follow(pointFrame: pf, width: l.width, height: l.height, fps: fps) }
+                let own = Set([w.id] + (s.children[w.id] ?? []))
+                let area = cap.pointFrame.insetBy(dx: -64, dy: -64)
+                var add: [SCWindow] = []
+                for (id, r) in s.pointBounds where !own.contains(id) && !cap.isExcluded(id) && r.intersects(area) {
+                    if let sc = catalog.window(id) { add.append(sc); catalogMissNanos[id] = nil }
+                    else if let first = catalogMissNanos[id] {
+                        // Not listed by ScreenCaptureKit even after a refresh: it cannot be excluded (it stays in the capture).
+                        if catalog.refreshedNanos < first &+ 300_000_000 { needCatalog.append(id) }
+                    } else { catalogMissNanos[id] = now; needCatalog.append(id) }
+                }
+                if !add.isEmpty {
+                    cap.exclude(add)
+                    if debugLayers { log("layer \(w.id): capture now also leaves out \(add.map(\.windowID))") }
+                }
+            }
         }
+        if catalogMissNanos.count > 256 { catalogMissNanos = catalogMissNanos.filter { s.pointBounds[$0.key] != nil } }
         updateDisplayHidden(now: now)
         if !needCatalog.isEmpty {
             catalog.ensure(needCatalog) { [weak self] in self?.queue.async { guard let self, let s = self.windows?.current else { return }; self.reconcileLayers(s, now: Clock.nowNanos()) } }
@@ -720,14 +745,23 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
     }
 
-    private func startCapturer(for l: Layer, pid: Int32, needCatalog: inout [UInt32]) {
+    /// Window ids ScreenCaptureKit did not list when first seen over a layer (retried once after a catalog refresh).
+    private var catalogMissNanos: [UInt32: UInt64] = [:]
+
+    private func startCapturer(for l: Layer, sample s: WindowTracker.Sample, needCatalog: inout [UInt32]) {
         guard let sc = catalog.window(l.id) else { needCatalog.append(l.id); return }
-        let cap = WindowCapturer(window: sc, width: l.width, height: l.height, fps: 10, queue: queue)
+        let pointFrame = s.pointBounds[l.id] ?? sc.frame
+        guard let display = catalog.display(for: pointFrame) else { needCatalog.append(l.id); return }
+        // Every other window ScreenCaptureKit lists is left out (the desktop picture too): the layer is the window alone,
+        // on transparency, and macOS does not badge a window that a capture merely leaves in.
+        let own = Set([l.id] + (s.children[l.id] ?? []))
+        let others = catalog.all.filter { !own.contains($0.windowID) }
+        let cap = WindowCapturer(window: sc, display: display, pointFrame: pointFrame, width: l.width, height: l.height, fps: 10, queue: queue)
         l.capturer = cap
         l.forceFullDiff = true
         cap.onStop = { [weak self, weak l] err in self?.queue.async { guard let l, l.capturer === cap else { return }; l.capturer = nil; self?.log("layer \(l.id) capture stopped: \(err.map { "\($0)" } ?? "ok")") } }
         Task { [weak self] in
-            do { try await cap.start { [weak self] pb, nanos in self?.queue.async { self?.captured(pb, nanos, dirtyRects: [], layerID: l.id) } } }
+            do { try await cap.start(excluding: others) { [weak self] pb, nanos in self?.queue.async { self?.captured(pb, nanos, dirtyRects: [], layerID: l.id) } } }
             catch { self?.queue.async { if l.capturer === cap { l.capturer = nil }; self?.log("layer \(l.id) capture failed: \(error)") } }
         }
     }

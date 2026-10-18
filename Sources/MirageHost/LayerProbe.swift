@@ -3,6 +3,7 @@ import AppKit
 import ScreenCaptureKit
 import CoreMedia
 import IOSurface
+import ImageIO
 import MirageCore
 
 /// `miraged probe-layers`: feasibility and cost check for per-window capture (DESIGN §3.2 layered desktop).
@@ -29,8 +30,9 @@ public final class LayerProbe: NSObject, SCStreamOutput, @unchecked Sendable {
     public static func codec(log: @escaping (String) -> Void) async throws {
     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
     let d = content.displays[0]
-    let keep = content.windows.filter { $0.windowLayer < 0 }   // desktop picture and icons only
-    let f = SCContentFilter(display: d, including: keep)
+    // The desktop picture and icons only: every other window left out (never named in an including filter, which
+    // would badge it).
+    let f = SCContentFilter(display: d, excludingWindows: content.windows.filter { $0.windowLayer >= 0 })
     let c = SCStreamConfiguration(); c.width = 2600; c.height = 1688; c.pixelFormat = kCVPixelFormatType_32BGRA; c.showsCursor = false
     let img = try await SCScreenshotManager.captureImage(contentFilter: f, configuration: c)
     let w = img.width, h = img.height
@@ -54,8 +56,73 @@ public final class LayerProbe: NSObject, SCStreamOutput, @unchecked Sendable {
     for (k, v) in totals.sorted(by: { $0.value > $1.value }) { log(String(format: "%-14@ %8.0f KB per Mpx  (whole 2600x1688 desktop ≈ %5.0f KB)", k as NSString, Double(v) / 1000 / mpx, Double(v) / 1000 / mpx * 2600 * 1688 / 1e6)) }
     }
 
+    /// `--mode badge`: per filter variant, one stream over the first matched window (sourceRect = its frame grown by
+    /// 16 pt): whether macOS badges it (a `screencapture -l` of the window is written per variant to `dump` dir), the
+    /// alpha around and inside it, frames delivered while it is static, and whether a window covering it shows.
+    public static func badge(match: String, seconds: Int, dump: String?, log: @escaping (String) -> Void) async throws {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let pick = ProcessInfo.processInfo.environment["MIRAGE_PROBE_WINDOW"].flatMap { UInt32($0) }
+        guard let w = content.windows.first(where: { ($0.title ?? "").contains(match) && (pick == nil || $0.windowID == pick) }), let display = content.displays.first(where: { $0.frame.contains(CGPoint(x: w.frame.midX, y: w.frame.midY)) }) ?? content.displays.first else { log("no window matches"); return }
+        let ppp = Double(NSScreen.screens.first?.backingScaleFactor ?? 2)
+        let src = w.frame.insetBy(dx: -16, dy: -16).offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+        let others = content.windows.filter { $0.windowID != w.windowID }
+        let apps = content.applications
+        let variants: [(String, SCContentFilter)] = [
+            ("independent", SCContentFilter(desktopIndependentWindow: w)),
+            ("exclude-windows", SCContentFilter(display: display, excludingWindows: others)),
+            ("exclude-apps", SCContentFilter(display: display, excludingApplications: apps, exceptingWindows: [w])),
+        ]
+        for (name, filter) in variants {
+            let probe = LayerProbe()
+            let c = SCStreamConfiguration()
+            let independent = name == "independent"
+            if !independent { c.sourceRect = src }
+            c.width = Int((independent ? w.frame.width : src.width) * ppp) & ~1; c.height = Int((independent ? w.frame.height : src.height) * ppp) & ~1
+            c.pixelFormat = kCVPixelFormatType_32BGRA; c.showsCursor = false; c.queueDepth = 3; c.shouldBeOpaque = false
+            c.minimumFrameInterval = CMTime(value: 1, timescale: 30); c.capturesAudio = false
+            c.ignoreShadowsSingleWindow = true; c.includeChildWindows = true; c.ignoreShadowsDisplay = true
+            let s = SCStream(filter: filter, configuration: c, delegate: nil)
+            let t = Target(window: w)
+            t.stream = s
+            try s.addStreamOutput(probe, type: .screen, sampleHandlerQueue: probe.queue)
+            probe.queue.sync { probe.targets.append(t) }
+            var r0 = rusage(); getrusage(RUSAGE_SELF, &r0)
+            try await s.startCapture()
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            if let dump {
+                let out = "\(dump)/badge-\(name).png"
+                let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture"); p.arguments = ["-x", "-o", "-l\(w.windowID)", out]
+                try? p.run(); p.waitUntilExit()
+            }
+            let f0 = probe.queue.sync { t.frames }
+            try await Task.sleep(nanoseconds: UInt64(max(1, seconds)) * 1_000_000_000)
+            var r1 = rusage(); getrusage(RUSAGE_SELF, &r1)
+            let (frames, last) = probe.queue.sync { (t.frames, t.last) }
+            try? await s.stopCapture()
+            var report = "\(name): \(c.width)x\(c.height), \(frames - f0) frames in \(seconds) s while static"
+            if let pb = last {
+                CVPixelBufferLockBaseAddress(pb, .readOnly)
+                let base = CVPixelBufferGetBaseAddress(pb)!.assumingMemoryBound(to: UInt8.self), stride = CVPixelBufferGetBytesPerRow(pb)
+                let pw = CVPixelBufferGetWidth(pb), ph = CVPixelBufferGetHeight(pb)
+                func px(_ x: Int, _ y: Int) -> String { let o = min(ph - 1, y) * stride + min(pw - 1, x) * 4; return "bgra(\(base[o]),\(base[o+1]),\(base[o+2]),\(base[o+3]))" }
+                let m = Int(16 * ppp)
+                let x0 = m, y0 = m, x1 = pw - m - 1, y1 = ph - m - 1
+                report += "; edge alpha L \(base[(ph/2)*stride + x0*4+3]),\(base[(ph/2)*stride + (x0+1)*4+3]) R \(base[(ph/2)*stride + x1*4+3]),\(base[(ph/2)*stride + (x1-1)*4+3]) T \(base[y0*stride + (pw/2)*4+3]),\(base[(y0+1)*stride + (pw/2)*4+3]) B \(base[y1*stride + (pw/2)*4+3]),\(base[(y1-1)*stride + (pw/2)*4+3])"
+                report += "; margin \(px(m / 2, ph / 2)) corner \(px(m + 2, m + 2)) centre \(px(pw / 2, ph / 2))"
+                CVPixelBufferUnlockBaseAddress(pb, .readOnly)
+                if let dump, let img = CGImage.fromBGRA(pb) {
+                    let url = URL(fileURLWithPath: "\(dump)/frame-\(name).png")
+                    if let d = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) { CGImageDestinationAddImage(d, img, nil); CGImageDestinationFinalize(d) }
+                }
+            } else { report += "; no frame" }
+            let cpu = Double(r1.ru_utime.tv_sec - r0.ru_utime.tv_sec + r1.ru_stime.tv_sec - r0.ru_stime.tv_sec) + Double(r1.ru_utime.tv_usec - r0.ru_utime.tv_usec + r1.ru_stime.tv_usec - r0.ru_stime.tv_usec) / 1e6
+            log(report + String(format: "; probe CPU %.0f ms", cpu * 1000))
+        }
+    }
+
     public static func run(match: String, seconds: Int, scale: Double, dump: String?, mode: String = "window", log: @escaping (String) -> Void) async throws {
         if mode == "codec" { try await codec(log: log); return }
+        if mode == "badge" { try await badge(match: match, seconds: seconds, dump: dump, log: log); return }
         let probe = LayerProbe()
         hostLog = log
         // What the window list looks like: owner, level, size, alpha, per window (titles only for matched windows).
@@ -167,7 +234,7 @@ public final class LayerProbe: NSObject, SCStreamOutput, @unchecked Sendable {
               let pb = CMSampleBufferGetImageBuffer(sb) else { return }
         guard let t = targets.first(where: { $0.stream === stream }) else { return }
         t.frames += 1
-        if t.firstFrameNanos == 0 { t.firstFrameNanos = Clock.nowNanos() }
+        if t.firstFrameNanos == 0 { t.firstFrameNanos = Clock.nowNanos(); if let a = attachments.first { hostLog("    frame info: " + a.map { "\($0.key.rawValue)=\($0.value)" }.sorted().joined(separator: " ").replacingOccurrences(of: "\n", with: " ")) } }
         let surf = CVPixelBufferGetIOSurface(pb).map { IOSurfaceGetID($0.takeUnretainedValue()) } ?? 0
         if t.frames <= 6 || t.frames % 50 == 0 {
             // Same IOSurface as last time = SCK did not render anything new (a free "unchanged" check), and a byte compare says whether the pixels differ.
@@ -189,5 +256,18 @@ public final class LayerProbe: NSObject, SCStreamOutput, @unchecked Sendable {
             let keys = a.keys.map { $0.rawValue }.sorted().joined(separator: " ")
             hostLog("    first frame of window \(t.window.windowID): \(CVPixelBufferGetWidth(pb))x\(CVPixelBufferGetHeight(pb)) attachments: \(keys) contentRect \(a[.contentRect] ?? "nil") scale \(a[.contentScale] ?? "nil") scaleFactor \(a[.scaleFactor] ?? "nil")")
         }
+    }
+}
+
+extension CGImage {
+    /// A BGRA pixel buffer as an image (probe dumps).
+    static func fromBGRA(_ pb: CVPixelBuffer) -> CGImage? {
+        CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb), stride = CVPixelBufferGetBytesPerRow(pb)
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
+        let data = Data(bytes: base, count: stride * h)
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
+        return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: stride, space: CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue), provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
     }
 }

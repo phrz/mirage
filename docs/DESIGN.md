@@ -176,8 +176,9 @@ current. Unified mode later maps these same layers onto native `NSWindow`s. Tran
 stream remains as the fallback for anything not attributable to a window.
 
 **As built, M3.1 (2026-10-18).** Every window at CGWindow level 0 of a real app (not the dock, not the
-menu bar), front first, up to 16 windows or 48 Mpx, gets a `desktopIndependentWindow` SCStream at the
-stream's pixel scale, shadow left out, the off-screen part included, child windows included (macOS 26
+menu bar), front first, up to 16 windows or 48 Mpx, gets its own SCStream at the stream's pixel scale, shadow
+left out (since 2026-10-19 a display filter excluding every other window, not `desktopIndependentWindow`: see §6
+"No screen-sharing badge"), child windows included (macOS 26
 draws a titled window's traffic lights in a 66×20 child window of their own; the window list folds such
 children into their parent). The display stream excludes exactly the windows the viewer holds as layers,
 and their children, and is captured without shadows; the viewer draws a macOS-style soft shadow per layer
@@ -1507,3 +1508,54 @@ frames in which any 64-px block changed. It counts only blocks that belong to ex
 - No frame shows refined next to unrefined blocks within a layer except during a crossfade. The viewer's
   per-layer counters (`steps`, `looseRefinements` in `--stats` layers) agree: no refinement block was ever
   presented on its own. Watch and drag scenarios: stale bench pixels 0, fill 0, stale commits 0.
+
+**No screen-sharing badge on layered windows (phrz, 2026-10-19).** macOS paints a purple screen-sharing pill
+in place of the traffic lights on every window a capture names. phrz's tests, repeated with
+`miraged probe-layers --mode badge`:
+
+| Filter | Badge |
+|---|---|
+| `desktopIndependentWindow` | yes |
+| display including the window | yes |
+| display excluding the window | no (the excluded window) |
+| display excluding every *other* window | no |
+
+The last one is now how each window layer is captured. It shows normal traffic lights, and the window
+renders whole even where others cover it.
+- **Capture.** A display stream with `sourceRect` on the window's frame (points) and the output at the layer's
+  pixel size. The filter excludes every window ScreenCaptureKit lists except the layer's own window and its
+  children: other apps' windows, the other layers, and the wallpaper and desktop-icon windows. The layer
+  therefore has transparency around its rounded corners. Excluding the applications instead
+  (`excludingApplications:exceptingWindows:`) leaves an opaque black backstop around the window. The part
+  of a window outside the display is no longer captured; the streamer already treated those tiles as
+  occluded.
+- **Exclusion list.** Windows that appear over a layer (within 64 pt) are added to its filter. The update
+  is serialized, latest wins. Windows already excluded stay excluded, so churn elsewhere costs nothing.
+  For the 100–300 ms until a newly opened menu is excluded, it can be captured into the layer underneath.
+  The viewer draws the same menu as a cut-out at the same place, so this does not show. Windows
+  ScreenCaptureKit does not list (other windows' traffic-light children) cannot be excluded and stay in the
+  capture where they overlap.
+- **Following a moving window.** On each window-list change the capture moves `sourceRect`. A frame is
+  passed on only if its `screenRect` is the window's current frame. For a window whose edges are opaque
+  (learned from the first frames; the outermost pixel is the anti-aliased border, about 89 % alpha), a frame
+  is also dropped when an edge midpoint is transparent: the window moved before the list said so. A
+  bench drag drops about 100 stale and 20 shifted frames per 30 s, and none reach the viewer. The 30 s log
+  line "window captures" counts them. `MIRAGE_DEBUG_CAPTURE` logs every frame.
+- **Cost.** Like `desktopIndependentWindow`, a source-rect stream reports the whole rect dirty every
+  interval (about 8.5 frames/s for a visible window at 10 fps, 0.5–0.9 ms of diff each). Per layer the
+  cost is the same order as before, and the output buffers are window-sized. Comparison on this MacBook,
+  4 bench windows plus the desktop, 20 s at steady state, with the person's own apps running: host
+  1.3 s CPU (new) against 2.7 s (old), RSS 110 MB both. Extrapolated to 16 layers: about 10 % of one core
+  for the diff.
+
+  The 16-layer run on mac-daddy could not run: a test host started from a temporary path has no
+  screen-recording grant (TCC ties the grant to the binary's path). It needs a one-time grant or a deployed
+  binary.
+- **Checks on loopback** (bench windows only):
+  - The bench title bars, screenshotted while layered, show normal traffic lights.
+  - A covered window's capture shows the whole window (`--mode badge` dump).
+  - The fresh-connection frame sheet is unchanged: still → middle → lossless per window, a burst as direct
+    plus one crossfade.
+  - Watch and drag scenarios: stale bench pixels 0, fill 0, stale commits 0.
+- **No including filter anywhere.** The display layer excludes windows. The codec probe now also excludes
+  windows instead of naming the desktop windows.
