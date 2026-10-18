@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import MirageCore
 
 /// Scripted interactions for `--headless --scenario NAME:SECONDS`, driven against the
@@ -20,7 +21,7 @@ final class ScenarioRunner {
     private var lastBench: ControlMessage.WindowInfo?
     /// The bench window, or the last one seen (a window-list update can momentarily drop it).
     private func bench() -> ControlMessage.WindowInfo? {
-        if let w = session.windowsSnapshot().first(where: { $0.title.contains("Mirage Test Bench") && !$0.title.contains("overlay") && !$0.title.contains("icons") }) { lastBench = w }
+        if let w = session.windowsSnapshot().first(where: { $0.title.contains("Mirage Test Bench") && ($0.app ?? "Mirage Test Bench") == "Mirage Test Bench" && !$0.title.contains("overlay") && !$0.title.contains("icons") }) { lastBench = w }
         return lastBench
     }
     /// The bench's visible part (it may have drifted partly off-screen); points are picked inside it,
@@ -82,7 +83,7 @@ final class ScenarioRunner {
     private func guardsStillHold() -> Bool {
         guard let status = session.hostStatus else { session.log("scenario \(name): ABORT, host status lost"); return false }
         guard !status.consoleLocked else { session.log("scenario \(name): ABORT, host console LOCKED"); return false }
-        if name == "drag", status.inputSink == true { return true }
+        if name == "drag" || name == "unified", status.inputSink == true { return true }
         guard status.frontmostWindowID == guardedWindowID || status.frontmostApp == "Mirage Test Bench" else {
             session.log("scenario \(name): ABORT, focus moved to \(status.frontmostApp) \(status.frontmostWindowID) '\(status.frontmostWindowTitle)'"); return false
         }
@@ -256,7 +257,7 @@ final class ScenarioRunner {
         guard !status.consoleLocked else { session.log("scenario \(name): ABORT, host console is LOCKED"); return }
         // In input-sink mode nothing the script sends can reach the host's input (window commands move only
         // the bench's own windows there), so the bench need not be frontmost for the drag scenario.
-        let sinkDrag = name == "drag" && status.inputSink == true
+        let sinkDrag = (name == "drag" || name == "unified") && status.inputSink == true
         guard sinkDrag || status.frontmostWindowID == w.id || status.frontmostApp == "Mirage Test Bench" else {
             session.log("scenario \(name): ABORT, bench is not frontmost (front: \(status.frontmostApp) \(status.frontmostWindowID) '\(status.frontmostWindowTitle)')"); return
         }
@@ -394,8 +395,73 @@ final class ScenarioRunner {
                 try? await Task.sleep(for: .milliseconds(800))
                 dir = -dir
             }
+        case "unified":
+            await unifiedRun(end: end, ppp: ppp)
         default:
             session.log("unknown scenario \(name)")
+        }
+    }
+
+    // MARK: Unified mode (M3.2): the bench's native window moved and raised here, as the window server would on a drag;
+    // nothing is injected, the host follows through window commands.
+    private(set) var localMoveMs: [Double] = []      // per step: time for the local window to take the new frame
+    private(set) var stepJitterMs: [Double] = []     // per burst: worst gap between consecutive local moves (target 16 ms)
+    private(set) var redraws: [Int] = []             // per burst: frames the moved window redrew during its move
+    private(set) var switchConfirmMs: [Double] = []  // window switches: host list shows the raised window in front
+    private(set) var switchKB: [Double] = []
+    private func unifiedRun(end: Date, ppp: Double) async {
+        guard let u = await MainActor.run(body: { session.unified }) else { session.log("scenario unified: ABORT, not in Unified mode (--unified)"); return }
+        session.watchWindowID = bench()?.id ?? 0
+        var dir: CGFloat = 1
+        var round = 0
+        while Date() < end {
+            guard guardsStillHold() else { break }
+            let benches = session.windowsSnapshot().filter { $0.title.contains("Mirage Test Bench") && $0.app == "Mirage Test Bench" && $0.isLayered && !$0.title.contains("overlay") && !$0.title.contains("icons") }
+            guard let target = benches.first, let w = await MainActor.run(body: { u.windows[target.id] }) else { try? await Task.sleep(for: .milliseconds(200)); continue }
+            round += 1
+            // Drag burst: 50 steps of 3×1.5 pt (6×3 px at 2x) per 16 ms, like the Desktop-mode drag.
+            let bytes0 = session.totalBytes()
+            let drawn0 = await MainActor.run { w.remoteView.framesDrawn }
+            var worst = 0.0, last = Clock.nowNanos()
+            for _ in 0..<50 {
+                let t0 = Clock.nowNanos()
+                await MainActor.run {
+                    var o = w.frame.origin; o.x += 3 * dir; o.y -= 1.5 * dir
+                    w.setFrameOrigin(o)
+                }
+                let t1 = Clock.nowNanos()
+                localMoveMs.append(Double(t1 - t0) / 1e6)
+                worst = max(worst, Double(Clock.elapsed(since: last, now: t1)) / 1e6); last = t1
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            let released = Clock.nowNanos()
+            let final = await MainActor.run { u.hostFrame(w.frame) }
+            let during = Double(session.totalBytes() - bytes0) / 1000
+            var confirmed: Double? = nil
+            for _ in 0..<300 {
+                try? await Task.sleep(for: .milliseconds(10))
+                if let f = session.windowsSnapshot().first(where: { $0.id == target.id })?.frame, abs(f.x - final.x) <= 2, abs(f.y - final.y) <= 2 { confirmed = Double(Clock.elapsed(since: released, now: Clock.nowNanos())) / 1e6; break }
+            }
+            let drawn = await MainActor.run { w.remoteView.framesDrawn } - drawn0
+            confirmMs.append(confirmed ?? 9999); burstKB.append(during); stepJitterMs.append(worst); redraws.append(drawn); bursts += 1
+            session.log(String(format: "scenario unified: drag %d: %.1f KB during, worst step gap %.1f ms, %d redraws of the window, host confirmed after %@", bursts, during, worst, drawn, confirmed.map { String(format: "%.0f ms", $0) } ?? "no confirmation in 3 s"))
+            let bytes1 = session.totalBytes()
+            try? await Task.sleep(for: .seconds(3))
+            settleKB.append(Double(session.totalBytes() - bytes1) / 1000)
+            // Window switch: raise the other bench window here (as a click would make it key), measure the host's echo.
+            if benches.count >= 2, let other = await MainActor.run(body: { u.windows[benches[round % benches.count].id] }) {
+                let b0 = session.totalBytes(), t0 = Clock.nowNanos()
+                await MainActor.run { u.raise(other) }
+                var got: Double? = nil
+                for _ in 0..<300 {
+                    try? await Task.sleep(for: .milliseconds(10))
+                    if session.hostOrder().first(where: { $0.windowLevel == 0 })?.id == other.remoteID { got = Double(Clock.elapsed(since: t0, now: Clock.nowNanos())) / 1e6; break }
+                }
+                try? await Task.sleep(for: .seconds(2))
+                switchConfirmMs.append(got ?? 9999); switchKB.append(Double(session.totalBytes() - b0) / 1000)
+                session.log(String(format: "scenario unified: switch to %u: host raised it after %@, %.1f KB in 2 s", other.remoteID, got.map { String(format: "%.0f ms", $0) } ?? "never (input sink records raises)", switchKB.last!))
+            }
+            dir = -dir
         }
     }
 }

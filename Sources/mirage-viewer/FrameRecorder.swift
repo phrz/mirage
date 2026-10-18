@@ -60,3 +60,31 @@ final class FrameRecorder {
         }
     }
 }
+
+/// Test knob `MIRAGE_TEST_UNIFIED_SHOTS=<dir>` (Unified mode): every 2 s, each remote window's content as its native
+/// window draws it (`win-<id>-NNN.png`, full size, alpha kept), plus `unified.jsonl` with the local frames. Only
+/// windows the host captures as layers, so a loopback run with MIRAGE_LAYER_APPS shows nothing of the person's screen.
+enum UnifiedShots {
+    static let directory: URL? = ProcessInfo.processInfo.environment["MIRAGE_TEST_UNIFIED_SHOTS"].map { URL(fileURLWithPath: $0) }
+    static func write(_ c: Compositor, source: PixelRect, context: MetalContext, to url: URL) {
+        let w = max(1, source.width), h = max(1, source.height)
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false)
+        d.usage = [.renderTarget, .shaderRead]; d.storageMode = .private
+        guard let target = context.device.makeTexture(descriptor: d) else { return }
+        SceneRenderer.renderCrop(c, source: source, displacements: [], bandColors: [:], context: context, target: target, clear: MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0))
+        let stride = w * 4
+        guard let buf = context.device.makeBuffer(length: stride * h, options: .storageModeShared), let cb = context.commandQueue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return }
+        blit.copy(from: target, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0), sourceSize: MTLSize(width: w, height: h, depth: 1),
+                  to: buf, destinationOffset: 0, destinationBytesPerRow: stride, destinationBytesPerImage: stride * h)
+        blit.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        let data = Data(bytes: buf.contents(), count: stride * h)
+        DispatchQueue.global(qos: .utility).async {
+            guard let provider = CGDataProvider(data: data as CFData),
+                  let img = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: stride, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                    bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue), provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
+                  let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else { return }
+            CGImageDestinationAddImage(dest, img, nil)
+            CGImageDestinationFinalize(dest)
+        }
+    }
+}

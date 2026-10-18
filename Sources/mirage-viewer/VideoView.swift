@@ -103,8 +103,10 @@ final class VideoNSView: NSView {
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300), execute: w)
     }
 
+    /// Forget what was requested (back from Unified mode, which asks for its own size).
+    func resetStreamRequest() { lastRequested = (0, 0) }
     func sendStreamRequest() {
-        guard let session, let model, bounds.width > 0 else { return }
+        guard let session, let model, bounds.width > 0, !model.unified else { return }
         let scale = window?.backingScaleFactor ?? 2
         let w = Int(bounds.width * scale * model.pixelFactor), h = Int(bounds.height * scale * model.pixelFactor)
         guard (w, h) != lastRequested else { return }
@@ -270,20 +272,7 @@ final class VideoNSView: NSView {
         session.predict(kind: .scroll, windowID: w.id, rect: rect, dx: sdx, dy: sdy, inputSeq: seq)
     }
 
-    /// Viewer-local shortcuts: ⌃⌥⌘ + S (stats), ↑/↓ (bitrate), Q (quit). Everything else goes to the host.
-    private func handleLocal(_ e: NSEvent) -> Bool {
-        let local: NSEvent.ModifierFlags = [.control, .option, .command]
-        guard e.modifierFlags.intersection([.control, .option, .command, .shift]) == local else { return false }
-        switch e.keyCode {
-        case 1: onToggleStats?(); return true                       // S
-        case 126: Task { @MainActor in session?.adjustBitrate(by: 200) }; return true   // ↑
-        case 125: Task { @MainActor in session?.adjustBitrate(by: -200) }; return true  // ↓
-        case 12: session?.stop(); NSApp.terminate(nil); return true  // Q
-        case 36: session?.flushInput(); return true                  // ↩: send what was typed during a gap
-        case 51: session?.discardInput(); return true                // ⌫: drop it
-        default: return false
-        }
-    }
+    private func handleLocal(_ e: NSEvent) -> Bool { MainActor.assumeIsolated { LocalShortcuts.handle(e, session: session) } }
 
     private func key(_ e: NSEvent, down: Bool) {
         guard !observeOnly else { return }
@@ -291,7 +280,7 @@ final class VideoNSView: NSView {
                                  characters: down ? e.characters : nil)))
     }
     override func keyDown(with event: NSEvent) { if !handleLocal(event) { key(event, down: true) } }
-    override func keyUp(with event: NSEvent) { key(event, down: false) }
+    override func keyUp(with event: NSEvent) { if !observeOnly, event.modifierFlags.intersection([.control, .option, .command, .shift]) == [.control, .option, .command] { return }; key(event, down: false) }
     override func flagsChanged(with event: NSEvent) { if !observeOnly { session?.send(.modifiers(.init(keyCode: event.keyCode, modifiers: flags(event)))) } }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         // Swallow ⌘-shortcuts so the viewer's own menu does not eat them; forward to the host.
@@ -310,7 +299,6 @@ struct VideoView: NSViewRepresentable {
         let v = VideoNSView(frame: .zero)
         v.model = model
         v.attach(session)
-        v.onToggleStats = { model.showStats.toggle() }
         DispatchQueue.main.async { v.window?.makeFirstResponder(v) }
         return v
     }

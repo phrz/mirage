@@ -92,6 +92,16 @@ final class WindowTracker {
                 if slack.intersection(w.frame) == w.frame { children[p.id, default: []].append(w.id); childIDs.insert(w.id); break }
             }
         }
+        // The traffic lights (macOS 26+: a child window of their own, ~66×20 pt near the parent's top-left corner):
+        // published relative to the parent so Unified mode can handle them locally.
+        for i in windows.indices {
+            guard let kids = children[windows[i].id] else { continue }
+            let p = windows[i].frame
+            if let c = kids.compactMap({ id in windows.first { $0.id == id }?.frame }).first(where: { f in
+                let w = Double(f.width) / pxPerPoint, h = Double(f.height) / pxPerPoint
+                return w >= 40 && w <= 100 && h >= 12 && h <= 32 && Double(f.x - p.x) / pxPerPoint < 40 && Double(f.y - p.y) / pxPerPoint < 40
+            }) { windows[i].controls = PixelRect(x: c.x - p.x, y: c.y - p.y, width: c.width, height: c.height) }
+        }
         if !childIDs.isEmpty {
             windows.removeAll { childIDs.contains($0.id) }
             for i in windows.indices { windows[i].z = i }

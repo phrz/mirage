@@ -29,6 +29,8 @@ final class ViewerModel: ObservableObject {
     @Published var inputQueued = 0
     @Published var inputDropped = 0
     @Published var inputHeld = false
+    /// Unified mode: remote windows as native windows (DESIGN §3.2); Desktop mode otherwise. Local; no reconnect.
+    @Published var unified = false
 
     struct Stats {
         var rttMs = 0.0, fps = 0.0, kbps = 0.0, frameAgeMs = 0.0, decodeMs = 0.0
@@ -116,6 +118,19 @@ final class ViewerSession: @unchecked Sendable {
     /// Every byte from the host (video, tiles, control messages), cumulative: scenario bytes-during-a-burst.
     private var sTotalBytes = 0, sControlBytes = 0
     func totalBytes() -> Int { statsLock.lock(); defer { statsLock.unlock() }; return sTotalBytes + sControlBytes }
+    /// Native-chrome messages (menus, apps, icons): bytes so far, and the handler (main actor).
+    private var sChromeBytes = 0
+    func chromeBytes() -> Int { statsLock.lock(); defer { statsLock.unlock() }; return sChromeBytes }
+    @MainActor var onChrome: ((ControlMessage) -> Void)?
+    /// Sends a control message (native chrome requests).
+    func sendControl(_ m: ControlMessage) { sender?.send(m) }
+    /// What the viewer shows (Unified mode); re-sent on every new connection.
+    private var viewInterest: ControlMessage.ViewInterest?
+    func setViewInterest(_ v: ControlMessage.ViewInterest) {
+        guard v != viewInterest else { return }
+        viewInterest = v
+        sender?.send(.viewInterest(v))
+    }
     private var rateState = ControlMessage.RateState(targetKbps: 0, capacityKbps: 0, queueMs: 0, rung: 0, scale: 1, tileBudgetKbps: 0, videoKbps: 0, tileKbps: 0)
     @MainActor private var lastRequest: ControlMessage.StreamRequest?
     @MainActor private var pendingRequest: ControlMessage.StreamRequest?
@@ -154,6 +169,8 @@ final class ViewerSession: @unchecked Sendable {
     func resetWatched() { videoQueue.async { self.watchedTileBytes = 0; self.watchedTileCount = 0; self.watchedDirectBytes = 0; self.watchedVideoFrames = 0; self.watchedCopyRects = 0 } }
     func windowsSnapshot() -> [ControlMessage.WindowInfo] { predictorLock.lock(); defer { predictorLock.unlock() }; return windows }
     var scenario: ScenarioRunner?
+    /// Unified mode's controller while it is on (scenarios drive its windows).
+    @MainActor weak var unified: UnifiedController?
 
     init(host: String, port: UInt16, pairCode: String?, model: ViewerModel) {
         self.host = host; self.port = port; self.pairCode = pairCode; self.model = model
@@ -161,6 +178,8 @@ final class ViewerSession: @unchecked Sendable {
         if let context { layerViews[0] = LayerView(id: 0, context: context) }
     }
 
+    /// The host is this Mac (loopback tests).
+    var isLoopback: Bool { ["localhost", "127.0.0.1", "::1"].contains(host) || host == ProcessInfo.processInfo.hostName }
     func log(_ s: String) { FileHandle.standardError.write(Data("\(s)\n".utf8)) }
 
     /// Test only: MIRAGE_TEST_DELAY_MS=N holds every message from the host until N ms after it arrived (order kept
@@ -295,6 +314,7 @@ final class ViewerSession: @unchecked Sendable {
             control.connection.viabilityUpdateHandler = { [weak self] viable in self?.log("path \(viable ? "viable" : "not viable")"); if viable { self?.pathChanged() } }
             control.connection.betterPathUpdateHandler = { [weak self] better in if better { self?.log("a better path is available"); self?.pathChanged() } }
             log("connected: control, tile streams and datagram flow up")
+            if let v = viewInterest { sender?.send(.viewInterest(v)) }   // before the stream: Unified never streams the desktop
             await MainActor.run { if let p = pendingRequest { pendingRequest = nil; requestStream(width: p.width, height: p.height) } }
             await MainActor.run { model.reconnecting = nil; model.error = nil }
             startLoopsOnce()
@@ -435,6 +455,10 @@ final class ViewerSession: @unchecked Sendable {
                 statsLock.lock(); let wasLocked = hostStatus?.consoleLocked; hostStatus = h; statsLock.unlock()
                 if wasLocked != h.consoleLocked, h.consoleLocked || wasLocked == true { log(h.consoleLocked ? "host: \(host)'s screen is locked (window layers paused on the host)" : "host: \(host)'s screen is unlocked") }
                 Task { @MainActor in model.hostStatus = h }
+            case .apps, .icon, .menu:
+                // Native chrome (DESIGN §3.8); counted with the control bytes.
+                if let d = try? Frame.encode(msg) { statsLock.lock(); sControlBytes += d.count; sChromeBytes += d.count; statsLock.unlock() }
+                Task { @MainActor in onChrome?(msg) }
             case .reject(let r):
                 log("host: \(r.reason)")
                 Task { @MainActor in model.error = r.reason; model.status = "host refused"; lastRequest = nil }   // a later resize/bitrate change retries
@@ -666,7 +690,7 @@ final class ViewerSession: @unchecked Sendable {
                 predictorLock.lock(); predictor = Predictor(); predictorLock.unlock()
             } else if let v = ensureLayerView(layer) {
                 // A window layer announced (new, resized, or re-announced on resume): its canvas at the window's pixel size.
-                v.compositor.configure(width: w, height: h)
+                v.compositor.configureKeepingPixels(width: w, height: h)
                 v.compositor.discardStaged(); v.stagedLossless = []
                 v.tileCaptureSeq = []
                 predictorLock.lock(); predictor.forget(windowID: layer); predictorLock.unlock()
@@ -1242,6 +1266,59 @@ final class ViewerSession: @unchecked Sendable {
         lf.inputSeq = seq
         predictorLock.lock(); localFrames[windowID] = lf; predictorLock.unlock()
     }
+    // Unified mode (DESIGN §3.5 item 2): native windows move and resize under the window server; each change becomes a
+    // local frame override and a window command, throttled to 20 Hz with a trailing send, so the host follows and the
+    // override retires once the host's list reflects the last command.
+    private var trailingCommand: [UInt32: DispatchWorkItem] = [:]   // main thread
+    private var lastUnifiedCommandNanos: [UInt32: UInt64] = [:]    // main thread
+    @MainActor func moveLayerLocally(windowID: UInt32, to frame: PixelRect) { setLocalFrame(windowID: windowID, frame: frame, action: .move, immediate: false) }
+    /// A local resize: the frame shows at once (the canvas is drawn 1:1, never stretched); the host is told when the live resize ends.
+    @MainActor func resizeLayerLocally(windowID: UInt32, to frame: PixelRect, final: Bool) {
+        if final { setLocalFrame(windowID: windowID, frame: frame, action: .resize, immediate: true); return }
+        predictorLock.lock()
+        let now = Clock.nowNanos()
+        var lf = localFrames[windowID] ?? LocalFrame(frame: frame, inputSeq: .max, releasedNanos: now)
+        lf.frame = frame; lf.inputSeq = .max; lf.releasedNanos = now
+        localFrames[windowID] = lf
+        predictorLock.unlock()
+        onChange?()
+    }
+    @MainActor private func setLocalFrame(windowID: UInt32, frame: PixelRect, action: ControlMessage.WindowCommand.Action, immediate: Bool) {
+        let now = Clock.nowNanos()
+        predictorLock.lock()
+        var lf = localFrames[windowID] ?? LocalFrame(frame: frame, inputSeq: .max, releasedNanos: now)
+        lf.frame = frame; lf.releasedNanos = now; lf.inputSeq = .max   // not retired by an older command's echo
+        localFrames[windowID] = lf
+        predictorLock.unlock()
+        trailingCommand[windowID]?.cancel(); trailingCommand[windowID] = nil
+        let send: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            self.predictorLock.lock(); let f = self.localFrames[windowID]?.frame; self.predictorLock.unlock()
+            guard let f else { return }
+            let seq = self.sendWindowCommand(action == .resize ? .init(id: windowID, action: .resize, x: f.x, y: f.y, width: f.width, height: f.height) : .init(id: windowID, action: .move, x: f.x, y: f.y))
+            self.lastUnifiedCommandNanos[windowID] = Clock.nowNanos()
+            self.predictorLock.lock()
+            if var cur = self.localFrames[windowID], cur.frame == f { cur.inputSeq = seq; cur.releasedNanos = Clock.nowNanos(); self.localFrames[windowID] = cur }
+            self.predictorLock.unlock()
+        }
+        if immediate || Clock.elapsed(since: lastUnifiedCommandNanos[windowID] ?? 0, now: now) > 50_000_000 { send() }
+        else {
+            let w = DispatchWorkItem { MainActor.assumeIsolated { send() } }
+            trailingCommand[windowID] = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60), execute: w)
+        }
+        onChange?()
+    }
+    /// The host's own stacking (front to back), local overrides not applied.
+    func hostOrder() -> [ControlMessage.WindowInfo] { windowsSnapshot() }
+    /// A layer's canvas (Unified mode draws each in its own window).
+    func layerCanvas(_ id: UInt32) -> Compositor? { layerViews[id]?.compositor }
+    /// Displacements (scroll predictions) of one window, in its own canvas coordinates, with its band colours.
+    func displacements(forWindow id: UInt32) -> ([Predictor.Displacement], [UInt32: SIMD4<Float>]) {
+        let (d, c) = displacements()
+        return (d.filter { $0.windowID == id }, c)
+    }
+
     /// Sends a window command stamped with a fresh input sequence (so the host's list can say when it reflects it).
     @discardableResult
     func sendWindowCommand(_ c: ControlMessage.WindowCommand) -> UInt64 {
@@ -1352,6 +1429,13 @@ extension ViewerSession {
             var staleSamples: Int?, staleBenchPixels: Int?, staleAt: [String]?
             var guardDrops: Int?, unknownDesktopTiles: Int?, fillSamples: Int?, unknownVisibleTiles: Int?, preExclusionDrops: Int?
             var samples: [Sample]
+            var unified: UnifiedStats? = nil
+        }
+        struct UnifiedStats: Codable {
+            var windows: Int, hostFramesApplied: Int, localMoves: Int
+            var localMoveMsMedian: Double?, localMoveMsMax: Double?, stepJitterMs: [Double]?, redraws: [Int]?
+            var switchConfirmMs: [Double]?, switchKB: [Double]?
+            var chromeBytes: Int, menuLatencyMs: [Double], menuPresses: Int
         }
         let target = MainActor.assumeIsolated { lastRequest?.bitrateKbps ?? 0 }
         let inputStateNow = inputState()
@@ -1363,7 +1447,7 @@ extension ViewerSession {
             if tail > 500 { videoGaps.append(tail) }
         }
         let pstats = MainActor.assumeIsolated { model.stats.predictions }
-        let out = Out(host: host, seconds: samples.last?.t ?? 0, targetKbps: target,
+        var out = Out(host: host, seconds: samples.last?.t ?? 0, targetKbps: target,
                       width: samples.last?.width ?? 0, height: samples.last?.height ?? 0,
                       fpsMedian: median(steady.map(\.fps)), kbpsMedian: median(steady.map(\.kbps)),
                       frameAgeMsMedian: median(steady.map(\.frameAgeMs)), frameAgeMsP95: p95(steady.map(\.frameAgeMs)),
@@ -1394,6 +1478,14 @@ extension ViewerSession {
                       staleSamples: scenario?.staleSamples, staleBenchPixels: scenario?.stalePurple, staleAt: scenario?.staleAt,
                       guardDrops: videoQueue.sync { guardDrops }, unknownDesktopTiles: unknownDesktop.count, fillSamples: scenario?.fillSamples, unknownVisibleTiles: unknownVisibleCount(), preExclusionDrops: videoQueue.sync { preExclusionDrops },
                       samples: samples)
+        out.unified = MainActor.assumeIsolated { () -> UnifiedStats? in
+            guard let u = unified else { return nil }
+            let lm = scenario?.localMoveMs ?? []
+            return UnifiedStats(windows: u.windows.count, hostFramesApplied: u.hostFramesApplied, localMoves: u.localMoves,
+                                localMoveMsMedian: lm.isEmpty ? nil : median(lm), localMoveMsMax: lm.max(), stepJitterMs: scenario?.stepJitterMs, redraws: scenario?.redraws,
+                                switchConfirmMs: scenario?.switchConfirmMs, switchKB: scenario?.switchKB,
+                                chromeBytes: chromeBytes(), menuLatencyMs: u.chrome?.menuLatencies ?? [], menuPresses: u.chrome?.menuPresses ?? 0)
+        }
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         return (try? enc.encode(out)) ?? Data()
     }

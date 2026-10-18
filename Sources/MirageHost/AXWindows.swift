@@ -19,16 +19,16 @@ final class AXWindows {
 
     struct Target { let id: UInt32; let pid: Int32; let title: String; let bounds: CGRect }   // points, global top-left origin
 
-    /// Applies a command; `target` is the window's current CGWindowList entry; `origin` in points.
-    func apply(_ c: ControlMessage.WindowCommand, target: Target, origin: CGPoint?, completion: ((Bool) -> Void)? = nil) {
+    /// Applies a command; `target` is the window's current CGWindowList entry; `origin` and `size` in points.
+    func apply(_ c: ControlMessage.WindowCommand, target: Target, origin: CGPoint?, size: CGSize? = nil, completion: ((Bool) -> Void)? = nil) {
         queue.async { [self] in
-            let ok = perform(c, target: target, origin: origin)
+            let ok = perform(c, target: target, origin: origin, size: size)
             if ok { applied += 1 } else { failed += 1 }
             completion?(ok)
         }
     }
 
-    private func perform(_ c: ControlMessage.WindowCommand, target: Target, origin: CGPoint?) -> Bool {
+    private func perform(_ c: ControlMessage.WindowCommand, target: Target, origin: CGPoint?, size: CGSize?) -> Bool {
         guard let elem = element(for: target) else {
             if Clock.elapsed(since: lastLogNanos, now: Clock.nowNanos()) > 2_000_000_000 { lastLogNanos = Clock.nowNanos(); log("ax: no accessibility window for \(target.id) (pid \(target.pid), '\(target.title.prefix(30))')") }
             return false
@@ -49,9 +49,17 @@ final class AXWindows {
             let r = AXUIElementSetAttributeValue(elem, kAXMinimizedAttribute as CFString, (c.action == .minimize ? kCFBooleanTrue : kCFBooleanFalse) as CFTypeRef)
             if r != .success { cache[target.id] = nil }
             return r == .success
-        case .close:
+        case .resize:
+            // Size first, then position (a window shrinking from the left edge keeps its right edge where the client put it).
+            guard var s = size, let sv = AXValueCreate(.cgSize, &s) else { return false }
+            let r = AXUIElementSetAttributeValue(elem, kAXSizeAttribute as CFString, sv)
+            if var p = origin, let pv = AXValueCreate(.cgPoint, &p) { _ = AXUIElementSetAttributeValue(elem, kAXPositionAttribute as CFString, pv) }
+            if r != .success { cache[target.id] = nil }
+            return r == .success
+        case .close, .zoom:
             var button: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(elem, kAXCloseButtonAttribute as CFString, &button) == .success, let b = button else { return false }
+            let attr = c.action == .close ? kAXCloseButtonAttribute : kAXZoomButtonAttribute
+            guard AXUIElementCopyAttributeValue(elem, attr as CFString, &button) == .success, let b = button else { return false }
             return AXUIElementPerformAction(b as! AXUIElement, kAXPressAction as CFString) == .success
         }
     }

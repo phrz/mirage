@@ -27,6 +27,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var cursor: CursorMonitor?
     private var windows: WindowTracker?
     private var ax: AXWindows?
+    /// Native chrome (DESIGN §3.8): menus, running apps, icons.
+    private var chrome: NativeChrome?
+    /// What the viewer shows (M3.2): in Unified mode window layers are not held back for being covered on this screen,
+    /// and the display layer is sent only where the viewer shows it (menus, popovers, the status-item strip).
+    private var interest: ControlMessage.ViewInterest?
+    private var unifiedView: Bool { interest?.unified ?? false }
+    private var lastInterestLog: UInt64 = 0
+    /// Window-command targets of windows that left the list (minimized from the viewer), for the restore.
+    private var lastTargets: [UInt32: (target: AXWindows.Target, nanos: UInt64)] = [:]
     private var request: ControlMessage.StreamRequest?
     private var target: ScreenCapturer.Target?
 
@@ -187,6 +196,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if n >= 1 { under.insert(i) }
             if n >= 2 { doubly.insert(i) }
         }
+        if unifiedView { under = []; doubly = [] }   // Unified: no desktop is shown, so none is underlay
         if under != d.underLayer {
             // Uncovered tiles that went out at underlay quality are refined at the normal quality now.
             let uncoveredLossy = d.underlayLossy.subtracting(under)
@@ -194,7 +204,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             d.underLayer = under
         }
         // Desktop under two or more shown windows only shows if both move: its underlay waits until one window covers it.
-        let hidden = displayGuard.guardedTiles(d.tracker, now: now).union(doubly)
+        var hidden = displayGuard.guardedTiles(d.tracker, now: now).union(doubly)
+        if unifiedView {
+            // Unified: the display layer is shown only as menus, popovers, tooltips (cut-out-safe windows above the normal
+            // level, known here, so a new menu costs no extra round trip) and the rects the viewer asks for (status items).
+            let wanted = (interest?.displayRects ?? []) + list.filter { $0.windowLevel != 0 && $0.windowLevel != 20 && $0.windowLevel != 24 && $0.windowLevel != 25 && shown[$0.id] == nil && Self.cutoutSafe($0, displayArea: d.width * d.height) }.map(\.frame)
+            for i in 0..<d.tracker.tileCount { let r = d.tracker.rect(of: i); if !wanted.contains(where: { $0.intersects(r) }) { hidden.insert(i) } }
+            if Clock.elapsed(since: lastInterestLog, now: now) > 10_000_000_000 {
+                lastInterestLog = now
+                let ws = list.filter { w in wanted.contains(w.frame) }.map { "\($0.app ?? "?") L\($0.windowLevel) \($0.frame.width)x\($0.frame.height)" }
+                log("unified: display layer shown for \(wanted.count) rects (\(d.tracker.tileCount - hidden.count) of \(d.tracker.tileCount) tiles): \(ws.prefix(8).joined(separator: ", "))")
+            }
+        }
         d.underlayEdge = insetFrames
         guard hidden != d.occludedTiles else { return }
         let uncovered = d.occludedTiles.subtracting(hidden)
@@ -253,6 +274,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     try self.configure(for: t, req: req)
                     self.injector = InputInjector(displayID: t.display.displayID)
                     self.ax = AXWindows(log: self.log)
+                    let chrome = NativeChrome(log: self.log, send: { [weak self] m in self?.queue.async { self?.sendControlCounted(m) } })
+                    if InputInjector.sinkPath != nil { chrome.sink = { [weak self] m in self?.injector?.record(m) } }
+                    chrome.start()
+                    self.chrome = chrome
                     let cur = CursorMonitor(displayID: t.display.displayID)
                     cur.onShape = { [weak self] s in self?.output?.sendControl(.cursorShape(s)) }
                     cur.onPosition = { [weak self] p in self?.output?.sendControl(.cursorPosition(p)) }
@@ -417,6 +442,22 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     public func handle(input: ControlMessage) {
         if case .windowCommand(let c) = input { queue.async { self.handle(windowCommand: c) }; return }
+        switch input {
+        case .menuRequest(let r): chrome?.menu(r); return
+        case .menuPress(let p): chrome?.press(p, locked: InputInjector.consoleLocked()); return
+        case .iconRequest(let r): chrome?.icon(r); return
+        case .appCommand(let c): chrome?.app(c, locked: InputInjector.consoleLocked()); return
+        case .viewInterest(let v):
+            queue.async {
+                guard v != self.interest else { return }
+                let was = self.unifiedView
+                self.interest = v
+                if was != v.unified { self.log(v.unified ? "viewer: Unified mode (window layers by the viewer's arrangement, display layer only where shown)" : "viewer: Desktop mode") }
+                if let s = self.windows?.current { self.reconcileLayers(s, now: Clock.nowNanos()) }
+            }
+            return
+        default: break
+        }
         if case .refreshTiles(let r) = input {
             queue.async {
                 guard r.layer == 0, let d = self.display else { return }
@@ -442,20 +483,31 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// A window-management decision the client already shows: apply it through Accessibility, and
     /// count it as an input so the next window list can say it reflects it.
     private func handle(windowCommand c: ControlMessage.WindowCommand) {
-        guard let windows, let ax, let s = windows.current, let w = s.byID[c.id], let bounds = s.pointBounds[c.id] else { return }
+        guard let windows, let ax, let s = windows.current else { return }
+        // A window minimized from the viewer is no longer listed: its restore goes to the last target it had.
+        if s.byID[c.id] == nil, c.action == .restore || c.action == .raise, let last = lastTargets[c.id], !InputInjector.consoleLocked() {
+            if InputInjector.sinkPath != nil { injector?.record(.windowCommand(c)); return }
+            statWindowCommands += 1
+            ax.apply(c, target: last.target, origin: nil)
+            return
+        }
+        guard let w = s.byID[c.id], let bounds = s.pointBounds[c.id] else { return }
+        lastTargets[c.id] = (.init(id: w.id, pid: w.pid, title: w.title, bounds: bounds), Clock.nowNanos())
+        if lastTargets.count > 64 { let now = Clock.nowNanos(); lastTargets = lastTargets.filter { Clock.elapsed(since: $0.value.nanos, now: now) < 3_600_000_000_000 } }
         statWindowCommands += 1
         // The same guards as injected input: nothing while the console is locked; in input-sink mode the
         // command is recorded, not applied, except for the measurement bench's own windows (a loopback
         // drag run moves nothing but them).
         if InputInjector.consoleLocked() { return }
-        if InputInjector.sinkPath != nil, w.app != "Mirage Test Bench" || c.action != .move { injector?.record(.windowCommand(c)); return }
+        if InputInjector.sinkPath != nil, w.app != "Mirage Test Bench" || ![.move, .raise, .resize].contains(c.action) { injector?.record(.windowCommand(c)); return }
         let origin = (c.x != nil && c.y != nil) ? windows.originInPoints(x: c.x!, y: c.y!) : nil
+        let size = (c.width != nil && c.height != nil) ? CGSize(width: Double(c.width!) / windows.pxPerPoint, height: Double(c.height!) / windows.pxPerPoint) : nil
         if c.action == .move || c.action == .raise { lastMotionNanos = Clock.nowNanos() }
         if let seq = c.inputSeq { injector?.noteApplied(seq: seq) }
-        ax.apply(c, target: .init(id: w.id, pid: w.pid, title: w.title, bounds: bounds), origin: origin) { [weak self] ok in
+        ax.apply(c, target: .init(id: w.id, pid: w.pid, title: w.title, bounds: bounds), origin: origin, size: size) { [weak self] ok in
             guard let self else { return }
             self.queue.async {
-                if !ok, c.action == .move || c.action == .raise { self.log("window command \(c.action) for \(c.id) failed (no accessibility window?)") }
+                if !ok, c.action == .move || c.action == .raise || c.action == .resize { self.log("window command \(c.action) for \(c.id) failed (no accessibility window?)") }
                 // Make the list reflect it as soon as it happened, not at the next 50 ms tick.
                 if let w = self.windows?.sample(captureSeq: self.captureSeq, now: Clock.nowNanos(), force: true) { self.reconcileLayers(w.sample, now: Clock.nowNanos()); self.pendingMoved += w.moved; self.publishWindows(now: Clock.nowNanos(), full: false) }
             }
@@ -568,6 +620,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     // Window layers the viewer already holds are announced again (their pixel size), then
                     // their capturers restart and the first frame's full diff sends whatever changed.
                     for l in self.layers.values where !l.isDisplay && l.announced { self.sendTileMessage(.reset(layer: l.id, width: l.width, height: l.height), captureNanos: now) }
+                    self.chrome?.resend()
                     if let s = self.windows?.sample(captureSeq: self.captureSeq, now: now, force: true) { self.reconcileLayers(s.sample, now: now) }
                     self.publishWindows(now: now, full: true)
                     self.startTimers()
@@ -590,6 +643,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.rateTimer?.cancel(); self.rateTimer = nil
                 self.capturer = nil; self.output = nil
                 self.layers = [:]
+                self.chrome?.stop(); self.chrome = nil
                 let inj = self.injector; self.injector = nil
                 self.inputQueue.async { inj?.releaseAll() }
                 c.resume()
@@ -669,7 +723,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let occluders = s.windows.filter { plannedIDs.contains($0.id) || Self.cutoutSafe($0, displayArea: displayArea) }
         for w in planned {
             guard let l = layers[w.id] else { continue }
-            let (fraction, covering) = WindowTracker.occlusion(of: w, in: occluders, display: displayRect)
+            var (fraction, covering) = WindowTracker.occlusion(of: w, in: occluders, display: displayRect)
+            let hiddenHere = interest?.hiddenLayers?.contains(w.id) ?? false
+            if unifiedView {
+                // Unified: the viewer stacks windows itself; only the part off this display (not capturable) and a
+                // window minimized there count as hidden.
+                covering = []
+                let on = w.frame.intersection(displayRect).area
+                fraction = hiddenHere ? 0 : Double(on) / Double(max(1, w.frame.area))
+            }
             l.visibleFraction = fraction
             l.frontmost = w.id == frontID
             // Tiles of the layer fully inside a covering rect (or outside the display) are occluded.
@@ -677,7 +739,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let onScreen = l.local(w.frame.intersection(displayRect))
             for i in 0..<l.tracker.tileCount {
                 let r = l.tracker.rect(of: i)
-                if r.intersection(onScreen) != r { occluded.insert(i); continue }
+                if r.intersection(onScreen) != r || hiddenHere && unifiedView { occluded.insert(i); continue }
                 let rd = r.offset(l.frame.x, l.frame.y)
                 if covering.contains(where: { $0.intersection(rd) == rd }) { occluded.insert(i) }
             }
@@ -1658,7 +1720,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let ordered = layersByPriority()
         // Fresh pictures: the display's ladder gates everything until its base is acked; window stills
         // and lossless blocks go one at a time, locus layer first.
-        if let d = display { switch d.fresh { case .base, .climb: return; default: break } }
+        // (Unified mode shows no desktop: its base may never go out, and must not hold the windows back.)
+        if let d = display, !unifiedView { switch d.fresh { case .base, .climb: return; default: break } }
         // Every window's still before any window's lossless blocks: with many large windows (a real desktop)
         // one window's blocks would otherwise hold every other window's first picture back for tens of seconds.
         if let l = ordered.first(where: { if case .still = $0.fresh { return true }; return false }) { freshStep(l, now: now); return }
@@ -1874,6 +1937,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 tiles.subtract(held)
                 for i in held { let c = i % l.tracker.cols - c0, r = i / l.tracker.cols - r0; if c >= 0, r >= 0, c < grid.cols, r < grid.rows { mask[c, r] = false } }
                 l.tracker.defer(Array(held), now: now, delayNanos: 3_600_000_000_000)
+            }
+            // Unified mode: desktop motion nobody sees is not encoded at all (recovery frames still go: the decoder needs them).
+            if tiles.isEmpty, !recovery, unifiedView {
+                l.pendingVideoTiles = []; l.pendingVideoRegion = .zero; l.pendingWholeFrame = false
+                return
             }
         }
         if l.isDisplay { displaySent(Array(tiles)) }

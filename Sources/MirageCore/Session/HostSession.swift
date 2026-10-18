@@ -99,6 +99,7 @@ public enum HostSession {
     static func serveStream(_ stream: MessageStream, conn: HostConnection, remote: String, ctx: HostContext) async throws {
         var authenticated: DeviceRecord?
         var output: ConnectionOutput?
+        var pendingInterest: ControlMessage.ViewInterest?
         while true {
             let msg = try await stream.receive()
             switch msg {
@@ -147,6 +148,7 @@ public enum HostSession {
                     do {
                         let info = try await s.start(req, output: out)
                         conn.streamer = s
+                        if let v = pendingInterest { s.handle(input: .viewInterest(v)) }
                         ctx.log("[\(remote)] streaming \(info.displayName) \(info.width)x\(info.height) @ \(req.bitrateKbps) kbps, datagrams ≤\(out.maxDatagramSize)")
                         out.sendControl(.streamInfo(info))
                     } catch {
@@ -164,7 +166,12 @@ public enum HostSession {
                 conn.streamer?.handle(tileAck: ack)
             case .nack(let n):
                 conn.streamer?.handle(nack: n)
-            case .mouseMove, .mouseButton, .scroll, .key, .modifiers, .windowCommand, .refreshTiles:
+            case .viewInterest(let v):
+                // What the viewer shows (Unified mode); kept for a streamer started later on this connection.
+                guard authenticated != nil else { throw MirageError.protocolViolation("input before auth") }
+                pendingInterest = v
+                conn.streamer?.handle(input: msg)
+            case .mouseMove, .mouseButton, .scroll, .key, .modifiers, .windowCommand, .refreshTiles, .menuRequest, .menuPress, .iconRequest, .appCommand:
                 guard authenticated != nil else { throw MirageError.protocolViolation("input before auth") }
                 conn.streamer?.handle(input: msg)
             default:

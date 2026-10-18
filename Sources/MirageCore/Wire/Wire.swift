@@ -2,7 +2,7 @@ import Foundation
 
 /// Protocol constants shared by host and clients.
 public enum Mirage {
-    public static let protocolVersion = 4
+    public static let protocolVersion = 5
     public static let alpn = "mirage/1"
     public static let defaultPort: UInt16 = 7799
     /// Domain-separation prefix for every hash/signature in the protocol.
@@ -134,6 +134,25 @@ public enum ControlMessage: Codable, Equatable {
     /// Viewer → host: these tiles of a layer have no clean pixels on the viewer (it dropped a write that might
     /// have held a window, or they predate the window becoming a layer); resend them once clear of windows.
     case refreshTiles(RefreshTiles)
+
+    // M3.2 native chrome (DESIGN §3.8): the host's menus, running apps and status items as data.
+    /// Viewer → host: the items of one of an app's menus (`path` empty = the menu bar's titles).
+    case menuRequest(MenuRequest)
+    /// Host → viewer: a menu's items, read through Accessibility.
+    case menu(MenuContent)
+    /// Viewer → host: the person chose a menu item here; press it there (AXPress).
+    case menuPress(MenuPress)
+    /// Host → viewer: the host's regular running apps, on change.
+    case apps(AppList)
+    /// Viewer → host: an app icon it does not have cached; host → viewer: the icon.
+    case iconRequest(IconRequest)
+    case icon(AppIcon)
+    /// Viewer → host: activate (or hide) a host app (the remote dock).
+    case appCommand(AppCommand)
+    /// Viewer → host: what the viewer shows (Unified mode: every window layer by its own arrangement, and only parts
+    /// of the display layer), so the host neither holds back windows covered on its own screen nor streams desktop
+    /// nobody sees.
+    case viewInterest(ViewInterest)
 
     // Input, client → host. Coordinates are normalized to the streamed display: (0,0) top-left, (1,1) bottom-right.
     case mouseMove(MouseMove)
@@ -330,8 +349,12 @@ public enum ControlMessage: Codable, Equatable {
         /// Layered windows: false when the window's own pixels are mostly transparent (an overlay, a desktop-icons
         /// window): it hides nothing behind it, so the desktop shows through it.
         public var opaque: Bool?
-        public init(id: UInt32, pid: Int32, title: String, frame: PixelRect, z: Int, scrollRect: PixelRect? = nil, level: Int? = nil, layered: Bool? = nil, app: String? = nil, cutout: Bool? = nil, excludedFrom: UInt32? = nil, opaque: Bool? = nil) {
-            self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect; self.level = level; self.layered = layered; self.app = app; self.cutout = cutout; self.excludedFrom = excludedFrom; self.opaque = opaque
+        /// The window's traffic lights (close, minimize, zoom, left to right), relative to the window's top-left, when
+        /// the host knows them (macOS 26+ draws them in a child window of their own). Unified mode handles clicks on
+        /// them locally (DESIGN §3.8).
+        public var controls: PixelRect?
+        public init(id: UInt32, pid: Int32, title: String, frame: PixelRect, z: Int, scrollRect: PixelRect? = nil, level: Int? = nil, layered: Bool? = nil, app: String? = nil, cutout: Bool? = nil, excludedFrom: UInt32? = nil, opaque: Bool? = nil, controls: PixelRect? = nil) {
+            self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect; self.level = level; self.layered = layered; self.app = app; self.cutout = cutout; self.excludedFrom = excludedFrom; self.opaque = opaque; self.controls = controls
         }
         /// Whether this window hides what is behind it (layered and not marked transparent).
         public var hidesBehind: Bool { isLayered && (opaque ?? true) }
@@ -377,16 +400,91 @@ public enum ControlMessage: Codable, Equatable {
         public init(layer: UInt32, tiles: [UInt32]) { self.layer = layer; self.tiles = tiles }
     }
     /// Client → host: apply a window-management decision the client already shows (DESIGN §3.5 item 2).
-    /// `move` carries the new frame origin in native stream pixels of the display.
+    /// `move` carries the new frame origin in native stream pixels of the display, `resize` the whole new frame.
     public struct WindowCommand: Codable, Equatable {
-        public enum Action: String, Codable { case raise, move, minimize, restore, close }
+        public enum Action: String, Codable { case raise, move, minimize, restore, close, resize, zoom }
         public var id: UInt32
         public var action: Action
         public var x: Int?
         public var y: Int?
+        public var width: Int?
+        public var height: Int?
         /// The client's input sequence at the time (the host echoes it in the window list once applied).
         public var inputSeq: UInt64?
-        public init(id: UInt32, action: Action, x: Int? = nil, y: Int? = nil, inputSeq: UInt64? = nil) { self.id = id; self.action = action; self.x = x; self.y = y; self.inputSeq = inputSeq }
+        public init(id: UInt32, action: Action, x: Int? = nil, y: Int? = nil, width: Int? = nil, height: Int? = nil, inputSeq: UInt64? = nil) { self.id = id; self.action = action; self.x = x; self.y = y; self.width = width; self.height = height; self.inputSeq = inputSeq }
+    }
+    public struct MenuRequest: Codable, Equatable {
+        public var pid: Int32
+        /// Indices from the menu bar down: [] the bar's titles, [i] menu i's items, [i, j] item j's submenu…
+        public var path: [Int]
+        public init(pid: Int32, path: [Int]) { self.pid = pid; self.path = path }
+    }
+    public struct MenuItem: Codable, Equatable {
+        public var title: String
+        public var enabled: Bool
+        public var separator: Bool
+        public var hasSubmenu: Bool
+        /// The item's mark (✓, •, –), if any.
+        public var mark: String?
+        /// Key equivalent as AppKit wants it (lowercase letter, or a function-key character) and its modifiers
+        /// (`NSEvent.ModifierFlags` raw value), for display: the keystroke itself goes to the host as a key.
+        public var key: String?
+        public var modifiers: UInt?
+        public init(title: String, enabled: Bool = true, separator: Bool = false, hasSubmenu: Bool = false, mark: String? = nil, key: String? = nil, modifiers: UInt? = nil) {
+            self.title = title; self.enabled = enabled; self.separator = separator; self.hasSubmenu = hasSubmenu; self.mark = mark; self.key = key; self.modifiers = modifiers
+        }
+    }
+    public struct MenuContent: Codable, Equatable {
+        public var pid: Int32
+        public var path: [Int]
+        public var items: [MenuItem]
+        /// Why there is nothing (the app exposes no menu bar through Accessibility): the viewer falls back to pixels.
+        public var error: String?
+        public init(pid: Int32, path: [Int], items: [MenuItem], error: String? = nil) { self.pid = pid; self.path = path; self.items = items; self.error = error }
+    }
+    public struct MenuPress: Codable, Equatable {
+        public var pid: Int32
+        public var path: [Int]
+        /// The chosen item's title: the host checks it before pressing (menus change).
+        public var title: String
+        public init(pid: Int32, path: [Int], title: String) { self.pid = pid; self.path = path; self.title = title }
+    }
+    public struct AppInfo: Codable, Equatable {
+        public var pid: Int32
+        public var bundleID: String
+        public var name: String
+        public var active: Bool
+        public var hidden: Bool
+        public init(pid: Int32, bundleID: String, name: String, active: Bool, hidden: Bool) { self.pid = pid; self.bundleID = bundleID; self.name = name; self.active = active; self.hidden = hidden }
+    }
+    public struct AppList: Codable, Equatable {
+        public var apps: [AppInfo]
+        public init(apps: [AppInfo]) { self.apps = apps }
+    }
+    public struct IconRequest: Codable, Equatable {
+        public var bundleID: String
+        public init(bundleID: String) { self.bundleID = bundleID }
+    }
+    public struct AppIcon: Codable, Equatable {
+        public var bundleID: String
+        /// 128×128 PNG.
+        public var png: Data
+        public init(bundleID: String, png: Data) { self.bundleID = bundleID; self.png = png }
+    }
+    public struct AppCommand: Codable, Equatable {
+        public enum Action: String, Codable { case activate, hide }
+        public var pid: Int32
+        public var action: Action
+        public init(pid: Int32, action: Action) { self.pid = pid; self.action = action }
+    }
+    public struct ViewInterest: Codable, Equatable {
+        /// Unified mode: window layers are shown as separate native windows; the host's own stacking does not hide them.
+        public var unified: Bool
+        /// Display-layer rects the viewer shows (menus, popovers, status items); nil = all of it (Desktop mode).
+        public var displayRects: [PixelRect]?
+        /// Window layers the viewer does not show at the moment (minimized here): no refinement for them.
+        public var hiddenLayers: [UInt32]?
+        public init(unified: Bool, displayRects: [PixelRect]? = nil, hiddenLayers: [UInt32]? = nil) { self.unified = unified; self.displayRects = displayRects; self.hiddenLayers = hiddenLayers }
     }
     public struct Nack: Codable, Equatable {
         public var frameSeq: UInt32

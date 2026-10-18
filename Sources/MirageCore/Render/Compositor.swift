@@ -114,6 +114,20 @@ public final class Compositor {
         fades = []
         clear()
     }
+    /// Like `configure`, but a size change keeps the old picture at the top-left (cropped or with cleared margins) until
+    /// new pixels replace it: a window resized on either end shows its last content, not a blank canvas, while the host
+    /// re-captures it.
+    public func configureKeepingPixels(width: Int, height: Int) {
+        guard let old = canvas, self.width > 0, width > 0, height > 0, width != self.width || height != self.height else { configure(width: width, height: height); return }
+        let ow = self.width, oh = self.height
+        configure(width: width, height: height)
+        guard let new = canvas, let cb = commandQueue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return }
+        blit.copy(from: old, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0), sourceSize: MTLSize(width: min(ow, width), height: min(oh, height), depth: 1),
+                  to: new, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+        blit.endEncoding()
+        cb.commit()
+        bump()
+    }
     private func ensureScratch() -> MTLTexture? {
         if scratch == nil, width > 0 {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
@@ -154,6 +168,9 @@ public final class Compositor {
     }
     public var needsRender: Bool { lock.lock(); defer { lock.unlock() }; return generation != renderedGeneration || !fades.isEmpty }
     public func invalidate() { bump() }
+    /// The canvas's change counter, for presenters that track what they last drew themselves (Unified mode: one
+    /// canvas may be drawn by several native windows, so `needsRender` cannot be shared).
+    public var currentGeneration: Int { lock.lock(); defer { lock.unlock() }; return generation }
     func markRendered() { lock.lock(); renderedGeneration = generation; lock.unlock() }
 
     // MARK: Write targets (DESIGN §3.3 presentation levels)
@@ -543,6 +560,23 @@ public final class Compositor {
         cb.commit()
     }
 
+    /// A window layer's corner radius in pixels, from its alpha along the top-left diagonal (where a rounded corner of
+    /// radius r crosses it at ≈0.29 r). Nil while that corner holds nothing opaque yet (no picture).
+    public func sampleCornerRadius(completion: @escaping (Double?) -> Void) {
+        let n = min(128, width, height)
+        guard n >= 8, let canvas, let cb = commandQueue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder(),
+              let buf = device.makeBuffer(length: n * n * 4, options: .storageModeShared) else { completion(nil); return }
+        blit.copy(from: canvas, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0), sourceSize: MTLSize(width: n, height: n, depth: 1),
+                  to: buf, destinationOffset: 0, destinationBytesPerRow: n * 4, destinationBytesPerImage: n * n * 4)
+        blit.endEncoding()
+        cb.addCompletedHandler { _ in
+            let p = buf.contents().assumingMemoryBound(to: UInt8.self)
+            for i in 0..<n where p[(i * n + i) * 4 + 3] >= 128 { completion(i == 0 ? 0 : Double(i) / 0.2929); return }
+            completion(nil)
+        }
+        cb.commit()
+    }
+
     // MARK: Presentation (single canvas)
 
     /// Draws the canvas into `drawable` at `dest` (drawable pixels), then each displacement. The
@@ -653,8 +687,20 @@ public enum SceneRenderer {
         render(scene, context: context, target: drawable.texture, dest: dest, present: drawable)
     }
 
+    /// Unified mode: one canvas's `source` rect (canvas pixels) drawn 1:1 at the drawable's top-left, with its running
+    /// crossfades and the displacements given in canvas coordinates. A window being resized locally is larger than its
+    /// canvas until the host re-captures it: the rest of the drawable is `clear` (the canvas is never stretched).
+    /// `scale`: drawable pixels per canvas pixel (1 where the stream was sized for the screen).
+    public static func renderCrop(_ c: Compositor, source: PixelRect, scale: Double = 1, displacements: [Predictor.Displacement], bandColors: [UInt32: SIMD4<Float>],
+                                  context: MetalContext, target: MTLTexture, clear: MTLClearColor, present: CAMetalDrawable? = nil) {
+        guard c.width > 0 else { return }
+        let scene = LayerScene(background: c, items: [], displacements: displacements.map { LayerScene.Displacement(layerID: 0, displacement: $0) }, bandColors: bandColors)
+        let s = CGFloat(scale)
+        render(scene, context: context, target: target, dest: CGRect(x: -CGFloat(source.x) * s, y: -CGFloat(source.y) * s, width: CGFloat(c.width) * s, height: CGFloat(c.height) * s), present: present, clear: clear)
+    }
+
     /// Draws the scene into `target` (a drawable's texture, or any BGRA render target in tests).
-    public static func render(_ scene: LayerScene, context: MetalContext, target: MTLTexture, dest: CGRect, present: CAMetalDrawable? = nil) {
+    public static func render(_ scene: LayerScene, context: MetalContext, target: MTLTexture, dest: CGRect, present: CAMetalDrawable? = nil, clear: MTLClearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)) {
         guard let bg = scene.background, bg.width > 0, let cb = context.commandQueue.makeCommandBuffer() else { return }
         let now = Clock.nowNanos()
         // Every visible canvas's running crossfades (settled on the writer's queue, not here), then one render pass.
@@ -663,7 +709,7 @@ public enum SceneRenderer {
         for item in scene.items { if case .layer(let c, _, _, _) = item { fades[ObjectIdentifier(c)] = c.activeFades(now: now) } }
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = target; rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
-        rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        rp.colorAttachments[0].clearColor = clear
         guard let re = cb.makeRenderCommandEncoder(descriptor: rp) else { return }
         let dw = Float(target.width), dh = Float(target.height)
         let sx = Float(dest.width) / Float(bg.width), sy = Float(dest.height) / Float(bg.height)

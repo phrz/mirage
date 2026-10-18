@@ -16,6 +16,8 @@ struct Options {
     var statsJSON: String?
     var scenario: (String, Double)?
     var observe = false
+    /// Start in Unified mode (remote windows as native windows).
+    var unified = false
     /// Seconds after connecting before the video-gap (freeze) metric starts counting.
     var steadyAfter = 3.0
 
@@ -37,6 +39,7 @@ struct Options {
         if let v = value("--scenario") { let p = v.split(separator: ":"); o.scenario = (String(p[0]), p.count > 1 ? Double(p[1]) ?? 30 : 30) }
         if let i = args.firstIndex(of: "--headless") { o.headless = true; args.remove(at: i) }
         if let i = args.firstIndex(of: "--observe") { o.observe = true; args.remove(at: i) }
+        if let i = args.firstIndex(of: "--unified") { o.unified = true; args.remove(at: i) }
         if let i = args.firstIndex(of: "--probe-input") { o.probeInput = true; args.remove(at: i) }
         if let v = value("--window") { let p = v.split(separator: "x").compactMap { Int($0) }; if p.count == 2 { o.window = (p[0], p[1]) } }
         if args.isEmpty { return o }   // launched from Finder/Dock: show the connect window
@@ -55,6 +58,7 @@ struct Options {
                   --scenario NAME:SECONDS  drive the host's "Mirage Test Bench" window: idle | typing | scroll | drag | login | fovea (GUI or headless)
                              keys:N sends N scripted keystrokes to a host in input-sink mode only (input-integrity test)
                   --observe  show the picture but forward no local input (watching a scripted run without disturbing it)
+                  --unified  start in Unified mode: every remote window a native window (⌃⌥⌘U switches Desktop ↔ Unified)
                   ⌃⌥⌘S toggles the stats overlay, ⌃⌥⌘Q quits; all other keys go to the host.
                 """)
             exit(0)
@@ -72,6 +76,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var session: ViewerSession!
     var window: NSWindow!
     var connectWindow: NSWindow?
+    var unified: UnifiedController?
+    var chrome: NativeChromeController?
+    private var modeItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMenu()
@@ -118,6 +125,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if options.window == (1280, 720) { w.setFrameAutosaveName("MirageViewer") }
         w.makeKeyAndOrderFront(nil)
         window = w
+        unified = UnifiedController(session: session, model: model)
+        if let menu = NSApp.mainMenu {
+            let c = NativeChromeController(session: session, model: model, localMainMenu: menu)
+            c.unified = unified; unified?.chrome = c; chrome = c
+        }
+        LocalShortcuts.toggleStats = { [weak self] in self?.model.showStats.toggle() }
+        LocalShortcuts.toggleMode = { [weak self] in self?.setUnified(!(self?.model.unified ?? false)) }
+        if options.unified { setUnified(true) }
         session.start()
         // A scripted run with the window visible: the stats overlay shows the picture being measured.
         if let (name, secs) = options.scenario {
@@ -135,11 +150,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// Desktop ↔ Unified, on the same session: the Desktop window hides and every remote window becomes a native one,
+    /// or back.
+    @MainActor func setUnified(_ on: Bool) {
+        guard let model, let unified, model.unified != on else { return }
+        model.unified = on
+        modeItem?.state = on ? .on : .off
+        if on {
+            window.orderOut(nil)
+            unified.start()
+            chrome?.start()
+        } else {
+            chrome?.stop()
+            unified.stop()
+            window.makeKeyAndOrderFront(nil)
+            if let v = findVideoView(window.contentView) { v.resetStreamRequest(); v.sendStreamRequest() }
+        }
+    }
+    private func findVideoView(_ v: NSView?) -> VideoNSView? {
+        guard let v else { return nil }
+        if let vv = v as? VideoNSView { return vv }
+        for s in v.subviews { if let f = findVideoView(s) { return f } }
+        return nil
+    }
+    @objc func toggleDock(_ sender: Any?) { MainActor.assumeIsolated { if let c = chrome { c.dockVisible.toggle() } } }
+    @objc func toggleUnified(_ sender: Any?) { MainActor.assumeIsolated { setUnified(!(model?.unified ?? false)) } }
+
     func windowWillClose(_ notification: Notification) {
         guard (notification.object as? NSWindow) === window else { return }
         session?.stop(); NSApp.terminate(nil)
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// Not in Unified mode: the Desktop window is hidden there, and remote windows come and go with the host's.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { MainActor.assumeIsolated { !(model?.unified ?? false) && unified?.active != true } }
 
     private func installMenu() {
         let main = NSMenu()
@@ -147,6 +189,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let appMenu = NSMenu()
         let quit = NSMenuItem(title: "Quit Mirage Viewer", action: #selector(quit(_:)), keyEquivalent: "q")
         quit.keyEquivalentModifierMask = [.control, .option, .command]
+        let unifiedItem = NSMenuItem(title: "Unified Windows", action: #selector(toggleUnified(_:)), keyEquivalent: "u")
+        unifiedItem.keyEquivalentModifierMask = [.control, .option, .command]
+        appMenu.addItem(unifiedItem)
+        appMenu.addItem(withTitle: "Show Remote Dock", action: #selector(toggleDock(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
         appMenu.addItem(quit)
         appItem.submenu = appMenu
         let editItem = NSMenuItem(); main.addItem(editItem)
@@ -156,6 +203,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = edit
+        let viewItem = NSMenuItem(); main.addItem(viewItem)
+        let view = NSMenu(title: "View")
+        let mode = NSMenuItem(title: "Unified Windows", action: #selector(toggleUnified(_:)), keyEquivalent: "u")
+        mode.keyEquivalentModifierMask = [.control, .option, .command]
+        view.addItem(mode); modeItem = mode
+        viewItem.submenu = view
+        let windowItem = NSMenuItem(); main.addItem(windowItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowItem.submenu = windowMenu
+        NSApp.windowsMenu = windowMenu
         NSApp.mainMenu = main
     }
     @objc func quit(_ sender: Any?) { session?.stop(); NSApp.terminate(nil) }
@@ -300,7 +357,7 @@ struct StatsOverlay: View {
                 Text("host: \(h.consoleLocked ? "SCREEN LOCKED" : "unlocked")   front: \(h.frontmostApp) — \(h.frontmostWindowTitle.prefix(40))")
                     .foregroundStyle(h.consoleLocked ? .red : .white)
             }
-            Text("⌃⌥⌘S stats  ⌃⌥⌘↑↓ bitrate  ⌃⌥⌘Q quit").foregroundStyle(.secondary)
+            Text("⌃⌥⌘S stats  ⌃⌥⌘U unified  ⌃⌥⌘↑↓ bitrate  ⌃⌥⌘Q quit").foregroundStyle(.secondary)
         }
         .font(.system(size: 11, design: .monospaced))
         .foregroundStyle(.white)
