@@ -102,6 +102,23 @@ final class ScenarioRunner {
     private(set) var settleKB: [Double] = []
     private(set) var confirmMs: [Double] = []
     private(set) var layered = false
+    /// Layered desktop: after each burst, samples of the *display* layer where the bench's caption band was
+    /// before the burst (only where the bench no longer is). Purple there = window pixels in the desktop layer.
+    private(set) var staleSamples = 0, stalePurple = 0
+    private(set) var staleAt: [String] = []
+    private func displayShowsBench(at band: PixelRect, label: String) async -> Bool? {
+        guard let c = session.compositor else { return nil }
+        return await withCheckedContinuation { cont in
+            c.sampleEdgeColor(of: band, bottom: false) { col in
+                let purple = abs(col.x - 0.42) < 0.15 && abs(col.y - 0.20) < 0.15 && abs(col.z - 0.75) < 0.18
+                cont.resume(returning: purple)
+            }
+        }
+    }
+    /// The bench's caption band (display coordinates) for a frame.
+    private func captionBand(_ f: PixelRect, ppp: Double) -> PixelRect {
+        PixelRect(x: f.x + Int(40 * ppp), y: f.y + Int((28 + 20) * ppp), width: min(f.width - Int(80 * ppp), Int(200 * ppp)), height: 2)
+    }
     private func latestMotionNanos() -> UInt64 { max(session.lastWatchedVideoNanos, session.lastWatchedCopyNanos, session.lastWatchedMoveNanos) }
 
     /// `watch`: inject nothing; the bench moves itself (`--drift`). Each burst of motion the host shows in
@@ -129,6 +146,7 @@ final class ScenarioRunner {
             }
             guard Date() < end else { break }
             let burstStart = Clock.nowNanos()
+            let frameBefore = w.frame
             let bytes0 = session.totalBytes()
             let moves0 = session.watchedMoves
             // The burst lasts while video/copy-rects/moves keep touching the window (300 ms quiet ends it).
@@ -141,6 +159,27 @@ final class ScenarioRunner {
             }
             let dur = Double(last - burstStart) / 1e9
             let frames = session.watchedVideoFrames, copies = session.watchedCopyRects, moves = session.watchedMoves - moves0
+            if let now = bench(), now.isLayered, now.frame != frameBefore {
+                // The old caption band, wherever the bench is not now: the display layer must show the desktop there.
+                let ppp = await MainActor.run { session.pixelsPerPoint }
+                let band = captionBand(frameBefore, ppp: ppp)
+                // Only where the scene shows the display layer: no window layer over the band.
+                let coveredByLayer = session.arrangedWindows().contains { $0.isLayered && $0.frame.intersects(band) }
+                let free = coveredByLayer ? PixelRect.zero : band
+                if !free.isEmpty {
+                    Task { [weak self] in
+                        guard let self else { return }
+                        for wait in [1000, 3000] {
+                            try? await Task.sleep(for: .milliseconds(wait == 1000 ? 1000 : 2000))
+                            if let purple = await self.displayShowsBench(at: free, label: "") {
+                                self.staleSamples += 1
+                                if purple { self.stalePurple += 1; self.staleAt.append("\(free.x),\(free.y)+\(wait)ms") }
+                                self.session.log("scenario watch: old caption band \(free.x),\(free.y) \(wait) ms after the burst: display layer shows \(purple ? "BENCH PIXELS (stale)" : "the desktop")")
+                            }
+                        }
+                    }
+                }
+            }
             if frames + copies + moves < 3 || dur < 0.3 { continue }   // a stray refinement frame, not motion
             let during = Double(session.totalBytes() - bytes0) / 1000
             motionFrames.append(frames); motionCopyRects.append(copies); motionFps.append(dur > 0.2 ? Double(frames) / dur : 0)

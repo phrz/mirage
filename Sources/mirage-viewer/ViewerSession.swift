@@ -153,6 +153,15 @@ final class ViewerSession: @unchecked Sendable {
 
     func log(_ s: String) { FileHandle.standardError.write(Data("\(s)\n".utf8)) }
 
+    /// Test only: MIRAGE_TEST_DELAY_MS=N holds every message from the host until N ms after it arrived (order kept
+    /// per stream), so a loopback run sees a WAN-like round trip (no dummynet, no sudo).
+    static let testDelayNanos: UInt64 = ProcessInfo.processInfo.environment["MIRAGE_TEST_DELAY_MS"].flatMap { UInt64($0) }.map { $0 * 1_000_000 } ?? 0
+    static func holdForTestDelay(arrived: UInt64) async {
+        guard testDelayNanos > 0 else { return }
+        let due = arrived + testDelayNanos, now = Clock.nowNanos()
+        if due > now { try? await Task.sleep(nanoseconds: due - now) }
+    }
+
     func start() {
         Task { await run() }
     }
@@ -288,7 +297,7 @@ final class ViewerSession: @unchecked Sendable {
 
     /// The path changed under a stalled connection: redial now (the host resumes the session).
     private func pathChanged() {
-        statsLock.lock(); let stalled = lastHostPacketNanos > 0 && Clock.nowNanos() - lastHostPacketNanos > 2_000_000_000; statsLock.unlock()
+        statsLock.lock(); let stalled = lastHostPacketNanos > 0 && Clock.nowNanos() &- lastHostPacketNanos > 2_000_000_000 && Clock.nowNanos() > lastHostPacketNanos; statsLock.unlock()
         if stalled { log("path changed while stalled: redialing"); dropConnection() }
     }
 
@@ -305,7 +314,7 @@ final class ViewerSession: @unchecked Sendable {
     private func watchdog(now: UInt64) {
         statsLock.lock(); let last = lastHostPacketNanos, since = connectedAtNanos; statsLock.unlock()
         guard sender != nil, last > 0, since > 0 else { return }
-        let silent = Double(now - last) / 1e9
+        let silent = Double(now > last ? now - last : 0) / 1e9   // a packet noted after `now` was taken is not silence (was a UInt64 underflow trap)
         if silent > 12 {
             log(String(format: "no packet from the host for %.0f s: redialing", silent))
             statsLock.lock(); lastHostPacketNanos = 0; statsLock.unlock()
@@ -372,6 +381,7 @@ final class ViewerSession: @unchecked Sendable {
     private func receiveControl(_ control: MessageStream) async throws {
         while true {
             let msg = try await control.receive()
+            await Self.holdForTestDelay(arrived: Clock.nowNanos())
             noteHostPacket(Clock.nowNanos())
             switch msg {
             case .pong(let p):
@@ -428,6 +438,17 @@ final class ViewerSession: @unchecked Sendable {
     private func receiveDatagrams(_ flow: MessageStream, gen myGen: Int) async {
         while !Task.isCancelled {
             guard let d = try? await flow.receiveSome() else { log("datagram flow closed"); return }
+            if Self.testDelayNanos > 0 {
+                // Test delay: the datagram is handled later, not read later (an unread flow drops datagrams).
+                delayQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(Self.testDelayNanos))) { [weak self] in self?.handleDatagram(d, flow: flow, gen: myGen) }
+                continue
+            }
+            handleDatagram(d, flow: flow, gen: myGen)
+        }
+    }
+    private let delayQueue = DispatchQueue(label: "mirage.viewer.testdelay")
+    private func handleDatagram(_ d: Data, flow: MessageStream, gen myGen: Int) {
+        do {   // (scope kept from the receive loop this was moved out of)
             let now = Clock.nowNanos()
             noteHostPacket(now)
             if let frag = VideoFragment.decode(d) {
@@ -456,7 +477,11 @@ final class ViewerSession: @unchecked Sendable {
                 for (seq, bytes, msg) in try parser.feed(d) {
                     let now = Clock.nowNanos()
                     noteHostPacket(now)
-                    videoQueue.async { guard myGen == self.gen else { return }; self.apply(msg, seq: seq, bytes: bytes, now: now) }
+                    if Self.testDelayNanos > 0 {
+                        videoQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(Self.testDelayNanos))) { guard myGen == self.gen else { return }; self.apply(msg, seq: seq, bytes: bytes, now: Clock.nowNanos()) }
+                    } else {
+                        videoQueue.async { guard myGen == self.gen else { return }; self.apply(msg, seq: seq, bytes: bytes, now: now) }
+                    }
                 }
             } catch { log("tile stream: \(error)"); return }
         }
@@ -1116,6 +1141,7 @@ extension ViewerSession {
             var motionMoves: [Int]?, moveFps: [Double]?, burstKB: [Double]?, settleKB: [Double]?, confirmMs: [Double]?, layered: Bool?, layersHeld: Int?, windowCommandsSent: Int?
             var staleTilesDiscarded: Int?, staleTilesCommitted: Int?
             var layers: [LayerDiag]?
+            var staleSamples: Int?, staleBenchPixels: Int?, staleAt: [String]?
             var samples: [Sample]
         }
         let target = MainActor.assumeIsolated { lastRequest?.bitrateKbps ?? 0 }
@@ -1156,6 +1182,7 @@ extension ViewerSession {
                       layered: scenario?.layered, layersHeld: layerViews.count - 1, windowCommandsSent: windowCommandsSent,
                       staleTilesDiscarded: staleDiscards, staleTilesCommitted: staleCommits,
                       layers: videoQueue.sync { layerDiagnostics() },
+                      staleSamples: scenario?.staleSamples, staleBenchPixels: scenario?.stalePurple, staleAt: scenario?.staleAt,
                       samples: samples)
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         return (try? enc.encode(out)) ?? Data()

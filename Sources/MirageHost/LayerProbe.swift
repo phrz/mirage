@@ -78,6 +78,14 @@ public final class LayerProbe: NSObject, SCStreamOutput, @unchecked Sendable {
             }
         }
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        if mode == "list" {
+            // What ScreenCaptureKit lists for the matching app (CGWindow ids, sizes, layers), against CGWindowList.
+            let pids = Set(content.windows.filter { ($0.title ?? "").contains(match) }.compactMap { $0.owningApplication?.processID })
+            for w in content.windows where pids.contains(w.owningApplication?.processID ?? -1) {
+                log(String(format: "  SCK window %u layer %d %.0fx%.0f on-screen %@ '%@'", w.windowID, w.windowLayer, w.frame.width, w.frame.height, w.isOnScreen ? "yes" : "no", String((w.title ?? "").prefix(30)) as NSString))
+            }
+            return
+        }
         let wanted = content.windows.filter { ($0.title ?? "").contains(match) }
         guard !wanted.isEmpty else { log("no on-screen window whose title contains \"\(match)\""); return }
         log("\(wanted.count) matching windows; starting one SCStream each at scale \(scale)")

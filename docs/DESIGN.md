@@ -1273,3 +1273,32 @@ in 60 s instead of 3.95 MB**, refinement done at ~19 s instead of ~44 s, display
 10–14 KB per burst, 0 stale tiles. Not done: re-refining photographic tiles to lossless when the link
 improves to Normal/Local.
 
+**Ghosts on the desktop (fourth mac-daddy run, b7fda04).** After each bench move, fragments of the bench
+(its purple title band, columns of its text) stayed painted on the desktop at its previous positions for
+many seconds. Root cause: the display stream never excluded the bench. Since d5a233b the exclusion
+was applied only when every window to exclude had an `SCWindow`, including the folded child windows. The
+traffic-light child that CGWindowList reports for a titled window (66×20) is not listed by
+ScreenCaptureKit (`miraged probe-layers --mode list`), so the condition never held. The desktop layer kept
+the window, its old positions showed it until the window covered them again, and refinement under it was
+spent on window pixels. a1c707a did not show it only because the bench there drifted over a layered
+window, which hides the desktop layer. Reproduced on loopback with two new test-only knobs:
+`MIRAGE_LAYER_APPS="Mirage Test Bench"` (only the bench becomes a layer, so the rest of the screen is
+desktop) and the viewer's `MIRAGE_TEST_DELAY_MS=145` (every message from the host handled 145 ms after
+it arrived, so the RTT is ~150 ms). The watch scenario now samples the *display* layer at the bench's
+previous caption band, wherever no layer covers it, 1 s and 3 s after each burst (`staleSamples`,
+`staleBenchPixels` in `--stats`). Before: 10 of 10 samples showed bench pixels. Fix: every layer's own
+window is excluded; child windows ScreenCaptureKit does not list stay in the display stream (logged
+once). After: 0 of 10, 1.13 MB in 60 s, the same as before.
+Two safety nets came with it:
+- **Desktop taint (`DisplayTaint`, unit-tested).** For every desktop tile the host records whether the
+  last pixels it sent were captured while a window was there: a window planned as a layer whose still
+  has not landed, or one that moved in the last 600 ms. A tainted tile that becomes visible and clear of
+  windows is re-sent once from the desktop. That is how the first picture's windows are cleaned up:
+  217 tiles in the first 15 s of that run, then none.
+- **Exclusion-lag detector.** While a layer moves, the host samples 16 interior points of the layer
+  against the display capture and logs when the display stream still shows the window. It needs varied
+  colours, since white on white proves nothing, and those areas are treated as tainted. It was silent in
+  the fixed run.
+Also fixed: the viewer's stall watchdog could trap on a UInt64 underflow when a packet was noted after
+it read the clock (crash seen under the test delay; a real race).
+
