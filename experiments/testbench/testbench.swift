@@ -22,10 +22,14 @@ final class App: NSObject, NSApplicationDelegate {
         // `--drift`: an 800×500 window that drags *itself* in 0.8 s bursts of 6×3 pt per 16 ms every 6 s
         // (what the drag scenario does with the pointer), without taking focus and without any input
         // being injected: the window-drag path is measured while the person at the machine keeps working.
-        let isDrift = CommandLine.arguments.contains("--drift")
+        let isDrift = CommandLine.arguments.contains("--drift") || CommandLine.arguments.contains("--still")
+        // `--still`: the drift window without the motion (several instances make a cheap set of windows of our own
+        // to measure per-window capture against), offset by --index N so they do not stack exactly.
+        let isStill = CommandLine.arguments.contains("--still")
+        let index = CommandLine.arguments.firstIndex(of: "--index").flatMap { Int(CommandLine.arguments[$0 + 1]) } ?? 0
         let isStatic = CommandLine.arguments.contains("--static") || isMotion
         let size = isStatic ? NSSize(width: screen.frame.width, height: screen.frame.height - 25) : isDrift ? NSSize(width: 800, height: 500) : NSSize(width: 1100, height: 750)
-        let origin = isStatic ? NSPoint(x: screen.frame.minX, y: screen.frame.minY) : NSPoint(x: screen.frame.minX + 240, y: screen.frame.maxY - 160 - size.height)
+        let origin = isStatic ? NSPoint(x: screen.frame.minX, y: screen.frame.minY) : NSPoint(x: screen.frame.minX + 240 + CGFloat(index * 40), y: screen.frame.maxY - 160 - size.height - CGFloat(index * 30))
         let w = NSWindow(contentRect: NSRect(origin: origin, size: size), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         w.title = "Mirage Test Bench — measurement window started by Claude, safe to ignore"
         let captionHeight: CGFloat = 44
@@ -76,6 +80,8 @@ final class App: NSObject, NSApplicationDelegate {
             tv.isSelectable = false; tv.isEditable = false
             w.orderFrontRegardless()
             updateCaption()
+            window = w
+            if isStill { return }
             var dir: CGFloat = 1
             Timer.scheduledTimer(withTimeInterval: 6.0, repeats: true) { [weak self] _ in
                 guard let self, let win = self.window else { return }

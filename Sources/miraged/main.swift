@@ -9,7 +9,7 @@ struct Miraged: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "miraged",
         abstract: "Mirage host daemon: serves this Mac to paired devices over QUIC.",
-        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Install.self, Uninstall.self],
+        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Install.self, Uninstall.self, ProbeLayers.self],
         defaultSubcommand: Serve.self)
 }
 
@@ -78,6 +78,18 @@ struct Pair: AsyncParsableCommand {
         store.remove("pending-pair.json")
         print("✗ timed out, code expired")
         throw ExitCode(1)
+    }
+}
+
+struct ProbeLayers: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "probe-layers", abstract: "Measure per-window (layer) capture against windows whose title matches (default: the test bench).")
+    @Option(help: "Title substring of the windows to capture.") var match: String = "Mirage Test Bench"
+    @Option(help: "Seconds to capture.") var seconds: Int = 10
+    @Option(help: "Stream pixels per window point.") var scale: Double = 1.0
+    @Option(help: "Write the first window's last frame as PNG here.") var dump: String?
+    @Option(help: "window (one stream per matched window), display (whole display), exclude (display minus the matched windows).") var mode: String = "window"
+    func run() async throws {
+        try await LayerProbe.run(match: match, seconds: seconds, scale: scale, dump: dump, mode: mode, log: { log($0) })
     }
 }
 

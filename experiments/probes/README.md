@@ -63,3 +63,24 @@ full width). Status items are drawn inside it; they are not separate windows any
 the "status item strip" in DESIGN §3.8 is: capture the Menubar window via SCK
 (`desktopIndependentWindow`), get item positions per app through `AXExtrasMenuBar`, crop
 the third-party region, and map clicks back. Still cheap: one 1512×33 window.
+
+## layers — per-window capture for the layered desktop (`miraged probe-layers`, 2026-10-18, macOS 27, M4 Max)
+
+The probe lives in the host binary (same TCC grant): `miraged probe-layers --match "Mirage Test Bench"
+--seconds 10 --scale 0.5 [--dump out.png] [--mode window|display|exclude]`, against windows of our own
+(`MirageTestBench --still --index N`).
+
+- **Window streams render every interval.** Eight still windows at `minimumFrameInterval` 1/30: 311–334
+  frames each in 10 s, the dirty rect always the whole window, two IOSurfaces alternating; `memcmp` says the
+  pixels are identical. At 1/5 the stream delivers 5 fps. So the frame interval is the cost knob and our own
+  diff the change detector; SCK gives no "unchanged" signal for windows the way it does for displays.
+- **Cost.** Our process: 1.5 % of a core per 400×266 stream, 8 % for eight. WindowServer went from
+  ~28 % to ~50 % with the streams, but a single window stream, a whole-display stream and a display stream
+  excluding the window all read 45–60 % on a screen that was in use; the difference between them was
+  inside the noise. Start-up 100–170 ms per stream, first frame 20 ms later.
+- **Alpha.** Corners are transparent (`bgra(0,0,0,0)`), content opaque; `shouldBeOpaque = false` keeps it.
+  `SCStreamUpdateFrameCornerRadius` is attached to every frame.
+- **Children.** The traffic lights are a 66×20 level-0 window of the same process at (x+6, y+6) of every
+  titled window; `includeChildWindows = true` draws them into the parent's capture.
+- **Shadows.** `ignoreShadowsSingleWindow` removes them from a window capture; excluding a window from a
+  display capture leaves its shadow behind unless `ignoreShadowsDisplay` is set too.
