@@ -35,6 +35,9 @@ public struct TileTracker {
         var pendingSince: UInt64 = 0     // when it first became pending (oldest-first ordering)
         var dueNanos: UInt64 = 0
         var viaVideo = false              // pending because video covered it (refinement) rather than a rate limit
+        /// Pending as a direct change (changed pixels the rate limit or the budget held back, a correction): it is
+        /// presented as soon as it lands, never staged with a refinement level (DESIGN §3.3).
+        var direct = false
     }
     private var cells: [Cell]
 
@@ -109,7 +112,7 @@ public struct TileTracker {
             // A tile that moves again while queued for refinement is dropped and re-queued: its old place
             // in the oldest-first order would otherwise let a region that kept moving jump the queue
             // (review: a 1003-tile backlog during a drag).
-            cells[i].pending = true; cells[i].viaVideo = true
+            cells[i].pending = true; cells[i].viaVideo = true; cells[i].direct = false
             cells[i].pendingSince = now
             cells[i].dueNanos = now &+ tuning.settleNanos
         }
@@ -117,10 +120,10 @@ public struct TileTracker {
             var c = cells[i]
             if now &- c.lastLosslessNanos >= tuning.losslessMinIntervalNanos {
                 plan.lossless.append(i)
-                c.lastLosslessNanos = now; c.pending = false; c.pendingSince = 0; c.viaVideo = false
+                c.lastLosslessNanos = now; c.pending = false; c.pendingSince = 0; c.viaVideo = false; c.direct = false
             } else {
                 // Rate-limited: send later, from whatever the frame looks like then.
-                c.pending = true; c.viaVideo = false
+                c.pending = true; c.viaVideo = false; c.direct = true
                 if c.pendingSince == 0 { c.pendingSince = now }
                 c.dueNanos = c.lastLosslessNanos &+ tuning.losslessMinIntervalNanos
             }
@@ -133,7 +136,7 @@ public struct TileTracker {
     public mutating func markVideo(_ tiles: [Int], now: UInt64) {
         for i in tiles {
             var c = cells[i]
-            c.pending = true; c.viaVideo = true
+            c.pending = true; c.viaVideo = true; c.direct = false
             c.pendingSince = now
             c.dueNanos = now &+ tuning.settleNanos
             cells[i] = c
@@ -149,15 +152,37 @@ public struct TileTracker {
         return n
     }
 
-    /// Lossless tiles the budget could not carry now: keep them pending, due shortly.
-    public mutating func `defer`(_ tiles: [Int], now: UInt64, delayNanos: UInt64 = 50_000_000) {
+    /// Lossless tiles the budget could not carry now: keep them pending, due shortly. `direct`: they are changed
+    /// pixels (presented on arrival) or not (a refinement, staged); nil keeps what they were.
+    public mutating func `defer`(_ tiles: [Int], now: UInt64, delayNanos: UInt64 = 50_000_000, direct: Bool? = nil) {
         for i in tiles {
             var c = cells[i]
             c.pending = true
+            if let direct { c.direct = direct }
             if c.pendingSince == 0 { c.pendingSince = now }
             c.dueNanos = now &+ delayNanos
             cells[i] = c
         }
+    }
+
+    /// Pending tiles that must be resent as direct changes (a correction), due now.
+    public mutating func markDirect(_ tiles: [Int], now: UInt64) {
+        for i in tiles {
+            var c = cells[i]
+            c.pending = true; c.direct = true
+            if c.pendingSince == 0 { c.pendingSince = now }
+            c.dueNanos = now
+            cells[i] = c
+        }
+    }
+    /// Pending as a direct change (sent unstaged), not a refinement.
+    public func isDirectPending(_ i: Int) -> Bool { cells[i].pending && cells[i].direct }
+    /// Refinement still owed somewhere the viewer can see: pending, not direct, not in `excluding`, and not changed
+    /// since `stableBefore` (a region that keeps changing is dropped from the pending level, not waited for).
+    public func refinementOutstanding(excluding: Set<Int>, stableBefore: UInt64) -> Int {
+        var n = 0
+        for i in 0..<cells.count where cells[i].pending && !cells[i].direct && cells[i].lastDirtyNanos <= stableBefore && !excluding.contains(i) { n += 1 }
+        return n
     }
 
     /// The client has this tile pixel-exact (last update was lossless or a copy of crisp pixels, nothing pending).
@@ -168,7 +193,7 @@ public struct TileTracker {
         for i in tiles {
             var c = cells[i]
             c.lastDirtyNanos = now; c.lastLosslessNanos = now
-            c.pending = false; c.pendingSince = 0; c.viaVideo = false
+            c.pending = false; c.pendingSince = 0; c.viaVideo = false; c.direct = false
             cells[i] = c
         }
     }
@@ -194,7 +219,7 @@ public struct TileTracker {
     public mutating func sent(lossless tiles: [Int], now: UInt64) {
         for i in tiles {
             var c = cells[i]
-            c.lastLosslessNanos = now; c.pending = false; c.pendingSince = 0; c.viaVideo = false
+            c.lastLosslessNanos = now; c.pending = false; c.pendingSince = 0; c.viaVideo = false; c.direct = false
             cells[i] = c
         }
     }

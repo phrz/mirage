@@ -72,4 +72,14 @@ final class LayerWireTests: XCTestCase {
         let edge = ControlMessage.WindowInfo(id: 3, pid: 3, title: "", frame: PixelRect(x: 800, y: 0, width: 400, height: 800), z: 0)
         XCTAssertEqual(WindowTrackerOcclusion.occlusion(of: edge, in: [edge], display: display).visibleFraction, 0.5, accuracy: 0.001)
     }
+
+    func testStagedTilesAndCommitRoundTrip() throws {
+        let h = TileMessage.Header(captureSeq: 1, inputSeq: 2, windowID: 7, captureNanos: 3)
+        let staged = TileMessage.tiles(.init(header: h, refinement: true, staged: true, tiles: [.init(rect: PixelRect(x: 0, y: 0, width: 64, height: 64), format: .lossless, data: Data([1]))]))
+        let commit = TileMessage.commit(layer: 7)
+        var p = TileStreamParser()
+        let got = try p.feed(staged.encode(msgSeq: 1) + commit.encode(msgSeq: 2))
+        XCTAssertEqual(got.map(\.message), [staged, commit])
+        if case .tiles(let t) = got[0].message { XCTAssertTrue(t.staged); XCTAssertTrue(t.refinement) }
+    }
 }

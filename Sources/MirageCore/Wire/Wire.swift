@@ -2,7 +2,7 @@ import Foundation
 
 /// Protocol constants shared by host and clients.
 public enum Mirage {
-    public static let protocolVersion = 3
+    public static let protocolVersion = 4
     public static let alpn = "mirage/1"
     public static let defaultPort: UInt16 = 7799
     /// Domain-separation prefix for every hash/signature in the protocol.

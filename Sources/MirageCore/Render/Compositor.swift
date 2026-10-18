@@ -70,10 +70,12 @@ public final class Compositor {
     private var videoUp: MTLTexture?       // upscaled to native when below native
     private var scaler: MTLFXSpatialScaler?
     private var incoming: MTLTexture?      // pixels still crossfading in (refinement, progressive steps)
-    public struct Fade: Equatable { public var rect: PixelRect; public var startNanos: UInt64 }
+    public struct Fade: Equatable { public var rect: PixelRect; public var startNanos: UInt64; public var durationNanos: UInt64 }
     private var fades: [Fade] = []
-    /// Crossfade length for refinement and progressive steps.
-    public var crossfadeNanos: UInt64 = 150_000_000
+    /// Crossfade length for a whole-layer level sent as one message (DESIGN §3.3: 200–250 ms).
+    public var crossfadeNanos: UInt64 = 220_000_000
+    private var staging: MTLTexture?       // the next presentation level, assembled off-screen
+    private var stagedMask: [Bool] = []    // per 64-px tile: staged and not yet presented
     private var scalerSize: (Int, Int, Int, Int) = (0, 0, 0, 0)
     private let lock = NSLock()
     private var generation = 0             // bumped on every change; render() compares
@@ -87,7 +89,7 @@ public final class Compositor {
     /// Receiver clock of the last write (layer cache eviction).
     public private(set) var lastWriteNanos: UInt64 = 0
     /// Bytes of texture memory this canvas holds (canvas + scratch + incoming).
-    public var textureBytes: Int { (canvas == nil ? 0 : width * height * 4) * (1 + (scratch == nil ? 0 : 1) + (incoming == nil ? 0 : 1)) }
+    public var textureBytes: Int { (canvas == nil ? 0 : width * height * 4) * (1 + (scratch == nil ? 0 : 1) + (incoming == nil ? 0 : 1) + (staging == nil ? 0 : 1)) }
 
     struct Quad { var dst: SIMD4<Float>; var src: SIMD4<Float> }
 
@@ -108,6 +110,7 @@ public final class Compositor {
         canvas = device.makeTexture(descriptor: d)
         scratch = nil
         incoming = nil
+        staging = nil; stagedMask = []; commitPending = nil
         fades = []
         clear()
     }
@@ -128,9 +131,9 @@ public final class Compositor {
         return incoming
     }
     /// Frees the optional textures (memory pressure); the canvas stays.
-    public func trim() { lock.lock(); let busy = !fades.isEmpty; lock.unlock(); if !busy { incoming = nil }; scratch = nil }
+    public func trim() { lock.lock(); let busy = !fades.isEmpty; lock.unlock(); if !busy { incoming = nil }; scratch = nil; if !hasStaged { staging = nil; stagedMask = [] } }
     /// Frees everything; the layer is gone.
-    public func release() { canvas = nil; scratch = nil; incoming = nil; videoRGB = nil; videoUp = nil; scaler = nil; width = 0; height = 0; lock.lock(); fades = []; lock.unlock() }
+    public func release() { canvas = nil; scratch = nil; incoming = nil; staging = nil; stagedMask = []; commitPending = nil; videoRGB = nil; videoUp = nil; scaler = nil; width = 0; height = 0; lock.lock(); fades = []; lock.unlock() }
 
     public func clear() {
         guard let canvas, let cb = commandQueue.makeCommandBuffer() else { return }
@@ -153,15 +156,138 @@ public final class Compositor {
     public func invalidate() { bump() }
     func markRendered() { lock.lock(); renderedGeneration = generation; lock.unlock() }
 
+    // MARK: Write targets (DESIGN §3.3 presentation levels)
+    //
+    // `canvas` is what is shown. `incoming` holds what fades in over it (`fades`). `staging` is the layer's next
+    // presentation level, assembled off-screen: it starts as a copy of what the canvas will be once its fades end,
+    // receives every later write, and holds the staged (refinement) tiles nobody sees until `commitStaged`.
+    // A write that is not staged lands on the canvas, on `incoming` where a fade runs over it (so the fade shows the
+    // new pixels at once and commits them), and on `staging` (so a commit never puts older pixels back).
+
+    private func ensureStaging(_ cb: MTLCommandBuffer) -> MTLTexture? {
+        if let staging { return staging }
+        guard width > 0, let canvas else { return nil }
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        d.usage = [.shaderRead, .shaderWrite, .renderTarget]; d.storageMode = .private
+        guard let s = device.makeTexture(descriptor: d), let blit = cb.makeBlitCommandEncoder() else { return nil }
+        blit.copy(from: canvas, to: s)
+        lock.lock(); let running = fades; lock.unlock()
+        if let incoming { for f in running { copy(incoming, to: s, rect: f.rect, blit: blit) } }
+        blit.endEncoding()
+        staging = s
+        stagedMask = Array(repeating: false, count: tileCols * tileRows)
+        return s
+    }
+    private var tileCols: Int { (width + 63) / 64 }
+    private var tileRows: Int { (height + 63) / 64 }
+    private func copy(_ src: MTLTexture, to dst: MTLTexture, rect r: PixelRect, blit: MTLBlitCommandEncoder) {
+        let c = r.intersection(PixelRect(x: 0, y: 0, width: width, height: height))
+        guard !c.isEmpty else { return }
+        blit.copy(from: src, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: c.x, y: c.y, z: 0), sourceSize: MTLSize(width: c.width, height: c.height, depth: 1),
+                  to: dst, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: c.x, y: c.y, z: 0))
+    }
+    private func fadeIntersects(_ r: PixelRect) -> Bool { lock.lock(); defer { lock.unlock() }; return fades.contains { $0.rect.intersects(r) } }
+    /// Ends the fades over `r` at once (their pixels go to the canvas now): a new crossfade or a copy-rect follows there.
+    private func finishFades(intersecting r: PixelRect, _ cb: MTLCommandBuffer) {
+        lock.lock(); let hit = fades.filter { $0.rect.intersects(r) }; fades.removeAll { $0.rect.intersects(r) }; lock.unlock()
+        guard !hit.isEmpty, let canvas, let incoming, let blit = cb.makeBlitCommandEncoder() else { return }
+        for f in hit { copy(incoming, to: canvas, rect: f.rect, blit: blit) }
+        blit.endEncoding()
+    }
+    /// The textures a write of `rect` lands on.
+    private func targets(_ rect: PixelRect, staged: Bool, crossfade: Bool, _ cb: MTLCommandBuffer) -> [MTLTexture] {
+        guard let canvas else { return [] }
+        if staged {
+            guard let s = ensureStaging(cb) else { return [] }
+            markStaged(rect)
+            return [s]
+        }
+        var out: [MTLTexture] = []
+        if crossfade { if let inc = ensureIncoming() { out.append(inc) } else { out.append(canvas) } }
+        else {
+            out.append(canvas)
+            if let incoming, fadeIntersects(rect) { out.append(incoming) }
+        }
+        if let staging { out.append(staging) }
+        return out
+    }
+    private func markStaged(_ r: PixelRect) {
+        let cols = tileCols, rows = tileRows
+        guard stagedMask.count == cols * rows, !r.isEmpty else { return }
+        let c0 = max(0, r.x / 64), c1 = min(cols - 1, (r.maxX - 1) / 64), r0 = max(0, r.y / 64), r1 = min(rows - 1, (r.maxY - 1) / 64)
+        guard c1 >= c0, r1 >= r0 else { return }
+        for y in r0...r1 { for x in c0...c1 { stagedMask[y * cols + x] = true } }
+    }
+    /// Tiles of the next level written off-screen and not yet presented.
+    public var stagedTiles: Int { stagedMask.reduce(0) { $0 + ($1 ? 1 : 0) } }
+    public var hasStaged: Bool { stagedMask.contains(true) || commitPending != nil }
+
+    /// Presents the staged level: every staged tile crossfades in together over `durationNanos` (one presentation
+    /// step for the layer). Waits for running fades to end first, so a level never jumps mid-fade. Returns the
+    /// number of tiles committed now (0 if deferred or nothing staged).
+    @discardableResult
+    public func commitStaged(durationNanos: UInt64 = 220_000_000) -> Int {
+        guard stagedMask.contains(true) else { commitPending = nil; return 0 }
+        if hasActiveFades { commitPending = durationNanos; return 0 }
+        guard let cb = commandQueue.makeCommandBuffer() else { return 0 }
+        let n = performCommit(durationNanos: durationNanos, cb)
+        cb.commit()
+        return n
+    }
+    /// Commits pending from a deferred `commitStaged` (count of committed levels, for diagnostics).
+    public private(set) var commitsPresented = 0
+    private var commitPending: UInt64? = nil
+    private func performCommit(durationNanos: UInt64, _ cb: MTLCommandBuffer) -> Int {
+        commitPending = nil
+        guard let staging, let inc = ensureIncoming(), let blit = cb.makeBlitCommandEncoder() else { return 0 }
+        let runs = Self.runs(stagedMask, cols: tileCols, rows: tileRows, width: width, height: height)
+        let n = stagedTiles
+        for r in runs { copy(staging, to: inc, rect: r, blit: blit) }
+        blit.endEncoding()
+        let start = Clock.nowNanos()
+        lock.lock(); for r in runs { fades.append(Fade(rect: r, startNanos: start, durationNanos: durationNanos)) }; lock.unlock()
+        stagedMask = Array(repeating: false, count: tileCols * tileRows)
+        commitsPresented += 1
+        bump()
+        return n
+    }
+    /// Drops the staged level unseen (a fresh stream: nothing staged before it is trusted).
+    public func discardStaged() { stagedMask = Array(repeating: false, count: stagedMask.count); commitPending = nil; staging = nil }
+    /// Marked tiles as rects: horizontal runs per tile row, merged with the rows below that have the same run.
+    static func runs(_ mask: [Bool], cols: Int, rows: Int, width: Int, height: Int) -> [PixelRect] {
+        var open: [Int: (x0: Int, x1: Int, y0: Int, y1: Int)] = [:]   // key x0 * 100000 + x1
+        var out: [PixelRect] = []
+        func emit(_ s: (x0: Int, x1: Int, y0: Int, y1: Int)) {
+            out.append(PixelRect(x: s.x0 * 64, y: s.y0 * 64, width: min(width, s.x1 * 64) - s.x0 * 64, height: min(height, s.y1 * 64) - s.y0 * 64))
+        }
+        for y in 0..<rows {
+            var rowRuns: [(Int, Int)] = []
+            var x = 0
+            while x < cols {
+                guard mask[y * cols + x] else { x += 1; continue }
+                let x0 = x
+                while x < cols, mask[y * cols + x] { x += 1 }
+                rowRuns.append((x0, x))
+            }
+            var next: [Int: (x0: Int, x1: Int, y0: Int, y1: Int)] = [:]
+            for (x0, x1) in rowRuns {
+                let k = x0 * 100_000 + x1
+                if var s = open[k] { s.y1 = y + 1; next[k] = s; open[k] = nil } else { next[k] = (x0, x1, y, y + 1) }
+            }
+            for s in open.values { emit(s) }
+            open = next
+        }
+        for s in open.values { emit(s) }
+        return out
+    }
+
     // MARK: Video
 
     /// Writes the masked tiles of a decoded NV12 frame into `region` of the canvas (scaling if the
     /// frame is smaller than the region, i.e. the host is on a lower rung).
     public func applyVideo(_ image: CVImageBuffer, region: PixelRect, mask: TileMask?, tile: Int = 64, crossfade: Bool = false) {
-        guard let canvasTex = canvas, CVPixelBufferGetPlaneCount(image) == 2 else { return }
-        let canvas = crossfade ? (ensureIncoming() ?? canvasTex) : canvasTex
-        if crossfade { beginFade(region.isEmpty ? PixelRect(x: 0, y: 0, width: width, height: height) : region) }
-        else { dropFades(intersecting: region.isEmpty ? PixelRect(x: 0, y: 0, width: width, height: height) : region) }
+        guard canvas != nil, CVPixelBufferGetPlaneCount(image) == 2 else { return }
+        let full = region.isEmpty ? PixelRect(x: 0, y: 0, width: width, height: height) : region
         let vw = CVPixelBufferGetWidthOfPlane(image, 0), vh = CVPixelBufferGetHeightOfPlane(image, 0)
         guard vw > 0, vh > 0 else { return }
         var yTex: CVMetalTexture?, cTex: CVMetalTexture?
@@ -174,6 +300,9 @@ public final class Compositor {
             videoRGB = device.makeTexture(descriptor: d)
         }
         guard let rgb = videoRGB, let cb = commandQueue.makeCommandBuffer() else { return }
+        if crossfade { finishFades(intersecting: full, cb) }
+        let outs = targets(full, staged: false, crossfade: crossfade, cb)
+        if crossfade { beginFade(full, durationNanos: 220_000_000) }
         // YUV → BGRA.
         if let ce = cb.makeComputeCommandEncoder() {
             ce.setComputePipelineState(context.yuvPipeline)
@@ -196,17 +325,16 @@ public final class Compositor {
             upscale(rgb, to: up, commandBuffer: cb)
             source = up
         }
-        // Blit the masked tiles (or the whole region).
+        // Blit the masked tiles (or the whole region) into every target.
         guard let blit = cb.makeBlitCommandEncoder() else { return }
-        let r = region.isEmpty ? PixelRect(x: 0, y: 0, width: width, height: height) : region.intersection(PixelRect(x: 0, y: 0, width: width, height: height))
+        let r = full.intersection(PixelRect(x: 0, y: 0, width: width, height: height))
         let grid = TileMask.grid(for: r, tile: tile)
         for row in 0..<grid.rows {
             for col in 0..<grid.cols {
                 if let mask, !mask[col, row] { continue }
                 let t = PixelRect(x: r.x + col * tile, y: r.y + row * tile, width: tile, height: tile).intersection(r)
                 guard !t.isEmpty, t.maxX <= source.width, t.maxY <= source.height else { continue }
-                blit.copy(from: source, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: t.x, y: t.y, z: 0), sourceSize: MTLSize(width: t.width, height: t.height, depth: 1),
-                          to: canvas, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: t.x, y: t.y, z: 0))
+                for dst in outs { copy(source, to: dst, rect: t, blit: blit) }
             }
         }
         blit.endEncoding()
@@ -252,28 +380,26 @@ public final class Compositor {
     // MARK: Tiles and copy-rects
 
     /// Decodes and uploads lossless tiles (and lossy stills, scaled onto their rect). Returns the number applied.
+    /// `crossfade`: the tiles fade in together (a whole-layer level). `staged`: they go to the off-screen next
+    /// level only, shown on `commitStaged`; the parts of them inside `alsoShow` are written to the canvas too
+    /// (the desktop where the viewer shows fill: any clean picture beats the fill). Lossless and solid tiles only.
     @discardableResult
-    public func applyTiles(_ tiles: [TileMessage.Tile], crossfade: Bool = false) -> Int {
-        guard let canvasTex = canvas, let cb = commandQueue.makeCommandBuffer() else { return 0 }
-        let canvas = crossfade ? (ensureIncoming() ?? canvasTex) : canvasTex
-        if crossfade { for t in tiles { beginFade(t.rect) } } else { for t in tiles { dropFades(intersecting: t.rect) } }
-        var n = 0
+    public func applyTiles(_ tiles: [TileMessage.Tile], crossfade: Bool = false, staged: Bool = false, alsoShow: [PixelRect] = []) -> Int {
+        guard canvas != nil, let cb = commandQueue.makeCommandBuffer() else { return 0 }
         let bounds = PixelRect(x: 0, y: 0, width: width, height: height)
-        var blit = cb.makeBlitCommandEncoder()
+        if crossfade && !staged { for t in tiles { finishFades(intersecting: t.rect, cb) } }
+        if staged, ensureStaging(cb) == nil { return 0 }   // before any encoder below is open
+        var n = 0
+        var blit: MTLBlitCommandEncoder? = nil
+        var faded: [PixelRect] = []
+        var shownNow = false
         for t in tiles {
             let r = t.rect.intersection(bounds)
             guard !r.isEmpty else { continue }
             let w = t.rect.width, h = t.rect.height, stride = w * 4
-            if t.format == .solid {
-                guard let buf = device.makeBuffer(length: stride * h, options: .storageModeShared), TileCodec.fillSolid(t.data, into: buf.contents(), width: w, height: h, stride: stride) else { continue }
-                blit?.copy(from: buf, sourceOffset: 0, sourceBytesPerRow: stride, sourceBytesPerImage: stride * h, sourceSize: MTLSize(width: r.width, height: r.height, depth: 1),
-                           to: canvas, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: r.x, y: r.y, z: 0))
-                n += 1
-                continue
-            }
-            guard let (dw, dh) = TileCodec.size(of: t.data) else { continue }
             if t.format == .lossy {
                 // A still at its own size: decode into a shared texture and draw it scaled onto the rect.
+                guard let (dw, dh) = TileCodec.size(of: t.data) else { continue }
                 let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: dw, height: dh, mipmapped: false)
                 d.usage = [.shaderRead]; d.storageMode = .shared
                 guard let tex = device.makeTexture(descriptor: d) else { continue }
@@ -281,84 +407,118 @@ public final class Compositor {
                 guard pixels.withUnsafeMutableBytes({ TileCodec.decode(t.data, into: $0.baseAddress!, width: dw, height: dh, stride: dw * 4) }) else { continue }
                 tex.replace(region: MTLRegionMake2D(0, 0, dw, dh), mipmapLevel: 0, withBytes: pixels, bytesPerRow: dw * 4)
                 blit?.endEncoding(); blit = nil
-                drawScaled(tex, into: canvas, rect: r, commandBuffer: cb)
-                blit = cb.makeBlitCommandEncoder()
+                for dst in targets(r, staged: staged, crossfade: crossfade, cb) { drawScaled(tex, into: dst, rect: r, commandBuffer: cb) }
+                if crossfade && !staged { faded.append(r) }
                 n += 1
                 continue
             }
-            guard dw == w, dh == h else { continue }
             guard let buf = device.makeBuffer(length: stride * h, options: .storageModeShared) else { continue }
-            guard TileCodec.decode(t.data, into: buf.contents(), width: w, height: h, stride: stride) else { continue }
-            blit?.copy(from: buf, sourceOffset: 0, sourceBytesPerRow: stride, sourceBytesPerImage: stride * h, sourceSize: MTLSize(width: r.width, height: r.height, depth: 1),
-                       to: canvas, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: r.x, y: r.y, z: 0))
+            if t.format == .solid {
+                guard TileCodec.fillSolid(t.data, into: buf.contents(), width: w, height: h, stride: stride) else { continue }
+            } else {
+                guard let (dw, dh) = TileCodec.size(of: t.data), dw == w, dh == h, TileCodec.decode(t.data, into: buf.contents(), width: w, height: h, stride: stride) else { continue }
+            }
+            let outs = targets(r, staged: staged, crossfade: crossfade, cb)
+            if blit == nil { blit = cb.makeBlitCommandEncoder() }
+            for dst in outs {
+                blit?.copy(from: buf, sourceOffset: 0, sourceBytesPerRow: stride, sourceBytesPerImage: stride * h, sourceSize: MTLSize(width: r.width, height: r.height, depth: 1),
+                           to: dst, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: r.x, y: r.y, z: 0))
+            }
+            if staged, let canvasTex = canvas {
+                for part in alsoShow {
+                    let p = part.intersection(r)
+                    guard !p.isEmpty else { continue }
+                    let off = (p.y - t.rect.y) * stride + (p.x - t.rect.x) * 4
+                    for dst in [canvasTex] + (incoming != nil && fadeIntersects(p) ? [incoming!] : []) {
+                        blit?.copy(from: buf, sourceOffset: off, sourceBytesPerRow: stride, sourceBytesPerImage: stride * h, sourceSize: MTLSize(width: p.width, height: p.height, depth: 1),
+                                   to: dst, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: p.x, y: p.y, z: 0))
+                    }
+                    shownNow = true
+                }
+            }
+            if crossfade && !staged { faded.append(r) }
             n += 1
         }
         blit?.endEncoding()
         cb.commit()
-        if n > 0 { bump() }
+        // One crossfade for the whole message (a whole-layer level steps in at once, not tile by tile).
+        if !faded.isEmpty { let start = Clock.nowNanos(); for r in faded { beginFade(r, durationNanos: crossfadeNanos, start: start) } }
+        if n > 0 && (!staged || shownNow) { bump() }
         return n
     }
 
     /// Starts a crossfade for `rect`: the new pixels live in `incoming` until the fade ends, when
-    /// they are committed to the canvas. A rect still fading when overwritten is committed first.
-    private func beginFade(_ rect: PixelRect) {
+    /// they are committed to the canvas (by `settle`, on the writer's queue).
+    private func beginFade(_ rect: PixelRect, durationNanos: UInt64, start: UInt64 = Clock.nowNanos()) {
         let r = rect.intersection(PixelRect(x: 0, y: 0, width: width, height: height))
         guard !r.isEmpty else { return }
-        lock.lock(); fades.append(Fade(rect: r, startNanos: Clock.nowNanos())); lock.unlock()
+        lock.lock(); fades.append(Fade(rect: r, startNanos: start, durationNanos: durationNanos)); lock.unlock()
+        bump()
     }
 
-    /// Commits fades that have finished (copy incoming → canvas) and returns the ones still running.
-    func settleFades(now: UInt64, commandBuffer cb: MTLCommandBuffer) -> [(Fade, Float)] {
+    /// The fades to draw now with their progress (a finished one at 1 until `settle` commits it). Render thread.
+    func activeFades(now: UInt64) -> [(Fade, Float)] {
         lock.lock(); let list = fades; lock.unlock()
-        var active: [(Fade, Float)] = []
-        var done: [Fade] = []
-        for f in list {
-            let t = Float(now &- f.startNanos) / Float(crossfadeNanos)
-            if t >= 1 { done.append(f) } else { active.append((f, max(0, t))) }
-        }
-        if !done.isEmpty, let canvas, let incoming, let blit = cb.makeBlitCommandEncoder() {
-            for f in done {
-                blit.copy(from: incoming, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: f.rect.x, y: f.rect.y, z: 0), sourceSize: MTLSize(width: f.rect.width, height: f.rect.height, depth: 1),
-                          to: canvas, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: f.rect.x, y: f.rect.y, z: 0))
-            }
-            blit.endEncoding()
-            lock.lock(); fades.removeAll { d in done.contains(d) }; lock.unlock()
-        }
-        return active
+        return list.map { f in (f, min(1, max(0, Float(Clock.elapsed(since: f.startNanos, now: now)) / Float(max(1, f.durationNanos))))) }
     }
     var incomingTexture: MTLTexture? { incoming }
-    /// Commits finished crossfades without rendering (review M1: a headless viewer, or one whose window is
-    /// hidden, never rendered, so refinement and progressive steps never reached the canvas).
+    /// Commits finished crossfades (incoming → canvas), then a deferred level commit once no fade runs. Called every
+    /// 20 ms on the writer's queue, so a headless viewer or a hidden window still reaches the final picture (review M1),
+    /// and every write and commit happens on one queue in order.
     public func settle(now: UInt64 = Clock.nowNanos()) {
-        guard hasActiveFades, let cb = commandQueue.makeCommandBuffer() else { return }
-        _ = settleFades(now: now, commandBuffer: cb)
+        guard hasActiveFades || commitPending != nil else { return }
+        lock.lock(); let done = fades.filter { Clock.elapsed(since: $0.startNanos, now: now) >= $0.durationNanos }; lock.unlock()
+        guard let cb = commandQueue.makeCommandBuffer() else { return }
+        if !done.isEmpty, let canvas, let incoming, let blit = cb.makeBlitCommandEncoder() {
+            for f in done { copy(incoming, to: canvas, rect: f.rect, blit: blit) }
+            blit.endEncoding()
+            lock.lock(); fades.removeAll { d in done.contains(d) }; lock.unlock()
+            bump()
+        }
+        if let d = commitPending, !hasActiveFades { _ = performCommit(durationNanos: d, cb) }
         cb.commit()
     }
     public var hasActiveFades: Bool { lock.lock(); defer { lock.unlock() }; return !fades.isEmpty }
 
-    /// Newer pixels (a copy-rect, a video frame, a direct tile) arrived under a crossfade still in
-    /// progress: the fading block is stale and is dropped, never committed (review M1: committing it
-    /// 150 ms later put old pixels back over the moved window, the "shattering" of a drag).
+    /// Ends every fade intersecting `r` at once (tests; review M1 kept for API).
     @discardableResult
     public func dropFades(intersecting r: PixelRect) -> Int {
-        lock.lock(); defer { lock.unlock() }
-        let before = fades.count
-        fades.removeAll { $0.rect.intersects(r) }
-        return before - fades.count
+        lock.lock(); let n = fades.filter { $0.rect.intersects(r) }.count; lock.unlock()
+        guard n > 0, let cb = commandQueue.makeCommandBuffer() else { return 0 }
+        finishFades(intersecting: r, cb); cb.commit()
+        return n
     }
 
     public func applyCopyRect(_ rect: PixelRect, dx: Int, dy: Int) {
-        dropFades(intersecting: rect.union(rect.offset(dx, dy)))
-        guard let canvas, let scratch = ensureScratch(), let cb = commandQueue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return }
+        guard let canvas, let cb = commandQueue.makeCommandBuffer() else { return }
+        // A fade under the move ends now (its pixels move with the rest); the staged level moves too.
+        finishFades(intersecting: rect.union(rect.offset(dx, dy)), cb)
+        guard let scratch = ensureScratch() else { return }
         let bounds = PixelRect(x: 0, y: 0, width: width, height: height)
         let src = rect.intersection(bounds).intersection(bounds.offset(-dx, -dy))
-        guard !src.isEmpty else { return }
+        guard !src.isEmpty else { cb.commit(); return }
         let size = MTLSize(width: src.width, height: src.height, depth: 1)
-        blit.copy(from: canvas, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: src.x, y: src.y, z: 0), sourceSize: size,
-                  to: scratch, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: src.x, y: src.y, z: 0))
-        blit.copy(from: scratch, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: src.x, y: src.y, z: 0), sourceSize: size,
-                  to: canvas, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: src.x + dx, y: src.y + dy, z: 0))
-        blit.endEncoding()
+        for tex in [canvas] + (staging.map { [$0] } ?? []) {
+            guard let blit = cb.makeBlitCommandEncoder() else { continue }
+            blit.copy(from: tex, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: src.x, y: src.y, z: 0), sourceSize: size,
+                      to: scratch, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: src.x, y: src.y, z: 0))
+            blit.endEncoding()
+            guard let blit2 = cb.makeBlitCommandEncoder() else { continue }
+            blit2.copy(from: scratch, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: src.x, y: src.y, z: 0), sourceSize: size,
+                       to: tex, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: src.x + dx, y: src.y + dy, z: 0))
+            blit2.endEncoding()
+        }
+        // Staged tiles that moved stay staged where they landed (over-marking only re-presents identical pixels).
+        if staging != nil, stagedMask.contains(true) {
+            let cols = tileCols, rows = tileRows
+            var add: [PixelRect] = []
+            for i in 0..<stagedMask.count where stagedMask[i] {
+                let tr = PixelRect(x: (i % cols) * 64, y: (i / cols) * 64, width: 64, height: 64).intersection(src)
+                if !tr.isEmpty { add.append(tr.offset(dx, dy)) }
+            }
+            _ = rows
+            for r in add { markStaged(r) }
+        }
         cb.commit()
         bump()
     }
@@ -497,10 +657,10 @@ public enum SceneRenderer {
     public static func render(_ scene: LayerScene, context: MetalContext, target: MTLTexture, dest: CGRect, present: CAMetalDrawable? = nil) {
         guard let bg = scene.background, bg.width > 0, let cb = context.commandQueue.makeCommandBuffer() else { return }
         let now = Clock.nowNanos()
-        // Settle every visible canvas's crossfades first (a blit each), then one render pass.
+        // Every visible canvas's running crossfades (settled on the writer's queue, not here), then one render pass.
         var fades: [ObjectIdentifier: [(Compositor.Fade, Float)]] = [:]
-        fades[ObjectIdentifier(bg)] = bg.settleFades(now: now, commandBuffer: cb)
-        for item in scene.items { if case .layer(let c, _, _, _) = item { fades[ObjectIdentifier(c)] = c.settleFades(now: now, commandBuffer: cb) } }
+        fades[ObjectIdentifier(bg)] = bg.activeFades(now: now)
+        for item in scene.items { if case .layer(let c, _, _, _) = item { fades[ObjectIdentifier(c)] = c.activeFades(now: now) } }
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = target; rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
         rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)

@@ -57,6 +57,9 @@ public enum TileMessage: Equatable, Sendable {
     case copyRect(CopyRect)
     /// A layer's pixel size (new layer, native size changed, window resized). Layer 0 is the display.
     case reset(layer: UInt32, width: Int, height: Int)
+    /// Present the layer's staged level now (everything sent with `staged` since the last commit), in one
+    /// crossfade (DESIGN §3.3: progressive whole-picture steps, never block by block).
+    case commit(layer: UInt32)
 
     public struct Header: Equatable, Sendable {
         public var captureSeq: UInt32
@@ -79,8 +82,11 @@ public enum TileMessage: Equatable, Sendable {
         public var header: Header
         /// Why these tiles were sent, for the client's stats; refinement crossfades in on the client.
         public var refinement: Bool
+        /// Part of a layer's next presentation level: the client writes them off-screen and shows them only on
+        /// the layer's `commit` (a lossless pass assembled whole, never block by block).
+        public var staged: Bool
         public var tiles: [Tile]
-        public init(header: Header, refinement: Bool, tiles: [Tile]) { self.header = header; self.refinement = refinement; self.tiles = tiles }
+        public init(header: Header, refinement: Bool, staged: Bool = false, tiles: [Tile]) { self.header = header; self.refinement = refinement; self.staged = staged; self.tiles = tiles }
         public var bytes: Int { tiles.reduce(0) { $0 + $1.data.count } }
     }
     public struct CopyRect: Equatable, Sendable {
@@ -90,7 +96,7 @@ public enum TileMessage: Equatable, Sendable {
         public init(header: Header, rect: PixelRect, dx: Int, dy: Int) { self.header = header; self.rect = rect; self.dx = dx; self.dy = dy }
     }
 
-    enum Kind: UInt8 { case tiles = 1, copyRect = 2, reset = 3 }
+    enum Kind: UInt8 { case tiles = 1, copyRect = 2, reset = 3, commit = 4 }
     /// Tiles dropped because their format byte was unknown (diagnostics).
     nonisolated(unsafe) public static var skippedUnknownFormats = 0
 
@@ -101,7 +107,7 @@ public enum TileMessage: Equatable, Sendable {
         case .tiles(let t):
             kind = .tiles
             t.header.write(to: &body)
-            body.append(t.refinement ? 1 : 0)
+            body.append((t.refinement ? 1 : 0) | (t.staged ? 2 : 0))
             body.appendBE(UInt16(t.tiles.count))
             for tile in t.tiles {
                 tile.rect.write(to: &body)
@@ -117,6 +123,9 @@ public enum TileMessage: Equatable, Sendable {
         case .reset(let layer, let w, let h):
             kind = .reset
             body.appendBE(layer); body.appendBE(UInt16(w)); body.appendBE(UInt16(h))
+        case .commit(let layer):
+            kind = .commit
+            body.appendBE(layer)
         }
         var d = Data(capacity: 9 + body.count)
         d.append(kind.rawValue); d.appendBE(msgSeq); d.appendBE(UInt32(body.count))
@@ -134,7 +143,8 @@ public enum TileMessage: Equatable, Sendable {
         switch kind {
         case .tiles:
             guard r.remaining >= 24 + 1 + 2, let h = Header.read(&r) else { return nil }
-            let refinement = r.readByte() != 0
+            let flags = r.readByte()
+            let refinement = flags & 1 != 0, staged = flags & 2 != 0
             let n: UInt16 = r.read()
             var tiles: [Tile] = []
             tiles.reserveCapacity(Int(n))
@@ -152,7 +162,7 @@ public enum TileMessage: Equatable, Sendable {
                 }
                 r.offset += Int(len)
             }
-            return .tiles(Tiles(header: h, refinement: refinement, tiles: tiles))
+            return .tiles(Tiles(header: h, refinement: refinement, staged: staged, tiles: tiles))
         case .copyRect:
             guard r.remaining >= 24 + 8 + 4, let h = Header.read(&r), let rect = PixelRect.read(&r) else { return nil }
             let dx: Int16 = r.read(), dy: Int16 = r.read()
@@ -161,6 +171,10 @@ public enum TileMessage: Equatable, Sendable {
             guard r.remaining >= 8 else { return nil }
             let layer: UInt32 = r.read(), w: UInt16 = r.read(), h: UInt16 = r.read()
             return .reset(layer: layer, width: Int(w), height: Int(h))
+        case .commit:
+            guard r.remaining >= 4 else { return nil }
+            let layer: UInt32 = r.read()
+            return .commit(layer: layer)
         }
     }
 }

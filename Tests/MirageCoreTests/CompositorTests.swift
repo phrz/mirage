@@ -68,4 +68,72 @@ final class CompositorTests: XCTestCase {
         XCTAssertFalse(c.hasActiveFades)
         XCTAssertEqual(pixel(readback(c), 128, 10, 10).2, 255, "the faded-in tile is on the canvas")
     }
+
+    private func solid(_ x: Int, _ y: Int, _ bgra: [UInt8], w: Int = 64, h: Int = 64) -> TileMessage.Tile {
+        .init(rect: PixelRect(x: x, y: y, width: w, height: h), format: .solid, data: Data(bgra))
+    }
+
+    /// DESIGN §3.3: a staged level is invisible until its commit, then fades in whole; a direct change that lands on a
+    /// staged tile meanwhile is what the commit shows there (never the older staged pixels).
+    func testStagedLevelAppearsOnlyOnCommit() throws {
+        guard let c = Compositor() else { throw XCTSkip("no Metal device") }
+        c.configure(width: 192, height: 64)
+        let red: [UInt8] = [0, 0, 255, 255], green: [UInt8] = [0, 255, 0, 255], blue: [UInt8] = [255, 0, 0, 255]
+        c.applyTiles([solid(0, 0, red), solid(64, 0, red), solid(128, 0, red)])
+        c.applyTiles([solid(0, 0, green), solid(64, 0, green)], staged: true)
+        XCTAssertEqual(c.stagedTiles, 2)
+        var px = readback(c)
+        XCTAssertEqual(pixel(px, 192, 10, 10).2, 255, "staged pixels are not shown")
+        // A direct change on the second staged tile: shown now, and it is what the commit keeps there.
+        c.applyTiles([solid(64, 0, blue)])
+        px = readback(c)
+        XCTAssertEqual(pixel(px, 192, 70, 10).0, 255, "direct change shown at once")
+        XCTAssertEqual(pixel(px, 192, 10, 10).2, 255)
+        XCTAssertGreaterThan(c.commitStaged(durationNanos: 1_000_000), 0)
+        usleep(5_000); c.settle()
+        px = readback(c)
+        XCTAssertEqual(pixel(px, 192, 10, 10).1, 255, "staged tile presented")
+        XCTAssertEqual(pixel(px, 192, 70, 10).0, 255, "the newer direct change survives the commit")
+        XCTAssertEqual(pixel(px, 192, 140, 10).2, 255, "untouched tile unchanged")
+        XCTAssertEqual(c.stagedTiles, 0)
+    }
+
+    /// A commit while a fade runs waits for it (a level never jumps mid-fade), then lands on its own.
+    func testCommitWaitsForRunningFade() throws {
+        guard let c = Compositor() else { throw XCTSkip("no Metal device") }
+        c.configure(width: 128, height: 64)
+        c.crossfadeNanos = 30_000_000
+        c.applyTiles([solid(0, 0, [0, 0, 255, 255], w: 128)], crossfade: true)
+        c.applyTiles([solid(0, 0, [0, 255, 0, 255])], staged: true)
+        XCTAssertEqual(c.commitStaged(durationNanos: 1_000_000), 0, "deferred behind the running fade")
+        XCTAssertTrue(c.hasStaged)
+        usleep(40_000); c.settle()   // the fade ends and the deferred commit starts
+        usleep(5_000); c.settle()
+        let px = readback(c)
+        XCTAssertEqual(pixel(px, 128, 10, 10).1, 255, "staged level presented after the fade")
+        XCTAssertEqual(pixel(px, 128, 100, 10).2, 255, "the faded level is on the canvas")
+        XCTAssertFalse(c.hasStaged)
+    }
+
+    /// Staged tiles move with a copy-rect (a scroll during assembly) and are presented where they landed.
+    func testStagedTilesMoveWithCopyRect() throws {
+        guard let c = Compositor() else { throw XCTSkip("no Metal device") }
+        c.configure(width: 64, height: 192)
+        c.applyTiles([solid(0, 0, [0, 0, 255, 255])])
+        c.applyTiles([solid(0, 0, [0, 255, 0, 255])], staged: true)
+        c.applyCopyRect(PixelRect(x: 0, y: 0, width: 64, height: 64), dx: 0, dy: 128)
+        var px = readback(c)
+        XCTAssertEqual(pixel(px, 64, 10, 140).2, 255, "the canvas moved its own (red) pixels")
+        c.commitStaged(durationNanos: 1_000_000); usleep(5_000); c.settle()
+        px = readback(c)
+        XCTAssertEqual(pixel(px, 64, 10, 140).1, 255, "the staged (green) tile is presented where it moved")
+    }
+
+    func testRunsMergeRowsWithTheSameSpan() {
+        // 4×3 tiles: rows 0 and 1 have tiles 1–2, row 2 has tile 0 only.
+        var m = [Bool](repeating: false, count: 12)
+        m[1] = true; m[2] = true; m[5] = true; m[6] = true; m[8] = true
+        let r = Compositor.runs(m, cols: 4, rows: 3, width: 250, height: 150)
+        XCTAssertEqual(Set(r.map { "\($0)" }), Set(["\(PixelRect(x: 64, y: 0, width: 128, height: 128))", "\(PixelRect(x: 0, y: 128, width: 64, height: 22))"]))
+    }
 }

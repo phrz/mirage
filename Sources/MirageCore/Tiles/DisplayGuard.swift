@@ -49,6 +49,9 @@ public struct DisplayGuard {
         return out
     }
 
+    /// Whether some guarded area is only remembered (a window moved within the history): it is released soon.
+    public func releasing(now: UInt64) -> Bool { history.contains { now &- $0.nanos <= historyNanos } }
+
     /// Tiles of `tracker` that touch any guarded rect.
     public func guardedTiles(_ tracker: TileTracker, now: UInt64) -> Set<Int> {
         Set(tracker.tiles(covering: guardedRects(now: now)))
