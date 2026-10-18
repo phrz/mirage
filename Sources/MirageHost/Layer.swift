@@ -34,9 +34,16 @@ final class Layer {
     /// ones that went out lossy that way (refined at the normal quality once a window move uncovers them).
     var underLayer = Set<Int>()
     var underlayLossy = Set<Int>()
+    /// Frames (inset) of the shown windows, for ordering the underlay edge-first.
+    var underlayEdge: [PixelRect] = []
     /// Captures with any change, and tile bytes sent, since the last stats line.
     var frames = 0
     var sentBytes = 0, sentRefine = 0, sentDirect = 0
+    /// 30 s accounting by class (DESIGN §6 M3.1: what the steady traffic is): first-picture still, lossless blocks,
+    /// per-tile refinement, direct changes, video, underlay (display only), and dirty tiles seen.
+    struct Account { var still = 0, blocks = 0, refine = 0, direct = 0, video = 0, underlay = 0, dirtyTiles = 0
+        var total: Int { still + blocks + refine + direct + video + underlay } }
+    var account = Account()
 
     // Video.
     var canvas: CVPixelBuffer?

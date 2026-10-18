@@ -96,6 +96,21 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var effortLogged = false
     private var statTimer: DispatchSourceTimer?
     private var statStaleDropped = 0
+    private var accountTicks = 0
+    /// Per-layer bytes by class over the last 30 s, largest first (app names only, never window titles).
+    private func logAccount() {
+        let byID = windows?.current?.byID ?? [:]
+        let rows = layers.values.sorted { $0.account.total > $1.account.total }.map { l -> String in
+            let a = l.account
+            let who = l.isDisplay ? "desktop" : "\(byID[l.id]?.app ?? "?") \(l.id)"
+            return String(format: "%@ %dx%d vis %d%%: %.0f KB = still %.0f + blocks %.0f + refine %.0f + direct %.0f + video %.0f + underlay %.0f, dirty %.0f tiles/s",
+                          who as NSString, l.width, l.height, Int(l.visibleFraction * 100), Double(a.total) / 1000, Double(a.still) / 1000, Double(a.blocks) / 1000,
+                          Double(a.refine) / 1000, Double(a.direct) / 1000, Double(a.video) / 1000, Double(a.underlay) / 1000, Double(a.dirtyTiles) / 30)
+        }
+        let total = layers.values.reduce(0) { $0 + $1.account.total }
+        log(String(format: "layer bytes, last 30 s (%.0f kbps): ", Double(total) * 8 / 30 / 1000) + rows.joined(separator: " | "))
+        for l in layers.values { l.account = Layer.Account() }
+    }
     private var statWindowCommands = 0
     private var debugLayers = false
     /// The host's screen is locked (ScreenLock: any signal). Layering pauses meanwhile: window capturers stop,
@@ -136,15 +151,22 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Tiles fully under a shown window (inset by the corner radius): the underlay.
         let inset = Int(14 * (windows?.pxPerPoint ?? 2))
         let insetFrames = shown.values.map { PixelRect(x: $0.x + inset, y: $0.y + inset, width: $0.width - 2 * inset, height: $0.height - 2 * inset) }
-        var under = Set<Int>()
-        for i in 0..<d.tracker.tileCount { let r = d.tracker.rect(of: i); if insetFrames.contains(where: { $0.intersection(r) == r }) { under.insert(i) } }
+        var under = Set<Int>(), doubly = Set<Int>()
+        for i in 0..<d.tracker.tileCount {
+            let r = d.tracker.rect(of: i)
+            let n = insetFrames.reduce(0) { $0 + ($1.intersection(r) == r ? 1 : 0) }
+            if n >= 1 { under.insert(i) }
+            if n >= 2 { doubly.insert(i) }
+        }
         if under != d.underLayer {
             // Uncovered tiles that went out at underlay quality are refined at the normal quality now.
             let uncoveredLossy = d.underlayLossy.subtracting(under)
             if !uncoveredLossy.isEmpty { d.tracker.markVideo(Array(uncoveredLossy), now: now); d.underlayLossy.subtract(uncoveredLossy) }
             d.underLayer = under
         }
-        let hidden = displayGuard.guardedTiles(d.tracker, now: now)
+        // Desktop under two or more shown windows only shows if both move: its underlay waits until one window covers it.
+        let hidden = displayGuard.guardedTiles(d.tracker, now: now).union(doubly)
+        d.underlayEdge = insetFrames
         guard hidden != d.occludedTiles else { return }
         let uncovered = d.occludedTiles.subtracting(hidden)
         if !uncovered.isEmpty {
@@ -794,6 +816,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         statDirtyTiles += dirty.count
         layer.frames += 1
+        layer.account.dirtyTiles += dirty.count
         if dirty.isEmpty { layer.lastFrame = pb; layer.tracker = tracker; refine(now: now); return }
         if debugLayers, dirty.count >= 4 { log("layer \(layer.id) capture \(captureSeq): \(dirty.count) dirty tiles, bb \(tracker.boundingRect(dirty))" + (dirty.count <= 8 ? " boxes " + dirty.map { "\(tightBoxes[$0].map { "\($0.x),\($0.y) \($0.width)x\($0.height)" } ?? "?")" }.joined(separator: " | ") : "")) }
 
@@ -1114,9 +1137,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let p = locus(in: l) { cx = p.x; cy = p.y }
         // Visible blocks first (locus first among them), then the underlay (the desktop under shown windows).
         func hiddenUnder(_ b: PixelRect) -> Bool { l.isDisplay && tracker.tiles(covering: [b]).allSatisfy { l.underLayer.contains($0) } }
+        // Underlay edge-first: a move uncovers the desktop along a window's edges first; inner areas last.
+        func edgeDistance(_ b: PixelRect) -> Int {
+            let px = b.x + b.width / 2, py = b.y + b.height / 2
+            return l.underlayEdge.filter { $0.contains(px, py) }.map { min(px - $0.x, $0.maxX - px, py - $0.y, $0.maxY - py) }.min() ?? 0
+        }
         blocks.sort { a, b in
             let ha = hiddenUnder(a), hb = hiddenUnder(b)
             if ha != hb { return !ha }
+            if ha { return edgeDistance(a) < edgeDistance(b) }
             return abs(a.x + a.width / 2 - cx) + abs(a.y + a.height / 2 - cy) < abs(b.x + b.width / 2 - cx) + abs(b.y + b.height / 2 - cy)
         }
         return blocks
@@ -1323,7 +1352,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.tileTokens -= Double(bytes - estimate)   // true up the estimate
                 self.statTileBytes += bytes; self.statTileRects += out.count; self.secTileBytes += bytes
                 if refinement { self.statRefineBytes += bytes }
-                if let l = self.layers[layerID] { l.sentBytes += bytes; if refinement { l.sentRefine += out.count } else { l.sentDirect += out.count } }
+                if let l = self.layers[layerID] {
+                    l.sentBytes += bytes; if refinement { l.sentRefine += out.count } else { l.sentDirect += out.count }
+                    if photoQuality < 90 { l.account.underlay += bytes } else if !refinement { l.account.direct += bytes } else if block { l.account.blocks += bytes } else { l.account.refine += bytes }
+                }
                 if photoQuality < 90, let l = self.layers[layerID] { for t in out where t.format == .lossy { l.underlayLossy.formUnion(l.tracker.tiles(covering: [t.rect])) } }
                 if self.debugLayers { self.log("layer \(layerID): sent \(out.count) \(refinement ? (block ? "block" : "refinement") : "direct") rects \(bytes) B: \(out.prefix(3).map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))") }
             }
@@ -1390,7 +1422,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: false, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: true, layer: layerID) }
                 self.tileTokens -= Double(data.count - estimate)
                 self.statTileBytes += data.count; self.statTileRects += 1; self.secTileBytes += data.count
-                if let l = self.layers[layerID] { l.exposed = true }
+                if let l = self.layers[layerID] { l.exposed = true; l.account.still += data.count }
                 self.log("layer \(layerID): still \(ow)x\(oh) \(data.count) bytes for a \(rect.width)x\(rect.height) window")
                 if let s = self.windows?.current { self.reconcileLayers(s, now: Clock.nowNanos()); self.publishWindows(now: Clock.nowNanos(), full: false) }
             }
@@ -1681,6 +1713,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         tokens -= Double(payload.count)
         unacked[seq] = InFlight(layer: l.id, sentNanos: Clock.nowNanos(), bytes: payload.count, ltrToken: f.ltrToken, paceEndNanos: paceEnd)
         statFrames += 1; statBytes += payload.count; statEncodeNanos += f.encodeNanos; secVideoBytes += payload.count; secVideoFrames += 1
+        l.account.video += payload.count
         if f.keyframe {
             log("keyframe \(payload.count) bytes (layer \(l.id), \(frags.count) datagrams, \(mask.count) tiles masked, paced over \(paceEnd > Clock.nowNanos() ? (paceEnd - Clock.nowNanos()) / 1_000_000 : 0) ms)")
             switch l.fresh {
@@ -1893,6 +1926,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 + " | layers \(windowLayers.count) (\(windowLayers.filter { $0.capturer != nil }.count) capturing, \(windowLayers.filter { $0.encoder != nil }.count) encoders, \(windowLayers.filter { !$0.exposed }.count) pending) stills \(statStills) occluded \(statOccluded) window-cmds \(statWindowCommands) taint-resent \(statTaintResent) exclusion-lag \(statExclusionLag)"
                 + " [0:\(display?.sentBytes ?? 0 / 1000 > 0 ? (display!.sentBytes / 1000) : 0)KB(\(display?.sentDirect ?? 0)d+\(display?.sentRefine ?? 0)r) " + windowLayers.sorted { $0.id < $1.id }.map { "\($0.id):\($0.frames)f/\(Int($0.visibleFraction * 100))%/\($0.sentBytes / 1000)KB(\($0.sentDirect)d+\($0.sentRefine)r)\($0.exposed ? "" : "/\($0.fresh)")" }.joined(separator: " ") + "]")
             for l in layers.values { l.frames = 0; l.sentBytes = 0; l.sentDirect = 0; l.sentRefine = 0 }
+            accountTicks += 1
+            if accountTicks >= 6 { accountTicks = 0; logAccount() }
             statStaleDropped = 0; statStills = 0; statOccluded = 0; statWindowCommands = 0; statTaintResent = 0; statExclusionLag = 0
             statControlBytes = 0; statFoveaTiles = 0
             statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0

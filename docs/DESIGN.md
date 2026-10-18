@@ -1382,3 +1382,21 @@ everywhere, and the area a move vacates shows desktop-layer content with no fill
 layer's own refinement runs at 0–31 rects per 5 s after the first picture. The bulk of the bytes in these
 runs are direct changes of the person's screen, which bare mode puts in the desktop layer.
 
+**What the traffic after a fresh connection is (seventh mac-daddy run, 7548f94).** The picture was right in
+every frame (one crisp bench with its shadow, no ghost, no fill, real desktop the moment an area is
+uncovered), but tiles ran 540–900 kbps for the first ~30 s with only the bench drifting. The host now logs,
+every 30 s, the bytes per layer by class: still, blocks, refine, direct changes, video, underlay. It also
+logs the layer's size, how visible it is and its dirty tiles per second, with app names only
+("layer bytes, last 30 s (…)"). On loopback (all layers, drifting bench, ~150 ms RTT, 800 kbps,
+2600×1688) the first 30 s were every window's lossless blocks (bench 258 KB, Astropad 155, Claude 221), the
+desktop's visible blocks (209 KB; they run after the windows by design), the underlay and the
+re-refinement of uncovered q75 areas. In the second 30 s the bench, Astropad and the desktop were idle
+(desktop 19 KB, the clock), and the only traffic was a window that really changes (Claude, 55 dirty
+tiles/s). So it is the first picture of a layered desktop, larger than a single capture's because every
+window's content and the underlay are sent. Two parts were avoidable and are gone:
+- **Underlay under two or more windows** waits until only one window covers it, since that desktop shows
+  only if both move (here the bench sits on a full-screen window: 210 KB → 0).
+- **The rest of the underlay goes edge-first**, nearest a window's edges where a move uncovers the desktop.
+The bare-desktop check still shows desktop at +100 ms, +1 s and +3 s (15 of 15). mac-daddy's next log will
+show the same lines, per app.
+
