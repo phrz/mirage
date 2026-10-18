@@ -286,7 +286,7 @@ struct StatsOverlay: View {
             Text(String(format: "rtt %4.0f ms   age %4.0f ms   %4.1f fps   video %5.0f kbps   tiles %5.0f kbps   (cap %d)", s.rttMs, s.frameAgeMs, s.fps, s.kbps, s.tileKbps, model.bitrateKbps))
             Text(String(format: "%@   target %d kbps   capacity %d   queue %.0f ms   rung %d (%.3gx%@)   tile budget %d", s.rate.tier?.name ?? "–", s.rate.targetKbps, s.rate.capacityKbps, s.rate.queueMs, s.rate.rung, s.rate.scale, s.upscaling ? " MetalFX" : "", s.rate.tileBudgetKbps))
             Text(String(format: "video %dx%d   decode %.1f ms   frames %d   lost %d   skipped %d   tile rects %d   copy-rects %d   nacks %d (recovered %d, parity %d)", s.width, s.height, s.decodeMs, s.frames, s.lost, s.dropped, s.tileRects, s.copyRects, s.nacks, s.recoveredByNack, s.recoveredByParity))
-            Text(String(format: "predictions shown %d   confirmed %d   mismatched %d   expired %d", s.predictions.shown, s.predictions.confirmed, s.predictions.mismatched, s.predictions.expired))
+            Text(String(format: "predictions shown %d   confirmed %d   mismatched %d   expired %d   layers %d (%d MB)", s.predictions.shown, s.predictions.confirmed, s.predictions.mismatched, s.predictions.expired, s.layers, s.layerMB))
             if let h = model.hostStatus {
                 Text("host: \(h.consoleLocked ? "CONSOLE LOCKED" : "unlocked")   front: \(h.frontmostApp) — \(h.frontmostWindowTitle.prefix(40))")
                     .foregroundStyle(h.consoleLocked ? .red : .white)

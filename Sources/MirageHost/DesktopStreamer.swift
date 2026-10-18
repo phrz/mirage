@@ -3,13 +3,17 @@ import CoreVideo
 import CoreGraphics
 import VideoToolbox
 import ApplicationServices
+import ScreenCaptureKit
 import MirageCore
 
-/// macOS desktop streamer, M2 hybrid codec (DESIGN §3.3–3.5):
-/// SCK capture (BGRA, dirty rects) → CPU tile diff → copy-rect detection (window drags from the
-/// window list, scrolls from line signatures) → TileTracker classification → lossless WebP tiles on
-/// the reliable tile stream / HEVC of the moving region through a host-side canvas on datagrams →
-/// lossless refinement of settled video tiles, all paced by the RateController's budget split.
+/// macOS desktop streamer, M3 layered desktop over the M2 hybrid codec (DESIGN §3.2–3.5):
+/// the display captured without the layered windows (layer 0) plus one `desktopIndependentWindow`
+/// capture per normal window (its own layer, whole and unoccluded), each through the same pipeline:
+/// CPU tile diff → copy-rect detection (scrolls from line signatures; drags of windows the display
+/// layer still carries from the window list) → TileTracker classification → lossless WebP tiles on the
+/// reliable tile streams / HEVC of the moving region through a per-layer canvas on datagrams →
+/// lossless refinement, all paced by one RateController's budget split. The window list (frames,
+/// z-order, levels, which windows are layers) goes on the control stream; the client composites.
 /// All mutable state lives on `queue`; tile encoding runs on `tileQueue`.
 public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private let queue = DispatchQueue(label: "mirage.host.video", qos: .userInteractive)
@@ -18,38 +22,39 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private let log: @Sendable (String) -> Void
     private var output: StreamOutput?
     private var capturer: ScreenCapturer?
-    private var encoder: HEVCEncoder?
+    private let catalog = WindowCatalog()
     private var injector: InputInjector?
     private var cursor: CursorMonitor?
     private var windows: WindowTracker?
+    private var ax: AXWindows?
     private var request: ControlMessage.StreamRequest?
     private var target: ScreenCapturer.Target?
 
-    // Hybrid codec state.
-    private var tracker: TileTracker?
+    // Layers (DESIGN §3.2): 0 = the display without the layered windows; others keyed by CGWindow id.
+    private var layers: [UInt32: Layer] = [:]
+    private var display: Layer? { layers[0] }
+    /// Bounds on per-window capture (host memory and WindowServer work): count and summed pixels.
+    private var maxWindowLayers = 16
+    private var maxLayerPixels = 48_000_000
+    private var lastExcludedIDs: Set<UInt32> = []
+    private var pendingMoved: [WindowTracker.Delta] = []
+    private var layerRetainNanos: UInt64 = 10_000_000_000
+    private var maxLayerEncoders = 4
+
+    // Hybrid codec state shared across layers.
     private var detector = ShiftDetector()
     private var rc: RateController?
-    private var canvas: CVPixelBuffer?          // native BGRA picture the encoder sees
-    private var scaled: CVPixelBuffer?          // encoder input at the current rung (nil at native)
-    private var transfer: VTPixelTransferSession?
-    private var lastFrame: CVPixelBuffer?       // previous capture: diff source and refinement source
     private var captureSeq: UInt32 = 0
     private var lastInputSeq: UInt64 = 0
-    private var pendingVideoTiles = Set<Int>()
-    private var pendingVideoRegion = PixelRect.zero
-    private var pendingWholeFrame = false
-    private var submitted: (tiles: Set<Int>, region: PixelRect, whole: Bool)? = nil
-    private var videoActiveNanos: UInt64 = 0
     private var tileTokens: Double = 0
     private var tileMsgSeq: UInt32 = 0
-    private var tileSent: [UInt32: (nanos: UInt64, bytes: Int, refinement: Int, block: Bool, rects: [PixelRect])] = [:]
+    private var tileSent: [UInt32: (nanos: UInt64, bytes: Int, refinement: Int, block: Bool, layer: UInt32, rects: [PixelRect])] = [:]
     private var lastBudget = RateController.Budget(tileKbps: 0, videoKbps: 0)
     private var refineTimer: DispatchSourceTimer?
     private var rateTimer: DispatchSourceTimer?
     private struct PendingScroll { let x: Int, y: Int; let windowID: UInt32; let nanos: UInt64 }
     private let scrollLock = NSLock()
     private var pendingScroll: PendingScroll?
-    private var dumped = false
 
     // Video pacing state.
     /// Video frame sequence, monotonic across streamers of one host process (review M4: a viewer whose
@@ -59,17 +64,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private static let frameSeqLock = NSLock()
     private var tokens: Double = 0                 // bytes available to send
     private var lastRefill = Clock.nowNanos()
-    private var lastSendNanos: UInt64 = 0
-    private struct InFlight { let sentNanos: UInt64; let bytes: Int; let ltrToken: Int64?; var paceEndNanos: UInt64 = 0 }
+    private struct InFlight { let layer: UInt32; let sentNanos: UInt64; let bytes: Int; let ltrToken: Int64?; var paceEndNanos: UInt64 = 0 }
     private var unacked: [UInt32: InFlight] = [:]
     private var srttNanos: Double = 250_000_000
-    private var ackedLTR: [Int64] = []
-    private var wantKeyframe = false
-    private var wantLTRRefresh = false
-    private var encoding = false
-    private var encodingSince: UInt64 = 0
-    private var recoverySeq: UInt32 = 0
-    private var recoverySentNanos: UInt64 = 0
     /// Last ~2 s of sent frames' datagrams, for fragment NACKs; `sent` = how many have left the pacer so far
     /// (review H5: a NACK for a datagram still queued in the pacer is ignored).
     private final class SentFrame { let nanos: UInt64; let datagrams: [Data]; var sent = 0; init(nanos: UInt64, datagrams: [Data]) { self.nanos = nanos; self.datagrams = datagrams } }
@@ -78,18 +75,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// cursor being the time the last scheduled datagram leaves; resends queue behind the frame in flight.
     private let paceQueue = DispatchQueue(label: "mirage.host.pace", qos: .userInteractive)
     private var paceCursorNanos: UInt64 = 0
-    private var lastFpsCap = 30.0
     private var lastHostStatus: ControlMessage.HostStatus? = nil
     private var lastHostStatusNanos: UInt64 = 0
     private var statNacks = 0, statNackResent = 0
     /// Frames purged as stale whose ack may still arrive (review H3): they still teach srtt and the fresh-picture state.
     private var recentlyPurged: [UInt32: InFlight] = [:]
-    private var keyframeArmed = false
 
     // Stats (per log interval).
     private var statFrames = 0, statBytes = 0, statDropped = 0, statSkippedBudget = 0, statLost = 0
     private var statEncodeNanos: UInt64 = 0
-    private var statInput = 0, statTileBytes = 0, statTileRects = 0, statRefineBytes = 0, statCopyRects = 0, statDirtyTiles = 0, statDiffPruned = 0, statTileSkipped = 0, statFoveaTiles = 0
+    private var statInput = 0, statTileBytes = 0, statTileRects = 0, statRefineBytes = 0, statCopyRects = 0, statDirtyTiles = 0, statDiffPruned = 0, statTileSkipped = 0, statFoveaTiles = 0, statStills = 0, statOccluded = 0
     private var secTileBytes = 0, secVideoBytes = 0, secVideoFrames = 0, secSkippedBudget = 0   // per rateState second
     private var statCaptures = 0
     private var statCaptureNanos: UInt64 = 0
@@ -100,6 +95,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var effortCaptureNanos: UInt64 = 0, effortCaptures = 0
     private var effortLogged = false
     private var statTimer: DispatchSourceTimer?
+    private var statStaleDropped = 0
+    private var statWindowCommands = 0
+    private var debugLayers = false
 
     public init(log: @escaping @Sendable (String) -> Void) {
         self.log = log
@@ -107,13 +105,24 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Env var, or a marker file for the LaunchAgent: ~/Library/Application Support/Mirage/debug-shift
         let marker = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Mirage/debug-shift").path
         if ProcessInfo.processInfo.environment["MIRAGE_DEBUG_SHIFT"] != nil || FileManager.default.fileExists(atPath: marker) { detector.debug = { log($0) } }
+        if let v = ProcessInfo.processInfo.environment["MIRAGE_MAX_LAYERS"], let n = Int(v) { maxWindowLayers = n }
+        debugLayers = ProcessInfo.processInfo.environment["MIRAGE_DEBUG_LAYERS"] != nil
     }
 
     // MARK: DesktopStreamer
 
     public func start(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
+        let t = try await ScreenCapturer.resolve(req)
+        // The window list and the SCWindow catalog come first, so the display stream can exclude the
+        // layered windows from its very first frame (the picture under them is part of the base picture).
+        await catalog.refreshNow()
+        let tracker = WindowTracker(displayID: t.display.displayID, streamWidth: t.pixelWidth)
+        let now = Clock.nowNanos()
+        let sample = tracker.sample(captureSeq: 0, now: now, force: true)
         let cap = ScreenCapturer(queue: queue)
-        let t = try await cap.start(req) { [weak self] pb, nanos, dirty in self?.captured(pb, nanos, dirtyRects: dirty) }
+        let planned = sample.map { plannedLayers(in: $0.sample.windows, displayPixels: t.pixelWidth * t.pixelHeight) } ?? []
+        let excluded = planned.flatMap { w in [w.id] + (sample?.sample.children[w.id] ?? []) }.compactMap { catalog.window($0) }
+        _ = try await cap.start(req, target: t, excluding: excluded) { [weak self] pb, nanos, dirty in self?.queue.async { self?.captured(pb, nanos, dirtyRects: dirty, layerID: 0) } }
         return try await withCheckedThrowingContinuation { c in
             queue.async {
                 do {
@@ -121,19 +130,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.capturer = cap
                     self.target = t
                     self.request = req
+                    self.windows = tracker
+                    self.lastExcludedIDs = Set(excluded.map(\.windowID))
                     try self.configure(for: t, req: req)
                     self.injector = InputInjector(displayID: t.display.displayID)
-                    self.windows = WindowTracker(displayID: t.display.displayID, streamWidth: t.pixelWidth)
+                    self.ax = AXWindows(log: self.log)
                     let cur = CursorMonitor(displayID: t.display.displayID)
                     cur.onShape = { [weak self] s in self?.output?.sendControl(.cursorShape(s)) }
                     cur.onPosition = { [weak self] p in self?.output?.sendControl(.cursorPosition(p)) }
                     cur.start(on: self.queue)
                     self.cursor = cur
                     cap.onStop = { [weak self] err in self?.log("capture stopped: \(err.map { "\($0)" } ?? "ok")") }
-                    if let w = self.windows?.sample(captureSeq: 0, now: Clock.nowNanos()) {
-                        self.publishedWindows = w.sample.windows; self.lastFullWindowsNanos = Clock.nowNanos()
-                        self.sendControlCounted(.windowList(.init(captureSeq: 0, windows: w.sample.windows)))
-                    }
+                    if let s = sample { self.reconcileLayers(s.sample, now: now); self.publishWindows(now: now, full: true) }
                     self.startTimers()
                     c.resume(returning: t.info)
                 } catch { c.resume(throwing: error) }
@@ -144,42 +152,48 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// (Re)builds everything that depends on the native stream size.
     private func configure(for t: ScreenCapturer.Target, req: ControlMessage.StreamRequest) throws {
         let w = t.pixelWidth, h = t.pixelHeight
-        tracker = TileTracker(width: w, height: h)
+        let now = Clock.nowNanos()
         var controller = RateController(initialKbps: min(req.bitrateKbps, 800), maxKbps: req.bitrateKbps, nativePixels: w * h)
         if let old = rc { controller = RateController(initialKbps: old.targetKbps, maxKbps: req.bitrateKbps, nativePixels: w * h) }
         rc = controller
-        canvas = try Self.makeBuffer(width: w, height: h)
-        scaled = nil; transfer = nil
-        lastFrame = nil
-        pendingVideoTiles = []; pendingVideoRegion = .zero; pendingWholeFrame = false; submitted = nil
-        try rebuildEncoder()
+        // Every layer starts over: the display at the new size, the windows at the new scale (their
+        // capturers are rebuilt by the next window-list reconcile).
+        for (id, l) in layers where id != 0 { let cap = l.capturer; l.capturer = nil; Task { await cap?.stop() } }
+        layers = [:]
+        let d = Layer(id: 0, width: w, height: h, frame: PixelRect(x: 0, y: 0, width: w, height: h), now: now)
+        d.canvas = try Self.makeBuffer(width: w, height: h)
+        d.announced = true; d.exposed = true
+        layers[0] = d
         lastBudget = controller.budget(videoActive: false)
+        try rebuildEncoder(d)
         tokens = bucketCapacity(); tileTokens = Double(lastBudget.tileKbps * 1000 / 8) * 0.5
-        wantKeyframe = false; keyframeArmed = false; ackedLTR = []
         windows?.setDisplay(t.display.displayID, streamWidth: w)
-        sendTileMessage(.reset(width: w, height: h), captureNanos: Clock.nowNanos())
+        blockInFlight = nil
+        sendTileMessage(.reset(layer: 0, width: w, height: h), captureNanos: now)
         beginFreshPicture(reason: "stream start or resize")
+        if let s = windows?.sample(captureSeq: captureSeq, now: now, force: true) { reconcileLayers(s.sample, now: now) }
     }
 
-    private func rebuildEncoder() throws {
-        guard let t = target, let rc else { return }
+    private func rebuildEncoder(_ l: Layer) throws {
+        guard let rc else { return }
         // A session replaced while a frame is inside it never calls that frame's completion (its
         // invalidation drops the frame), which left `encoding` stuck forever (seen in the M2.5 burst runs).
         // Callers set wantKeyframe anyway, and the keyframe path rebuilds once the encoder is idle.
-        guard !encoding else { return }
+        guard !l.encoding else { return }
         let scale = rc.scale
-        let ew = max(64, Int(Double(t.pixelWidth) * scale)) & ~1, eh = max(64, Int(Double(t.pixelHeight) * scale)) & ~1
-        encoder = try HEVCEncoder(width: ew, height: eh, bitrateKbps: max(100, lastBudget.videoKbps), expectedFPS: plannedFPS())
+        let ew = max(64, Int(Double(l.width) * scale)) & ~1, eh = max(64, Int(Double(l.height) * scale)) & ~1
+        l.encoder = try HEVCEncoder(width: ew, height: eh, bitrateKbps: max(100, lastBudget.videoKbps), expectedFPS: plannedFPS())
         if scale < 1 {
-            scaled = try Self.makeBuffer(width: ew, height: eh)
+            l.scaled = try Self.makeBuffer(width: ew, height: eh)
             var s: VTPixelTransferSession?
             guard VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &s) == noErr, let s else { throw MirageError.transport("VTPixelTransferSessionCreate failed") }
             VTSessionSetProperty(s, key: kVTPixelTransferPropertyKey_ScalingMode, value: kVTScalingMode_Normal)
-            transfer = s
+            l.transfer = s
         } else {
-            scaled = nil; transfer = nil
+            l.scaled = nil; l.transfer = nil
         }
-        ackedLTR = []
+        l.ackedLTR = []
+        l.encoderUseNanos = Clock.nowNanos()
     }
 
     private static func makeBuffer(width: Int, height: Int) throws -> CVPixelBuffer {
@@ -197,7 +211,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             queue.async {
                 let old = self.target
                 self.target = t
-                if old?.pixelWidth != t.pixelWidth || old?.pixelHeight != t.pixelHeight || self.encoder == nil {
+                if old?.pixelWidth != t.pixelWidth || old?.pixelHeight != t.pixelHeight || self.display?.encoder == nil {
                     do {
                         self.request = req
                         try self.configure(for: t, req: req)
@@ -231,7 +245,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard let f = self.sentFrames[nack.frameSeq] else {
                 // Not in the ring (older than ~2 s, or lost during a burst): a resend is impossible, so the
                 // viewer gets a recovery frame now instead of after its own timeout.
-                if !self.wantKeyframe { self.log("nack for frame \(nack.frameSeq) outside the resend ring: recovery frame"); self.requestRecovery() }
+                self.log("nack for frame \(nack.frameSeq) outside the resend ring: recovery frame")
+                self.requestRecovery(layer: nil)
                 return
             }
             // An empty list asks for the whole frame (a sequence gap); only datagrams that have actually
@@ -240,9 +255,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let resend = wanted.filter { $0 >= 0 && $0 < min(f.sent, f.datagrams.count) }.map { f.datagrams[$0] }
             guard !resend.isEmpty else { return }
             self.statNackResent += resend.count
-            // Resends go ahead of new data: queued behind a keyframe in the pacer they would arrive after the
-            // viewer's give-up time and turn one lost datagram into a lost frame (seen in the burst runs). A
-            // few datagrams go at once; a large whole-frame resend is paced from now, not from the cursor.
             _ = self.pace(resend, frame: nil, ahead: true)
         }
     }
@@ -272,7 +284,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard let sent = self.tileSent.removeValue(forKey: tileAck.msgSeq) else { return }
             let now = Clock.nowNanos()
             self.refinementInFlight = max(0, self.refinementInFlight - sent.refinement)
-            if sent.block { self.freshBlockAcked(); self.freshBlocksStep(now: now) }
+            if sent.block, self.blockInFlight?.msgSeq == tileAck.msgSeq { self.blockInFlight = nil; self.refine(now: now) }
             self.rc?.delaySample(sentNanos: sent.nanos, receivedNanos: tileAck.receivedNanos, bytes: sent.bytes, now: now)
             // Prune by age (a big refinement block legitimately outlives dozens of interactive acks).
             for (k, v) in self.tileSent where now - v.nanos > 20_000_000_000 { self.tileSent[k] = nil; self.refinementInFlight = max(0, self.refinementInFlight - v.refinement) }
@@ -280,6 +292,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     public func handle(input: ControlMessage) {
+        if case .windowCommand(let c) = input { queue.async { self.handle(windowCommand: c) }; return }
         inputQueue.async {
             self.injector?.handle(input)
             if case .scroll(let s) = input, let t = self.target, let w = self.windows {
@@ -290,6 +303,29 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 }
             }
             self.queue.async { self.statInput += 1 }
+        }
+    }
+
+    /// A window-management decision the client already shows: apply it through Accessibility, and
+    /// count it as an input so the next window list can say it reflects it.
+    private func handle(windowCommand c: ControlMessage.WindowCommand) {
+        guard let windows, let ax, let s = windows.current, let w = s.byID[c.id], let bounds = s.pointBounds[c.id] else { return }
+        statWindowCommands += 1
+        // The same guards as injected input: nothing while the console is locked; in input-sink mode the
+        // command is recorded, not applied, except for the measurement bench's own windows (a loopback
+        // drag run moves nothing but them).
+        if InputInjector.consoleLocked() { return }
+        if InputInjector.sinkPath != nil, w.app != "Mirage Test Bench" || c.action != .move { injector?.record(.windowCommand(c)); return }
+        let origin = (c.x != nil && c.y != nil) ? windows.originInPoints(x: c.x!, y: c.y!) : nil
+        if c.action == .move || c.action == .raise { lastMotionNanos = Clock.nowNanos() }
+        if let seq = c.inputSeq { injector?.noteApplied(seq: seq) }
+        ax.apply(c, target: .init(id: w.id, pid: w.pid, title: w.title, bounds: bounds), origin: origin) { [weak self] ok in
+            guard let self else { return }
+            self.queue.async {
+                if !ok, c.action == .move || c.action == .raise { self.log("window command \(c.action) for \(c.id) failed (no accessibility window?)") }
+                // Make the list reflect it as soon as it happened, not at the next 50 ms tick.
+                if let w = self.windows?.sample(captureSeq: self.captureSeq, now: Clock.nowNanos(), force: true) { self.reconcileLayers(w.sample, now: Clock.nowNanos()); self.pendingMoved += w.moved; self.publishWindows(now: Clock.nowNanos(), full: false) }
+            }
         }
     }
 
@@ -311,13 +347,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
     private var probeSeq: UInt64 = 0
 
-    /// The connection went away: capture and sending stop, every piece of session state stays (tracker,
-    /// controller and tier, encoder rung, frame and tile sequences, input sequence). Whatever was in
-    /// flight is treated as lost: unacked tile messages have their rects queued for a lossless resend,
-    /// unacked video frames are forgotten (the resume keyframe replaces them).
+    /// The connection went away: capture and sending stop, every piece of session state stays (layers
+    /// and their trackers, controller and tier, encoder rung, frame and tile sequences, input sequence).
+    /// Whatever was in flight is treated as lost: unacked tile messages have their rects queued for a
+    /// lossless resend, unacked video frames are forgotten (the resume keyframe replaces them).
     public func suspend() async {
         let cap = capturer
         await cap?.stop()
+        let caps: [WindowCapturer] = await withCheckedContinuation { c in queue.async { c.resume(returning: self.layers.values.compactMap { l in let w = l.capturer; l.capturer = nil; return w }) } }
+        for w in caps { await w.stop() }
         await withCheckedContinuation { c in
             queue.async {
                 let now = Clock.nowNanos()
@@ -327,19 +365,22 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.rateTimer?.cancel(); self.rateTimer = nil
                 self.capturer = nil; self.output = nil
                 self.unacked = [:]; self.sentFrames = [:]; self.recentlyPurged = [:]; self.paceCursorNanos = 0
-                if var tracker = self.tracker {
-                    var rects: [PixelRect] = []
-                    for (_, v) in self.tileSent { rects += v.rects }
-                    let tiles = tracker.tiles(covering: rects)
-                    tracker.markVideo(tiles, now: now)
-                    self.tracker = tracker
-                    if !tiles.isEmpty { self.log("suspend: \(tiles.count) tiles of unacked tile messages queued for resend") }
+                var resent = 0
+                for (_, v) in self.tileSent {
+                    guard let l = self.layers[v.layer] else { continue }
+                    let tiles = l.tracker.tiles(covering: v.rects)
+                    l.tracker.markVideo(tiles, now: now)
+                    resent += tiles.count
                 }
-                self.tileSent = [:]; self.refinementInFlight = 0
-                switch self.fresh {
-                case .base, .climb: self.fresh = .base(seq: 0)       // the resume keyframe becomes the base
-                case .blocks(let r, _, _): self.fresh = .blocks(remaining: r, inFlightBytes: 0)
-                case .done: break
+                if resent > 0 { self.log("suspend: \(resent) tiles of unacked tile messages queued for resend") }
+                self.tileSent = [:]; self.refinementInFlight = 0; self.blockInFlight = nil
+                for l in self.layers.values {
+                    switch l.fresh {
+                    case .base, .climb: l.fresh = .base(seq: 0)       // the resume keyframe becomes the base
+                    default: break
+                    }
+                    l.encoding = false; l.submitted = nil
+                    l.forceFullDiff = true
                 }
                 self.suspendedAt = now
                 let inj = self.injector
@@ -351,15 +392,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var suspendedAt: UInt64 = 0
 
     /// A new connection presented this session's token. The viewer kept its picture, so: rebind the
-    /// output, restart capture, and bring the picture current with a keyframe masked to the tiles the
-    /// viewer does not have crisp plus the diff of the first capture against the last frame it saw.
-    /// The ladder rung, tier, controller target and all sequences continue. A size change is a fresh picture.
+    /// output, restart capture (display and window layers), and bring the picture current with a keyframe
+    /// masked to the tiles the viewer does not have crisp plus the diff of each layer's first capture
+    /// against the last frame it saw. The ladder rung, tier, controller target and all sequences continue.
     public func resume(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         // Taken over from a connection the host had not yet noticed was dead: suspend that side first.
         if capturer != nil { await suspend() }
         let cap = ScreenCapturer(queue: queue)
         cap.forceNextFrame = true
-        let t = try await cap.start(req) { [weak self] pb, nanos, dirty in self?.captured(pb, nanos, dirtyRects: dirty) }
+        await catalog.refreshNow()
+        let excluded = await withCheckedContinuation { c in queue.async { c.resume(returning: self.layers.values.filter { $0.exposed && !$0.isDisplay }.flatMap { l in [l.id] + (self.windows?.current?.children[l.id] ?? []) }.compactMap { self.catalog.window($0) }) } }
+        let t = try await cap.start(req, excluding: excluded) { [weak self] pb, nanos, dirty in self?.queue.async { self?.captured(pb, nanos, dirtyRects: dirty, layerID: 0) } }
         return try await withCheckedThrowingContinuation { c in
             queue.async {
                 do {
@@ -367,19 +410,20 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     let gapMs = self.suspendedAt > 0 ? (now - self.suspendedAt) / 1_000_000 : 0
                     self.output = output
                     self.capturer = cap
+                    self.lastExcludedIDs = Set(excluded.map(\.windowID))
                     let old = self.target
                     self.target = t
                     self.request = req
                     cap.onStop = { [weak self] err in self?.log("capture stopped: \(err.map { "\($0)" } ?? "ok")") }
-                    if old?.pixelWidth != t.pixelWidth || old?.pixelHeight != t.pixelHeight || self.encoder == nil || self.tracker == nil {
+                    if old?.pixelWidth != t.pixelWidth || old?.pixelHeight != t.pixelHeight || self.display?.encoder == nil {
                         try self.configure(for: t, req: req)
                         self.log("resumed after \(gapMs) ms at a new size \(t.pixelWidth)x\(t.pixelHeight): fresh picture")
                     } else {
                         self.rc?.maxKbps = req.bitrateKbps
-                        self.wantKeyframe = true; self.keyframeArmed = false; self.ackedLTR = []
-                        self.tokens = self.bucketCapacity(); self.lastSendNanos = 0; self.encoding = false; self.submitted = nil
-                        self.lastRefill = now; self.lastTileRefill = now
-                        self.log("resumed after \(gapMs) ms: rung \(self.rc?.rung ?? -1), tier \(self.rc?.tier.name ?? "?"), target \(self.rc?.targetKbps ?? 0) kbps, fresh \(self.fresh); masked keyframe next")
+                        if let d = self.display { d.wantKeyframe = true; d.keyframeArmed = false; d.ackedLTR = [] }
+                        self.tokens = self.bucketCapacity(); self.lastRefill = now; self.lastTileRefill = now
+                        for l in self.layers.values { l.lastSendNanos = 0 }
+                        self.log("resumed after \(gapMs) ms: rung \(self.rc?.rung ?? -1), tier \(self.rc?.tier.name ?? "?"), target \(self.rc?.targetKbps ?? 0) kbps, fresh \(self.display?.fresh.description ?? "?"), \(self.layers.count - 1) window layers; masked keyframe next")
                     }
                     self.injector?.setDisplay(t.display.displayID)
                     let cur = CursorMonitor(displayID: t.display.displayID)
@@ -387,10 +431,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     cur.onPosition = { [weak self] p in self?.output?.sendControl(.cursorPosition(p)) }
                     cur.start(on: self.queue)
                     self.cursor = cur
-                    if let w = self.windows?.sample(captureSeq: self.captureSeq, now: now) {
-                        self.publishedWindows = w.sample.windows; self.lastFullWindowsNanos = now
-                        self.sendControlCounted(.windowList(.init(captureSeq: self.captureSeq, windows: w.sample.windows)))
-                    }
+                    // Window layers the viewer already holds are announced again (their pixel size), then
+                    // their capturers restart and the first frame's full diff sends whatever changed.
+                    for l in self.layers.values where !l.isDisplay && l.announced { self.sendTileMessage(.reset(layer: l.id, width: l.width, height: l.height), captureNanos: now) }
+                    if let s = self.windows?.sample(captureSeq: self.captureSeq, now: now, force: true) { self.reconcileLayers(s.sample, now: now) }
+                    self.publishWindows(now: now, full: true)
                     self.startTimers()
                     c.resume(returning: t.info)
                 } catch { c.resume(throwing: error) }
@@ -401,19 +446,134 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     public func stop() async {
         let cap = capturer
         await cap?.stop()
+        let caps: [WindowCapturer] = await withCheckedContinuation { c in queue.async { c.resume(returning: self.layers.values.compactMap { l in let w = l.capturer; l.capturer = nil; return w }) } }
+        for w in caps { await w.stop() }
         await withCheckedContinuation { c in
             queue.async {
                 self.cursor?.stop(); self.cursor = nil
                 self.statTimer?.cancel(); self.statTimer = nil
                 self.refineTimer?.cancel(); self.refineTimer = nil
                 self.rateTimer?.cancel(); self.rateTimer = nil
-                self.encoder = nil; self.capturer = nil; self.output = nil
-                self.lastFrame = nil; self.canvas = nil; self.scaled = nil; self.transfer = nil
+                self.capturer = nil; self.output = nil
+                self.layers = [:]
                 let inj = self.injector; self.injector = nil
                 self.inputQueue.async { inj?.releaseAll() }
                 c.resume()
             }
         }
+    }
+
+    // MARK: Layers
+
+    /// Which windows of a list get their own capture: normal-level windows of real apps, front first,
+    /// within the count and pixel bounds. The rest (menus, the dock, the menu bar, overflow) stay in the
+    /// display layer and the client draws them as cut-outs.
+    private func plannedLayers(in list: [ControlMessage.WindowInfo], displayPixels: Int) -> [ControlMessage.WindowInfo] {
+        var out: [ControlMessage.WindowInfo] = []
+        var pixels = 0
+        for w in list where w.windowLevel == 0 && w.app != "Window Server" && w.app != "Dock" && w.frame.width >= 64 && w.frame.height >= 64 {
+            guard out.count < maxWindowLayers, pixels + w.frame.area <= maxLayerPixels else { continue }
+            out.append(w); pixels += w.frame.area
+        }
+        return out
+    }
+
+    /// Creates, resizes, stops and reprioritises window layers after a window-list sample; computes
+    /// occlusion; keeps the display stream's exclusion list in step with the layers the viewer shows.
+    private func reconcileLayers(_ s: WindowTracker.Sample, now: UInt64) {
+        guard let t = target, let d = display else { return }
+        let displayRect = d.bounds
+        let planned = plannedLayers(in: s.windows, displayPixels: t.pixelWidth * t.pixelHeight)
+        let plannedIDs = Set(planned.map(\.id))
+        var needCatalog: [UInt32] = []
+        let frontID = s.windows.first(where: { $0.windowLevel == 0 })?.id
+        for w in planned {
+            if let l = layers[w.id] {
+                l.absentSince = 0
+                l.frame = w.frame
+                if Layer.even(w.frame.width) != l.width || Layer.even(w.frame.height) != l.height {
+                    // Resized on the host: the layer starts over at the new size (a still, then blocks).
+                    l.resize(width: w.frame.width, height: w.frame.height)
+                    if let cap = l.capturer { Task { try? await cap.update(width: w.frame.width, height: w.frame.height, fps: cap.fps) } }
+                    log("layer \(w.id) resized to \(w.frame.width)x\(w.frame.height)")
+                }
+                if l.capturer == nil { startCapturer(for: l, pid: w.pid, needCatalog: &needCatalog) }
+            } else {
+                let l = Layer(id: w.id, width: w.frame.width, height: w.frame.height, frame: w.frame, now: now)
+                layers[w.id] = l
+                startCapturer(for: l, pid: w.pid, needCatalog: &needCatalog)
+            }
+        }
+        // Layers no longer planned (window gone, minimized, dropped out of the cap): capture stops; the
+        // pixels stay for a while in case it comes right back (a Space switch, a restore).
+        for (id, l) in layers where id != 0 && !plannedIDs.contains(id) {
+            if let cap = l.capturer { l.capturer = nil; Task { await cap.stop() } }
+            if l.absentSince == 0 { l.absentSince = now }
+            else if now - l.absentSince > layerRetainNanos { layers[id] = nil; ax?.forget(id); log("layer \(id) released") }
+        }
+        // Occlusion on the host, frontmost flag, and the capture rate per layer.
+        for w in planned {
+            guard let l = layers[w.id] else { continue }
+            let (fraction, covering) = WindowTracker.occlusion(of: w, in: s.windows, display: displayRect)
+            l.visibleFraction = fraction
+            l.frontmost = w.id == frontID
+            // Tiles of the layer fully inside a covering rect (or outside the display) are occluded.
+            var occluded = Set<Int>()
+            let onScreen = l.local(w.frame.intersection(displayRect))
+            for i in 0..<l.tracker.tileCount {
+                let r = l.tracker.rect(of: i)
+                if r.intersection(onScreen) != r { occluded.insert(i); continue }
+                let rd = r.offset(l.frame.x, l.frame.y)
+                if covering.contains(where: { $0.intersection(rd) == rd }) { occluded.insert(i) }
+            }
+            let exposedNow = l.occludedTiles.subtracting(occluded)
+            if !exposedNow.isEmpty { _ = l.tracker.expedite(in: l.bounds, now: now, only: exposedNow) }
+            l.occludedTiles = occluded
+            let fps = l.frontmost ? 30 : (fraction <= 0.001 ? 2 : 10)
+            if let cap = l.capturer, cap.fps != fps { Task { try? await cap.update(width: cap.width, height: cap.height, fps: fps) } }
+        }
+        if !needCatalog.isEmpty {
+            catalog.ensure(needCatalog) { [weak self] in self?.queue.async { guard let self, let s = self.windows?.current else { return }; self.reconcileLayers(s, now: Clock.nowNanos()) } }
+        }
+        // The display stream leaves out exactly the layers the viewer shows (exposed): a layer the viewer
+        // does not hold yet stays in the display picture (the client draws it as a cut-out meanwhile).
+        var exposedIDs = Set(layers.values.filter { !$0.isDisplay && $0.exposed && plannedIDs.contains($0.id) }.map(\.id))
+        for id in exposedIDs { for c in s.children[id] ?? [] { exposedIDs.insert(c) } }
+        if exposedIDs != lastExcludedIDs, let cap = capturer {
+            let scWindows = exposedIDs.compactMap { catalog.window($0) }
+            if scWindows.count == exposedIDs.count {
+                lastExcludedIDs = exposedIDs
+                Task { do { try await cap.setExcluded(scWindows) } catch { self.log("display exclusion update failed: \(error)") } }
+            } else {
+                catalog.ensure(Array(exposedIDs)) { [weak self] in self?.queue.async { guard let self, let s = self.windows?.current else { return }; self.reconcileLayers(s, now: Clock.nowNanos()) } }
+            }
+        }
+    }
+
+    private func startCapturer(for l: Layer, pid: Int32, needCatalog: inout [UInt32]) {
+        guard let sc = catalog.window(l.id) else { needCatalog.append(l.id); return }
+        let cap = WindowCapturer(window: sc, width: l.width, height: l.height, fps: 10, queue: queue)
+        l.capturer = cap
+        l.forceFullDiff = true
+        cap.onStop = { [weak self, weak l] err in self?.queue.async { guard let l, l.capturer === cap else { return }; l.capturer = nil; self?.log("layer \(l.id) capture stopped: \(err.map { "\($0)" } ?? "ok")") } }
+        Task { [weak self] in
+            do { try await cap.start { [weak self] pb, nanos in self?.queue.async { self?.captured(pb, nanos, dirtyRects: [], layerID: l.id) } } }
+            catch { self?.queue.async { if l.capturer === cap { l.capturer = nil }; self?.log("layer \(l.id) capture failed: \(error)") } }
+        }
+    }
+
+    /// Layers in the order refinement serves them: the one under the pointer, then window layers front
+    /// to back (visible ones first), then the display.
+    private func layersByPriority() -> [Layer] {
+        guard let d = display else { return [] }
+        let locus = injector?.locus.map { (x: Int($0.x * Double(d.width)), y: Int($0.y * Double(d.height))) }
+        let list = windows?.current?.windows ?? []
+        var ordered: [Layer] = []
+        if let p = locus, let w = list.first(where: { $0.frame.contains(p.x, p.y) }), let l = layers[w.id] { ordered.append(l) }
+        for w in list { if let l = layers[w.id], !ordered.contains(where: { $0 === l }), l.visibleFraction > 0.001 { ordered.append(l) } }
+        for w in list { if let l = layers[w.id], !ordered.contains(where: { $0 === l }) { ordered.append(l) } }
+        ordered.append(d)
+        return ordered
     }
 
     // MARK: Capture pipeline
@@ -427,16 +587,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// video frame plus a full lossless refinement pass (measured: ~400 KB per flicker).
     private static let diffTolerance: Int32 = 4
 
-    private func tileEqual(_ a: ShiftDetector.Frame, _ b: ShiftDetector.Frame, _ r: PixelRect) -> Bool {
-        tileChangedBox(a, b, r) == nil
-    }
-
     /// Bounding box of the pixels that differ beyond the tolerance inside `r`, or nil if none do.
     /// Sparse updates (a typed glyph, a caret) are a fraction of their 64-px tile; sending the tight
-    /// box instead of the tile halves typing's bytes.
-    private func tileChangedBox(_ a: ShiftDetector.Frame, _ b: ShiftDetector.Frame, _ r: PixelRect) -> PixelRect? {
+    /// box instead of the tile halves typing's bytes. Alpha counts too (a window's rounded corners).
+    private func tileChangedBox(_ a: ShiftDetector.Frame, _ b: ShiftDetector.Frame, _ r: PixelRect, alphaLayer: Bool = false) -> PixelRect? {
         let n = r.width * 4
         var x0 = Int.max, x1 = -1, y0 = Int.max, y1 = -1
+        let tol = Self.diffTolerance
         for y in r.y..<r.maxY {
             let pa = a.base.advanced(by: y * a.stride + r.x * 4), pb = b.base.advanced(by: y * b.stride + r.x * 4)
             if memcmp(pa, pb, n) == 0 { continue }
@@ -444,7 +601,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             var rowChanged = false
             for x in 0..<r.width {
                 let o = x * 4
-                if abs(Int32(ua[o]) - Int32(ub[o])) > Self.diffTolerance || abs(Int32(ua[o + 1]) - Int32(ub[o + 1])) > Self.diffTolerance || abs(Int32(ua[o + 2]) - Int32(ub[o + 2])) > Self.diffTolerance {
+                var changed = abs(Int32(ua[o]) - Int32(ub[o])) > tol || abs(Int32(ua[o + 1]) - Int32(ub[o + 1])) > tol || abs(Int32(ua[o + 2]) - Int32(ub[o + 2])) > tol
+                if alphaLayer {
+                    // A window's rounded corners: the anti-aliased edge pixels re-render a little differently from
+                    // frame to frame (measured: four 23×23 corner boxes "changing" on a still window, ±10 levels);
+                    // semi-transparent pixels get a wide tolerance, fully transparent ones never count.
+                    let aa = Int32(ua[o + 3]), ab = Int32(ub[o + 3])
+                    if aa == 0 && ab == 0 { changed = false }
+                    else if aa < 255 || ab < 255 { changed = abs(aa - ab) > 48 || abs(Int32(ua[o]) - Int32(ub[o])) > 48 || abs(Int32(ua[o + 1]) - Int32(ub[o + 1])) > 48 || abs(Int32(ua[o + 2]) - Int32(ub[o + 2])) > 48 }
+                    else if abs(aa - ab) > tol { changed = true }
+                }
+                if changed {
                     rowChanged = true
                     if x < x0 { x0 = x }
                     if x > x1 { x1 = x }
@@ -456,103 +623,116 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         return PixelRect(x: r.x + x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1)
     }
 
-    private func captured(_ pb: CVPixelBuffer, _ nanos: UInt64, dirtyRects: [PixelRect]) {
-        guard var tracker, request != nil, output != nil, let windows else { return }
+    /// One captured frame of one layer (on `queue`). `dirtyRects` are SCK's (display layer) or empty
+    /// (window layers: the whole frame is a candidate; the diff decides).
+    private func captured(_ pb: CVPixelBuffer, _ nanos: UInt64, dirtyRects: [PixelRect], layerID: UInt32) {
+        guard request != nil, output != nil, let windows, let layer = layers[layerID] else { return }
         captureSeq &+= 1
         let now = Clock.nowNanos()
         statCaptures += 1; effortCaptures += 1
         defer { let dt = Clock.nowNanos() - now; statCaptureNanos += dt; effortCaptureNanos += dt }
         // Inputs injected less than ~40 ms before the capture are not in these pixels yet (window server + app render).
         lastInputSeq = injector?.inputSeq(before: nanos &- 40_000_000) ?? 0
-        var moved: [WindowTracker.Delta] = []
-        var sampledWindows: [ControlMessage.WindowInfo]? = nil
-        if let s = windows.sample(captureSeq: captureSeq, now: now) {
-            moved = s.moved
-            if s.changed { sampledWindows = s.sample.windows }
-        }
-        var copyRectsThisCapture = 0
-        /// Window frames as the pixels verified them this capture: the list reports a diagonal move axis
-        /// by axis, the copy-rect carries the real (dx, dy), and the viewer must see one frame per move.
-        var verifiedFrames: [UInt32: PixelRect] = [:]
-        defer {
-            if var list = sampledWindows ?? (verifiedFrames.isEmpty ? nil : publishedWindows) {
-                for i in list.indices { if let f = verifiedFrames[list[i].id] { list[i].frame = f } }
-                publishWindows(list, captureSeq: captureSeq, now: now)
-            }
-        }
         CVPixelBufferLockBaseAddress(pb, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
         let new = frameView(pb)
-        guard new.width == tracker.width, new.height == tracker.height else { return }   // a stale frame around a resize
-        var dirty = tracker.tiles(covering: dirtyRects)
-        let prev = lastFrame
+        guard new.width == layer.width, new.height == layer.height else { return }   // a stale frame around a resize
+        var tracker = layer.tracker
+        var dirty = (layer.isDisplay && !layer.forceFullDiff) ? tracker.tiles(covering: dirtyRects) : Array(0..<tracker.tileCount)
+        layer.forceFullDiff = false
+        let prev = layer.lastFrame
         var old: ShiftDetector.Frame? = nil
         if let prev { CVPixelBufferLockBaseAddress(prev, .readOnly); old = frameView(prev) }
         defer { if let prev { CVPixelBufferUnlockBaseAddress(prev, .readOnly) } }
 
         var tightBoxes: [Int: PixelRect] = [:]
         if let old {
-            // CPU diff inside SCK's dirty rects: they over-report ~1.7x (experiments/probes), and the
-            // exact changed box inside a tile is what a sparse lossless update needs.
+            // CPU diff inside SCK's dirty rects (they over-report ~1.7x, experiments/probes) or over the whole
+            // window (window streams report no useful dirty rects); the exact changed box inside a tile is
+            // what a sparse lossless update needs.
             let before = dirty.count
             let wantBoxes = effort.tightBoxes
+            let alphaLayer = !layer.isDisplay
             dirty.removeAll { i in
-                if let box = tileChangedBox(old, new, tracker.rect(of: i)) { if wantBoxes { tightBoxes[i] = box }; return false }
+                if let box = tileChangedBox(old, new, tracker.rect(of: i), alphaLayer: alphaLayer) { if wantBoxes { tightBoxes[i] = box }; return false }
                 return true
             }
             statDiffPruned += before - dirty.count
         } else {
-            // First frame: everything through one keyframe, then refine lossless.
+            // First frame of the layer: the display goes through one keyframe then refines lossless; a
+            // window layer is announced, gets one lossy still, then refines lossless.
             dirty = Array(0..<tracker.tileCount)
+            if !layer.isDisplay {
+                layer.announced = true
+                log("layer \(layer.id): first frame \(layer.width)x\(layer.height) after \((now - layer.createdNanos) / 1_000_000) ms; announced")
+                sendTileMessage(.reset(layer: layer.id, width: layer.width, height: layer.height), captureNanos: nanos)
+                tracker.markVideo(dirty, now: now)
+                layer.fresh = .still
+                layer.tracker = tracker
+                layer.lastFrame = pb
+                refine(now: now)
+                return
+            }
         }
         statDirtyTiles += dirty.count
-        if dirty.isEmpty { lastFrame = pb; refine(now: now); return }
+        layer.frames += 1
+        if dirty.isEmpty { layer.lastFrame = pb; layer.tracker = tracker; refine(now: now); return }
+        if debugLayers, dirty.count >= 4 { log("layer \(layer.id) capture \(captureSeq): \(dirty.count) dirty tiles, bb \(tracker.boundingRect(dirty))" + (dirty.count <= 8 ? " boxes " + dirty.map { "\(tightBoxes[$0].map { "\($0.x),\($0.y) \($0.width)x\($0.height)" } ?? "?")" }.joined(separator: " | ") : "")) }
 
-        // Copy-rects: window drags from the window list, scrolls from line signatures.
+        // Copy-rects: window drags (display layer, for windows it still carries) from the window list,
+        // scrolls from line signatures.
         var explained = Set<Int>()
+        var copyRectsThisCapture = 0
         if let old, prev != nil {
-            for d in moved {
-                let dx0 = d.new.x - d.old.x, dy0 = d.new.y - d.old.y
-                guard abs(dx0) + abs(dy0) > 0, abs(dx0) < 600, abs(dy0) < 600 else { continue }
-                // The window list is sampled a few ms after the pixels were composited, so during a fast
-                // drag the reported delta can be off by a few px: verify it, else search around the window.
-                var r = detector.verify(old: old, new: new, rect: d.old, dx: dx0, dy: dy0)
-                if r == nil, let (rdx, rdy) = detector.refine(old: old, new: new, rect: d.old, dx: dx0, dy: dy0, radius: effort.shiftSearch.refineRadius), (rdx, rdy) != (dx0, dy0) {
-                    r = detector.verify(old: old, new: new, rect: d.old, dx: rdx, dy: rdy)
+            if layer.isDisplay {
+                let moved = pendingMoved; pendingMoved = []
+                for d in moved where layers[d.id] == nil {
+                    let dx0 = d.new.x - d.old.x, dy0 = d.new.y - d.old.y
+                    guard abs(dx0) + abs(dy0) > 0, abs(dx0) < 600, abs(dy0) < 600 else { continue }
+                    var r = detector.verify(old: old, new: new, rect: d.old, dx: dx0, dy: dy0)
+                    if r == nil, let (rdx, rdy) = detector.refine(old: old, new: new, rect: d.old, dx: dx0, dy: dy0, radius: effort.shiftSearch.refineRadius), (rdx, rdy) != (dx0, dy0) {
+                        r = detector.verify(old: old, new: new, rect: d.old, dx: rdx, dy: rdy)
+                    }
+                    guard let r else { continue }
+                    let dest = tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])
+                    let mismatched = Set(tracker.tiles(covering: r.mismatchedTiles))
+                    explained.formUnion(dest.filter { !mismatched.contains($0) })
+                    sendTileMessage(.copyRect(.init(header: header(layer: 0, nanos: nanos), rect: r.rect, dx: r.dx, dy: r.dy)), captureNanos: nanos)
+                    if debugLayers { log("layer 0 drag copy-rect for window \(d.id) \(r.rect) by (\(r.dx), \(r.dy)) (layers: \(layers.keys.sorted()))") }
+                    statCopyRects += 1; copyRectsThisCapture += 1
                 }
-                guard let r else { continue }
-                let dx = r.dx, dy = r.dy
-                let dest = tracker.tiles(covering: [r.rect.offset(dx, dy)])
-                let mismatched = Set(tracker.tiles(covering: r.mismatchedTiles))
-                explained.formUnion(dest.filter { !mismatched.contains($0) })
-                sendTileMessage(.copyRect(.init(header: header(windowID: d.id, nanos: nanos), rect: r.rect, dx: dx, dy: dy)), captureNanos: nanos)
-                statCopyRects += 1; copyRectsThisCapture += 1
-                if (dx, dy) != (dx0, dy0) { verifiedFrames[d.id] = d.old.offset(dx, dy) }
             }
             let unexplained = dirty.filter { !explained.contains($0) }
-            if detector.debug != nil, unexplained.count >= 6 { log("capture \(captureSeq): dirty \(dirty.count) unexplained \(unexplained.count) bb \(tracker.boundingRect(unexplained)) moved \(moved.count) scroll \(pendingScroll != nil)") }
-            if let dir = ProcessInfo.processInfo.environment["MIRAGE_DUMP_DIR"], unexplained.count >= 100, !dumped {
-                dumped = true
-                for (name, f) in [("old", old), ("new", new)] {
-                    var d = Data(count: f.width * f.height * 4)
-                    d.withUnsafeMutableBytes { dst in for y in 0..<f.height { memcpy(dst.baseAddress!.advanced(by: y * f.width * 4), f.base.advanced(by: y * f.stride), f.width * 4) } }
-                    try? d.write(to: URL(fileURLWithPath: "\(dir)/\(name)-\(f.width)x\(f.height).bgra"))
-                }
-                log("dumped frame pair to \(dir)")
+            scrollLock.lock(); let scroll = pendingScroll; scrollLock.unlock()
+            // The wheel event belongs to this layer if it fell on its window (display layer: a window it carries).
+            var scrollHere: PendingScroll? = nil
+            if let s = scroll, now &- s.nanos < 500_000_000 {   // review L4: an old wheel event is not attributed to an unrelated capture
+                let onLayer = layers[s.windowID] != nil ? s.windowID : 0
+                if onLayer == layer.id { scrollHere = s; scrollLock.lock(); pendingScroll = nil; scrollLock.unlock() }
             }
-            scrollLock.lock(); let scroll = pendingScroll; pendingScroll = nil; scrollLock.unlock()
             let bb = tracker.boundingRect(unexplained)
             if unexplained.count >= 12, bb.height >= 128 || bb.width >= 128 {
-                let win = scroll.flatMap { s in windows.window(at: s.x, s.y) } ?? windows.window(at: bb.x + bb.width / 2, bb.y + bb.height / 2)
-                let known = win.flatMap { windows.scrollRect(for: $0.id) }
-                var region = (known ?? win?.frame ?? bb).intersection(bb)
+                var known: PixelRect? = nil
+                var win: ControlMessage.WindowInfo? = nil
+                if layer.isDisplay {
+                    win = scrollHere.flatMap { s in windows.window(at: s.x, s.y) } ?? windows.window(at: bb.x + bb.width / 2, bb.y + bb.height / 2)
+                    known = win.flatMap { windows.scrollRect(for: $0.id) }
+                } else {
+                    known = windows.scrollRect(for: layer.id).map { layer.local($0) }
+                }
+                var region = (known ?? (layer.isDisplay ? win?.frame : nil) ?? bb).intersection(bb)
                 if region.width < 64 || region.height < 64 { region = bb }
                 if region.height >= 96 || region.width >= 96, let r = detector.detect(old: old, new: new, rect: region) {
                     let dest = tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])
                     let mismatched = Set(tracker.tiles(covering: r.mismatchedTiles))
                     explained.formUnion(dest.filter { !mismatched.contains($0) })
-                    sendTileMessage(.copyRect(.init(header: header(windowID: win?.id ?? 0, nanos: nanos), rect: r.rect, dx: r.dx, dy: r.dy)), captureNanos: nanos)
-                    if let win, known == nil { windows.learn(scrollRect: r.rect.union(r.rect.offset(r.dx, r.dy)), for: win.id) }
+                    sendTileMessage(.copyRect(.init(header: header(layer: layer.id, nanos: nanos), rect: r.rect, dx: r.dx, dy: r.dy)), captureNanos: nanos)
+                    if debugLayers { log("layer \(layer.id) copy-rect \(r.rect) by (\(r.dx), \(r.dy)) confidence \(r.confidence)") }
+                    if known == nil {
+                        let learnedRect = r.rect.union(r.rect.offset(r.dx, r.dy))
+                        if layer.isDisplay { if let win { windows.learn(scrollRect: learnedRect, for: win.id) } }
+                        else { windows.learn(scrollRect: learnedRect.offset(layer.frame.x, layer.frame.y), for: layer.id) }
+                    }
                     statCopyRects += 1; copyRectsThisCapture += 1
                 }
             }
@@ -561,6 +741,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             dirty.removeAll { explained.contains($0) }
             tracker.markCopied(Array(explained), now: now)
         }
+        // Occluded on the host (covered by a window in front, or off the display): tracked, not sent. They
+        // become due when uncovered (reconcileLayers expedites them) and are then sent from the frame of that moment.
+        if !layer.occludedTiles.isEmpty {
+            let hidden = dirty.filter { layer.occludedTiles.contains($0) }
+            if !hidden.isEmpty {
+                dirty.removeAll { layer.occludedTiles.contains($0) }
+                tracker.defer(hidden, now: now, delayNanos: 3_600_000_000_000)
+                statOccluded += hidden.count
+            }
+        }
 
         var plan = tracker.classify(dirty: dirty, now: now)
         // Motion bookkeeping for the refinement freeze: classified video, copy-rects, or the input stream.
@@ -568,7 +758,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let hint = injector?.motionHintNanos, hint > lastMotionNanos { lastMotionNanos = hint }
         let motion = motionSustained(now)
         if motion != wasMotion { wasMotion = motion; lastBudgetApply = 0; applyBudget(now: now) }
-        if let fov = fovea(tracker) {
+        if let fov = fovea(layer) {
             // Fovea: motion inside it is carried as native tiles while the tile budget holds; the base
             // layer (video) takes the rest. A fovea that moved refines its new ground first.
             if !plan.video.isEmpty, tileTokens > 0 {
@@ -581,7 +771,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     statFoveaTiles += inside.count
                 }
             }
-            if abs(fov.x - lastFovea.x) > fov.width / 4 || abs(fov.y - lastFovea.y) > fov.height / 4 {
+            if layer.isDisplay, abs(fov.x - lastFovea.x) > fov.width / 4 || abs(fov.y - lastFovea.y) > fov.height / 4 {
                 lastFovea = fov
                 let n = tracker.expedite(in: fov, now: now)
                 if n > 0 { log("fovea moved to \(fov): \(n) tiles refine first") }
@@ -592,6 +782,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             tracker.markVideo(plan.video, now: now)
             plan.video = []; plan.videoRegion = .zero; plan.wholeFrame = false
         }
+        if !plan.video.isEmpty, !layer.isDisplay, layer.encoder == nil, !ensureEncoder(layer) {
+            // No encoder to spare for this layer: its motion is refined lossless once it settles.
+            tracker.markVideo(plan.video, now: now)
+            plan.video = []; plan.videoRegion = .zero; plan.wholeFrame = false
+        }
         refillTiles(now: now)
         if !plan.lossless.isEmpty {
             // Priority 1: changed pixels near the input locus (pointer or caret) always go, now, on the
@@ -599,18 +794,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // looking at. Priority 2: other changed pixels, budget permitting. Refinement yields to real
             // change (three tiles or more), not to a caret blink or a menu-bar clock.
             if plan.lossless.count >= 3 { lastDirectNanos = now }
-            let (near, far) = splitByLocus(plan.lossless, tracker: tracker)
+            let (near, far) = splitByLocus(plan.lossless, layer: layer, tracker: tracker)
             if !near.isEmpty {
-                let bytes = submitLossless(tiles: near, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
+                let bytes = submitLossless(layer: layer, tiles: near, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
                 tileTokens -= Double(bytes)
                 plan.lossless = far
             }
         }
         if !plan.lossless.isEmpty {
             if tileTokens > 0 {
-                let bytes = submitLossless(tiles: plan.lossless, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
+                let bytes = submitLossless(layer: layer, tiles: plan.lossless, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
                 tileTokens -= Double(bytes)
-            } else if plan.lossless.count >= 12, rc?.policy.videoEnabled ?? true {
+            } else if plan.lossless.count >= 12, rc?.policy.videoEnabled ?? true, layer.encoder != nil || ensureEncoder(layer) {
                 // The tile budget is spent and this is a lot of fresh content (a scroll's exposed strip at
                 // native scale is megapixels per second): show it through video now, refine it later.
                 plan.video.append(contentsOf: plan.lossless)
@@ -621,24 +816,50 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 tracker.defer(plan.lossless, now: now); statTileSkipped += plan.lossless.count
             }
         }
-        if !plan.video.isEmpty, let canvas {
+        if !plan.video.isEmpty, let canvas = ensureCanvas(layer) {
             copyToCanvas(canvas, tiles: plan.video, from: new, tracker: tracker)
-            pendingVideoTiles.formUnion(plan.video)
-            pendingVideoRegion = pendingVideoRegion.union(plan.videoRegion)
-            pendingWholeFrame = pendingWholeFrame || plan.wholeFrame
-            videoActiveNanos = now
+            layer.pendingVideoTiles.formUnion(plan.video)
+            layer.pendingVideoRegion = layer.pendingVideoRegion.union(plan.videoRegion)
+            layer.pendingWholeFrame = layer.pendingWholeFrame || plan.wholeFrame
+            layer.videoActiveNanos = now; videoActiveNanos = now
         }
-        self.tracker = tracker
-        lastFrame = pb
-        if !pendingVideoTiles.isEmpty || wantKeyframe { tryEncode(now: now, latest: new) }
+        layer.tracker = tracker
+        layer.lastFrame = pb
+        if layer.hasVideoPending { tryEncode(layer, now: now, latest: new) }
         refine(now: now)
     }
 
+    private func ensureCanvas(_ l: Layer) -> CVPixelBuffer? {
+        if l.canvas == nil { l.canvas = try? Self.makeBuffer(width: l.width, height: l.height) }
+        return l.canvas
+    }
+
+    /// A window layer's encoder, created on first motion; at most `maxLayerEncoders` live at once, the
+    /// idle one longest unused making room. False if none can be had right now.
+    private func ensureEncoder(_ l: Layer) -> Bool {
+        if l.encoder != nil { return true }
+        let live = layers.values.filter { $0.encoder != nil && !$0.isDisplay }
+        if live.count >= maxLayerEncoders {
+            let now = Clock.nowNanos()
+            guard let victim = live.filter({ !$0.encoding && now - $0.videoActiveNanos > 2_000_000_000 }).min(by: { $0.videoActiveNanos < $1.videoActiveNanos }) else { return false }
+            victim.encoder = nil; victim.scaled = nil; victim.transfer = nil; victim.canvas = nil
+            victim.pendingVideoTiles = []; victim.pendingVideoRegion = .zero; victim.pendingWholeFrame = false
+            log("layer \(victim.id): encoder released for layer \(l.id)")
+        }
+        do { try rebuildEncoder(l); l.wantKeyframe = true; return true } catch { log("layer \(l.id): encoder failed: \(error)"); return false }
+    }
+
     /// Tiles within ~200 px (native) of the last input event, and the rest (TileScheduler, unit-tested).
-    private func splitByLocus(_ tiles: [Int], tracker: TileTracker) -> ([Int], [Int]) {
-        let l = injector?.locus.map { (x: Int($0.x * Double(tracker.width)), y: Int($0.y * Double(tracker.height))) }
+    private func splitByLocus(_ tiles: [Int], layer: Layer, tracker: TileTracker) -> ([Int], [Int]) {
+        let l = locus(in: layer)
         let o = TileScheduler.order(changed: tiles, refinement: [], locus: l, tracker: tracker)
         return (o.locus, o.changed)
+    }
+    /// The input locus in a layer's coordinates (nil when unknown).
+    private func locus(in layer: Layer) -> (x: Int, y: Int)? {
+        guard let d = display, let l = injector?.locus else { return nil }
+        let p = layer.local(x: Int(l.x * Double(d.width)), y: Int(l.y * Double(d.height)))
+        return (p.0, p.1)
     }
     private var lastDirectNanos: UInt64 = 0
     /// Sustained motion (classified video, copy-rects, or a drag/scroll/press on the input stream) in
@@ -646,6 +867,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var lastMotionNanos: UInt64 = 0
     private func motionSustained(_ now: UInt64) -> Bool { now &- lastMotionNanos < 300_000_000 }
     private var wasMotion = false
+    private var videoActiveNanos: UInt64 = 0
     private var secInteractiveBytes = 0
     private var interactiveKbpsEWMA = 0.0
 
@@ -654,148 +876,148 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     // and refines first; the base layer is the ladder's low rung. Inert on Local/Normal.
     private var foveaActive: Bool { (rc?.tier.rawValue ?? 0) >= LinkTier.constrained.rawValue }
     private var lastFovea: PixelRect = .zero
-    private func fovea(_ tracker: TileTracker) -> PixelRect? {
-        guard foveaActive else { return nil }
+    private func fovea(_ layer: Layer) -> PixelRect? {
+        guard foveaActive, let d = display else { return nil }
         let l = injector?.locus ?? (0.5, 0.5)
-        let w = Int(Double(tracker.width) * 0.577), h = Int(Double(tracker.height) * 0.577)   // a third of the area
-        let x = min(max(0, Int(l.x * Double(tracker.width)) - w / 2), tracker.width - w)
-        let y = min(max(0, Int(l.y * Double(tracker.height)) - h / 2), tracker.height - h)
-        return PixelRect(x: x, y: y, width: w, height: h)
+        let w = Int(Double(d.width) * 0.577), h = Int(Double(d.height) * 0.577)   // a third of the area
+        let x = min(max(0, Int(l.x * Double(d.width)) - w / 2), d.width - w)
+        let y = min(max(0, Int(l.y * Double(d.height)) - h / 2), d.height - h)
+        let f = PixelRect(x: x, y: y, width: w, height: h)
+        return layer.isDisplay ? f : layer.local(f)
     }
-    private func locusTile(_ tracker: TileTracker) -> (col: Int, row: Int)? {
-        guard foveaActive, let l = injector?.locus else { return nil }
-        return (min(tracker.cols - 1, Int(l.x * Double(tracker.cols))), min(tracker.rows - 1, Int(l.y * Double(tracker.rows))))
+    private func locusTile(_ layer: Layer) -> (col: Int, row: Int)? {
+        guard foveaActive, let l = locus(in: layer) else { return nil }
+        let t = layer.tracker
+        return (min(t.cols - 1, max(0, l.x / TileTracker.tile)), min(t.rows - 1, max(0, l.y / TileTracker.tile)))
     }
 
-    /// Progressive, whole-picture refinement of a fresh picture (DESIGN §3.3): level 0 is the tiny
-    /// keyframe, then the ladder climbs rung by rung as each step is acked, then lossless lands in
-    /// large centre-first blocks. Per-tile refinement is gated off until this is done, and nothing
-    /// from the refinement queue goes out before the base frame is acked.
-    enum Fresh: CustomStringConvertible, Equatable {
-        case base(seq: UInt32)          // waiting for the ack of the tiny keyframe
-        case climb(seq: UInt32)         // waiting for the ack of the last ladder step
-        case blocks(remaining: [PixelRect], inFlightBytes: Int, sentNanos: UInt64 = 0)
-        case done
-        var description: String {
-            switch self {
-            case .base(let s): return "base(\(s))"
-            case .climb(let s): return "climb(\(s))"
-            case .blocks(let r, let b, _): return "blocks(\(r.count) left, \(b) B in flight)"
-            case .done: return "done"
-            }
-        }
-    }
-    private var fresh: Fresh = .done
-    private var freshBaseSeq: UInt32 = 0
+    // MARK: Fresh pictures (DESIGN §3.3 "lossy first")
 
-    /// Starts a fresh-picture sequence; the next keyframe is its base.
+    /// Starts the display layer's fresh-picture sequence; the next keyframe is its base.
     private func beginFreshPicture(reason: String) {
-        fresh = .base(seq: 0)
+        display?.fresh = .base(seq: 0)
         log("fresh picture (\(reason)): tiny keyframe first, then ladder climb, then large lossless blocks")
     }
 
     /// Called when a video frame is acked as decoded.
-    private func freshAcked(seq: UInt32, now: UInt64) {
-        guard let rc, var tracker else { return }
-        switch fresh {
+    private func freshAcked(_ l: Layer, seq: UInt32, now: UInt64) {
+        guard let rc else { return }
+        switch l.fresh {
         case .base(let s) where seq >= s && s != 0, .climb(let s) where seq >= s && s != 0:
             // Climb while the target affords the next rung; each step is a whole-frame keyframe.
-            let kpix = Double(tracker.width * tracker.height) / 1000
+            let kpix = Double(l.width * l.height) / 1000
             let next = rc.rung - 1
             // Review H4: the same test tryEncode applies (the keyframe at the next rung fits one second of the
             // video budget), plus the P-frame density rule and no standing queue.
-            let nextW = max(64, Int(Double(tracker.width) * RateController.scales[max(0, next)])) & ~1, nextH = max(64, Int(Double(tracker.height) * RateController.scales[max(0, next)])) & ~1
+            let nextW = max(64, Int(Double(l.width) * RateController.scales[max(0, next)])) & ~1, nextH = max(64, Int(Double(l.height) * RateController.scales[max(0, next)])) & ~1
             if next >= rc.policy.minRung, FrameAssembler.keyframeFits(encodedWidth: nextW, encodedHeight: nextH, videoKbps: lastBudget.videoKbps),
                Double(rc.targetKbps) >= kpix * RateController.scales[next] * RateController.scales[next] * rc.tuning.kbpsPerKpixelDown, rc.queueMs < 90 {
                 self.rc!.climbOneRung(now: now)
                 lastRebuildNanos = now
-                if (try? rebuildEncoder()) != nil { wantKeyframe = true; progressiveKeyframe = true; fresh = .climb(seq: 0); log("fresh picture: climbing to rung \(self.rc!.rung) (scale \(self.rc!.scale))") }
-                else { fresh = .done }
+                rebuildAllEncoders(keyframes: false)
+                if (try? rebuildEncoder(l)) != nil { l.wantKeyframe = true; l.progressiveKeyframe = true; l.fresh = .climb(seq: 0); log("fresh picture: climbing to rung \(self.rc!.rung) (scale \(self.rc!.scale))") }
+                else { l.fresh = .done }
             } else {
                 // Lossless in large blocks sized to ~1 s of the refinement budget, centre-first.
-                let blocks = planBlocks(tracker)
-                fresh = .blocks(remaining: blocks, inFlightBytes: 0)
+                let blocks = planBlocks(l)
+                l.fresh = .blocks(remaining: blocks)
                 log("fresh picture: rung \(rc.rung) is the top the target affords; \(blocks.count) lossless blocks, first: \(blocks.prefix(3).map { "\($0.x),\($0.y)" }.joined(separator: " "))")
-                self.tracker = tracker
             }
         default: break
         }
     }
-    private var progressiveKeyframe = false
 
-    /// Large lossless blocks (~1 s of the refinement budget each) over everything the viewer does not hold
-    /// crisp, ordered by distance to the input locus (or the centre).
-    private func planBlocks(_ tracker: TileTracker) -> [PixelRect] {
+    /// Large lossless blocks (~1 s of the refinement budget each, 64-px aligned so no tile straddles two
+    /// blocks, review M3) over everything the viewer does not hold crisp, ordered by distance to the input
+    /// locus (or the centre).
+    private func planBlocks(_ l: Layer) -> [PixelRect] {
+        let tracker = l.tracker
         let perSecond = Double(lastBudget.tileKbps * 1000 / 8) * 0.3
         let blockArea = max(240.0 * 135.0, min(Double(tracker.width * tracker.height), perSecond / 0.3))
-        let side = Int(blockArea.squareRoot())
+        let side = max(64, (Int(blockArea.squareRoot()) + 63) / 64 * 64)
         let cols = max(1, (tracker.width + side - 1) / side), rows = max(1, (tracker.height + side - 1) / side)
-        let bw = (tracker.width + cols - 1) / cols, bh = (tracker.height + rows - 1) / rows
         var blocks: [PixelRect] = []
         for r in 0..<rows { for c in 0..<cols {
-            let rect = PixelRect(x: c * bw, y: r * bh, width: min(bw, tracker.width - c * bw), height: min(bh, tracker.height - r * bh))
+            let rect = PixelRect(x: c * side, y: r * side, width: min(side, tracker.width - c * side), height: min(side, tracker.height - r * side))
+            guard !rect.isEmpty else { continue }
             let tiles = tracker.tiles(covering: [rect])
-            if !tiles.allSatisfy({ tracker.isCrisp($0) }) { blocks.append(rect) }
+            if !tiles.allSatisfy({ tracker.isCrisp($0) || l.occludedTiles.contains($0) }) { blocks.append(rect) }
         } }
         var cx = tracker.width / 2, cy = tracker.height / 2
-        if let l = injector?.locus { cx = Int(l.x * Double(tracker.width)); cy = Int(l.y * Double(tracker.height)) }
+        if let p = locus(in: l) { cx = p.x; cy = p.y }
         blocks.sort { a, b in abs(a.x + a.width / 2 - cx) + abs(a.y + a.height / 2 - cy) < abs(b.x + b.width / 2 - cx) + abs(b.y + b.height / 2 - cy) }
         return blocks
     }
 
-    /// Sends the next large lossless block when the previous one is acked (one in flight), within budget.
-    private func freshBlocksStep(now: UInt64) {
-        guard case .blocks(var remaining, let inFlight, let sentAt) = fresh, !motionSustained(now) else { return }
-        if inFlight > 0 {
+    /// One large refinement item (a block or a window still) in flight at a time across all layers.
+    private var blockInFlight: (layer: UInt32, msgSeq: UInt32?, sentNanos: UInt64)? = nil
+
+    /// Sends the next large lossless block of a layer (one in flight), within budget. Returns whether anything is pending for it.
+    private func freshStep(_ l: Layer, now: UInt64) {
+        if let b = blockInFlight {
             // A block whose ack never comes (a viewer that dropped the message, a stale ack) must not
             // freeze the picture: after ~3 RTT + 2 s treat it as done and move on.
-            guard now - sentAt > UInt64(3 * srttNanos) + 2_000_000_000 else { return }
-            log("fresh picture: block ack timed out after \((now - sentAt) / 1_000_000) ms; continuing")
+            guard now - b.sentNanos > UInt64(3 * srttNanos) + 2_000_000_000 else { return }
+            log("fresh picture: block ack timed out after \((now - b.sentNanos) / 1_000_000) ms; continuing")
+            blockInFlight = nil
         }
-        guard !remaining.isEmpty else { fresh = .done; log("fresh picture: complete"); return }
-        guard let src = lastFrame, var tracker else { return }
+        guard let src = l.lastFrame else { return }
         refillTiles(now: now)
         // One block in flight and budget-limited: it does not yield to motion (that would starve the
         // base picture whenever something animates), it just takes the leftover tokens.
         guard tileTokens > 0 else { return }
-        let rect = remaining.removeFirst()
-        CVPixelBufferLockBaseAddress(src, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
-        let f = frameView(src)
-        guard f.width == tracker.width else { return }
-        let est = submitRects([rect], from: f, refinement: true, nanos: now)
-        tileTokens -= Double(est)
-        let covered = tracker.tiles(covering: [rect]).filter { tracker.rect(of: $0).intersection(rect) == tracker.rect(of: $0) }
-        tracker.sent(lossless: covered, now: now)
-        self.tracker = tracker
-        fresh = .blocks(remaining: remaining, inFlightBytes: est, sentNanos: now)
-    }
-    private func freshBlockAcked() {
-        if case .blocks(let remaining, _, _) = fresh { fresh = .blocks(remaining: remaining, inFlightBytes: 0) }
+        switch l.fresh {
+        case .still:
+            CVPixelBufferLockBaseAddress(src, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
+            let est = submitStill(l, from: frameView(src), nanos: now)
+            tileTokens -= Double(est)
+            l.fresh = .blocks(remaining: planBlocks(l))
+            statStills += 1
+        case .blocks(var remaining):
+            guard !remaining.isEmpty else { l.fresh = .done; if l.isDisplay { log("fresh picture: complete") }; return }
+            let rect = remaining.removeFirst()
+            CVPixelBufferLockBaseAddress(src, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
+            let f = frameView(src)
+            guard f.width == l.width else { return }
+            let est = submitRects(l, [rect], from: f, refinement: true, nanos: now)
+            tileTokens -= Double(est)
+            let covered = l.tracker.tiles(covering: [rect])
+            l.tracker.sent(lossless: covered, now: now)
+            l.fresh = .blocks(remaining: remaining)
+        default: break
+        }
     }
     /// Refinement bytes sent but not yet acked by the viewer (bounded so refinement cannot fill the link's queue).
     private var refinementInFlight = 0
 
     // Window list publication: the client holds the last full list; the host sends coalesced deltas
-    // at most every 100 ms and a full list every 10 s (and on start). Review §2.2.
+    // at most every 33 ms while something moves (100 ms otherwise) and a full list every 10 s (and on start). Review §2.2.
     private var publishedWindows: [ControlMessage.WindowInfo] = []
-    private var pendingWindows: [ControlMessage.WindowInfo]? = nil
     private var lastWindowsSendNanos: UInt64 = 0
     private var lastFullWindowsNanos: UInt64 = 0
     private var statControlBytes = 0
+    private var lastWindowsMoveNanos: UInt64 = 0
 
-    private func publishWindows(_ list: [ControlMessage.WindowInfo], captureSeq: UInt32, now: UInt64) {
-        pendingWindows = list
-        flushWindows(now: now)
+    /// The current window list as the client should see it: `layered` is true for windows whose layer
+    /// the viewer holds (announced and with its still sent).
+    private func currentList() -> [ControlMessage.WindowInfo] {
+        guard let s = windows?.current else { return publishedWindows }
+        return s.windows.map { w in var w = w; w.layered = layers[w.id]?.exposed ?? false; if let l = layers[w.id], l.exposed, let r = w.scrollRect { w.scrollRect = l.local(r) }; return w }
     }
-    private func flushWindows(now: UInt64) {
-        guard let list = pendingWindows, now - lastWindowsSendNanos >= 100_000_000 else { return }
-        pendingWindows = nil
+    private func publishWindows(now: UInt64, full: Bool) {
+        let list = currentList()
+        let moving = list.contains { w in publishedWindows.first { $0.id == w.id }.map { $0.frame != w.frame } ?? false }
+        if moving { lastWindowsMoveNanos = now }
+        let interval: UInt64 = now - lastWindowsMoveNanos < 500_000_000 ? 33_000_000 : 100_000_000
+        guard full || now - lastWindowsSendNanos >= interval else { return }
         lastWindowsSendNanos = now
-        if now - lastFullWindowsNanos > 10_000_000_000 {
+        let inputSeq = injector?.inputSeq(before: now) ?? 0
+        if full || now - lastFullWindowsNanos > 10_000_000_000 {
             publishedWindows = list; lastFullWindowsNanos = now
-            sendControlCounted(.windowList(.init(captureSeq: captureSeq, windows: list)))
-        } else if let d = ControlMessage.WindowList.delta(from: publishedWindows, to: list, captureSeq: captureSeq) {
+            sendControlCounted(.windowList(.init(captureSeq: captureSeq, windows: list, inputSeq: inputSeq)))
+        } else if let d = ControlMessage.WindowList.delta(from: publishedWindows, to: list, captureSeq: captureSeq, inputSeq: inputSeq) {
             publishedWindows = list
             sendControlCounted(.windowList(d))
         }
@@ -806,8 +1028,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         output?.sendControl(m)
     }
 
-    private func header(windowID: UInt32, nanos: UInt64) -> TileMessage.Header {
-        .init(captureSeq: captureSeq, inputSeq: lastInputSeq, windowID: windowID, captureNanos: nanos)
+    private func header(layer: UInt32, nanos: UInt64) -> TileMessage.Header {
+        .init(captureSeq: captureSeq, inputSeq: lastInputSeq, windowID: layer, captureNanos: nanos)
     }
 
     /// Fills every tile not in `keep` with its mean colour (the client ignores them: masked out).
@@ -843,9 +1065,59 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     // MARK: Lossless tiles
 
-    /// Copies the rects' pixels out and encodes them on the tile queue. Returns the byte estimate charged to the budget.
+    /// Copies rects' pixels out of a frame for the tile queue.
+    private func copyOut(_ rects: [PixelRect], from f: ShiftDetector.Frame) -> ([(PixelRect, Data)], Int) {
+        var jobs: [(PixelRect, Data)] = []
+        var estimate = 0
+        for r in rects where !r.isEmpty {
+            var d = Data(count: r.width * r.height * 4)
+            d.withUnsafeMutableBytes { dst in
+                for y in 0..<r.height { memcpy(dst.baseAddress!.advanced(by: y * r.width * 4), f.base.advanced(by: (r.y + y) * f.stride + r.x * 4), r.width * 4) }
+            }
+            jobs.append((r, d)); estimate += r.area / 5
+        }
+        return (jobs, estimate)
+    }
+
+    /// Encodes copied rects on the tile queue and sends them (review L13: one body for tiles and blocks).
+    private func encodeAndSend(_ jobs: [(PixelRect, Data)], estimate: Int, layer: Layer, refinement: Bool, block: Bool, nanos: UInt64) {
+        let hdr = header(layer: layer.id, nanos: nanos)
+        let webp = effort.webpEffort
+        let alpha = !layer.isDisplay
+        let layerID = layer.id
+        tileQueue.async { [weak self] in
+            guard let self else { return }
+            var out: [TileMessage.Tile] = []
+            for (r, d) in jobs {
+                let encoded: (TileCodec.Format, Data)? = d.withUnsafeBytes { p -> (TileCodec.Format, Data)? in
+                    let base = p.baseAddress!
+                    if !alpha, let solid = TileCodec.solidColour(base: base, width: r.width, height: r.height, stride: r.width * 4) { return (.solid, solid) }
+                    let fmt: TileCodec.Format = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4, limit: 4096) > 4096 ? .nearLossless : .lossless
+                    return TileCodec.encode(base: base, width: r.width, height: r.height, stride: r.width * 4, format: fmt, effort: webp, alpha: alpha).map { (fmt, $0) }
+                }
+                if let (fmt, data) = encoded { out.append(.init(rect: r, format: fmt, data: data)) }
+            }
+            guard !out.isEmpty else { if block { self.queue.async { self.blockInFlight = nil } }; return }
+            let bytes = out.reduce(0) { $0 + $1.data.count }
+            self.queue.async {
+                // Encoded while the region moved on (a drag, a scroll): stale, never sent (the viewer would
+                // drop it too, but the bytes are better not spent).
+                if refinement, let l = self.layers[layerID], l.tracker.changedSince(nanos: nanos, in: out.map(\.rect)) {
+                    self.statStaleDropped += out.count; self.tileTokens += Double(estimate); if block { self.blockInFlight = nil }; return
+                }
+                self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: refinement, tiles: out)), captureNanos: nanos, fast: !refinement, refinementBytes: refinement ? bytes : 0, block: block, layer: layerID) }
+                self.tileTokens -= Double(bytes - estimate)   // true up the estimate
+                self.statTileBytes += bytes; self.statTileRects += out.count; self.secTileBytes += bytes
+                if refinement { self.statRefineBytes += bytes }
+                if let l = self.layers[layerID] { l.sentBytes += bytes; if refinement { l.sentRefine += out.count } else { l.sentDirect += out.count } }
+                if self.debugLayers, layerID != 0 { self.log("layer \(layerID): sent \(out.count) \(refinement ? (block ? "block" : "refinement") : "direct") rects \(bytes) B: \(out.prefix(3).map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))") }
+            }
+        }
+    }
+
+    /// Copies the tiles' pixels out and encodes them on the tile queue. Returns the byte estimate charged to the budget.
     @discardableResult
-    private func submitLossless(tiles: [Int], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, tracker: TileTracker, tight: [Int: PixelRect]? = nil) -> Int {
+    private func submitLossless(layer: Layer, tiles: [Int], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, tracker: TileTracker, tight: [Int: PixelRect]? = nil) -> Int {
         var rects = tracker.mergedRects(tiles)
         if let tight {
             // Shrink each merged rect to the union of its tiles' changed boxes (padded 2 px), when all are known.
@@ -859,83 +1131,46 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 return u.isEmpty ? r : PixelRect(x: u.x - 2, y: u.y - 2, width: u.width + 4, height: u.height + 4).intersection(r)
             }
         }
-        var jobs: [(PixelRect, Data)] = []
-        var estimate = 0
-        for r in rects {
-            var d = Data(count: r.width * r.height * 4)
-            d.withUnsafeMutableBytes { dst in
-                for y in 0..<r.height { memcpy(dst.baseAddress!.advanced(by: y * r.width * 4), f.base.advanced(by: (r.y + y) * f.stride + r.x * 4), r.width * 4) }
-            }
-            jobs.append((r, d)); estimate += r.area / 5
-        }
-        let hdr = header(windowID: 0, nanos: nanos)
-        let webp = effort.webpEffort
-        tileQueue.async { [weak self] in
-            guard let self else { return }
-            var out: [TileMessage.Tile] = []
-            for (r, d) in jobs {
-                let encoded: (TileCodec.Format, Data)? = d.withUnsafeBytes { p -> (TileCodec.Format, Data)? in
-                    let base = p.baseAddress!
-                    if let solid = TileCodec.solidColour(base: base, width: r.width, height: r.height, stride: r.width * 4) { return (.solid, solid) }
-                    let fmt: TileCodec.Format = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4, limit: 4096) > 4096 ? .nearLossless : .lossless
-                    return TileCodec.encode(base: base, width: r.width, height: r.height, stride: r.width * 4, format: fmt, effort: webp).map { (fmt, $0) }
-                }
-                if let (fmt, data) = encoded { out.append(.init(rect: r, format: fmt, data: data)) }
-            }
-            guard !out.isEmpty else { return }
-            let bytes = out.reduce(0) { $0 + $1.data.count }
-            self.queue.async {
-                // Encoded while the region moved on (a drag, a scroll): stale, never sent (the viewer would
-                // drop it too, but the bytes are better not spent).
-                if refinement, let t = self.tracker, t.changedSince(nanos: nanos, in: out.map(\.rect)) {
-                    self.statStaleDropped += out.count; self.tileTokens += Double(estimate); return
-                }
-                self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: refinement, tiles: out)), captureNanos: nanos, fast: !refinement, refinementBytes: refinement ? bytes : 0) }
-                self.tileTokens -= Double(bytes - estimate)   // true up the estimate
-                self.statTileBytes += bytes; self.statTileRects += out.count; self.secTileBytes += bytes
-                if refinement { self.statRefineBytes += bytes }
-            }
-        }
+        let (jobs, estimate) = copyOut(rects, from: f)
+        encodeAndSend(jobs, estimate: estimate, layer: layer, refinement: refinement, block: false, nanos: nanos)
         return estimate
     }
-    private var statStaleDropped = 0
 
-    /// Encodes arbitrary rects (large lossless blocks) on the tile queue. Returns the byte estimate charged.
+    /// Encodes arbitrary rects (large lossless blocks) on the tile queue, one block in flight. Returns the byte estimate charged.
     @discardableResult
-    private func submitRects(_ rects: [PixelRect], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64) -> Int {
-        var jobs: [(PixelRect, Data)] = []
-        var estimate = 0
-        for r in rects where !r.isEmpty {
-            var d = Data(count: r.width * r.height * 4)
-            d.withUnsafeMutableBytes { dst in
-                for y in 0..<r.height { memcpy(dst.baseAddress!.advanced(by: y * r.width * 4), f.base.advanced(by: (r.y + y) * f.stride + r.x * 4), r.width * 4) }
-            }
-            jobs.append((r, d)); estimate += r.area / 5
-        }
-        let hdr = header(windowID: 0, nanos: nanos)
-        let webp = effort.webpEffort
+    private func submitRects(_ layer: Layer, _ rects: [PixelRect], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64) -> Int {
+        let (jobs, estimate) = copyOut(rects, from: f)
+        blockInFlight = (layer.id, nil, nanos)
+        encodeAndSend(jobs, estimate: estimate, layer: layer, refinement: refinement, block: true, nanos: nanos)
+        return estimate
+    }
+
+    /// A window layer's first picture: one lossy WebP still, scaled so it costs about a tenth of a second
+    /// of the link, upscaled on the client; lossless blocks follow (DESIGN §3.3 "lossy first, always").
+    private func submitStill(_ layer: Layer, from f: ShiftDetector.Frame, nanos: UInt64) -> Int {
+        let rect = layer.bounds
+        let targetBytes = max(6_000.0, Double(lastBudget.tileKbps * 1000 / 8) * 0.15)
+        // ~0.1 B/px for UI at quality 60 after rescale.
+        let area = Double(rect.area)
+        let scale = min(1.0, (targetBytes / 0.1 / area).squareRoot())
+        let ow = max(32, Int(Double(rect.width) * scale)), oh = max(32, Int(Double(rect.height) * scale))
+        var d = Data(count: rect.width * rect.height * 4)
+        d.withUnsafeMutableBytes { dst in for y in 0..<rect.height { memcpy(dst.baseAddress!.advanced(by: y * rect.width * 4), f.base.advanced(by: y * f.stride), rect.width * 4) } }
+        let hdr = header(layer: layer.id, nanos: nanos)
+        let estimate = Int(targetBytes)
+        let layerID = layer.id
+        blockInFlight = (layer.id, nil, nanos)
         tileQueue.async { [weak self] in
             guard let self else { return }
-            var out: [TileMessage.Tile] = []
-            for (r, d) in jobs {
-                let encoded: (TileCodec.Format, Data)? = d.withUnsafeBytes { p -> (TileCodec.Format, Data)? in
-                    let base = p.baseAddress!
-                    if let solid = TileCodec.solidColour(base: base, width: r.width, height: r.height, stride: r.width * 4) { return (.solid, solid) }
-                    let fmt: TileCodec.Format = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4, limit: 4096) > 4096 ? .nearLossless : .lossless
-                    return TileCodec.encode(base: base, width: r.width, height: r.height, stride: r.width * 4, format: fmt, effort: webp).map { (fmt, $0) }
-                }
-                if let (fmt, data) = encoded { out.append(.init(rect: r, format: fmt, data: data)) }
-            }
-            guard !out.isEmpty else { self.queue.async { self.freshBlockAcked() }; return }
-            let bytes = out.reduce(0) { $0 + $1.data.count }
+            let data = d.withUnsafeBytes { TileCodec.encodeLossy(base: $0.baseAddress!, width: rect.width, height: rect.height, stride: rect.width * 4, outWidth: ow, outHeight: oh, quality: 60) }
+            guard let data else { self.queue.async { self.blockInFlight = nil }; return }
             self.queue.async {
-                if let t = self.tracker, t.changedSince(nanos: nanos, in: out.map(\.rect)) {
-                    // The block's region moved on while it was being encoded: stale, never sent.
-                    self.statStaleDropped += out.count; self.tileTokens += Double(estimate); self.freshBlockAcked(); return
-                }
-                self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: refinement, tiles: out)), captureNanos: nanos, fast: false, refinementBytes: bytes, block: true) }
-                self.tileTokens -= Double(bytes - estimate)
-                self.statTileBytes += bytes; self.statTileRects += out.count; self.secTileBytes += bytes; self.statRefineBytes += bytes
+                self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: false, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: true, layer: layerID) }
+                self.tileTokens -= Double(data.count - estimate)
+                self.statTileBytes += data.count; self.statTileRects += 1; self.secTileBytes += data.count
+                if let l = self.layers[layerID] { l.exposed = true }
+                self.log("layer \(layerID): still \(ow)x\(oh) \(data.count) bytes for a \(rect.width)x\(rect.height) window")
+                if let s = self.windows?.current { self.reconcileLayers(s, now: Clock.nowNanos()); self.publishWindows(now: Clock.nowNanos(), full: false) }
             }
         }
         return estimate
@@ -943,10 +1178,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// Sends a tile-stream message in order (all sends go through the tile queue). Copy-rects and resets are interactive.
     private func sendTileMessage(_ m: TileMessage, captureNanos: UInt64) {
-        tileQueue.async { [weak self] in self?.send(tile: m, captureNanos: captureNanos, fast: true, refinementBytes: 0) }
+        var layer: UInt32 = 0
+        switch m { case .tiles(let t): layer = t.header.windowID; case .copyRect(let c): layer = c.header.windowID; case .reset(let l, _, _): layer = l }
+        tileQueue.async { [weak self] in self?.send(tile: m, captureNanos: captureNanos, fast: true, refinementBytes: 0, layer: layer) }
     }
     /// On tileQueue.
-    private func send(tile m: TileMessage, captureNanos: UInt64, fast: Bool, refinementBytes: Int, block: Bool = false) {
+    private func send(tile m: TileMessage, captureNanos: UInt64, fast: Bool, refinementBytes: Int, block: Bool = false, layer: UInt32) {
         guard let out = output else { return }
         tileMsgSeq &+= 1
         let seq = tileMsgSeq
@@ -959,7 +1196,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         case .reset: rects = []
         }
         queue.async {
-            self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes, block, rects); self.refinementInFlight += refinementBytes
+            self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes, block, layer, rects); self.refinementInFlight += refinementBytes
+            if block, self.blockInFlight?.layer == layer { self.blockInFlight = (layer, seq, Clock.nowNanos()) }
             if refinementBytes == 0 { self.secInteractiveBytes += d.count }
         }
     }
@@ -973,9 +1211,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
     private var lastTileRefill = Clock.nowNanos()
 
-    /// Refinement: settled video tiles and rate-limited sparse tiles, oldest first, centre first, within the tile budget.
+    /// Refinement across layers: fresh pictures first (stills and blocks, one in flight), then settled
+    /// video tiles and rate-limited sparse tiles, oldest first, locus first, within the tile budget.
     private func refine(now: UInt64) {
-        guard var tracker, let src = lastFrame else { return }
+        guard display != nil else { return }
         refillTiles(now: now)
         // Priority 4: refinement runs on leftover budget only. It yields for 150 ms after any changed
         // pixels went out, keeps 30 % of the tile budget in reserve for them, and never has more than
@@ -984,37 +1223,48 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Sustained motion: refinement sends nothing and its queue is frozen (the blocks too). Video has
         // the whole target meanwhile; refinement resumes 300 ms after the motion stops, locus first.
         guard !motionSustained(now) else { return }
-        // A fresh picture refines progressively and whole-picture (see Fresh); never as a tile march.
-        guard fresh == .done else { freshBlocksStep(now: now); return }
-        // A backlog of more than 40 % of the screen (after a drag or a full-screen change) is refined
+        let ordered = layersByPriority()
+        // Fresh pictures: the display's ladder gates everything until its base is acked; window stills
+        // and lossless blocks go one at a time, locus layer first.
+        if let d = display { switch d.fresh { case .base, .climb: return; default: break } }
+        for l in ordered {
+            switch l.fresh {
+            case .still, .blocks: freshStep(l, now: now); return
+            default: continue
+            }
+        }
+        // A backlog of more than 40 % of a layer (after a drag or a full-screen change) is refined
         // as large locus-first blocks, one in flight, not as a march of a thousand tiles.
-        if tracker.pendingTotal * 10 > tracker.tileCount * 4 {
-            let blocks = planBlocks(tracker)
+        for l in ordered where l.tracker.pendingTotal * 10 > l.tracker.tileCount * 4 && l.lastFrame != nil {
+            let blocks = planBlocks(l)
             if !blocks.isEmpty {
-                fresh = .blocks(remaining: blocks, inFlightBytes: 0)
-                log("refinement backlog \(tracker.pendingTotal) tiles: \(blocks.count) large blocks, locus first")
-                freshBlocksStep(now: now); return
+                l.fresh = .blocks(remaining: blocks)
+                log("layer \(l.id) refinement backlog \(l.tracker.pendingTotal) tiles: \(blocks.count) large blocks, locus first")
+                freshStep(l, now: now); return
             }
         }
         let perSecond = Double(lastBudget.tileKbps * 1000 / 8)
         guard tileTokens > perSecond * 0.3 * 0.5, Double(refinementInFlight) < perSecond * 0.3 else { return }
-        let due = tracker.due(now: now, limit: 96, centre: locusTile(tracker))
-        guard !due.isEmpty else { return }
-        // Take tiles until the budget is spent (allowed to go negative once).
-        var take: [Int] = []
-        var est = 0.0
-        for i in due {
-            take.append(i); est += Double(tracker.rect(of: i).area) / 5
-            if est >= tileTokens { break }
+        for l in ordered {
+            guard let src = l.lastFrame else { continue }
+            let due = l.tracker.due(now: now, limit: 96, centre: locusTile(l))
+            guard !due.isEmpty else { continue }
+            // Take tiles until the budget is spent (allowed to go negative once).
+            var take: [Int] = []
+            var est = 0.0
+            for i in due {
+                take.append(i); est += Double(l.tracker.rect(of: i).area) / 5
+                if est >= tileTokens { break }
+            }
+            CVPixelBufferLockBaseAddress(src, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
+            let f = frameView(src)
+            guard f.width == l.width, f.height == l.height else { continue }
+            let bytes = submitLossless(layer: l, tiles: take, from: f, refinement: true, nanos: now, tracker: l.tracker)
+            tileTokens -= Double(bytes)
+            l.tracker.sent(lossless: take, now: now)
+            return
         }
-        CVPixelBufferLockBaseAddress(src, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
-        let f = frameView(src)
-        guard f.width == tracker.width, f.height == tracker.height else { return }
-        let bytes = submitLossless(tiles: take, from: f, refinement: true, nanos: now, tracker: tracker)
-        tileTokens -= Double(bytes)
-        tracker.sent(lossless: take, now: now)
-        self.tracker = tracker
     }
 
     // MARK: Video
@@ -1033,126 +1283,132 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         tokens = max(tokens, -3 * bucketCapacity())   // bound the debt a huge keyframe can create
     }
 
-    private func tryEncode(now: UInt64, latest: ShiftDetector.Frame) {
-        guard var enc = encoder, let req = request, let canvas, var tracker else { return }
-        refill()
-        // Review H3: a frame is stale only well after its datagrams have left the pacer plus the viewer's
-        // own give-up time; purged frames are remembered so a late ack still teaches srtt, the controller
-        // and the fresh-picture state. The frame the fresh-picture sequence waits on is purged like any
-        // other (a base keyframe swallowed whole by a loss burst produces no ack of any kind, and the
-        // in-flight cap would otherwise wait for it forever); the next keyframe takes its place.
-        let freshSeq: UInt32? = { if case .base(let s) = fresh { return s }; if case .climb(let s) = fresh { return s }; return nil }()
+    /// Purges frames unacked for too long (review H3) and asks for recovery; shared across layers.
+    private func purgeStale(now: UInt64) {
         for (s, f) in unacked where now > FrameAssembler.staleDeadlineNanos(paceEndNanos: f.paceEndNanos, sentNanos: f.sentNanos, srttNanos: srttNanos) {
             unacked[s] = nil; recentlyPurged[s] = f; statLost += 1
-            if !wantKeyframe { log("frame \(s) unacked \((now - f.sentNanos) / 1_000_000) ms after it was queued (srtt \(Int(srttNanos / 1e6)) ms): stale, recovery frame") }
-            if s == freshSeq { if case .climb = fresh { fresh = .climb(seq: 0) } else { fresh = .base(seq: 0) } }
-            requestRecovery()
+            guard let l = layers[f.layer] else { continue }
+            if !l.wantKeyframe { log("frame \(s) (layer \(f.layer)) unacked \((now - f.sentNanos) / 1_000_000) ms after it was queued (srtt \(Int(srttNanos / 1e6)) ms): stale, recovery frame") }
+            // The frame the fresh-picture sequence waits on is purged like any other (a base keyframe
+            // swallowed whole by a loss burst produces no ack of any kind, and the in-flight cap would
+            // otherwise wait for it forever); the next keyframe takes its place.
+            if case .base(let fs) = l.fresh, fs == s { l.fresh = .base(seq: 0) }
+            if case .climb(let fs) = l.fresh, fs == s { l.fresh = .climb(seq: 0) }
+            requestRecovery(layer: l)
         }
         if recentlyPurged.count > 16 { for k in recentlyPurged.keys.sorted().prefix(recentlyPurged.count - 16) { recentlyPurged[k] = nil } }
-        if encoding { statDropped += 1; return }
+    }
+
+    private func tryEncode(_ l: Layer, now: UInt64, latest: ShiftDetector.Frame) {
+        guard var enc = l.encoder, let req = request, let canvas = ensureCanvas(l) else { return }
+        refill()
+        purgeStale(now: now)
+        if l.encoding { statDropped += 1; return }
         let inflightBytes = unacked.values.reduce(0) { $0 + $1.bytes }
         // In flight may not exceed what the link drains in one base RTT plus a little: the controller
         // backs off on queuing delay, so this cap only keeps our own burst from building a queue.
         let inflightBudget = Double(max(100, lastBudget.videoKbps) * 1000 / 8) * (srttNanos / 1e9 + 0.05)
         if !unacked.isEmpty && Double(inflightBytes) > inflightBudget { statSkippedBudget += 1; secSkippedBudget += 1; return }
         if tokens < 0 { statSkippedBudget += 1; secSkippedBudget += 1; return }
-        let fraction = Double(pendingVideoRegion.area) / Double(tracker.width * tracker.height)
+        let fraction = Double(l.pendingVideoRegion.area) / Double(l.width * l.height)
         let tierFPS = Double(rc?.policy.maxVideoFPS ?? req.maxFPS)
         let fpsCap: Double = min(tierFPS, fraction < 0.03 ? 15 : Double(req.maxFPS))
-        lastFpsCap = fpsCap
+        l.lastFpsCap = fpsCap
         let minInterval = UInt64(1e9 / min(fpsCap, Double(max(1, req.maxFPS))))
-        if now - lastSendNanos < minInterval * 9 / 10 && !wantKeyframe { statDropped += 1; return }
+        if now - l.lastSendNanos < minInterval * 9 / 10 && !l.wantKeyframe { statDropped += 1; return }
 
         var opts = HEVCEncoder.FrameOptions()
-        var region = pendingWholeFrame ? PixelRect(x: 0, y: 0, width: tracker.width, height: tracker.height) : pendingVideoRegion
-        var tiles = pendingVideoTiles
-        if wantKeyframe, !progressiveKeyframe, var rc, rc.rung != RateController.tinyRung {
+        var region = l.pendingWholeFrame ? l.bounds : l.pendingVideoRegion
+        var tiles = l.pendingVideoTiles
+        if l.wantKeyframe, !l.progressiveKeyframe, var rc, rc.rung != RateController.tinyRung, l.isDisplay {
             // Lossy-first on recovery too: a keyframe at the current rung that would take more than ~1 s
             // of the video budget goes out on the tiny rung instead (the ladder climbs back afterwards).
             // The fresh-picture climb approved its keyframe with the same test (review H4), so it is exempt.
             if !FrameAssembler.keyframeFits(encodedWidth: enc.width, encodedHeight: enc.height, videoKbps: lastBudget.videoKbps) {
                 rc.dropToTinyRung(now: now); self.rc = rc
                 lastRebuildNanos = now
+                rebuildAllEncoders(keyframes: false)
                 log("lossy-first: recovery keyframe on the tiny rung (\(Int(Double(enc.width * enc.height) * 0.025 / 1000)) KB estimated at rung \(rc.rung))")
             }
         }
-        if wantKeyframe {
+        if l.wantKeyframe {
             // Recovery: the canvas must be the whole current picture. The mask leaves out tiles the
             // client already has pixel-exact, so a keyframe does not degrade crisp text elsewhere.
             CVPixelBufferLockBaseAddress(canvas, [])
             let dst = CVPixelBufferGetBaseAddress(canvas)!, ds = CVPixelBufferGetBytesPerRow(canvas)
             for y in 0..<latest.height { memcpy(dst.advanced(by: y * ds), latest.base.advanced(by: y * latest.stride), latest.width * 4) }
             CVPixelBufferUnlockBaseAddress(canvas, [])
-            region = PixelRect(x: 0, y: 0, width: tracker.width, height: tracker.height)
-            tiles = Set((0..<tracker.tileCount).filter { !tracker.isCrisp($0) })
-            tiles.formUnion(pendingVideoTiles)
-            tracker.markVideo(Array(tiles), now: now)
-            self.tracker = tracker
+            region = l.bounds
+            tiles = Set((0..<l.tracker.tileCount).filter { !l.tracker.isCrisp($0) })
+            tiles.formUnion(l.pendingVideoTiles)
+            l.tracker.markVideo(Array(tiles), now: now)
             // Review #6: tiles the client already has crisp are masked out of this keyframe, so their
             // pixels are wasted bits; flatten each to its mean colour before encoding.
-            flattenCanvas(canvas, except: tiles, tracker: tracker)
+            flattenCanvas(canvas, except: tiles, tracker: l.tracker)
             // A forced keyframe ignores MinAllowedFrameQP (measured: ~125 KB regardless); a fresh
             // session's first IDR honours it (~18 KB). Recovery therefore replaces the session.
-            if (try? rebuildEncoder()) != nil, let fresh = encoder { enc = fresh } else { opts.forceKeyframe = true }
-            wantKeyframe = false; wantLTRRefresh = false
-            keyframeArmed = true
+            if (try? rebuildEncoder(l)) != nil, let fresh = l.encoder { enc = fresh } else { opts.forceKeyframe = true }
+            l.wantKeyframe = false; l.wantLTRRefresh = false
+            l.keyframeArmed = true
         } else if enc.coarse && seq > 0 { enc.setCoarse(false) }
-        if !keyframeArmed && wantLTRRefresh { opts.forceLTRRefresh = true }
-        opts.acknowledgedLTRTokens = ackedLTR
-        let recovery = keyframeArmed || wantLTRRefresh
-        if recovery { lastRecoveryWasLTR = wantLTRRefresh && !keyframeArmed }
-        keyframeArmed = false; wantLTRRefresh = false
+        if !l.keyframeArmed && l.wantLTRRefresh { opts.forceLTRRefresh = true }
+        opts.acknowledgedLTRTokens = l.ackedLTR
+        let recovery = l.keyframeArmed || l.wantLTRRefresh
+        if recovery { l.lastRecoveryWasLTR = l.wantLTRRefresh && !l.keyframeArmed }
+        l.keyframeArmed = false; l.wantLTRRefresh = false
 
         // Build the mask over the region's tile grid.
         let grid = TileMask.grid(for: region)
         var mask = TileMask(cols: grid.cols, rows: grid.rows)
         let c0 = region.x / TileTracker.tile, r0 = region.y / TileTracker.tile
         for i in tiles {
-            let c = i % tracker.cols - c0, r = i / tracker.cols - r0
+            let c = i % l.tracker.cols - c0, r = i / l.tracker.cols - r0
             if c >= 0, r >= 0, c < grid.cols, r < grid.rows { mask[c, r] = true }
         }
         // Encoder input: the canvas, scaled down at lower rungs.
         var input = canvas
-        if let scaled, let transfer {
+        if let scaled = l.scaled, let transfer = l.transfer {
             guard VTPixelTransferSessionTransferImage(transfer, from: canvas, to: scaled) == noErr else { log("pixel transfer failed"); return }
             input = scaled
         }
-        submitted = (tiles, region, pendingWholeFrame)
-        pendingVideoTiles = []; pendingVideoRegion = .zero; pendingWholeFrame = false
-        encoding = true; encodingSince = now
-        lastSendNanos = now
+        l.submitted = (tiles, region, l.pendingWholeFrame)
+        l.pendingVideoTiles = []; l.pendingVideoRegion = .zero; l.pendingWholeFrame = false
+        l.encoding = true; l.encodingSince = now
+        l.lastSendNanos = now
+        l.encoderUseNanos = now
         let captureSeq = self.captureSeq, inputSeq = self.lastInputSeq
-        enc.encode(input, captureNanos: now, options: opts) { [weak self] result in
-            guard let self else { return }
+        let progressive = l.progressiveKeyframe
+        enc.encode(input, captureNanos: now, options: opts) { [weak self, weak l] result in
+            guard let self, let l else { return }
             self.queue.async {
-                self.encoding = false
+                l.encoding = false
                 switch result {
                 case .failure(let e):
                     // A rate-limited drop keeps the reference chain intact; the pending tiles ride the next frame.
-                    if let s = self.submitted { self.pendingVideoTiles.formUnion(s.tiles); self.pendingVideoRegion = self.pendingVideoRegion.union(s.region); self.pendingWholeFrame = self.pendingWholeFrame || s.whole }
+                    if let s = l.submitted { l.pendingVideoTiles.formUnion(s.tiles); l.pendingVideoRegion = l.pendingVideoRegion.union(s.region); l.pendingWholeFrame = l.pendingWholeFrame || s.whole }
                     if case MirageError.transport(let t) = e, t.contains("dropped") { self.statDropped += 1 }
-                    else { self.log("encode: \(e)"); self.wantKeyframe = true }
+                    else { self.log("encode (layer \(l.id)): \(e)"); l.wantKeyframe = true }
                 case .success(let f):
-                    self.send(f, recovery: recovery, region: region, mask: mask, captureSeq: captureSeq, inputSeq: inputSeq)
+                    self.send(l, f, recovery: recovery, progressive: progressive, region: region, mask: mask, captureSeq: captureSeq, inputSeq: inputSeq)
                 }
-                self.submitted = nil
+                l.submitted = nil
             }
         }
     }
 
-    private func send(_ f: HEVCEncoder.Encoded, recovery: Bool, region: PixelRect, mask: TileMask, captureSeq: UInt32, inputSeq: UInt64) {
+    private func send(_ l: Layer, _ f: HEVCEncoder.Encoded, recovery: Bool, progressive: Bool, region: PixelRect, mask: TileMask, captureSeq: UInt32, inputSeq: UInt64) {
         guard let out = output else { return }
         seq &+= 1
         var flags: VideoFragment.Flags = [.tileMask]
         if f.keyframe { flags.insert(.keyframe); flags.insert(.recovery) }
-        if progressiveKeyframe && f.keyframe { flags.insert(.progressive); progressiveKeyframe = false }
+        if progressive && f.keyframe { flags.insert(.progressive); l.progressiveKeyframe = false }
         if recovery { flags.insert(.recovery) }
-        if flags.contains(.recovery) { recoverySeq = seq; recoverySentNanos = Clock.nowNanos() }
+        if flags.contains(.recovery) { l.recoverySeq = seq; l.recoverySentNanos = Clock.nowNanos() }
         if !f.parameterSets.isEmpty { flags.insert(.parameterSets) }
         let payload = VideoFramePayload.encode(parameterSets: f.parameterSets, tileMask: mask.bits, sample: f.sample)
         let maxPayload = out.maxDatagramSize - VideoFragment.headerSize
         var frags = VideoFragment.fragments(frameSeq: seq, flags: flags, captureNanos: f.captureNanos, payload: payload, maxPayload: maxPayload,
-                                            captureSeq: captureSeq, inputSeq: inputSeq, region: region)
+                                            captureSeq: captureSeq, inputSeq: inputSeq, region: region, layerID: l.id)
         // XOR parity on every frame of two or more datagrams (§4a loss: recovery by parity before NACK,
         // keyframe last): one lost datagram per group is rebuilt by the viewer without a round trip. The
         // group is 8 normally and 4 above 2 % measured loss; a 2–3 datagram frame pays a third for it,
@@ -1168,23 +1424,25 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // the rate, so a 25 KB frame or a keyframe never builds a queue on a 1 Mbps hop.
         let paceEnd = pace(frags, frame: sent)
         tokens -= Double(payload.count)
-        unacked[seq] = InFlight(sentNanos: Clock.nowNanos(), bytes: payload.count, ltrToken: f.ltrToken, paceEndNanos: paceEnd)
+        unacked[seq] = InFlight(layer: l.id, sentNanos: Clock.nowNanos(), bytes: payload.count, ltrToken: f.ltrToken, paceEndNanos: paceEnd)
         statFrames += 1; statBytes += payload.count; statEncodeNanos += f.encodeNanos; secVideoBytes += payload.count; secVideoFrames += 1
         if f.keyframe {
-            log("keyframe \(payload.count) bytes (\(frags.count) datagrams, \(mask.count) tiles masked, paced over \(paceEnd > Clock.nowNanos() ? (paceEnd - Clock.nowNanos()) / 1_000_000 : 0) ms)")
-            switch fresh {
-            case .base: fresh = .base(seq: seq); freshBaseSeq = seq
-            case .climb: fresh = .climb(seq: seq)
+            log("keyframe \(payload.count) bytes (layer \(l.id), \(frags.count) datagrams, \(mask.count) tiles masked, paced over \(paceEnd > Clock.nowNanos() ? (paceEnd - Clock.nowNanos()) / 1_000_000 : 0) ms)")
+            switch l.fresh {
+            case .base: l.fresh = .base(seq: seq)
+            case .climb: l.fresh = .climb(seq: seq)
             default:
-                // A keyframe that replaces most of the picture is a fresh picture too (large invalidation).
-                if mask.count * 10 >= (tracker?.tileCount ?? 1) * 4 { beginFreshPicture(reason: "large invalidation"); fresh = .base(seq: seq); freshBaseSeq = seq }
+                // A keyframe that replaces most of the display is a fresh picture too (large invalidation).
+                if l.isDisplay, mask.count * 10 >= l.tracker.tileCount * 4 { beginFreshPicture(reason: "large invalidation"); l.fresh = .base(seq: seq) }
             }
         }
     }
 
     private func acked(_ ack: ControlMessage.FrameAck) {
         let now = Clock.nowNanos()
+        var layer: Layer? = nil
         if let f = unacked.removeValue(forKey: ack.seq) ?? recentlyPurged.removeValue(forKey: ack.seq) {
+            layer = layers[f.layer]
             // Loss acks come after the assembler's timeout; they say nothing about the path's RTT.
             if !ack.lost {
                 // RTT and one-way delay are measured from when the frame's last datagram left the pacer, not
@@ -1199,56 +1457,72 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                                fragments: paced ? 1 : (ack.fragments ?? 1), bytes: f.bytes, now: now, rttNanos: rtt, recovered: recovered)
                 if let total = ack.fragments { rc?.fragmentLoss(lost: ack.fragmentsLost ?? 0, total: total, now: now) }
             }
-            if !ack.lost, ack.decodedNanos != 0, ack.seq >= recoverySeq { lastRecoveryWasLTR = false }
-            if !ack.lost, ack.decodedNanos != 0 { freshAcked(seq: ack.seq, now: now) }
-            if !ack.lost, ack.decodedNanos != 0, let tok = f.ltrToken {
-                ackedLTR.append(tok)
-                if ackedLTR.count > 8 { ackedLTR.removeFirst(ackedLTR.count - 8) }
+            if let l = layer {
+                if !ack.lost, ack.decodedNanos != 0, ack.seq >= l.recoverySeq { l.lastRecoveryWasLTR = false }
+                if !ack.lost, ack.decodedNanos != 0 { freshAcked(l, seq: ack.seq, now: now) }
+                if !ack.lost, ack.decodedNanos != 0, let tok = f.ltrToken {
+                    l.ackedLTR.append(tok)
+                    if l.ackedLTR.count > 8 { l.ackedLTR.removeFirst(l.ackedLTR.count - 8) }
+                }
             }
         }
         for s in unacked.keys where s < ack.seq { unacked[s] = nil }
-        if ack.lost { statLost += 1; rc?.lossDetected(now: now); if ack.seq >= recoverySeq { requestRecovery() } }
+        if ack.lost {
+            statLost += 1
+            // Review L3: a stale "late lost" verdict for a frame older than the layer's recovery is not a loss.
+            if let l = layer { if ack.seq >= l.recoverySeq { rc?.lossDetected(now: now); requestRecovery(layer: l) } }
+            else { rc?.lossDetected(now: now); requestRecovery(layer: nil) }
+        }
         // Safety net: a viewer still skipping (not decoding) frames newer than the last recovery for
         // over a second did not get that recovery frame; send another.
-        let recoveryPaceEnd = unacked[recoverySeq]?.paceEndNanos ?? recoverySentNanos
-        if !ack.lost, ack.decodedNanos == 0, ack.seq > recoverySeq, now > max(recoverySentNanos, recoveryPaceEnd) &+ 1_500_000_000, !wantKeyframe {
-            log("viewer skipping frames after recovery \(recoverySeq); resending keyframe")
-            requestRecovery(); recoverySentNanos = now
+        if let l = layer {
+            let recoveryPaceEnd = unacked[l.recoverySeq]?.paceEndNanos ?? l.recoverySentNanos
+            if !ack.lost, ack.decodedNanos == 0, ack.seq > l.recoverySeq, now > max(l.recoverySentNanos, recoveryPaceEnd) &+ 1_500_000_000, !l.wantKeyframe {
+                log("viewer skipping frames of layer \(l.id) after recovery \(l.recoverySeq); resending keyframe")
+                requestRecovery(layer: l); l.recoverySentNanos = now
+            }
         }
         applyBudget(now: now)
     }
 
-    /// Pushes the controller's decisions into the encoder (rate, rung) at most every 500 ms.
+    /// Pushes the controller's decisions into the encoders (rate, rung) at most every 500 ms.
     private var lastBudgetApply: UInt64 = 0
     private var lastRebuildNanos: UInt64 = 0
     private func applyBudget(now: UInt64) {
-        guard let rc, now - lastBudgetApply > 500_000_000 else { return }
+        guard let rc, let d = display, now - lastBudgetApply > 500_000_000 else { return }
         lastBudgetApply = now
         // During sustained motion refinement is frozen, so only the interactive tile bytes (changed
         // pixels near the locus, copy-rects) are reserved and video gets the rest of the target.
         let b = rc.budget(videoActive: now - videoActiveNanos < 500_000_000, recentTileKbps: Int(motionSustained(now) ? interactiveKbpsEWMA : tileKbpsEWMA))
-        let wantedWidth = max(64, Int(Double(target?.pixelWidth ?? 0) * rc.scale)) & ~1
-        let rungChanged = encoder.map { wantedWidth != $0.width } ?? false
+        let wantedWidth = max(64, Int(Double(d.width) * rc.scale)) & ~1
+        let rungChanged = d.encoder.map { wantedWidth != $0.width } ?? false
         // A rung change costs a keyframe: at most one per 5 s, and never to a *larger* picture while the link is queuing.
-        let growing = encoder.map { wantedWidth > $0.width } ?? false
-        if rungChanged, fresh == .done, now - lastRebuildNanos > 5_000_000_000, !(growing && rc.queueMs > 60) {
+        let growing = d.encoder.map { wantedWidth > $0.width } ?? false
+        if rungChanged, d.fresh == .done, now - lastRebuildNanos > 5_000_000_000, !(growing && rc.queueMs > 60) {
             lastBudget = b
             lastRebuildNanos = now
-            if (try? rebuildEncoder()) != nil { wantKeyframe = true; log("ladder: rung \(rc.rung) (scale \(rc.scale)), target \(rc.targetKbps) kbps") }
+            rebuildAllEncoders(keyframes: true)
+            log("ladder: rung \(rc.rung) (scale \(rc.scale)), target \(rc.targetKbps) kbps")
         } else if abs(b.videoKbps - lastBudget.videoKbps) > lastBudget.videoKbps / 10 || b.tileKbps != lastBudget.tileKbps {
             lastBudget = b
-            encoder?.setRate(bitrateKbps: b.videoKbps, expectedFPS: plannedFPS())
+            for l in layers.values { l.encoder?.setRate(bitrateKbps: b.videoKbps, expectedFPS: plannedFPS()) }
+        }
+    }
+
+    /// The rung changed: every live encoder is rebuilt at the new scale (each costs a keyframe).
+    private func rebuildAllEncoders(keyframes: Bool) {
+        for l in layers.values where l.encoder != nil {
+            if (try? rebuildEncoder(l)) != nil, keyframes { l.wantKeyframe = true }
         }
     }
 
     /// Recovery defaults to a (QP-floored) keyframe from a fresh session. LTR refresh is opt-in (MIRAGE_LTR=1); see DESIGN §6 M1.
     private static let ltrEnabled = ProcessInfo.processInfo.environment["MIRAGE_LTR"] != nil
-    private var lastRecoveryWasLTR = false
-    private func requestRecovery() {
-        if Self.ltrEnabled && !ackedLTR.isEmpty && !lastRecoveryWasLTR {
-            wantLTRRefresh = true
-        } else {
-            wantKeyframe = true
+    /// `layer` nil: the lost frame could not be attributed, so every layer with a live encoder recovers.
+    private func requestRecovery(layer: Layer?) {
+        let targets = layer.map { [$0] } ?? layers.values.filter { $0.encoder != nil }
+        for l in targets {
+            if Self.ltrEnabled && !l.ackedLTR.isEmpty && !l.lastRecoveryWasLTR { l.wantLTRRefresh = true } else { l.wantKeyframe = true }
         }
     }
 
@@ -1256,22 +1530,33 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     private func startTimers() {
         let r = DispatchSource.makeTimerSource(queue: queue)
-        r.schedule(deadline: .now() + .milliseconds(50), repeating: .milliseconds(50))
+        r.schedule(deadline: .now() + .milliseconds(33), repeating: .milliseconds(33))
         r.setEventHandler { [weak self] in
             guard let self else { return }
             let now = Clock.nowNanos()
-            if self.encoding, now - self.encodingSince > 2_000_000_000 {
-                // Safety net: an encode whose completion never came (encoder replaced underneath it).
-                self.log("encoder: no completion for \((now - self.encodingSince) / 1_000_000) ms; releasing the pipeline and asking for a keyframe")
-                self.encoding = false; self.wantKeyframe = true
-                if let s = self.submitted { self.pendingVideoTiles.formUnion(s.tiles); self.pendingVideoRegion = self.pendingVideoRegion.union(s.region); self.pendingWholeFrame = self.pendingWholeFrame || s.whole; self.submitted = nil }
+            // The window list drives layers and the client's composition; it must not depend on captures
+            // (the display layer is mostly static now that the windows are not in it).
+            if let w = self.windows?.sample(captureSeq: self.captureSeq, now: now) {
+                self.pendingMoved += w.moved
+                if w.changed { self.reconcileLayers(w.sample, now: now); if !w.moved.isEmpty { self.lastMotionNanos = now } }
+                self.publishWindows(now: now, full: false)
+            }
+            for l in self.layers.values {
+                if l.encoding, now - l.encodingSince > 2_000_000_000 {
+                    // Safety net: an encode whose completion never came (encoder replaced underneath it).
+                    self.log("encoder (layer \(l.id)): no completion for \((now - l.encodingSince) / 1_000_000) ms; releasing the pipeline and asking for a keyframe")
+                    l.encoding = false; l.wantKeyframe = true
+                    if let s = l.submitted { l.pendingVideoTiles.formUnion(s.tiles); l.pendingVideoRegion = l.pendingVideoRegion.union(s.region); l.pendingWholeFrame = l.pendingWholeFrame || s.whole; l.submitted = nil }
+                }
+                if l.hasVideoPending, let src = l.lastFrame {
+                    CVPixelBufferLockBaseAddress(src, .readOnly)
+                    self.tryEncode(l, now: now, latest: self.frameView(src))
+                    CVPixelBufferUnlockBaseAddress(src, .readOnly)
+                }
+                // An encoder idle for 10 s is released (another layer may want one).
+                if !l.isDisplay, l.encoder != nil, !l.encoding, now - l.encoderUseNanos > 10_000_000_000, !l.hasVideoPending { l.encoder = nil; l.scaled = nil; l.transfer = nil; l.canvas = nil }
             }
             self.refine(now: now)
-            if !self.pendingVideoTiles.isEmpty || self.wantKeyframe, let src = self.lastFrame {
-                CVPixelBufferLockBaseAddress(src, .readOnly)
-                self.tryEncode(now: now, latest: self.frameView(src))
-                CVPixelBufferUnlockBaseAddress(src, .readOnly)
-            }
             self.applyBudget(now: now)
         }
         r.resume(); refineTimer = r
@@ -1286,11 +1571,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             self.rc?.tick(now: tnow)
             self.probeSeq += 1
             self.output?.sendDatagram(DatagramPing.encode(seq: self.probeSeq))
-            // The window list must not depend on captures: a static desktop produces none.
-            if let w = self.windows?.sample(captureSeq: self.captureSeq, now: Clock.nowNanos()), w.changed {
-                self.publishWindows(w.sample.windows, captureSeq: self.captureSeq, now: Clock.nowNanos())
-            }
-            self.flushWindows(now: Clock.nowNanos())
             self.output?.sendControl(.rateState(.init(targetKbps: rc.targetKbps, capacityKbps: rc.capacityKbps, queueMs: rc.queueMs, rung: rc.rung, scale: rc.scale,
                                                       tileBudgetKbps: self.lastBudget.tileKbps, videoKbps: self.secVideoBytes * 8 / 1000, tileKbps: self.secTileBytes * 8 / 1000, tier: rc.tier)))
             if rc.tier != self.lastTier {
@@ -1298,7 +1578,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let previous = self.lastTier
                 self.lastTier = rc.tier; self.log("link tier: \(rc.tier.name) (capacity \(rc.capacityKbps) kbps, srtt \(Int(rc.srttMs)) ms, loss \(String(format: "%.1f", rc.lossPercent)) %)")
                 // A worse tier restarts lossy-first from the tiny rung; a better one just lets the ladder climb.
-                if !first, self.fresh == .done, rc.tier.rawValue > (previous?.rawValue ?? 0) { self.rc?.dropToTinyRung(now: Clock.nowNanos()); self.lastRebuildNanos = Clock.nowNanos(); if (try? self.rebuildEncoder()) != nil { self.wantKeyframe = true; self.beginFreshPicture(reason: "tier change to \(rc.tier.name)") } }
+                if !first, let d = self.display, d.fresh == .done, rc.tier.rawValue > (previous?.rawValue ?? 0) {
+                    self.rc?.dropToTinyRung(now: tnow); self.lastRebuildNanos = tnow
+                    self.rebuildAllEncoders(keyframes: true)
+                    self.beginFreshPicture(reason: "tier change to \(rc.tier.name)")
+                }
             }
             self.tileKbpsEWMA = self.tileKbpsEWMA * 0.5 + Double(self.secTileBytes * 8 / 1000) * 0.5
             self.interactiveKbpsEWMA = self.interactiveKbpsEWMA * 0.5 + Double(self.secInteractiveBytes * 8 / 1000) * 0.5
@@ -1312,17 +1596,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.detector.maxShift = self.effort.shiftSearch.maxShift
                 self.log(String(format: "host effort: %@ (load/core %.2f, thermal %d, capture %.1f ms)", self.effort.rawValue, pressure.loadPerCore, pressure.thermal.rawValue, capMs))
             }
-            let active = Clock.nowNanos() - self.videoActiveNanos < 1_000_000_000
+            let active = tnow - self.videoActiveNanos < 1_000_000_000
             // Review H7: compare with the cap the host actually applied, and only when budget held frames back.
-            self.rc?.videoRate(achievedFPS: Double(self.secVideoFrames), wantedFPS: min(Double(min(self.request?.maxFPS ?? 30, rc.policy.maxVideoFPS)), self.lastFpsCap),
-                               active: active, budgetLimited: self.secSkippedBudget > 0, now: Clock.nowNanos())
+            let fpsCap = self.layers.values.filter { tnow - $0.videoActiveNanos < 1_000_000_000 }.map(\.lastFpsCap).min() ?? 30
+            self.rc?.videoRate(achievedFPS: Double(self.secVideoFrames), wantedFPS: min(Double(min(self.request?.maxFPS ?? 30, rc.policy.maxVideoFPS)), fpsCap),
+                               active: active, budgetLimited: self.secSkippedBudget > 0, now: tnow)
             self.secSkippedBudget = 0
             self.secVideoBytes = 0; self.secTileBytes = 0; self.secVideoFrames = 0
             let front: (app: String, id: UInt32, title: String) = self.windows?.frontmost() ?? (app: "", id: 0, title: "")
             let status = ControlMessage.HostStatus(consoleLocked: InputInjector.consoleLocked(), frontmostApp: front.app, frontmostWindowID: front.id, frontmostWindowTitle: front.title, inputSink: InputInjector.sinkPath != nil)
             // On change, and every 10 s regardless (sparse when idle; the viewer's keepalive is its own datagram).
-            if status != self.lastHostStatus || Clock.nowNanos() - self.lastHostStatusNanos > 10_000_000_000 {
-                self.lastHostStatus = status; self.lastHostStatusNanos = Clock.nowNanos()
+            if status != self.lastHostStatus || tnow - self.lastHostStatusNanos > 10_000_000_000 {
+                self.lastHostStatus = status; self.lastHostStatusNanos = tnow
                 self.output?.sendControl(.hostStatus(status))
             }
         }
@@ -1336,14 +1621,20 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let vkbps = Double(statBytes) * 8 / 5 / 1000, tkbps = Double(statTileBytes) * 8 / 5 / 1000
             let enc = statFrames > 0 ? Double(statEncodeNanos) / Double(statFrames) / 1e6 : 0
             let capMs = statCaptures > 0 ? Double(statCaptureNanos) / Double(statCaptures) / 1e6 : 0
+            let backlog = layers.values.reduce(0) { $0 + $1.tracker.pendingTotal }
+            let d = display
+            let windowLayers = layers.values.filter { !$0.isDisplay }
             log(String(format: "video %.1f fps %.0f kbps (%dx%d) | tiles %.0f kbps %d rects (refine %.0f kbps) copy-rects %d backlog %d skipped %d | captures %d (%.1f ms each) dirty %d pruned %d | target %d cap %d queue %.0f ms rung %d srtt %.0f ms | inflight %d skipped %d dropped %d lost %d encode %.1f ms input %d",
-                       fps, vkbps, encoder?.width ?? 0, encoder?.height ?? 0, tkbps, statTileRects, Double(statRefineBytes) * 8 / 5 / 1000, statCopyRects, tracker?.pendingTotal ?? 0, statTileSkipped,
+                       fps, vkbps, d?.encoder?.width ?? 0, d?.encoder?.height ?? 0, tkbps, statTileRects, Double(statRefineBytes) * 8 / 5 / 1000, statCopyRects, backlog, statTileSkipped,
                        statCaptures, capMs, statDirtyTiles, statDiffPruned, rc?.targetKbps ?? 0, rc?.capacityKbps ?? 0, rc?.queueMs ?? 0, rc?.rung ?? 0, srttNanos / 1e6,
                        unacked.count, statSkippedBudget, statDropped, statLost, enc, statInput)
-                + (statNacks > 0 ? " nacks \(statNacks) resent \(statNackResent)" : "") + " fresh \(fresh)"
+                + (statNacks > 0 ? " nacks \(statNacks) resent \(statNackResent)" : "") + " fresh \(d?.fresh.description ?? "-")"
                 + String(format: " control %.0f kbps effort %@ fovea %@%@", Double(statControlBytes) * 8 / 5 / 1000, effortLevel, foveaActive ? "on" : "off", statFoveaTiles > 0 ? " (\(statFoveaTiles) tiles)" : "")
-                + String(format: " delay src %@ age %d ms tile-backlog %.0f ms motion %@ interactive %.0f kbps stale-dropped %d", rc?.lastSampleSource ?? "none", Int((rc?.sampleAgeNanos(now: Clock.nowNanos()) ?? 0) / 1_000_000), rc?.tileDelayMs ?? 0, motionSustained(Clock.nowNanos()) ? "yes" : "no", interactiveKbpsEWMA, statStaleDropped))
-            statStaleDropped = 0
+                + String(format: " delay src %@ age %d ms tile-backlog %.0f ms motion %@ interactive %.0f kbps stale-dropped %d", rc?.lastSampleSource ?? "none", Int((rc?.sampleAgeNanos(now: Clock.nowNanos()) ?? 0) / 1_000_000), rc?.tileDelayMs ?? 0, motionSustained(Clock.nowNanos()) ? "yes" : "no", interactiveKbpsEWMA, statStaleDropped)
+                + " | layers \(windowLayers.count) (\(windowLayers.filter { $0.capturer != nil }.count) capturing, \(windowLayers.filter { $0.encoder != nil }.count) encoders, \(windowLayers.filter { !$0.exposed }.count) pending) stills \(statStills) occluded \(statOccluded) window-cmds \(statWindowCommands)"
+                + " [" + windowLayers.sorted { $0.id < $1.id }.map { "\($0.id):\($0.frames)f/\(Int($0.visibleFraction * 100))%/\($0.sentBytes / 1000)KB(\($0.sentDirect)d+\($0.sentRefine)r)\($0.exposed ? "" : "/\($0.fresh)")" }.joined(separator: " ") + "]")
+            for l in windowLayers { l.frames = 0; l.sentBytes = 0; l.sentDirect = 0; l.sentRefine = 0 }
+            statStaleDropped = 0; statStills = 0; statOccluded = 0; statWindowCommands = 0
             statControlBytes = 0; statFoveaTiles = 0
             statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0
             statTileBytes = 0; statTileRects = 0; statRefineBytes = 0; statCopyRects = 0; statDirtyTiles = 0; statDiffPruned = 0; statTileSkipped = 0

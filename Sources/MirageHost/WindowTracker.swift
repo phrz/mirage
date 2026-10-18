@@ -4,14 +4,21 @@ import CoreGraphics
 import ApplicationServices
 import MirageCore
 
-/// Host window list (CGWindowList) in stream pixels, frame deltas between samples for drag
-/// detection, and per-window scroll rects: from Accessibility (`AXScrollArea` under the pointer)
-/// when available, else learned from the first detected copy-rect shift.
+/// Host window list (CGWindowList) in stream pixels: every on-screen window at every level (normal
+/// windows, menus, the dock, the menu bar) front to back, frame deltas between samples for drag
+/// detection of windows the display layer still carries, and per-window scroll rects: from Accessibility
+/// (`AXScrollArea` under the pointer) when available, else learned from the first detected copy-rect shift.
 final class WindowTracker {
     struct Sample {
         var captureSeq: UInt32
         var windows: [ControlMessage.WindowInfo]
         var byID: [UInt32: ControlMessage.WindowInfo]
+        /// Window bounds in points (global, top-left origin), for Accessibility and capture sizing.
+        var pointBounds: [UInt32: CGRect]
+        /// Child windows folded into their parent (the traffic-light window macOS 26 gives every titled
+        /// window, sheets' accessories): same owner, inside the parent, tiny. They are not listed to the
+        /// client; a layered parent's capture includes them, and the display stream excludes them with it.
+        var children: [UInt32: [UInt32]]
     }
     private var _current: Sample?
     private(set) var current: Sample? {
@@ -19,11 +26,12 @@ final class WindowTracker {
         set { lock.lock(); _current = newValue; lock.unlock() }
     }
     private var displayBounds: CGRect       // points, global
-    private var pxPerPoint: Double
+    private(set) var pxPerPoint: Double
     private var lastSampleNanos: UInt64 = 0
     private let lock = NSLock()
     private var learned: [UInt32: PixelRect] = [:]
     private var axRects: [UInt32: (rect: PixelRect, size: PixelRect)] = [:]
+    private var lastSeen: [UInt32: UInt64] = [:]
     var minSampleInterval: UInt64 = 25_000_000
 
     init(displayID: CGDirectDisplayID, streamWidth: Int) {
@@ -41,26 +49,52 @@ final class WindowTracker {
                   width: Int((r.width * pxPerPoint).rounded()), height: Int((r.height * pxPerPoint).rounded()))
     }
     func toPoints(_ p: (Double, Double)) -> CGPoint { CGPoint(x: displayBounds.minX + p.0 / pxPerPoint, y: displayBounds.minY + p.1 / pxPerPoint) }
+    /// A stream-pixel origin (display coordinates) as a global point.
+    func originInPoints(x: Int, y: Int) -> CGPoint { toPoints((Double(x), Double(y))) }
 
     struct Delta { let id: UInt32; let old: PixelRect; let new: PixelRect }
 
-    /// Samples the window list (throttled). Returns the new sample and the windows that moved
-    /// without resizing since the previous sample, or nil if throttled.
-    func sample(captureSeq: UInt32, now: UInt64) -> (sample: Sample, moved: [Delta], changed: Bool)? {
-        guard now - lastSampleNanos >= minSampleInterval else { return nil }
+    /// Whether a CGWindowList entry is something the client should know about: on screen, visible,
+    /// not the desktop, not the cursor. The menu bar and the dock are kept (they stack above windows).
+    static func wanted(level: Int, owner: String, bounds: CGRect, alpha: Double) -> Bool {
+        if level < 0 || alpha <= 0.01 || bounds.width < 2 || bounds.height < 2 { return false }
+        if owner == "Window Server" && level > 1000 { return false }   // the cursor window and friends
+        return true
+    }
+
+    /// Samples the window list (throttled). Returns the new sample, the windows that moved without
+    /// resizing since the previous sample, and whether anything changed; nil if throttled.
+    func sample(captureSeq: UInt32, now: UInt64, force: Bool = false) -> (sample: Sample, moved: [Delta], changed: Bool)? {
+        guard force || now - lastSampleNanos >= minSampleInterval else { return nil }
         lastSampleNanos = now
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[CFString: Any]] else { return nil }
         var windows: [ControlMessage.WindowInfo] = []
+        var pointBounds: [UInt32: CGRect] = [:]
         let display = displayBounds
-        for (z, w) in list.enumerated() {
-            guard let layer = w[kCGWindowLayer] as? Int, layer == 0,
+        for w in list {
+            guard let layer = w[kCGWindowLayer] as? Int,
                   let num = w[kCGWindowNumber] as? UInt32, let pid = w[kCGWindowOwnerPID] as? Int32,
                   let b = w[kCGWindowBounds] as? NSDictionary, let bounds = CGRect(dictionaryRepresentation: b),
-                  bounds.width >= 40, bounds.height >= 40, bounds.intersects(display) else { continue }
-            if let alpha = w[kCGWindowAlpha] as? Double, alpha <= 0.01 { continue }
+                  bounds.intersects(display) else { continue }
+            let owner = (w[kCGWindowOwnerName] as? String) ?? ""
+            let alpha = w[kCGWindowAlpha] as? Double ?? 1
+            guard Self.wanted(level: layer, owner: owner, bounds: bounds, alpha: alpha) else { continue }
             let title = (w[kCGWindowName] as? String) ?? ""
-            let scroll = scrollRect(for: num)
-            windows.append(.init(id: num, pid: pid, title: title, frame: toPixels(bounds), z: z, scrollRect: scroll))
+            pointBounds[num] = bounds
+            windows.append(.init(id: num, pid: pid, title: title, frame: toPixels(bounds), z: windows.count, scrollRect: scrollRect(for: num), level: layer, layered: false, app: owner))
+        }
+        // Fold children into parents: a window in front of a larger one of the same owner, inside it (2 px slack), under 2 % of its area.
+        var children: [UInt32: [UInt32]] = [:]
+        var childIDs = Set<UInt32>()
+        for (i, w) in windows.enumerated() where w.frame.area > 0 {
+            for p in windows[(i + 1)...] where p.pid == w.pid && p.windowLevel == w.windowLevel && p.frame.area >= w.frame.area * 50 {
+                let slack = PixelRect(x: p.frame.x - 2, y: p.frame.y - 2, width: p.frame.width + 4, height: p.frame.height + 4)
+                if slack.intersection(w.frame) == w.frame { children[p.id, default: []].append(w.id); childIDs.insert(w.id); break }
+            }
+        }
+        if !childIDs.isEmpty {
+            windows.removeAll { childIDs.contains($0.id) }
+            for i in windows.indices { windows[i].z = i }
         }
         let byID = Dictionary(windows.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var moved: [Delta] = []
@@ -77,16 +111,20 @@ final class WindowTracker {
             }
         }
         let changed = resized || (current.map { $0.windows != windows } ?? true)
-        let s = Sample(captureSeq: captureSeq, windows: windows, byID: byID)
+        let s = Sample(captureSeq: captureSeq, windows: windows, byID: byID, pointBounds: pointBounds, children: children)
         current = s
+        // Review L9: forget scroll rects of windows gone for over a minute.
+        lock.lock()
+        for w in windows { lastSeen[w.id] = now }
+        for (id, t) in lastSeen where now &- t > 60_000_000_000 { lastSeen[id] = nil; learned[id] = nil; axRects[id] = nil }
+        lock.unlock()
         return (s, moved, changed)
     }
 
-    /// The frontmost normal window (first in the on-screen list) and its owner, for the host status.
+    /// The frontmost normal window (first level-0 window in the on-screen list) and its owner, for the host status.
     func frontmost() -> (app: String, id: UInt32, title: String) {
-        guard let w = current?.windows.first else { return ("", 0, "") }
-        let app = NSRunningApplication(processIdentifier: w.pid)?.localizedName ?? ""
-        return (app, w.id, w.title)
+        guard let w = current?.windows.first(where: { $0.windowLevel == 0 }) else { return ("", 0, "") }
+        return (w.app ?? "", w.id, w.title)
     }
 
     /// Topmost window under a stream-pixel point.
@@ -94,6 +132,7 @@ final class WindowTracker {
         current?.windows.first { $0.frame.contains(x, y) }
     }
 
+    /// Scroll rect in display coordinates, if known.
     func scrollRect(for id: UInt32) -> PixelRect? {
         lock.lock(); defer { lock.unlock() }
         return axRects[id]?.rect ?? learned[id]
@@ -131,5 +170,9 @@ final class WindowTracker {
             guard AXUIElementCopyAttributeValue(e, kAXParentAttribute as CFString, &parentRef) == .success, let parent = parentRef else { return }
             e = parent as! AXUIElement
         }
+    }
+
+    static func occlusion(of w: ControlMessage.WindowInfo, in list: [ControlMessage.WindowInfo], display: PixelRect) -> (visibleFraction: Double, covering: [PixelRect]) {
+        WindowTrackerOcclusion.occlusion(of: w, in: list, display: display)
     }
 }

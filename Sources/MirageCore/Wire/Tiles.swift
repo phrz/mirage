@@ -33,19 +33,22 @@ public struct PixelRect: Equatable, Hashable, Sendable, Codable {
 /// Messages on the tile stream, host → client. Framing: [type u8][msgSeq u32][length u32][body].
 /// Every message carries the host's capture sequence (shared with video frames, for ordering
 /// against the window list) and the last input sequence reflected in those pixels (for the
-/// client's prediction reconciliation, DESIGN §3.5).
+/// client's prediction reconciliation, DESIGN §3.5). Rects are in the coordinates of the message's
+/// layer (`Header.windowID`): the display layer (0) or a window captured as its own layer (M3).
 public enum TileMessage: Equatable, Sendable {
     /// Lossless (or near-lossless) rects that replace the client's pixels.
     case tiles(Tiles)
     /// "Move the pixels of `rect` by (dx, dy)": scroll or window drag detected on the host.
     case copyRect(CopyRect)
-    /// Native size changed; the client clears its canvas.
-    case reset(width: Int, height: Int)
+    /// A layer's pixel size (new layer, native size changed, window resized). Layer 0 is the display.
+    case reset(layer: UInt32, width: Int, height: Int)
 
     public struct Header: Equatable, Sendable {
         public var captureSeq: UInt32
         public var inputSeq: UInt64
-        public var windowID: UInt32      // 0 = none / unknown
+        /// Layer these pixels belong to: 0 = the display layer, else the window id of a layered window
+        /// (then rects are relative to that window's top-left).
+        public var windowID: UInt32
         public var captureNanos: UInt64  // host clock
         public init(captureSeq: UInt32, inputSeq: UInt64, windowID: UInt32, captureNanos: UInt64) {
             self.captureSeq = captureSeq; self.inputSeq = inputSeq; self.windowID = windowID; self.captureNanos = captureNanos
@@ -96,9 +99,9 @@ public enum TileMessage: Equatable, Sendable {
             c.header.write(to: &body)
             c.rect.write(to: &body)
             body.appendBE(Int16(c.dx)); body.appendBE(Int16(c.dy))
-        case .reset(let w, let h):
+        case .reset(let layer, let w, let h):
             kind = .reset
-            body.appendBE(UInt16(w)); body.appendBE(UInt16(h))
+            body.appendBE(layer); body.appendBE(UInt16(w)); body.appendBE(UInt16(h))
         }
         var d = Data(capacity: 9 + body.count)
         d.append(kind.rawValue); d.appendBE(msgSeq); d.appendBE(UInt32(body.count))
@@ -140,9 +143,9 @@ public enum TileMessage: Equatable, Sendable {
             let dx: Int16 = r.read(), dy: Int16 = r.read()
             return .copyRect(CopyRect(header: h, rect: rect, dx: Int(dx), dy: Int(dy)))
         case .reset:
-            guard r.remaining >= 4 else { return nil }
-            let w: UInt16 = r.read(), h: UInt16 = r.read()
-            return .reset(width: Int(w), height: Int(h))
+            guard r.remaining >= 8 else { return nil }
+            let layer: UInt32 = r.read(), w: UInt16 = r.read(), h: UInt16 = r.read()
+            return .reset(layer: layer, width: Int(w), height: Int(h))
         }
     }
 }

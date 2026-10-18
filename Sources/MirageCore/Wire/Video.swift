@@ -69,11 +69,12 @@ public struct ParityFragment: Equatable, Sendable {
 
 /// Header of a video fragment datagram (all big-endian):
 /// magic(1) type(1) frameSeq(4) fragIndex(2) fragCount(2) flags(1) captureNanos(8) frameBytes(4)
-/// captureSeq(4) inputSeq(8) region x,y,w,h (4×2)
-/// `region` is the part of the native picture this frame updates (native stream pixels); the
-/// encoded frame itself may be smaller (resolution ladder) and is scaled onto the region.
+/// captureSeq(4) inputSeq(8) region x,y,w,h (4×2) layerID(4)
+/// `region` is the part of the layer this frame updates (native stream pixels of the layer: the
+/// display, or a layered window's own coordinates); the encoded frame itself may be smaller
+/// (resolution ladder) and is scaled onto the region.
 public struct VideoFragment: Equatable, Sendable {
-    public static let headerSize = 43
+    public static let headerSize = 47
     /// Whole datagram size we aim for; stays under the tailnet's 1280-byte MTU with QUIC overhead.
     public static let datagramSize = 1200
     public static let maxPayload = datagramSize - headerSize
@@ -101,13 +102,14 @@ public struct VideoFragment: Equatable, Sendable {
     public var captureSeq: UInt32        // host capture counter, shared with tile messages and the window list
     public var inputSeq: UInt64          // last client input reflected in these pixels
     public var region: PixelRect         // native-pixel rect this frame updates
+    public var layerID: UInt32           // 0 = the display layer, else a layered window
     public var payload: Data
 
     public init(frameSeq: UInt32, fragIndex: UInt16, fragCount: UInt16, flags: Flags, captureNanos: UInt64, frameBytes: UInt32,
-                captureSeq: UInt32 = 0, inputSeq: UInt64 = 0, region: PixelRect = .zero, payload: Data) {
+                captureSeq: UInt32 = 0, inputSeq: UInt64 = 0, region: PixelRect = .zero, layerID: UInt32 = 0, payload: Data) {
         self.frameSeq = frameSeq; self.fragIndex = fragIndex; self.fragCount = fragCount
         self.flags = flags; self.captureNanos = captureNanos; self.frameBytes = frameBytes
-        self.captureSeq = captureSeq; self.inputSeq = inputSeq; self.region = region; self.payload = payload
+        self.captureSeq = captureSeq; self.inputSeq = inputSeq; self.region = region; self.layerID = layerID; self.payload = payload
     }
 
     public func encode() -> Data {
@@ -115,7 +117,7 @@ public struct VideoFragment: Equatable, Sendable {
         d.append(datagramMagic); d.append(DatagramType.video.rawValue)
         d.appendBE(frameSeq); d.appendBE(fragIndex); d.appendBE(fragCount)
         d.append(flags.rawValue); d.appendBE(captureNanos); d.appendBE(frameBytes)
-        d.appendBE(captureSeq); d.appendBE(inputSeq); region.write(to: &d)
+        d.appendBE(captureSeq); d.appendBE(inputSeq); region.write(to: &d); d.appendBE(layerID)
         d.append(payload)
         return d
     }
@@ -128,14 +130,15 @@ public struct VideoFragment: Equatable, Sendable {
         let cap: UInt64 = r.read(), total: UInt32 = r.read()
         let cseq: UInt32 = r.read(), iseq: UInt64 = r.read()
         guard let region = PixelRect.read(&r) else { return nil }
+        let layer: UInt32 = r.read()
         guard cnt > 0, idx < cnt else { return nil }
         return VideoFragment(frameSeq: seq, fragIndex: idx, fragCount: cnt, flags: flags, captureNanos: cap, frameBytes: total,
-                             captureSeq: cseq, inputSeq: iseq, region: region, payload: d.subdata(in: r.offset..<d.endIndex))
+                             captureSeq: cseq, inputSeq: iseq, region: region, layerID: layer, payload: d.subdata(in: r.offset..<d.endIndex))
     }
 
     /// Splits a frame payload into datagrams.
     public static func fragments(frameSeq: UInt32, flags: Flags, captureNanos: UInt64, payload: Data, maxPayload: Int = maxPayload,
-                                 captureSeq: UInt32 = 0, inputSeq: UInt64 = 0, region: PixelRect = .zero) -> [Data] {
+                                 captureSeq: UInt32 = 0, inputSeq: UInt64 = 0, region: PixelRect = .zero, layerID: UInt32 = 0) -> [Data] {
         let count = max(1, (payload.count + maxPayload - 1) / maxPayload)
         precondition(count <= Int(UInt16.max))
         return (0..<count).map { i in
@@ -143,7 +146,7 @@ public struct VideoFragment: Equatable, Sendable {
             let hi = min(lo + maxPayload, payload.endIndex)
             return VideoFragment(frameSeq: frameSeq, fragIndex: UInt16(i), fragCount: UInt16(count), flags: flags,
                                  captureNanos: captureNanos, frameBytes: UInt32(payload.count),
-                                 captureSeq: captureSeq, inputSeq: inputSeq, region: region, payload: payload.subdata(in: lo..<hi)).encode()
+                                 captureSeq: captureSeq, inputSeq: inputSeq, region: region, layerID: layerID, payload: payload.subdata(in: lo..<hi)).encode()
         }
     }
 }
@@ -223,6 +226,7 @@ public struct VideoFrame: Sendable {
     public var captureSeq: UInt32
     public var inputSeq: UInt64
     public var region: PixelRect
+    public var layerID: UInt32 = 0
     /// Fragments that needed parity or a NACK (the viewer reports them in the ack).
     public var fragmentsLost: Int = 0
 }
@@ -244,6 +248,7 @@ public struct FrameAssembler {
         var captureSeq: UInt32
         var inputSeq: UInt64
         var region: PixelRect
+        var layerID: UInt32 = 0
         var nacks = 0
         var lastNackNanos: UInt64 = 0
         var complete: Bool { count > 0 && received == count }
@@ -282,12 +287,14 @@ public struct FrameAssembler {
     public init() {}
 
     public enum Event {
-        case completed(VideoFrame), lost(seq: UInt32)
+        case completed(VideoFrame)
+        /// `layer` is the layer of the frame when any fragment of it arrived, nil when nothing did.
+        case lost(seq: UInt32, layer: UInt32?)
         /// Ask the host to resend these fragments (an empty list = the whole frame).
         case nack(seq: UInt32, fragments: [Int])
         /// A run of frames was never seen at all (a loss burst): ask the host for a recovery frame now.
         case gap(from: UInt32, to: UInt32)
-        var seq: UInt32 { switch self { case .completed(let f): return f.seq; case .lost(let s): return s; case .nack(let s, _): return s; case .gap(_, let t): return t } }
+        var seq: UInt32 { switch self { case .completed(let f): return f.seq; case .lost(let s, _): return s; case .nack(let s, _): return s; case .gap(_, let t): return t } }
     }
 
     public mutating func ingest(_ f: VideoFragment, now: UInt64 = Clock.nowNanos()) -> [Event] {
@@ -312,12 +319,12 @@ public struct FrameAssembler {
         }
         var p = partials[f.frameSeq] ?? Partial(flags: f.flags, captureNanos: f.captureNanos, firstNanos: now, lastNanos: now,
                                                  count: Int(f.fragCount), total: Int(f.frameBytes), parts: Array(repeating: nil, count: Int(f.fragCount)),
-                                                 captureSeq: f.captureSeq, inputSeq: f.inputSeq, region: f.region)
+                                                 captureSeq: f.captureSeq, inputSeq: f.inputSeq, region: f.region, layerID: f.layerID)
         if p.count == 0 {
             // A placeholder (parity arrived first, or a gap): take the frame's shape from this fragment.
             let parity = p.parity, nacks = p.nacks, lastNack = p.lastNackNanos, first = p.firstNanos
             p = Partial(flags: f.flags, captureNanos: f.captureNanos, firstNanos: first, lastNanos: now, count: Int(f.fragCount), total: Int(f.frameBytes),
-                        parts: Array(repeating: nil, count: Int(f.fragCount)), captureSeq: f.captureSeq, inputSeq: f.inputSeq, region: f.region,
+                        parts: Array(repeating: nil, count: Int(f.fragCount)), captureSeq: f.captureSeq, inputSeq: f.inputSeq, region: f.region, layerID: f.layerID,
                         nacks: nacks, lastNackNanos: lastNack, parity: parity)
         }
         guard Int(f.fragCount) == p.count, Int(f.fragIndex) < p.count else { return events }
@@ -391,16 +398,16 @@ public struct FrameAssembler {
                 if let decoded {
                     events.append(.completed(VideoFrame(seq: seq, flags: p.flags, captureNanos: p.captureNanos, firstFragmentNanos: p.firstNanos,
                                                          lastFragmentNanos: p.lastNanos, parameterSets: decoded.parameterSets, tileMask: decoded.tileMask, sample: decoded.sample, bytes: sample.count,
-                                                         fragments: p.count, captureSeq: p.captureSeq, inputSeq: p.inputSeq, region: p.region, fragmentsLost: p.recovered)))
+                                                         fragments: p.count, captureSeq: p.captureSeq, inputSeq: p.inputSeq, region: p.region, layerID: p.layerID, fragmentsLost: p.recovered)))
                 } else {
-                    events.append(.lost(seq: seq))
+                    events.append(.lost(seq: seq, layer: p.layerID))
                 }
                 continue
             }
             // Give up on the gap since the LAST fragment, not the age of the frame: a paced keyframe
             // arrives over a second or more and must not be declared lost while still flowing.
             if now - p.lastNanos > timeoutNanos || now - p.firstNanos > maxFrameAgeNanos {
-                partials[seq] = nil; delivered = seq; events.append(.lost(seq: seq)); continue
+                partials[seq] = nil; delivered = seq; events.append(.lost(seq: seq, layer: p.count > 0 && !p.isGap ? p.layerID : nil)); continue
             }
             break
         }

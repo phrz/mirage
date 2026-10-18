@@ -22,6 +22,9 @@ final class VideoNSView: NSView {
     private var lastRequested: (Int, Int) = (0, 0)
     private var displayLink: CADisplayLink?
     private var drag: (windowID: UInt32, frame: PixelRect, last: (Int, Int))?
+    /// A press on a layered window's title bar: a drag if the pointer moves, else the click is sent on release
+    /// (DESIGN §3.2: the window moves locally, the host is told the frame; the press itself never travels).
+    private var layerDrag: (windowID: UInt32, frame: PixelRect, start: (Int, Int), moved: Bool, downEvent: NSEvent)?
     var onToggleStats: (() -> Void)?
 
     override init(frame: NSRect) {
@@ -47,7 +50,7 @@ final class VideoNSView: NSView {
     func attach(_ session: ViewerSession) {
         self.session = session
         metalLayer.device = session.compositor?.device
-        session.onChange = { [weak self] in DispatchQueue.main.async { self?.needsDisplay = true } }
+        session.onChange = { [weak self] in DispatchQueue.main.async { self?.forceRedraw = true; self?.needsDisplay = true } }
     }
 
     override func viewDidMoveToWindow() {
@@ -60,16 +63,22 @@ final class VideoNSView: NSView {
     }
 
     @objc private func tick() {
-        guard let session, let comp = session.compositor, comp.width > 0 else { return }
-        let (disp, colors) = session.displacements()
-        let changed = comp.needsRender || !disp.isEmpty || lastDisplacements != disp
-        lastDisplacements = disp
+        guard let session, let comp = session.compositor, comp.width > 0, let context = session.context else { return }
+        let ppp = MainActor.assumeIsolated { session.pixelsPerPoint }
+        guard let scene = session.scene(pxPerPoint: ppp) else { return }
+        let arrangement = session.arrangementGeneration
+        var layersDirty = false
+        for it in scene.items { if case .layer(let c, _, _, _) = it, c.needsRender { layersDirty = true; break } }
+        let changed = comp.needsRender || layersDirty || !scene.displacements.isEmpty || lastDisplacementCount != scene.displacements.count || arrangement != lastArrangement || session.hasPendingPredictions || forceRedraw
+        lastDisplacementCount = scene.displacements.count; lastArrangement = arrangement; forceRedraw = false
         guard changed, let drawable = metalLayer.nextDrawable() else { return }
         let scale = metalLayer.contentsScale
         let r = videoRect
-        comp.render(to: drawable, dest: CGRect(x: r.minX * scale, y: r.minY * scale, width: r.width * scale, height: r.height * scale), displacements: disp, bandColors: colors)
+        SceneRenderer.render(scene, context: context, to: drawable, dest: CGRect(x: r.minX * scale, y: r.minY * scale, width: r.width * scale, height: r.height * scale))
     }
-    private var lastDisplacements: [Predictor.Displacement] = []
+    private var lastDisplacementCount = 0
+    private var lastArrangement = -1
+    private var forceRedraw = false
 
     override func layout() {
         super.layout()
@@ -166,6 +175,15 @@ final class VideoNSView: NSView {
     override func mouseMoved(with event: NSEvent) { moved(event) }
     override func mouseDragged(with event: NSEvent) {
         if observeOnly { moved(event); return }
+        if var ld = layerDrag, let session, let p = streamPixel(event) {
+            localPointer = convert(event.locationInWindow, from: nil); updateCursorLayer()
+            let dx = p.0 - ld.start.0, dy = p.1 - ld.start.1
+            if !ld.moved, abs(dx) < 3, abs(dy) < 3 { return }
+            if !ld.moved { ld.moved = true; session.beginLayerDrag(windowID: ld.windowID) }
+            layerDrag = ld
+            session.dragLayer(windowID: ld.windowID, to: ld.frame.offset(dx, dy))
+            return
+        }
         // Window drag prediction: translate the window's pixels with the pointer, send the move as usual.
         if let drag, let session, let p = streamPixel(event) {
             self.drag?.last = p
@@ -182,23 +200,51 @@ final class VideoNSView: NSView {
 
     @discardableResult
     private func button(_ e: NSEvent, _ b: Int, down: Bool) -> UInt64 {
-        if down { window?.makeFirstResponder(self) }
         guard !observeOnly else { return 0 }
         let (x, y) = normalized(e)
         return session?.send(.mouseButton(.init(button: b, down: down, x: x, y: y, clickCount: e.clickCount, modifiers: flags(e)))) ?? 0
     }
     override func mouseDown(with event: NSEvent) {
-        let seq = button(event, 0, down: true)
+        window?.makeFirstResponder(self)
         if let d = drag { session?.endDrag(windowID: d.windowID) }
-        drag = nil
+        drag = nil; layerDrag = nil
         guard !observeOnly else { return }
-        // Title-bar hit test on the host's window list: a plain left press there starts a predicted drag.
-        guard let session, let p = streamPixel(event), event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty, event.clickCount == 1,
-              let w = session.window(at: p.0, p.1) else { return }
-        let titleBar = Int(28 * MainActor.assumeIsolated { session.pixelsPerPoint })
-        if p.1 < w.frame.y + titleBar { drag = (w.id, w.frame, p); session.beginDrag(windowID: w.id, frame: w.frame, pointer: p, inputSeq: seq) }
+        let plain = event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty
+        if let session, let p = streamPixel(event), let w = session.window(at: p.0, p.1) {
+            let ppp = MainActor.assumeIsolated { session.pixelsPerPoint }
+            let titleBar = Int(28 * ppp), trafficLights = Int(80 * ppp)
+            if w.isLayered {
+                // A press on a layered window raises it here at once; on its title bar (right of the traffic
+                // lights) it may be a drag: hold the click until the pointer moves or the button is released.
+                if plain, event.clickCount == 1, p.1 < w.frame.y + titleBar, p.0 > w.frame.x + trafficLights {
+                    layerDrag = (w.id, w.frame, p, false, event)
+                    return
+                }
+                let seq = button(event, 0, down: true)
+                if plain, w.windowLevel == 0 { session.localRaise(windowID: w.id, inputSeq: seq) }
+                return
+            }
+            let seq = button(event, 0, down: true)
+            // Title-bar hit test on a window the display layer still carries: a plain left press there starts a predicted (copy-rect) drag.
+            if plain, event.clickCount == 1, p.1 < w.frame.y + titleBar { drag = (w.id, w.frame, p); session.beginDrag(windowID: w.id, frame: w.frame, pointer: p, inputSeq: seq) }
+            return
+        }
+        button(event, 0, down: true)
     }
-    override func mouseUp(with event: NSEvent) { button(event, 0, down: false); if let d = drag { session?.endDrag(windowID: d.windowID) }; drag = nil }
+    override func mouseUp(with event: NSEvent) {
+        if let ld = layerDrag {
+            layerDrag = nil
+            if ld.moved { session?.endLayerDrag(windowID: ld.windowID) }
+            else {
+                // It was a click after all: the press goes now, then the release (one RTT later than it could have, invisibly).
+                let seq = button(ld.downEvent, 0, down: true)
+                session?.localRaise(windowID: ld.windowID, inputSeq: seq)
+                button(event, 0, down: false)
+            }
+            return
+        }
+        button(event, 0, down: false); if let d = drag { session?.endDrag(windowID: d.windowID) }; drag = nil
+    }
     override func rightMouseDown(with event: NSEvent) { button(event, 1, down: true) }
     override func rightMouseUp(with event: NSEvent) { button(event, 1, down: false) }
     override func otherMouseDown(with event: NSEvent) { button(event, max(2, event.buttonNumber), down: true) }
@@ -217,7 +263,8 @@ final class VideoNSView: NSView {
         let sdx = Int((dx * ppp).rounded()), sdy = Int((dy * ppp).rounded())
         guard sdx != 0 || sdy != 0 else { return }
         let rect = session.scrollRect(for: w, titleBarPx: Int(28 * ppp))
-        guard rect.contains(p.0, p.1) else { return }
+        let lp = w.isLayered ? (p.0 - w.frame.x, p.1 - w.frame.y) : p
+        guard rect.contains(lp.0, lp.1) else { return }
         session.predict(kind: .scroll, windowID: w.id, rect: rect, dx: sdx, dy: sdy, inputSeq: seq)
     }
 

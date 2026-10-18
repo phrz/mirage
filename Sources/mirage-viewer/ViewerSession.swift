@@ -38,6 +38,7 @@ final class ViewerModel: ObservableObject {
         var predictions = (shown: 0, confirmed: 0, mismatched: 0, expired: 0)
         var upscaling = false
         var nacks = 0, recoveredByNack = 0, recoveredByParity = 0, bursts = 0
+        var layers = 0, layerMB = 0
     }
     struct CursorImage {
         let image: NSImage
@@ -61,18 +62,34 @@ final class ViewerSession: @unchecked Sendable {
     private var flow: MessageStream?
     private var tileStream: MessageStream?
     private var fastTileStream: MessageStream?
-    /// Capture sequence last applied per 64-px tile: a refinement that was queued before a newer
-    /// interactive update of the same tile must not overwrite it.
-    private var tileCaptureSeq: [UInt32] = []
     private(set) var hostStatus: ControlMessage.HostStatus?
     private let videoQueue = DispatchQueue(label: "mirage.viewer.video", qos: .userInteractive)
     private var assembler = FrameAssembler()
     private var assemblerTimer: DispatchSourceTimer?
-    private let decoder = HEVCDecoder()
-    private var awaitingRecovery = false
-    /// Sequence of the last decoded recovery frame: a loss verdict for an older frame is already healed.
-    private var lastRecoverySeq: UInt32 = 0
-    let compositor = Compositor()
+    /// One per layer (DESIGN §3.2): the display layer (0) and every window the host captures as its own
+    /// layer. Each has its canvas, its decoder (HEVC references are per layer), per-tile capture
+    /// sequences (a refinement queued before a newer interactive update of the same tile must not
+    /// overwrite it) and its recovery state.
+    final class LayerView {
+        let id: UInt32
+        let compositor: Compositor
+        let decoder = HEVCDecoder()
+        var tileCaptureSeq: [UInt32] = []
+        var losslessAt: [UInt64] = []
+        var awaitingRecovery = false
+        /// Sequence of the last decoded recovery frame: a loss verdict for an older frame is already healed.
+        var lastRecoverySeq: UInt32 = 0
+        var lastSeenInListNanos: UInt64 = 0
+        init(id: UInt32, context: MetalContext) { self.id = id; compositor = Compositor(context: context); compositor.layerID = id; compositor.hasAlpha = id != 0 }
+    }
+    let context = MetalContext()
+    private(set) var layerViews: [UInt32: LayerView] = [:]
+    /// The display layer's canvas (what scripts and the single-canvas paths mean by "the picture").
+    var compositor: Compositor? { displayView?.compositor }
+    private var displayView: LayerView? { layerViews[0] }
+    private func layerView(_ id: UInt32) -> LayerView? { layerViews[id] }
+    /// Texture memory the layer cache may hold before absent layers are evicted.
+    var layerMemoryBudget = 768 << 20
     /// Called (on the video queue) whenever the picture changed and should be presented.
     var onChange: (() -> Void)?
 
@@ -83,6 +100,9 @@ final class ViewerSession: @unchecked Sendable {
     private let statsLock = NSLock()
     private var sFrames = 0, sBytes = 0, sLost = 0, sDecodeNanos: UInt64 = 0, sAge: Double = 0, sRTT = 0.0, sDropped = 0
     private var sTileBytes = 0, sTileRects = 0, sCopyRects = 0, sNacks = 0, sBursts = 0
+    /// Every byte from the host (video, tiles, control messages), cumulative: scenario bytes-during-a-burst.
+    private var sTotalBytes = 0, sControlBytes = 0
+    func totalBytes() -> Int { statsLock.lock(); defer { statsLock.unlock() }; return sTotalBytes + sControlBytes }
     private var rateState = ControlMessage.RateState(targetKbps: 0, capacityKbps: 0, queueMs: 0, rung: 0, scale: 1, tileBudgetKbps: 0, videoKbps: 0, tileKbps: 0)
     @MainActor private var lastRequest: ControlMessage.StreamRequest?
     @MainActor private var pendingRequest: ControlMessage.StreamRequest?
@@ -107,6 +127,8 @@ final class ViewerSession: @unchecked Sendable {
     /// Scenario watch rect: last lossless tile / video frame that touched it.
     var watchRect: PixelRect = .zero
     private(set) var lastWatchedTileNanos: UInt64 = 0, lastWatchedVideoNanos: UInt64 = 0, lastWatchedCopyNanos: UInt64 = 0
+    /// Last watched tile of at least 32×32 px: time-to-crisp ignores caret blinks and single glyphs.
+    private(set) var lastWatchedLargeTileNanos: UInt64 = 0
     private(set) var watchedVideoFrames = 0, watchedCopyRects = 0
     private(set) var watchedTileBytes = 0, watchedTileCount = 0, watchedDirectBytes = 0
     /// Foveation metric: the first lossless tile within ~100 px of the pointer after the stream started.
@@ -114,8 +136,6 @@ final class ViewerSession: @unchecked Sendable {
     private var streamStartNanos: UInt64 = 0
     private(set) var legibleUnderPointerMs: Double? = nil
     private var refinementLogged = 0
-    /// Receiver clock of the last lossless tile per 64-px tile (for the legibility metric).
-    private var losslessAt: [UInt64] = []
     static let debugTiles = ProcessInfo.processInfo.environment["MIRAGE_DEBUG_TILES"] != nil
     func resetWatched() { videoQueue.async { self.watchedTileBytes = 0; self.watchedTileCount = 0; self.watchedDirectBytes = 0; self.watchedVideoFrames = 0; self.watchedCopyRects = 0 } }
     func windowsSnapshot() -> [ControlMessage.WindowInfo] { predictorLock.lock(); defer { predictorLock.unlock() }; return windows }
@@ -123,6 +143,7 @@ final class ViewerSession: @unchecked Sendable {
 
     init(host: String, port: UInt16, pairCode: String?, model: ViewerModel) {
         self.host = host; self.port = port; self.pairCode = pairCode; self.model = model
+        if let context { layerViews[0] = LayerView(id: 0, context: context) }
     }
 
     func log(_ s: String) { FileHandle.standardError.write(Data("\(s)\n".utf8)) }
@@ -191,7 +212,11 @@ final class ViewerSession: @unchecked Sendable {
     /// One connection's life: returns the reason it ended.
     private func connectOnce() async -> String {
         // Per-connection state; the compositor's picture is deliberately kept.
-        let myGen = videoQueue.sync { () -> Int in gen += 1; assembler = FrameAssembler(); awaitingRecovery = resumeToken != nil; lastRecoverySeq = 0; tileCaptureSeq = []; return gen }
+        let myGen = videoQueue.sync { () -> Int in
+            gen += 1; assembler = FrameAssembler()
+            for v in layerViews.values { v.awaitingRecovery = resumeToken != nil; v.lastRecoverySeq = 0; v.tileCaptureSeq = [] }
+            return gen
+        }
         sender = nil
         for t in receiveTasks { t.cancel() }
         receiveTasks = []
@@ -219,7 +244,7 @@ final class ViewerSession: @unchecked Sendable {
                 // The host did not know us (restarted, or the window passed): a fresh stream follows. The
                 // picture stays until its first keyframe replaces it; predictions from the old session are void.
                 predictorLock.lock(); predictor = Predictor(); predictorLock.unlock()
-                videoQueue.sync { awaitingRecovery = false }
+                videoQueue.sync { for v in layerViews.values { v.awaitingRecovery = false } }
             }
             log(resumed ? "session resumed by \(welcome.hostName) (\(disconnectedAt.map { String(format: "%.1f s gap", Date().timeIntervalSince($0)) } ?? ""))" : "authenticated to \(welcome.hostName)")
             setStatus(resumed ? "resumed session with \(welcome.hostName)" : "authenticated to \(welcome.hostName)")
@@ -351,8 +376,9 @@ final class ViewerSession: @unchecked Sendable {
                     // A new or resumed stream: the picture is kept (same size) until the host's first keyframe
                     // or masked keyframe replaces what changed; the assembler starts over (review M4).
                     self.compositor?.configure(width: info.width, height: info.height); self.onChange?()
-                    self.assembler = FrameAssembler(); self.lastRecoverySeq = 0
-                    self.streamStartNanos = Clock.nowNanos(); self.legibleUnderPointerMs = nil; self.losslessAt = []
+                    self.assembler = FrameAssembler()
+                    for v in self.layerViews.values { v.lastRecoverySeq = 0; v.losslessAt = [] }
+                    self.streamStartNanos = Clock.nowNanos(); self.legibleUnderPointerMs = nil
                 }
                 Task { @MainActor in model.streamInfo = info; model.status = "streaming \(info.width)x\(info.height) from \(host)" }
             case .cursorShape(let c):
@@ -363,7 +389,8 @@ final class ViewerSession: @unchecked Sendable {
                 if probeLog { log(String(format: "host cursor at (%.3f, %.3f)", p.x, p.y)) }
                 Task { @MainActor in model.remoteCursor = p.visible ? CGPoint(x: p.x, y: p.y) : nil }
             case .windowList(let list):
-                predictorLock.lock(); windows = list.apply(to: windows); predictorLock.unlock()
+                if let d = try? Frame.encode(msg) { statsLock.lock(); sControlBytes += d.count; statsLock.unlock() }
+                hostWindowList(list, now: Clock.nowNanos())
             case .rateState(let r):
                 statsLock.lock(); rateState = r; statsLock.unlock()
             case .hostStatus(let h):
@@ -429,64 +456,90 @@ final class ViewerSession: @unchecked Sendable {
         }
     }
 
-    /// Every pixel update carries the host capture it came from; per 64-px tile the viewer keeps the
-    /// newest capture that touched it (tiles, copy-rects, video alike). A tile message is applied only
-    /// if *no* tile under its rect holds a newer capture (review M2: applying a rect because one tile
+    /// Every pixel update carries the host capture it came from; per 64-px tile of its layer the viewer
+    /// keeps the newest capture that touched it (tiles, copy-rects, video alike). A tile message is applied
+    /// only if *no* tile under its rect holds a newer capture (review M2: applying a rect because one tile
     /// under it was still old put stale blocks over a moved window), and applying it marks the tiles.
-    private func isFresh(_ rect: PixelRect, captureSeq: UInt32) -> Bool {
-        guard let c = compositor, c.width > 0 else { return true }
+    private func isFresh(_ v: LayerView, _ rect: PixelRect, captureSeq: UInt32) -> Bool {
+        let c = v.compositor
+        guard c.width > 0 else { return true }
         let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
-        if tileCaptureSeq.count != cols * rows { tileCaptureSeq = Array(repeating: 0, count: cols * rows) }
+        if v.tileCaptureSeq.count != cols * rows { v.tileCaptureSeq = Array(repeating: 0, count: cols * rows) }
         let c0 = max(0, rect.x / 64), c1 = min(cols - 1, (rect.maxX - 1) / 64), r0 = max(0, rect.y / 64), r1 = min(rows - 1, (rect.maxY - 1) / 64)
         guard c1 >= c0, r1 >= r0 else { return true }
-        for r in r0...r1 { for cc in c0...c1 where tileCaptureSeq[r * cols + cc] > captureSeq { staleDiscards += 1; return false } }
-        markCapture(rect, captureSeq: captureSeq)
+        for r in r0...r1 { for cc in c0...c1 where v.tileCaptureSeq[r * cols + cc] > captureSeq { staleDiscards += 1; return false } }
+        markCapture(v, rect, captureSeq: captureSeq)
         return true
     }
-    /// Records that `rect` now shows pixels from `captureSeq` (copy-rects and video frames too).
-    private func markCapture(_ rect: PixelRect, captureSeq: UInt32) {
-        guard let c = compositor, c.width > 0 else { return }
+    /// Records that `rect` of a layer now shows pixels from `captureSeq` (copy-rects and video frames too).
+    private func markCapture(_ v: LayerView, _ rect: PixelRect, captureSeq: UInt32) {
+        let c = v.compositor
+        guard c.width > 0 else { return }
         let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
-        if tileCaptureSeq.count != cols * rows { tileCaptureSeq = Array(repeating: 0, count: cols * rows) }
+        if v.tileCaptureSeq.count != cols * rows { v.tileCaptureSeq = Array(repeating: 0, count: cols * rows) }
         let c0 = max(0, rect.x / 64), c1 = min(cols - 1, (rect.maxX - 1) / 64), r0 = max(0, rect.y / 64), r1 = min(rows - 1, (rect.maxY - 1) / 64)
         guard c1 >= c0, r1 >= r0 else { return }
-        for r in r0...r1 { for cc in c0...c1 { tileCaptureSeq[r * cols + cc] = max(tileCaptureSeq[r * cols + cc], captureSeq) } }
+        for r in r0...r1 { for cc in c0...c1 { v.tileCaptureSeq[r * cols + cc] = max(v.tileCaptureSeq[r * cols + cc], captureSeq) } }
     }
     /// Tile messages discarded because newer pixels (a copy-rect, video, a later tile) had already landed
     /// under them; `staleCommits` counts the opposite and must stay 0 (the drag scenario asserts it).
     private(set) var staleDiscards = 0, staleCommits = 0
-    private func wouldBeStale(_ rect: PixelRect, captureSeq: UInt32) -> Bool {
-        guard let c = compositor, c.width > 0, !tileCaptureSeq.isEmpty else { return false }
+    private func wouldBeStale(_ v: LayerView, _ rect: PixelRect, captureSeq: UInt32) -> Bool {
+        let c = v.compositor
+        guard c.width > 0, !v.tileCaptureSeq.isEmpty else { return false }
         let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
         let c0 = max(0, rect.x / 64), c1 = min(cols - 1, (rect.maxX - 1) / 64), r0 = max(0, rect.y / 64), r1 = min(rows - 1, (rect.maxY - 1) / 64)
         guard c1 >= c0, r1 >= r0 else { return false }
-        for r in r0...r1 { for cc in c0...c1 where tileCaptureSeq[r * cols + cc] > captureSeq { return true } }
+        for r in r0...r1 { for cc in c0...c1 where v.tileCaptureSeq[r * cols + cc] > captureSeq { return true } }
         return false
     }
 
+    /// The layer view for a tile message's layer, created on its `.reset`; messages for an unknown layer are dropped.
+    private func ensureLayerView(_ id: UInt32) -> LayerView? {
+        if let v = layerViews[id] { return v }
+        guard let context else { return nil }
+        let v = LayerView(id: id, context: context)
+        v.lastSeenInListNanos = Clock.nowNanos()
+        layerViews[id] = v
+        return v
+    }
+
+    /// A tile message's rect in display coordinates (window layers are stored in their own coordinates).
+    private func displayRect(_ r: PixelRect, layer: UInt32) -> PixelRect {
+        guard layer != 0 else { return r }
+        predictorLock.lock(); defer { predictorLock.unlock() }
+        guard let f = hostFrames[layer] else { return r }
+        return r.offset(f.x, f.y)
+    }
+
     private func apply(_ msg: TileMessage, seq: UInt32, bytes: Int, now: UInt64) {
+        statsLock.lock(); sTotalBytes += bytes; statsLock.unlock()
         switch msg {
         case .tiles(let t):
-            let fresh = t.tiles.filter { isFresh($0.rect, captureSeq: t.header.captureSeq) }
-            for tile in fresh where wouldBeStale(tile.rect, captureSeq: t.header.captureSeq) { staleCommits += 1 }   // must never happen
-            let n = compositor?.applyTiles(fresh, crossfade: t.refinement) ?? 0
+            guard let v = layerView(t.header.windowID) else { sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: t.header.captureNanos, receivedNanos: now, bytes: bytes))); return }
+            let fresh = t.tiles.filter { isFresh(v, $0.rect, captureSeq: t.header.captureSeq) }
+            for tile in fresh where wouldBeStale(v, tile.rect, captureSeq: t.header.captureSeq) { staleCommits += 1 }   // must never happen
+            let n = v.compositor.applyTiles(fresh, crossfade: t.refinement)
             statsLock.lock(); sTileBytes += t.bytes; sTileRects += n; statsLock.unlock()
-            if t.refinement { lastRefinementNanos = now; if Self.debugTiles, refinementLogged < 6 { refinementLogged += 1; log("refinement batch: \(t.tiles.prefix(2).map { "\($0.rect)" })") } }
-            if let c = compositor, c.width > 0 {
+            if t.refinement { lastRefinementNanos = now; if Self.debugTiles, refinementLogged < 6 { refinementLogged += 1; log("refinement batch (layer \(v.id)): \(t.tiles.prefix(2).map { "\($0.rect)" })") } }
+            let c = v.compositor
+            if c.width > 0 {
                 let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
-                if losslessAt.count != cols * rows { losslessAt = Array(repeating: 0, count: cols * rows) }
-                for tile in fresh {
+                if v.losslessAt.count != cols * rows { v.losslessAt = Array(repeating: 0, count: cols * rows) }
+                for tile in fresh where tile.format != .lossy {
                     let c0 = max(0, tile.rect.x / 64), c1 = min(cols - 1, (tile.rect.maxX - 1) / 64), r0 = max(0, tile.rect.y / 64), r1 = min(rows - 1, (tile.rect.maxY - 1) / 64)
-                    if c1 >= c0, r1 >= r0 { for r in r0...r1 { for cc in c0...c1 { losslessAt[r * cols + cc] = now } } }
+                    if c1 >= c0, r1 >= r0 { for r in r0...r1 { for cc in c0...c1 { v.losslessAt[r * cols + cc] = now } } }
                 }
             }
             checkLegible()
             if !watchRect.isEmpty {
-                let inside = t.tiles.filter { $0.rect.intersects(watchRect) }
+                // A layered watched window: only its own layer's tiles count (the display around it is other people's business).
+                let inside = watchWindowID != 0 && isWatchedLayered() ? (v.id == watchWindowID ? t.tiles : []) : t.tiles.filter { displayRect($0.rect, layer: v.id).intersects(watchRect) }
                 if !inside.isEmpty {
                     lastWatchedTileNanos = now; watchedTileBytes += inside.reduce(0) { $0 + $1.data.count }; watchedTileCount += inside.count
+                    if inside.contains(where: { $0.rect.area >= 1024 }) { lastWatchedLargeTileNanos = now }
                     if !t.refinement { watchedDirectBytes += inside.reduce(0) { $0 + $1.data.count } }
-                    if Self.debugTiles { log("tiles\(t.refinement ? " (refine)" : "") seq \(t.header.captureSeq) in watch rect: " + inside.map { "\($0.rect.width)x\($0.rect.height)@\($0.rect.x),\($0.rect.y) \($0.data.count)B \($0.format)" }.joined(separator: "  ")) }
+                    if Self.debugTiles { log("tiles\(t.refinement ? " (refine)" : "") layer \(v.id) seq \(t.header.captureSeq) in watch rect: " + inside.map { "\($0.rect.width)x\($0.rect.height)@\($0.rect.x),\($0.rect.y) \($0.data.count)B \($0.format)" }.joined(separator: "  ")) }
                 }
             }
             predictorLock.lock()
@@ -494,25 +547,47 @@ final class ViewerSession: @unchecked Sendable {
             predictorLock.unlock()
             sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: t.header.captureNanos, receivedNanos: now, bytes: bytes)))
         case .copyRect(let c):
-            compositor?.applyCopyRect(c.rect, dx: c.dx, dy: c.dy)
-            markCapture(c.rect.union(c.rect.offset(c.dx, c.dy)), captureSeq: c.header.captureSeq)
+            guard let v = layerView(c.header.windowID) else { sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: c.header.captureNanos, receivedNanos: now, bytes: bytes))); return }
+            v.compositor.applyCopyRect(c.rect, dx: c.dx, dy: c.dy)
+            markCapture(v, c.rect.union(c.rect.offset(c.dx, c.dy)), captureSeq: c.header.captureSeq)
             statsLock.lock(); sCopyRects += 1; statsLock.unlock()
-            if !watchRect.isEmpty, c.rect.union(c.rect.offset(c.dx, c.dy)).intersects(watchRect) { lastWatchedCopyNanos = now; watchedCopyRects += 1 }
+            if !watchRect.isEmpty, watchWindowID != 0 && isWatchedLayered() ? v.id == watchWindowID : displayRect(c.rect.union(c.rect.offset(c.dx, c.dy)), layer: v.id).intersects(watchRect) { lastWatchedCopyNanos = now; watchedCopyRects += 1 }
             predictorLock.lock()
             predictor.hostCopyRect(windowID: c.header.windowID, rect: c.rect, dx: c.dx, dy: c.dy, inputSeq: c.header.inputSeq, now: now)
             predictor.hostUpdate(inputSeq: c.header.inputSeq, rect: c.rect.union(c.rect.offset(c.dx, c.dy)), now: now)
             predictorLock.unlock()
             sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: c.header.captureNanos, receivedNanos: now, bytes: bytes)))
-        case .reset(let w, let h):
-            // A fresh stream at the same size keeps the pixels (review M11: the last picture stays until the
-            // first keyframe replaces it); a size change clears. Either way nothing old is trusted any more.
-            compositor?.configure(width: w, height: h)   // clears only on a size change
-            tileCaptureSeq = []
-            assembler = FrameAssembler(); lastRecoverySeq = 0   // review M4: the host's sequence may restart
-            predictorLock.lock(); predictor = Predictor(); predictorLock.unlock()
+        case .reset(let layer, let w, let h):
+            if layer == 0 {
+                // A fresh stream at the same size keeps the pixels (review M11: the last picture stays until the
+                // first keyframe replaces it); a size change clears. Either way nothing old is trusted any more.
+                compositor?.configure(width: w, height: h)   // clears only on a size change
+                displayView?.tileCaptureSeq = []
+                assembler = FrameAssembler(); for v in layerViews.values { v.lastRecoverySeq = 0 }   // review M4: the host's sequence may restart
+                predictorLock.lock(); predictor = Predictor(); predictorLock.unlock()
+            } else if let v = ensureLayerView(layer) {
+                // A window layer announced (new, resized, or re-announced on resume): its canvas at the window's pixel size.
+                v.compositor.configure(width: w, height: h)
+                v.tileCaptureSeq = []
+                predictorLock.lock(); predictor.forget(windowID: layer); predictorLock.unlock()
+                enforceLayerMemory(now: now)
+            }
         }
         onChange?()
         if case .reset = msg {} else { notePictureChange(now) }
+    }
+
+    /// Layers absent from the window list are released after a while, sooner under memory pressure.
+    private func enforceLayerMemory(now: UInt64) {
+        predictorLock.lock(); let present = Set(windows.map(\.id)); predictorLock.unlock()
+        var total = layerViews.values.reduce(0) { $0 + $1.compositor.textureBytes }
+        let absent = layerViews.values.filter { $0.id != 0 && !present.contains($0.id) }.sorted { $0.lastSeenInListNanos < $1.lastSeenInListNanos }
+        for v in absent where now - v.lastSeenInListNanos > 30_000_000_000 || total > layerMemoryBudget {
+            total -= v.compositor.textureBytes
+            v.compositor.release(); layerViews[v.id] = nil
+            predictorLock.lock(); predictor.forget(windowID: v.id); predictorLock.unlock()
+        }
+        if total > layerMemoryBudget { for v in layerViews.values where v.id != 0 { v.compositor.trim() } }
     }
 
     private func ingest(_ frag: VideoFragment) {
@@ -537,22 +612,30 @@ final class ViewerSession: @unchecked Sendable {
             case .nack(let seq, let fragments):
                 statsLock.lock(); sNacks += 1; statsLock.unlock()
                 sender?.send(.nack(.init(frameSeq: seq, fragments: fragments)))
-            case .lost(let seq):
+            case .lost(let seq, let layer):
                 // The assembler gives up on an old partial after its timeout; if a recovery frame newer
-                // than it was decoded meanwhile, nothing is missing (the host ignores such acks too).
-                if seq > lastRecoverySeq { awaitingRecovery = true }
+                // than it was decoded meanwhile, nothing is missing (the host ignores such acks too). A frame
+                // of unknown layer (nothing of it arrived) puts every layer that decodes into recovery.
+                for v in layerViews.values where (layer == nil || layer == v.id) && seq > v.lastRecoverySeq && v.decoder.width > 0 { v.awaitingRecovery = true }
                 statsLock.lock(); sLost += 1; statsLock.unlock()
                 sender?.send(.frameAck(.init(seq: seq, captureNanos: 0, receivedNanos: now, decodedNanos: 0, bytes: 0, lost: true)))
             case .gap(let from, let to):
                 // A loss burst: nothing of frames from...to ever arrived. Ask for a recovery frame now
                 // rather than after a timeout; frames that follow are P-frames and are skipped until it lands.
                 log("video: frames \(from)–\(to) never arrived (loss burst); asking for recovery")
-                if to > lastRecoverySeq { awaitingRecovery = true }
+                for v in layerViews.values where to > v.lastRecoverySeq && v.decoder.width > 0 { v.awaitingRecovery = true }
                 statsLock.lock(); sLost += Int(to - from + 1); sBursts += 1; statsLock.unlock()
                 sender?.send(.frameAck(.init(seq: to, captureNanos: 0, receivedNanos: now, decodedNanos: 0, bytes: 0, lost: true)))
             case .completed(let frame):
-                statsLock.lock(); sBytes += frame.bytes; statsLock.unlock()
-                if awaitingRecovery && !frame.flags.contains(.recovery) {
+                statsLock.lock(); sBytes += frame.bytes; sTotalBytes += frame.bytes; statsLock.unlock()
+                guard let v = layerView(frame.layerID) else {
+                    if Self.debugTiles { log("video: frame \(frame.seq) for unknown layer \(frame.layerID) (\(layerViews.keys.sorted()))") }
+                    sender?.send(.frameAck(.init(seq: frame.seq, captureNanos: frame.captureNanos, receivedNanos: frame.lastFragmentNanos, decodedNanos: 0, bytes: frame.bytes, lost: false,
+                                                 firstReceivedNanos: frame.firstFragmentNanos, fragments: frame.fragments, fragmentsLost: frame.fragmentsLost)))
+                    continue
+                }
+                if v.awaitingRecovery && !frame.flags.contains(.recovery) {
+                    if Self.debugTiles { log("video: frame \(frame.seq) layer \(v.id) skipped (awaiting recovery)") }
                     statsLock.lock(); sDropped += 1; statsLock.unlock()
                     sender?.send(.frameAck(.init(seq: frame.seq, captureNanos: frame.captureNanos, receivedNanos: frame.lastFragmentNanos, decodedNanos: 0, bytes: frame.bytes, lost: false,
                                                  firstReceivedNanos: frame.firstFragmentNanos, fragments: frame.fragments, fragmentsLost: frame.fragmentsLost)))
@@ -560,29 +643,29 @@ final class ViewerSession: @unchecked Sendable {
                 }
                 let t0 = Clock.nowNanos()
                 do {
-                    let image = try decoder.decode(frame)
+                    let image = try v.decoder.decode(frame)
                     let t1 = Clock.nowNanos()
-                    awaitingRecovery = false
-                    if frame.flags.contains(.recovery) { lastRecoverySeq = max(lastRecoverySeq, frame.seq) }
-                    if let compositor {
-                        if compositor.width == 0 { compositor.configure(width: decoder.width, height: decoder.height) }
-                        let region = frame.region.isEmpty ? PixelRect(x: 0, y: 0, width: compositor.width, height: compositor.height) : frame.region
-                        let grid = TileMask.grid(for: region)
-                        let mask = frame.tileMask.flatMap { TileMask(cols: grid.cols, rows: grid.rows, bits: $0) }
-                        compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive))
-                        if !frame.flags.contains(.progressive) { markCapture(region, captureSeq: frame.captureSeq) }
-                        notePictureChange(now)
-                        statsLock.lock(); let since = connectedAtNanos; statsLock.unlock()
-                        if lastVideoNanos > 0, since > 0, now > since &+ steadyAfterNanos, now > lastVideoNanos {
-                            let gap = Double(now - lastVideoNanos) / 1e6
-                            if gap > maxVideoGapMs { maxVideoGapMs = gap }
-                            if gap > 500 { videoGapsOver500.append(gap) }
-                        }
-                        lastVideoNanos = now
-                        if !watchRect.isEmpty, region.intersects(watchRect) { lastWatchedVideoNanos = now; watchedVideoFrames += 1 }
-                        predictorLock.lock(); predictor.hostUpdate(inputSeq: frame.inputSeq, rect: region, now: now); predictorLock.unlock()
-                        onChange?()
+                    if Self.debugTiles, frame.flags.contains(.keyframe) { log("video: keyframe \(frame.seq) layer \(v.id) decoded \(v.decoder.width)x\(v.decoder.height) region \(frame.region)") }
+                    v.awaitingRecovery = false
+                    if frame.flags.contains(.recovery) { v.lastRecoverySeq = max(v.lastRecoverySeq, frame.seq) }
+                    let compositor = v.compositor
+                    if compositor.width == 0 { compositor.configure(width: v.decoder.width, height: v.decoder.height) }
+                    let region = frame.region.isEmpty ? PixelRect(x: 0, y: 0, width: compositor.width, height: compositor.height) : frame.region
+                    let grid = TileMask.grid(for: region)
+                    let mask = frame.tileMask.flatMap { TileMask(cols: grid.cols, rows: grid.rows, bits: $0) }
+                    compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive))
+                    if !frame.flags.contains(.progressive) { markCapture(v, region, captureSeq: frame.captureSeq) }
+                    notePictureChange(now)
+                    statsLock.lock(); let since = connectedAtNanos; statsLock.unlock()
+                    if lastVideoNanos > 0, since > 0, now > since &+ steadyAfterNanos, now > lastVideoNanos {
+                        let gap = Double(now - lastVideoNanos) / 1e6
+                        if gap > maxVideoGapMs { maxVideoGapMs = gap }
+                        if gap > 500 { videoGapsOver500.append(gap) }
                     }
+                    lastVideoNanos = now
+                    if !watchRect.isEmpty, watchWindowID != 0 && isWatchedLayered() ? v.id == watchWindowID : displayRect(region, layer: v.id).intersects(watchRect) { lastWatchedVideoNanos = now; watchedVideoFrames += 1 }
+                    predictorLock.lock(); predictor.hostUpdate(inputSeq: frame.inputSeq, rect: region, now: now); predictorLock.unlock()
+                    onChange?()
                     statsLock.lock()
                     sFrames += 1; sDecodeNanos += t1 - t0
                     if bestRTT.isFinite {   // frame age needs the clock offset from a pong first
@@ -593,8 +676,8 @@ final class ViewerSession: @unchecked Sendable {
                     sender?.send(.frameAck(.init(seq: frame.seq, captureNanos: frame.captureNanos, receivedNanos: frame.lastFragmentNanos, decodedNanos: t1, bytes: frame.bytes, lost: false,
                                                  firstReceivedNanos: frame.firstFragmentNanos, fragments: frame.fragments, fragmentsLost: frame.fragmentsLost)))
                 } catch {
-                    log("decode seq \(frame.seq): \(error)")
-                    awaitingRecovery = true
+                    log("decode seq \(frame.seq) (layer \(v.id)): \(error)")
+                    v.awaitingRecovery = true
                     statsLock.lock(); sLost += 1; statsLock.unlock()
                     sender?.send(.frameAck(.init(seq: frame.seq, captureNanos: frame.captureNanos, receivedNanos: frame.lastFragmentNanos, decodedNanos: 0, bytes: frame.bytes, lost: true,
                                                  firstReceivedNanos: frame.firstFragmentNanos, fragments: frame.fragments)))
@@ -623,7 +706,7 @@ final class ViewerSession: @unchecked Sendable {
             statsLock.unlock()
             predictorLock.lock(); let pstats = predictor.stats; predictorLock.unlock()
             let inp = inputState()
-            let w = decoder.width, h = decoder.height
+            let w = displayView?.decoder.width ?? 0, h = displayView?.decoder.height ?? 0
             let upscaling = compositor?.usesMetalFX ?? false
             await MainActor.run {
                 var s = model.stats
@@ -632,6 +715,7 @@ final class ViewerSession: @unchecked Sendable {
                 s.frameAgeMs = age / 1e6; s.rttMs = rtt; s.width = w; s.height = h
                 s.tileKbps = Double(tileBytes) * 8 / 1000; s.tileRects += tileRects; s.copyRects += copies; s.rate = rate; s.predictions = pstats; s.upscaling = upscaling
                 s.nacks += nacks; s.recoveredByNack = self.assembler.recoveredByNack; s.recoveredByParity = self.assembler.recoveredByParity; s.bursts += bursts
+                s.layers = self.layerViews.count - 1; s.layerMB = self.layerViews.values.reduce(0) { $0 + $1.compositor.textureBytes } >> 20
                 model.stats = s
                 model.inputQueued = inp.queued; model.inputDropped = inp.dropped; model.inputHeld = inp.held
                 if frames > 0 || bytes > 0 || tileBytes > 0 {
@@ -697,12 +781,19 @@ final class ViewerSession: @unchecked Sendable {
     /// Time-to-legible under the pointer: the earliest lossless arrival (since the stream started) of any
     /// tile under the pointer rect, counted even if it landed before the pointer was known.
     private func checkLegible() {
-        guard legibleUnderPointerMs == nil, streamStartNanos > 0, !pointerRect.isEmpty, let c = compositor, c.width > 0, !losslessAt.isEmpty else { return }
-        let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
-        let c0 = max(0, pointerRect.x / 64), c1 = min(cols - 1, (pointerRect.maxX - 1) / 64), r0 = max(0, pointerRect.y / 64), r1 = min(rows - 1, (pointerRect.maxY - 1) / 64)
-        guard c1 >= c0, r1 >= r0 else { return }
+        guard legibleUnderPointerMs == nil, streamStartNanos > 0, !pointerRect.isEmpty else { return }
         var earliest: UInt64 = .max
-        for r in r0...r1 { for cc in c0...c1 { let t = losslessAt[r * cols + cc]; if t > streamStartNanos, t < earliest { earliest = t } } }
+        for v in layerViews.values {
+            let c = v.compositor
+            guard c.width > 0, !v.losslessAt.isEmpty else { continue }
+            // The pointer rect in this layer's coordinates (the window under the pointer, or the display).
+            var pr = pointerRect
+            if v.id != 0 { predictorLock.lock(); let f = hostFrames[v.id]; predictorLock.unlock(); guard let f else { continue }; pr = pr.offset(-f.x, -f.y) }
+            let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
+            let c0 = max(0, pr.x / 64), c1 = min(cols - 1, (pr.maxX - 1) / 64), r0 = max(0, pr.y / 64), r1 = min(rows - 1, (pr.maxY - 1) / 64)
+            guard c1 >= c0, r1 >= r0 else { continue }
+            for r in r0...r1 { for cc in c0...c1 { let t = v.losslessAt[r * cols + cc]; if t > streamStartNanos, t < earliest { earliest = t } } }
+        }
         guard earliest != .max else { return }
         legibleUnderPointerMs = Double(earliest - streamStartNanos) / 1e6
         log(String(format: "legible under the pointer %.0f ms after the stream started", legibleUnderPointerMs!))
@@ -741,7 +832,101 @@ final class ViewerSession: @unchecked Sendable {
         }
     }
 
-    // MARK: Prediction
+    // MARK: Window arrangement, local window management, prediction
+
+    /// Host window frames (display coordinates) by id, as last published; layered windows' canvases map
+    /// through these. Guarded by predictorLock.
+    private var hostFrames: [UInt32: PixelRect] = [:]
+    /// Local window management (DESIGN §3.5 item 2): a window being dragged shows at the local frame; a
+    /// window clicked shows in front. Each override lasts until the host's list reflects the input that
+    /// caused it (its `inputSeq`), or a moment after the interaction ends.
+    private struct LocalFrame { var frame: PixelRect; var inputSeq: UInt64; var releasedNanos: UInt64 }
+    private var localFrames: [UInt32: LocalFrame] = [:]
+    private struct LocalRaise { var inputSeq: UInt64; var since: UInt64 }
+    private var localRaise: (id: UInt32, LocalRaise)? = nil
+    private var lastHostListInputSeq: UInt64 = 0
+    private(set) var windowCommandsSent = 0
+    /// Scenario metrics: frame changes of the watched window in host lists, and the last one's time.
+    var watchWindowID: UInt32 = 0
+    private(set) var lastWatchedMoveNanos: UInt64 = 0, watchedMoves = 0
+    private var hostListSeq: UInt64 = 0
+
+    private func isWatchedLayered() -> Bool { predictorLock.lock(); defer { predictorLock.unlock() }; return windows.first { $0.id == watchWindowID }?.isLayered ?? false }
+    /// The canvas showing a window (its own layer, or the display layer) and the window's origin in it.
+    func canvas(for windowID: UInt32) -> (Compositor, origin: (Int, Int))? {
+        guard let w = windowsSnapshot().first(where: { $0.id == windowID }) else { return nil }
+        if w.isLayered, let v = layerViews[windowID], v.compositor.width > 0 { return (v.compositor, (0, 0)) }
+        guard let c = compositor else { return nil }
+        return (c, (w.frame.x, w.frame.y))
+    }
+
+    private func hostWindowList(_ list: ControlMessage.WindowList, now: UInt64) {
+        predictorLock.lock()
+        let before = hostFrames
+        windows = list.apply(to: windows)
+        hostFrames = Dictionary(windows.map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a })
+        if let s = list.inputSeq { lastHostListInputSeq = max(lastHostListInputSeq, s) }
+        hostListSeq += 1
+        if watchWindowID != 0, let f = hostFrames[watchWindowID], before[watchWindowID] != f { lastWatchedMoveNanos = now; watchedMoves += 1 }
+        // Overrides the host has caught up with are dropped.
+        for (id, lf) in localFrames {
+            let caughtUp = lastHostListInputSeq >= lf.inputSeq && lf.releasedNanos > 0
+            let expired = lf.releasedNanos > 0 && now - lf.releasedNanos > 2_000_000_000
+            if caughtUp || expired { localFrames[id] = nil }
+        }
+        if let (_, r) = localRaise, lastHostListInputSeq >= r.inputSeq || now - r.since > 1_500_000_000 { localRaise = nil }
+        predictorLock.unlock()
+        videoQueue.async { [weak self] in
+            guard let self else { return }
+            for w in self.windows { self.layerViews[w.id]?.lastSeenInListNanos = now }
+            self.enforceLayerMemory(now: now)
+        }
+        onChange?()
+    }
+
+    /// The window list as shown: local frames and the local raise applied, front to back.
+    func arrangedWindows() -> [ControlMessage.WindowInfo] {
+        predictorLock.lock(); defer { predictorLock.unlock() }
+        return arrangedLocked()
+    }
+    private func arrangedLocked() -> [ControlMessage.WindowInfo] {
+        var list = windows
+        for i in list.indices { if let lf = localFrames[list[i].id] { list[i].frame = lf.frame } }
+        if let (id, _) = localRaise, let i = list.firstIndex(where: { $0.id == id }), i > 0 {
+            // A raised normal window goes in front of the other normal windows (never above menus or the menu bar).
+            let w = list.remove(at: i)
+            let j = list.firstIndex(where: { $0.windowLevel <= w.windowLevel }) ?? list.count
+            list.insert(w, at: j)
+        }
+        return list
+    }
+
+    /// The scene for the renderer: the display layer, then every window back to front as a layer (its
+    /// canvas at its shown frame, with a shadow) or as a cut-out of the display layer.
+    func scene(pxPerPoint: Double) -> LayerScene? {
+        guard let bg = compositor, bg.width > 0 else { return nil }
+        let arranged = arrangedWindows()
+        let ppp = Float(pxPerPoint)
+        var items: [LayerScene.Item] = []
+        var keyFound = false
+        for w in arranged {
+            if w.isLayered, let v = layerViews[w.id], v.compositor.width > 0 {
+                let isKey = w.windowLevel == 0 && !keyFound
+                if w.windowLevel == 0 { keyFound = true }
+                items.append(.layer(v.compositor, frame: w.frame, shadow: isKey ? .key(pxPerPoint: ppp) : .inactive(pxPerPoint: ppp), dim: 1))
+            } else {
+                // Cut-outs: menus and popovers (level ≥ 100 or floating 3/8) get a menu shadow, overflow normal
+                // windows an inactive one; the dock (20) and menu bar (24) none.
+                let lv = w.windowLevel
+                let shadow: LayerScene.Shadow? = lv == 0 ? .inactive(pxPerPoint: ppp) : (lv == 20 || lv == 24 || lv == 25) ? nil : .menu(pxPerPoint: ppp)
+                items.append(.cutout(w.frame, shadow: shadow))
+            }
+        }
+        let (disp, colors) = displacements()
+        let layered = Set(arranged.filter { $0.isLayered && (layerViews[$0.id]?.compositor.width ?? 0) > 0 }.map(\.id))
+        let sd = disp.map { LayerScene.Displacement(layerID: layered.contains($0.windowID) ? $0.windowID : 0, displacement: $0) }
+        return LayerScene(background: bg, items: items, displacements: sd, bandColors: colors)
+    }
 
     /// Stream pixels per host display point (for scroll deltas and title-bar heights).
     @MainActor var pixelsPerPoint: Double {
@@ -749,17 +934,62 @@ final class ViewerSession: @unchecked Sendable {
         return Double(i.width) / Double(i.displayWidth)
     }
 
-    /// Topmost host window under a stream-pixel point.
+    /// Topmost window under a stream-pixel point, as arranged locally.
     func window(at x: Int, _ y: Int) -> ControlMessage.WindowInfo? {
-        predictorLock.lock(); defer { predictorLock.unlock() }
-        return windows.first { $0.frame.contains(x, y) }
+        arrangedWindows().first { $0.frame.contains(x, y) }
     }
 
-    /// The rect a wheel event over `window` should shift: the host's learned scroll rect, else the content area below the title bar.
+    /// The rect a wheel event over `window` should shift (in the window's own coordinates when it is a
+    /// layer): the host's learned scroll rect, else the content area below the title bar.
     func scrollRect(for w: ControlMessage.WindowInfo, titleBarPx: Int) -> PixelRect {
         if let r = w.scrollRect { return r }
-        return PixelRect(x: w.frame.x, y: w.frame.y + titleBarPx, width: w.frame.width, height: max(0, w.frame.height - titleBarPx))
+        let f = w.isLayered ? PixelRect(x: 0, y: 0, width: w.frame.width, height: w.frame.height) : w.frame
+        return PixelRect(x: f.x, y: f.y + titleBarPx, width: f.width, height: max(0, f.height - titleBarPx))
     }
+
+    /// A press in a layered window: it comes to the front locally at once; the host's own raise (the click) confirms.
+    func localRaise(windowID: UInt32, inputSeq: UInt64) {
+        predictorLock.lock(); localRaise = (windowID, LocalRaise(inputSeq: inputSeq, since: Clock.nowNanos())); predictorLock.unlock()
+        onChange?()
+    }
+
+    /// Local drag of a layered window (DESIGN §3.2): the window moves here, nothing is streamed for it,
+    /// and the host is told the frame through a window command (throttled; the final one on release).
+    private var lastMoveCommandNanos: UInt64 = 0
+    func beginLayerDrag(windowID: UInt32) {
+        guard let f = arrangedWindows().first(where: { $0.id == windowID })?.frame else { return }
+        predictorLock.lock(); localFrames[windowID] = LocalFrame(frame: f, inputSeq: 0, releasedNanos: 0); predictorLock.unlock()
+        sendWindowCommand(.init(id: windowID, action: .raise))
+        localRaise(windowID: windowID, inputSeq: lastInputSeqSent())
+    }
+    func dragLayer(windowID: UInt32, to frame: PixelRect) {
+        predictorLock.lock()
+        guard localFrames[windowID] != nil else { predictorLock.unlock(); return }
+        localFrames[windowID]?.frame = frame
+        predictorLock.unlock()
+        let now = Clock.nowNanos()
+        if now - lastMoveCommandNanos > 50_000_000 { lastMoveCommandNanos = now; sendWindowCommand(.init(id: windowID, action: .move, x: frame.x, y: frame.y)) }
+        onChange?()
+    }
+    func endLayerDrag(windowID: UInt32) {
+        predictorLock.lock()
+        guard var lf = localFrames[windowID] else { predictorLock.unlock(); return }
+        lf.releasedNanos = Clock.nowNanos()
+        predictorLock.unlock()
+        let seq = sendWindowCommand(.init(id: windowID, action: .move, x: lf.frame.x, y: lf.frame.y))
+        lf.inputSeq = seq
+        predictorLock.lock(); localFrames[windowID] = lf; predictorLock.unlock()
+    }
+    /// Sends a window command stamped with a fresh input sequence (so the host's list can say when it reflects it).
+    @discardableResult
+    func sendWindowCommand(_ c: ControlMessage.WindowCommand) -> UInt64 {
+        var c = c
+        c.inputSeq = inputQueue.sync { input.reserveSequence() }
+        sender?.send(.windowCommand(c))
+        windowCommandsSent += 1
+        return c.inputSeq ?? 0
+    }
+    private func lastInputSeqSent() -> UInt64 { inputQueue.sync { input.lastSequence } }
 
     func beginDrag(windowID: UInt32, frame: PixelRect, pointer: (Int, Int), inputSeq: UInt64) {
         predictorLock.lock(); predictor.beginDrag(windowID: windowID, frame: frame, pointer: pointer, inputSeq: inputSeq, now: Clock.nowNanos()); predictorLock.unlock()
@@ -775,8 +1005,9 @@ final class ViewerSession: @unchecked Sendable {
         predictorLock.lock()
         predictor.predict(kind: kind, windowID: windowID, rect: rect, dx: dx, dy: dy, inputSeq: inputSeq, now: now)
         let needColor = bandColors[windowID] == nil
+        let layered = windows.first(where: { $0.id == windowID })?.isLayered ?? false
         predictorLock.unlock()
-        if needColor, let c = compositor {
+        if needColor, let c = layered ? layerViews[windowID]?.compositor : compositor {
             videoQueue.async {
                 c.sampleEdgeColor(of: rect, bottom: dy < 0) { [weak self] color in
                     guard let self else { return }
@@ -793,7 +1024,9 @@ final class ViewerSession: @unchecked Sendable {
         predictor.expire(now: Clock.nowNanos())
         return (predictor.displacements(), bandColors)
     }
-    var hasPendingPredictions: Bool { predictorLock.lock(); defer { predictorLock.unlock() }; return predictor.hasPending }
+    var hasPendingPredictions: Bool { predictorLock.lock(); defer { predictorLock.unlock() }; return predictor.hasPending || !localFrames.isEmpty || localRaise != nil }
+    /// Whether the picture needs a redraw for reasons the compositors do not know (local arrangement).
+    var arrangementGeneration: Int { predictorLock.lock(); defer { predictorLock.unlock() }; return Int(hostListSeq) }
 
     var probeLog = false
     /// Headless input check: moves the pointer across the host display, opens and closes Spotlight
@@ -851,6 +1084,7 @@ extension ViewerSession {
             var maxVideoGapMs: Double?, videoGapsOver500ms: [Double]?
             var keepalivesSent: UInt64?
             var motionFps: [Double]?, motionFrames: [Int]?, motionCopyRects: [Int]?
+            var motionMoves: [Int]?, moveFps: [Double]?, burstKB: [Double]?, settleKB: [Double]?, confirmMs: [Double]?, layered: Bool?, layersHeld: Int?, windowCommandsSent: Int?
             var staleTilesDiscarded: Int?, staleTilesCommitted: Int?
             var samples: [Sample]
         }
@@ -888,6 +1122,8 @@ extension ViewerSession {
                       inputPackets: inputStateNow.packets, inputQueued: inputStateNow.queued, inputDropped: inputStateNow.dropped, keysSent: keysSent.isEmpty ? nil : keysSent,
                       maxVideoGapMs: videoGapMax, videoGapsOver500ms: videoGaps, keepalivesSent: pingSeq,
                       motionFps: scenario?.motionFps, motionFrames: scenario?.motionFrames, motionCopyRects: scenario?.motionCopyRects,
+                      motionMoves: scenario?.motionMoves, moveFps: scenario?.moveFps, burstKB: scenario?.burstKB, settleKB: scenario?.settleKB, confirmMs: scenario?.confirmMs,
+                      layered: scenario?.layered, layersHeld: layerViews.count - 1, windowCommandsSent: windowCommandsSent,
                       staleTilesDiscarded: staleDiscards, staleTilesCommitted: staleCommits,
                       samples: samples)
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]

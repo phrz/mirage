@@ -187,6 +187,10 @@ public struct InputChannel {
 
     public var queuedEvents: Int { unacked.count }
     public var lastSeq: UInt64 { nextSeq }
+    public var lastSequence: UInt64 { nextSeq }
+    /// Takes a sequence number for something that travels outside the input channel (a window command on
+    /// the control stream): the host's window list reports it as applied like any input.
+    public mutating func reserveSequence() -> UInt64 { nextSeq += 1; return nextSeq }
     /// Age of the oldest unacked discrete event, or 0.
     public func oldestUnackedNanos(now: UInt64) -> UInt64 { unackedSince.first.map { now &- $0 } ?? 0 }
     public mutating func setRTT(nanos: UInt64) { rttNanos = nanos }

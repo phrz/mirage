@@ -47,8 +47,8 @@ final class ScenarioRunner {
 
     /// Samples the canvas where the bench's purple caption band should be (just below its title bar).
     private func captionVisible(_ w: ControlMessage.WindowInfo, ppp: Double) async -> Bool {
-        guard let c = session.compositor else { return false }
-        let band = PixelRect(x: w.frame.x + Int(40 * ppp), y: w.frame.y + Int((28 + 20) * ppp), width: min(w.frame.width - Int(80 * ppp), 400), height: 2)
+        guard let (c, origin) = session.canvas(for: w.id) else { return false }
+        let band = PixelRect(x: origin.0 + Int(40 * ppp), y: origin.1 + Int((28 + 20) * ppp), width: min(w.frame.width - Int(80 * ppp), 400), height: 2)
         return await withCheckedContinuation { cont in
             c.sampleEdgeColor(of: band, bottom: false) { col in
                 // Band colour is (0.42, 0.20, 0.75) sRGB; accept a loose match.
@@ -66,11 +66,11 @@ final class ScenarioRunner {
         var last: UInt64 = 0
         while Clock.nowNanos() < deadline {
             try? await Task.sleep(for: .milliseconds(100))
-            let t = session.lastWatchedTileNanos, v = session.lastWatchedVideoNanos
+            let t = session.lastWatchedLargeTileNanos, v = session.lastWatchedVideoNanos
             last = max(t, v)
             if t >= v, Clock.nowNanos() - last > 700_000_000 { break }
         }
-        let crisp = session.lastWatchedTileNanos >= session.lastWatchedVideoNanos
+        let crisp = session.lastWatchedLargeTileNanos >= session.lastWatchedVideoNanos
         let ms = last > burstEnd ? Double(last - burstEnd) / 1e6 : 0
         crispMs.append(crisp ? ms : 9999); bursts += 1
         session.log(String(format: "scenario %@: burst %d time-to-crisp %.0f ms%@", name, bursts, ms, crisp ? "" : " (NOT crisp: video still arriving)"))
@@ -82,6 +82,7 @@ final class ScenarioRunner {
     private func guardsStillHold() -> Bool {
         guard let status = session.hostStatus else { session.log("scenario \(name): ABORT, host status lost"); return false }
         guard !status.consoleLocked else { session.log("scenario \(name): ABORT, host console LOCKED"); return false }
+        if name == "drag", status.inputSink == true { return true }
         guard status.frontmostWindowID == guardedWindowID || status.frontmostApp == "Mirage Test Bench" else {
             session.log("scenario \(name): ABORT, focus moved to \(status.frontmostApp) \(status.frontmostWindowID) '\(status.frontmostWindowTitle)'"); return false
         }
@@ -92,44 +93,64 @@ final class ScenarioRunner {
     private(set) var motionFrames: [Int] = []
     private(set) var motionFps: [Double] = []
     private(set) var motionCopyRects: [Int] = []
+    /// Layered desktop (M3): per burst, how many window-list frame updates moved the bench (and per second
+    /// of motion), the bytes received during the burst and in the 3 s after it, and (client drags) how long
+    /// after the release the host's list showed the final frame.
+    private(set) var motionMoves: [Int] = []
+    private(set) var moveFps: [Double] = []
+    private(set) var burstKB: [Double] = []
+    private(set) var settleKB: [Double] = []
+    private(set) var confirmMs: [Double] = []
+    private(set) var layered = false
+    private func latestMotionNanos() -> UInt64 { max(session.lastWatchedVideoNanos, session.lastWatchedCopyNanos, session.lastWatchedMoveNanos) }
 
     /// `watch`: inject nothing; the bench moves itself (`--drift`). Each burst of motion the host shows in
     /// the bench's rect (video or copy-rects) is timed: frames during it, and time-to-crisp after it.
     private func watch(seconds: Double) async {
         for _ in 0..<250 where bench() == nil || (session.compositor?.width ?? 0) == 0 { try? await Task.sleep(for: .milliseconds(100)) }
         guard var w = bench() else { session.log("scenario watch: no Mirage Test Bench window on the host"); return }
-        session.log("scenario watch for \(Int(seconds)) s on window \(w.id) \(w.frame); nothing is injected")
+        session.log("scenario watch for \(Int(seconds)) s on window \(w.id) \(w.frame) (\(w.isLayered ? "a layer" : "in the display layer")); nothing is injected")
+        session.watchWindowID = w.id
         let end = Date().addingTimeInterval(seconds)
         let started = Date()
         defer { activeSeconds = Date().timeIntervalSince(started) }
         while Date() < end {
             w = bench() ?? w
+            layered = layered || w.isLayered
             session.watchRect = PixelRect(x: max(0, w.frame.x - 400), y: max(0, w.frame.y - 200), width: w.frame.width + 800, height: w.frame.height + 400)
-            // Wait for motion: video or a copy-rect touching the window after ≥ 700 ms of quiet.
+            // Wait for motion: video, a copy-rect, or a window-list move of the bench after ≥ 700 ms of quiet.
             session.resetWatched()
-            var quietSince = max(session.lastWatchedVideoNanos, session.lastWatchedCopyNanos)
+            var quietSince = latestMotionNanos()
             while Date() < end {
                 try? await Task.sleep(for: .milliseconds(20))
-                let latest = max(session.lastWatchedVideoNanos, session.lastWatchedCopyNanos)
+                let latest = latestMotionNanos()
                 if latest > quietSince, Clock.nowNanos() - quietSince > 700_000_000 { break }
                 if latest > quietSince { quietSince = latest }
             }
             guard Date() < end else { break }
             let burstStart = Clock.nowNanos()
-            // The burst lasts while video/copy-rects keep touching the rect (300 ms quiet ends it).
+            let bytes0 = session.totalBytes()
+            let moves0 = session.watchedMoves
+            // The burst lasts while video/copy-rects/moves keep touching the window (300 ms quiet ends it).
             var last = burstStart
             while Date() < end {
                 try? await Task.sleep(for: .milliseconds(20))
-                let latest = max(session.lastWatchedVideoNanos, session.lastWatchedCopyNanos)
+                let latest = latestMotionNanos()
                 if latest > last { last = latest }
                 if Clock.nowNanos() - last > 300_000_000 { break }
             }
             let dur = Double(last - burstStart) / 1e9
-            let frames = session.watchedVideoFrames, copies = session.watchedCopyRects
-            if frames + copies < 3 || dur < 0.3 { continue }   // a stray refinement frame, not motion
+            let frames = session.watchedVideoFrames, copies = session.watchedCopyRects, moves = session.watchedMoves - moves0
+            if frames + copies + moves < 3 || dur < 0.3 { continue }   // a stray refinement frame, not motion
+            let during = Double(session.totalBytes() - bytes0) / 1000
             motionFrames.append(frames); motionCopyRects.append(copies); motionFps.append(dur > 0.2 ? Double(frames) / dur : 0)
-            session.log(String(format: "scenario watch: burst %d: %.2f s of motion, %d video frames (%.1f fps), %d copy-rects", bursts + 1, dur, frames, dur > 0.2 ? Double(frames) / dur : 0, copies))
+            motionMoves.append(moves); moveFps.append(dur > 0.2 ? Double(moves) / dur : 0); burstKB.append(during)
+            session.log(String(format: "scenario watch: burst %d: %.2f s of motion, %d video frames (%.1f fps), %d copy-rects, %d frame moves (%.1f/s), %.1f KB during", bursts + 1, dur, frames, dur > 0.2 ? Double(frames) / dur : 0, copies, moves, dur > 0.2 ? Double(moves) / dur : 0, during))
+            let bytes1 = session.totalBytes()
             await measureCrisp(burstEnd: last)
+            try? await Task.sleep(for: .milliseconds(max(0, 3000 - Int(Double(Clock.nowNanos() - last) / 1e6))))
+            settleKB.append(Double(session.totalBytes() - bytes1) / 1000)
+            session.log(String(format: "scenario watch: burst %d: %.1f KB in the 3 s after it", bursts, settleKB.last!))
         }
     }
 
@@ -177,20 +198,25 @@ final class ScenarioRunner {
         // Let the opening keyframe's full-screen lossless refinement finish first (up to 60 s): the
         // measurements are about the interaction, not the first picture.
         var quiet = 0
-        for _ in 0..<60 {
+        let maxWait = name == "drag" ? 20 : 60   // other windows on the host may never go quiet; the drag measures its own layer
+        for _ in 0..<maxWait {
             try? await Task.sleep(for: .seconds(1))
             if let last = session.samples.last, last.tileKbps + last.kbps < 60 { quiet += 1 } else { quiet = 0 }
             if quiet >= 2 { break }
         }
-        session.log("scenario \(name): stream quiet after refinement, starting")
+        session.log("scenario \(name): \(quiet >= 2 ? "stream quiet after refinement" : "stream not quiet after \(maxWait) s (other windows changing)"), starting")
         // Before injecting anything the script must know what it is looking at: the console unlocked,
         // the bench frontmost, and the picture actually showing the bench (its purple caption band).
         guard let w = bench() else { session.log("scenario \(name): ABORT, bench window gone"); return }
         guard let status = session.hostStatus else { session.log("scenario \(name): ABORT, no host status"); return }
         guard !status.consoleLocked else { session.log("scenario \(name): ABORT, host console is LOCKED"); return }
-        guard status.frontmostWindowID == w.id || status.frontmostApp == "Mirage Test Bench" else {
+        // In input-sink mode nothing the script sends can reach the host's input (window commands move only
+        // the bench's own windows there), so the bench need not be frontmost for the drag scenario.
+        let sinkDrag = name == "drag" && status.inputSink == true
+        guard sinkDrag || status.frontmostWindowID == w.id || status.frontmostApp == "Mirage Test Bench" else {
             session.log("scenario \(name): ABORT, bench is not frontmost (front: \(status.frontmostApp) \(status.frontmostWindowID) '\(status.frontmostWindowTitle)')"); return
         }
+        if sinkDrag { session.log("scenario drag: host is in input-sink mode; frontmost guard waived (only the bench's own window can move)") }
         let bandOK = await captionVisible(w, ppp: ppp)
         guard bandOK else { session.log("scenario \(name): ABORT, the picture does not show the bench's caption band"); return }
         session.log("scenario \(name): checks passed (console unlocked, bench frontmost, caption visible)")
@@ -270,26 +296,57 @@ final class ScenarioRunner {
             }
         case "drag":
             var dir = 1
+            session.watchWindowID = w.id
             while Date() < end {
                 guard guardsStillHold(), let win = bench() else { break }
                 let x0 = win.frame.x + win.frame.width / 2, y0 = win.frame.y + Int(12 * ppp)
                 var (nx, ny) = normalized(x0, y0)
                 session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
                 try? await Task.sleep(for: .milliseconds(50))
-                let downSeq = session.send(.mouseButton(.init(button: 0, down: true, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
-                session.beginDrag(windowID: win.id, frame: win.frame, pointer: (x0, y0), inputSeq: downSeq)
-                var x = x0, y = y0
                 session.watchRect = win.frame.union(win.frame.offset(300 * dir, 150 * dir))
-                for _ in 0..<50 {   // 0.8 s drag, 6×3 px per 16 ms
-                    x += 6 * dir; y += 3 * dir
-                    (nx, ny) = normalized(x, y)
-                    let seq = session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
-                    session.dragPointer(windowID: win.id, pointer: (x, y), inputSeq: seq)
-                    try? await Task.sleep(for: .milliseconds(16))
+                let bytes0 = session.totalBytes()
+                var x = x0, y = y0
+                if win.isLayered {
+                    // Layered desktop: the window moves here, the host is told the frame; no press travels.
+                    layered = true
+                    session.beginLayerDrag(windowID: win.id)
+                    for _ in 0..<50 {   // 0.8 s drag, 6×3 px per 16 ms
+                        x += 6 * dir; y += 3 * dir
+                        session.dragLayer(windowID: win.id, to: win.frame.offset(x - x0, y - y0))
+                        try? await Task.sleep(for: .milliseconds(16))
+                    }
+                    let final = win.frame.offset(x - x0, y - y0)
+                    session.endLayerDrag(windowID: win.id)
+                    let released = Clock.nowNanos()
+                    let during = Double(session.totalBytes() - bytes0) / 1000
+                    // Confirmation: the host's list shows the window within 2 px of where it was dropped.
+                    var confirmed: Double? = nil
+                    for _ in 0..<300 {
+                        try? await Task.sleep(for: .milliseconds(10))
+                        if let f = session.windowsSnapshot().first(where: { $0.id == win.id })?.frame, abs(f.x - final.x) <= 2, abs(f.y - final.y) <= 2 { confirmed = Double(Clock.nowNanos() - released) / 1e6; break }
+                    }
+                    confirmMs.append(confirmed ?? 9999); burstKB.append(during)
+                    session.log(String(format: "scenario drag: burst %d: %.1f KB during the drag, host confirmed the frame after %@", bursts + 1, during, confirmed.map { String(format: "%.0f ms", $0) } ?? "no confirmation in 3 s"))
+                    let bytes1 = session.totalBytes()
+                    await measureCrisp(burstEnd: released)
+                    try? await Task.sleep(for: .milliseconds(max(0, 3000 - Int(Double(Clock.nowNanos() - released) / 1e6))))
+                    settleKB.append(Double(session.totalBytes() - bytes1) / 1000)
+                    session.log(String(format: "scenario drag: burst %d: %.1f KB in the 3 s after the release", bursts, settleKB.last!))
+                } else {
+                    let downSeq = session.send(.mouseButton(.init(button: 0, down: true, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
+                    session.beginDrag(windowID: win.id, frame: win.frame, pointer: (x0, y0), inputSeq: downSeq)
+                    for _ in 0..<50 {   // 0.8 s drag, 6×3 px per 16 ms
+                        x += 6 * dir; y += 3 * dir
+                        (nx, ny) = normalized(x, y)
+                        let seq = session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
+                        session.dragPointer(windowID: win.id, pointer: (x, y), inputSeq: seq)
+                        try? await Task.sleep(for: .milliseconds(16))
+                    }
+                    session.send(.mouseButton(.init(button: 0, down: false, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
+                    session.endDrag(windowID: win.id)
+                    burstKB.append(Double(session.totalBytes() - bytes0) / 1000)
+                    await measureCrisp(burstEnd: Clock.nowNanos())
                 }
-                session.send(.mouseButton(.init(button: 0, down: false, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
-                session.endDrag(windowID: win.id)
-                await measureCrisp(burstEnd: Clock.nowNanos())
                 try? await Task.sleep(for: .milliseconds(800))
                 dir = -dir
             }

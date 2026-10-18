@@ -59,6 +59,14 @@ final class InputInjector {
     }
     private func cgButton(_ b: Int) -> CGMouseButton { b == 0 ? .left : b == 1 ? .right : .center }
 
+    /// A window command (not injected as an event) counts as applied input at `seq`, so the window list
+    /// can say it reflects it.
+    func noteApplied(seq: UInt64) {
+        seqLock.lock()
+        if (injected.last?.seq ?? 0) < seq { injected.append((seq, Clock.nowNanos())); if injected.count > 512 { injected.removeFirst(injected.count - 512) } }
+        seqLock.unlock()
+    }
+
     /// Highest input sequence injected at or before `nanos` (host clock).
     func inputSeq(before nanos: UInt64) -> UInt64 {
         seqLock.lock(); defer { seqLock.unlock() }
@@ -137,6 +145,12 @@ final class InputInjector {
             e.post(tap: .cghidEventTap)
         default: break
         }
+    }
+
+    /// Writes a message to the input sink (input-sink mode), for commands that are not injected.
+    func record(_ msg: ControlMessage) {
+        guard let sink, let d = try? JSONEncoder().encode(msg) else { return }
+        sink.write(d); sink.write(Data("\n".utf8))
     }
 
     private func noteMotion() { locusLock.lock(); _motionHintNanos = Clock.nowNanos(); locusLock.unlock() }

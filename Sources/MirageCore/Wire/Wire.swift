@@ -2,7 +2,7 @@ import Foundation
 
 /// Protocol constants shared by host and clients.
 public enum Mirage {
-    public static let protocolVersion = 2
+    public static let protocolVersion = 3
     public static let alpn = "mirage/1"
     public static let defaultPort: UInt16 = 7799
     /// Domain-separation prefix for every hash/signature in the protocol.
@@ -128,6 +128,9 @@ public enum ControlMessage: Codable, Equatable {
     case hostStatus(HostStatus)
     /// Viewer → host: resend these fragments of a recent frame (fragment NACK; an empty list = the whole frame).
     case nack(Nack)
+    /// Viewer → host (M3, layered desktop): a window-management result decided locally (a drag, a raise,
+    /// a minimize) that the host applies through Accessibility.
+    case windowCommand(WindowCommand)
 
     // Input, client → host. Coordinates are normalized to the streamed display: (0,0) top-left, (1,1) bottom-right.
     case mouseMove(MouseMove)
@@ -294,20 +297,31 @@ public enum ControlMessage: Codable, Equatable {
             self.msgSeq = msgSeq; self.captureNanos = captureNanos; self.receivedNanos = receivedNanos; self.bytes = bytes
         }
     }
-    /// A host window as the client needs it for hit-testing and local prediction. Frames are in
-    /// native stream pixels of the streamed display.
+    /// A host window as the client needs it for composition, hit-testing and local prediction. Frames
+    /// are in native stream pixels of the streamed display (they may extend outside it).
     public struct WindowInfo: Codable, Equatable {
         public var id: UInt32
         public var pid: Int32
         public var title: String
         public var frame: PixelRect
-        /// Stacking order, 0 = frontmost.
+        /// Stacking order, 0 = frontmost (across every level).
         public var z: Int
-        /// Learned scrollable area inside the window, if the host has seen one (native pixels).
+        /// Learned scrollable area inside the window, if the host has seen one. Native pixels; for a
+        /// layered window relative to the window's own top-left, else display coordinates.
         public var scrollRect: PixelRect?
-        public init(id: UInt32, pid: Int32, title: String, frame: PixelRect, z: Int, scrollRect: PixelRect? = nil) {
-            self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect
+        /// CGWindow level: 0 normal, 20 dock, 24 menu bar, 101 menus, 3 floating…
+        public var level: Int?
+        /// The host captures this window as its own layer (DESIGN §3.2): the client holds its pixels at
+        /// `frame.width × frame.height` and composites it itself. Otherwise the window is part of the
+        /// display layer's pixels and the client draws it as a cut-out of that layer at its frame.
+        public var layered: Bool?
+        /// Owning application's name (dock, native chrome).
+        public var app: String?
+        public init(id: UInt32, pid: Int32, title: String, frame: PixelRect, z: Int, scrollRect: PixelRect? = nil, level: Int? = nil, layered: Bool? = nil, app: String? = nil) {
+            self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect; self.level = level; self.layered = layered; self.app = app
         }
+        public var isLayered: Bool { layered ?? false }
+        public var windowLevel: Int { level ?? 0 }
     }
     /// Host → client window list. A full list carries `windows`; a delta carries only the windows that
     /// changed (`changed`) and the ids that went away (`removed`); z-order is each window's `z`.
@@ -317,9 +331,12 @@ public enum ControlMessage: Codable, Equatable {
         public var windows: [WindowInfo]
         public var changed: [WindowInfo]?
         public var removed: [UInt32]?
+        /// The last client input the host had applied when this list was sampled: the client retires
+        /// local window-management predictions (a raise, a drag) once the host's list reflects them.
+        public var inputSeq: UInt64?
         public var isDelta: Bool { changed != nil }
-        public init(captureSeq: UInt32, windows: [WindowInfo]) { self.captureSeq = captureSeq; self.windows = windows }
-        public init(captureSeq: UInt32, changed: [WindowInfo], removed: [UInt32]) { self.captureSeq = captureSeq; self.windows = []; self.changed = changed; self.removed = removed }
+        public init(captureSeq: UInt32, windows: [WindowInfo], inputSeq: UInt64? = nil) { self.captureSeq = captureSeq; self.windows = windows; self.inputSeq = inputSeq }
+        public init(captureSeq: UInt32, changed: [WindowInfo], removed: [UInt32], inputSeq: UInt64? = nil) { self.captureSeq = captureSeq; self.windows = []; self.changed = changed; self.removed = removed; self.inputSeq = inputSeq }
 
         /// Applies this message to a known list; returns the new full list (front to back by z).
         public func apply(to known: [WindowInfo]) -> [WindowInfo] {
@@ -330,14 +347,26 @@ public enum ControlMessage: Codable, Equatable {
             return byID.values.sorted { $0.z < $1.z }
         }
         /// The delta from `old` to `new`, or nil if nothing changed.
-        public static func delta(from old: [WindowInfo], to new: [WindowInfo], captureSeq: UInt32) -> WindowList? {
+        public static func delta(from old: [WindowInfo], to new: [WindowInfo], captureSeq: UInt32, inputSeq: UInt64? = nil) -> WindowList? {
             let oldByID = Dictionary(old.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
             let newIDs = Set(new.map(\.id))
             let changed = new.filter { oldByID[$0.id] != $0 }
             let removed = old.map(\.id).filter { !newIDs.contains($0) }
             if changed.isEmpty && removed.isEmpty { return nil }
-            return WindowList(captureSeq: captureSeq, changed: changed, removed: removed)
+            return WindowList(captureSeq: captureSeq, changed: changed, removed: removed, inputSeq: inputSeq)
         }
+    }
+    /// Client → host: apply a window-management decision the client already shows (DESIGN §3.5 item 2).
+    /// `move` carries the new frame origin in native stream pixels of the display.
+    public struct WindowCommand: Codable, Equatable {
+        public enum Action: String, Codable { case raise, move, minimize, restore, close }
+        public var id: UInt32
+        public var action: Action
+        public var x: Int?
+        public var y: Int?
+        /// The client's input sequence at the time (the host echoes it in the window list once applied).
+        public var inputSeq: UInt64?
+        public init(id: UInt32, action: Action, x: Int? = nil, y: Int? = nil, inputSeq: UInt64? = nil) { self.id = id; self.action = action; self.x = x; self.y = y; self.inputSeq = inputSeq }
     }
     public struct Nack: Codable, Equatable {
         public var frameSeq: UInt32

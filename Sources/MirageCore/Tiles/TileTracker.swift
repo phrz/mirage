@@ -140,10 +140,12 @@ public struct TileTracker {
         }
     }
 
-    /// Pending tiles inside `rect` become due now (a fovea moved over them).
-    public mutating func expedite(in rect: PixelRect, now: UInt64) -> Int {
+    /// Pending tiles inside `rect` (and in `only`, if given) become due now (a fovea moved over them, a
+    /// covered part of a window was uncovered).
+    @discardableResult
+    public mutating func expedite(in rect: PixelRect, now: UInt64, only: Set<Int>? = nil) -> Int {
         var n = 0
-        for i in tiles(covering: [rect]) where cells[i].pending && cells[i].dueNanos > now { cells[i].dueNanos = now; n += 1 }
+        for i in tiles(covering: [rect]) where cells[i].pending && cells[i].dueNanos > now && (only?.contains(i) ?? true) { cells[i].dueNanos = now; n += 1 }
         return n
     }
 

@@ -56,7 +56,7 @@ final class VideoWireTests: XCTestCase {
         let f4 = VideoFragment.fragments(frameSeq: 4, flags: [], captureNanos: 4, payload: p1).compactMap(VideoFragment.decode)
         _ = a.ingest(f4[0], now: 1_000_000_000)
         let late = a.tick(now: 1_000_000_000 + a.timeoutNanos + 1)
-        guard case .lost(let lostSeq)? = late.first else { return XCTFail("expected lost, got \(late)") }
+        guard case .lost(let lostSeq, _)? = late.first else { return XCTFail("expected lost, got \(late)") }
         XCTAssertEqual(lostSeq, 4)
         XCTAssertEqual(a.pendingCount, 0)
     }
@@ -64,7 +64,7 @@ final class VideoWireTests: XCTestCase {
     func testPacedFrameIsNotDeclaredLostWhileStillArriving() {
         var a = FrameAssembler()
         a.timeoutNanos = 300_000_000   // what a 1 ms RTT gives
-        let payload = Data(repeating: 5, count: 1157 * 40)
+        let payload = Data(repeating: 5, count: VideoFragment.maxPayload * 40)
         let frags = VideoFragment.fragments(frameSeq: 1, flags: [.keyframe], captureNanos: 1, payload: payload).compactMap(VideoFragment.decode)
         XCTAssertEqual(frags.count, 40)
         // Fragments 30 ms apart: the frame takes 1.2 s, far beyond the 300 ms timeout, with no gap over 30 ms.
@@ -133,7 +133,7 @@ final class TileWireTests: XCTestCase {
             .init(rect: PixelRect(x: 640, y: 0, width: 64, height: 64), format: .nearLossless, data: Data(repeating: 9, count: 700)),
         ]))
         let copy = TileMessage.copyRect(.init(header: h, rect: PixelRect(x: 10, y: 20, width: 300, height: 400), dx: -3, dy: 40))
-        let reset = TileMessage.reset(width: 2560, height: 1440)
+        let reset = TileMessage.reset(layer: 0, width: 2560, height: 1440)
         let bytes = tiles.encode(msgSeq: 1) + copy.encode(msgSeq: 2) + reset.encode(msgSeq: 3)
         var p = TileStreamParser()
         var got: [(seq: UInt32, bytes: Int, message: TileMessage)] = []

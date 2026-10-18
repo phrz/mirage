@@ -68,17 +68,25 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         // the streamer retains the previous frame for diffing and the latest for refinement.
         c.pixelFormat = kCVPixelFormatType_32BGRA
         c.showsCursor = false
+        // Windows captured as their own layers are left out of this stream, and so must their shadows
+        // be (a moving window's shadow would otherwise paint the display layer); the client draws shadows.
+        c.ignoreShadowsDisplay = true
         c.queueDepth = 6
         c.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(1, min(maxFPS, 120))))
         c.capturesAudio = false
         return c
     }
 
-    func start(_ req: ControlMessage.StreamRequest, onFrame: @escaping (CVPixelBuffer, UInt64, [PixelRect]) -> Void) async throws -> Target {
-        let t = try await Self.resolve(req)
+    /// Windows left out of the display capture: the ones captured as their own layers (DESIGN §3.2).
+    private(set) var excluded: [SCWindow] = []
+
+    func start(_ req: ControlMessage.StreamRequest, target: Target? = nil, excluding: [SCWindow] = [], onFrame: @escaping (CVPixelBuffer, UInt64, [PixelRect]) -> Void) async throws -> Target {
+        let t: Target
+        if let target { t = target } else { t = try await Self.resolve(req) }
         self.onFrame = onFrame
         self.target = t
-        let filter = SCContentFilter(display: t.display, excludingWindows: [])
+        excluded = excluding
+        let filter = SCContentFilter(display: t.display, excludingWindows: excluding)
         let s = SCStream(filter: filter, configuration: Self.configuration(for: t, maxFPS: req.maxFPS), delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await s.startCapture()
@@ -89,11 +97,18 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         return t
     }
 
+    /// Changes the set of windows left out of the display picture (layers started or stopped).
+    func setExcluded(_ windows: [SCWindow]) async throws {
+        guard let stream, let t = target else { return }
+        excluded = windows
+        try await stream.updateContentFilter(SCContentFilter(display: t.display, excludingWindows: windows))
+    }
+
     func update(_ req: ControlMessage.StreamRequest) async throws -> Target {
         guard let stream, let old = target else { throw MirageError.transport("not capturing") }
         var t = try await Self.resolve(req)
         if t.display.displayID != old.display.displayID {
-            try await stream.updateContentFilter(SCContentFilter(display: t.display, excludingWindows: []))
+            try await stream.updateContentFilter(SCContentFilter(display: t.display, excludingWindows: excluded))
         } else {
             t = Target(display: old.display, info: t.info, pixelWidth: t.pixelWidth, pixelHeight: t.pixelHeight)
         }
@@ -136,5 +151,42 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         onStop?(error)
+    }
+}
+
+
+/// The SCWindow objects ScreenCaptureKit needs for per-window filters, by CGWindow id. Refreshed from
+/// `SCShareableContent` (tens of ms, async) when the window list names an id we do not hold.
+final class WindowCatalog: @unchecked Sendable {
+    private var windows: [UInt32: SCWindow] = [:]
+    private let lock = NSLock()
+    private var refreshing = false
+    private var lastRefreshNanos: UInt64 = 0
+
+    func window(_ id: UInt32) -> SCWindow? { lock.lock(); defer { lock.unlock() }; return windows[id] }
+
+    /// Refreshes if any of `ids` is unknown and no refresh ran in the last 250 ms; `done` runs after a refresh.
+    func ensure(_ ids: [UInt32], done: @escaping @Sendable () -> Void) {
+        lock.lock()
+        let missing = ids.contains { windows[$0] == nil }
+        let now = Clock.nowNanos()
+        guard missing, !refreshing, now - lastRefreshNanos > 250_000_000 else { lock.unlock(); return }
+        refreshing = true; lastRefreshNanos = now
+        lock.unlock()
+        Task.detached { [self] in
+            defer { lock.lock(); refreshing = false; lock.unlock() }
+            guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else { return }
+            lock.lock()
+            windows = Dictionary(content.windows.map { ($0.windowID, $0) }, uniquingKeysWith: { a, _ in a })
+            lock.unlock()
+            done()
+        }
+    }
+    func refreshNow() async {
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else { return }
+        lock.lock()
+        windows = Dictionary(content.windows.map { ($0.windowID, $0) }, uniquingKeysWith: { a, _ in a })
+        lastRefreshNanos = Clock.nowNanos()
+        lock.unlock()
     }
 }

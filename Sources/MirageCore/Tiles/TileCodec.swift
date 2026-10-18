@@ -11,6 +11,9 @@ public enum TileCodec {
         case nearLossless = 1
         /// One colour for the whole rect: payload is 4 bytes BGRA (WebP's container alone costs 44 B).
         case solid = 2
+        /// A lossy WebP still, usually at a fraction of the rect's size (a layer's first picture, DESIGN
+        /// §3.3 "lossy first"): the client scales it onto the rect; lossless refinement follows.
+        case lossy = 3
     }
 
     /// The rect's single colour as 4 BGRA bytes if every pixel is the same colour, else nil.
@@ -33,13 +36,14 @@ public enum TileCodec {
     }
 
     /// Encodes a `width`×`height` BGRA rect starting at `base` with `stride` bytes per row.
-    /// Alpha is ignored (imported as BGRX). `effort` 0 (fastest) … 9.
-    public static func encode(base: UnsafeRawPointer, width: Int, height: Int, stride: Int, format: Format, effort: Int = 2) -> Data? {
+    /// `alpha`: keep the alpha channel (a layered window's rounded corners and translucency; the pixels
+    /// are premultiplied and stay byte-exact), else import as BGRX. `effort` 0 (fastest) … 9.
+    public static func encode(base: UnsafeRawPointer, width: Int, height: Int, stride: Int, format: Format, effort: Int = 2, alpha: Bool = false) -> Data? {
         var config = WebPConfig()
         // The lossless preset only sets lossless/method/quality; the rest needs WebPConfigInit first.
         guard WebPConfigInit(&config) != 0, WebPConfigLosslessPreset(&config, Int32(effort)) != 0 else { return nil }
         config.lossless = 1
-        config.exact = 0
+        config.exact = alpha ? 1 : 0
         config.thread_level = 0
         if format == .nearLossless { config.near_lossless = 60 }
         var pic = WebPPicture()
@@ -47,7 +51,39 @@ public enum TileCodec {
         defer { WebPPictureFree(&pic) }
         pic.use_argb = 1
         pic.width = Int32(width); pic.height = Int32(height)
-        guard WebPPictureImportBGRX(&pic, base.assumingMemoryBound(to: UInt8.self), Int32(stride)) != 0 else { return nil }
+        let imported = alpha ? WebPPictureImportBGRA(&pic, base.assumingMemoryBound(to: UInt8.self), Int32(stride))
+                             : WebPPictureImportBGRX(&pic, base.assumingMemoryBound(to: UInt8.self), Int32(stride))
+        guard imported != 0 else { return nil }
+        var writer = WebPMemoryWriter()
+        WebPMemoryWriterInit(&writer)
+        defer { WebPMemoryWriterClear(&writer) }
+        pic.writer = WebPMemoryWrite
+        return withUnsafeMutablePointer(to: &writer) { w -> Data? in
+            pic.custom_ptr = UnsafeMutableRawPointer(w)
+            guard WebPEncode(&config, &pic) != 0 else { return nil }
+            return Data(bytes: w.pointee.mem, count: w.pointee.size)
+        }
+    }
+
+    /// Lossy WebP of a BGRA rect, rescaled to `outWidth`×`outHeight` first (a layer's first picture: one
+    /// small still, upscaled on the client, instead of a march of tiles). Alpha is kept (premultiplied).
+    public static func encodeLossy(base: UnsafeRawPointer, width: Int, height: Int, stride: Int, outWidth: Int, outHeight: Int, quality: Float = 60, alpha: Bool = true) -> Data? {
+        var config = WebPConfig()
+        guard WebPConfigInit(&config) != 0, WebPConfigPreset(&config, WEBP_PRESET_TEXT, quality) != 0 else { return nil }
+        config.method = 3
+        config.thread_level = 0
+        config.alpha_quality = 100
+        var pic = WebPPicture()
+        guard WebPPictureInit(&pic) != 0 else { return nil }
+        defer { WebPPictureFree(&pic) }
+        pic.use_argb = 1
+        pic.width = Int32(width); pic.height = Int32(height)
+        let imported = alpha ? WebPPictureImportBGRA(&pic, base.assumingMemoryBound(to: UInt8.self), Int32(stride))
+                             : WebPPictureImportBGRX(&pic, base.assumingMemoryBound(to: UInt8.self), Int32(stride))
+        guard imported != 0 else { return nil }
+        if outWidth != width || outHeight != height {
+            guard WebPPictureRescale(&pic, Int32(max(1, outWidth)), Int32(max(1, outHeight))) != 0 else { return nil }
+        }
         var writer = WebPMemoryWriter()
         WebPMemoryWriterInit(&writer)
         defer { WebPMemoryWriterClear(&writer) }
