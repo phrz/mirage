@@ -201,6 +201,12 @@ sends nothing; if the pointer moves the window follows it locally and the host r
 sent on release; a press anywhere in a layered window raises it locally at once; the host's window list
 carries the input sequence it reflects so the local override is retired when the host has caught up.
 Host-side drags of layered windows cost no pixels at all: the list carries the frame at up to 30 Hz.
+Cut-outs and occlusion (fixed after the first mac-daddy run, see §6 "M3.1 field regression"): the host
+marks a non-layered window `cutout` only when it is safe to draw over window layers (pop-up menus,
+popovers, the dock, the menu bar, normal app windows; never Window Server's own windows, never anything
+desktop-sized above the normal level), the viewer draws a cut-out only where it overlaps a window layer
+(and that layer's shadow) behind it, and the host counts only layers and cut-out-safe windows as occluders
+when it holds back covered tiles. Every window gets its still before any window gets lossless blocks.
 
 Mode summary:
 
@@ -1195,3 +1201,34 @@ Not measured here: the real link (RTT and the AX round trip decide how long a dr
 be confirmed; the local picture does not wait for it), windows with heavy translucency (a layer captured
 alone has no backdrop blur), the look of the shadows against mac-daddy's wallpaper, and more than four
 windows at once (the cap is 16 layers / 48 Mpx; beyond it windows are cut-outs of the display layer).
+
+**M3.1 field regression (mac-daddy, d5a233b, 2026-10-18) and fix.** The coordinator's first run on
+mac-daddy (3200×1800 at 2x, stream 3024×1700, 145 ms RTT, 800 kbps cap, bench `--drift`): the bench was
+visible in the first frame only, then only the desktop, icons and dock rendered for 39 s, while the host
+sent its still and then refined at 600–750 kbps for 35 s. Reproduced on loopback with a ~1.7x non-native
+stream by adding one window the test bench can now open (`--overlay`: full-screen, transparent,
+click-through, floating level, the kind of window utilities keep on screen): exactly the same picture.
+Two causes, both "a transparent window in front of everything was treated as opaque":
+1. The viewer drew every non-layered window as a cut-out of the display layer at its full frame. The
+   overlay's cut-out repainted the whole screen from the display layer, which by then no longer contains
+   the layered windows; every window vanished once it became a layer.
+2. The host's occlusion test counted the overlay as covering every window, so every layer's tiles were
+   "covered on the host" and held back after the still (and its capture dropped to 2 fps).
+Fix: the host marks cut-out-safe windows explicitly (`WindowInfo.cutout`), the viewer plans the scene in
+`LayerScenePlan` (MirageCore, unit-tested) and draws a cut-out only where it overlaps a window layer or
+its shadow behind it, shadows never paint inside their own box, and host-side occlusion counts only layers
+and cut-out-safe windows. Also from the same run: per-tile refinement now holds tiles covered on the host
+(a fully covered window was refined tile by tile after its blocks), and every window's still goes before
+any window's blocks (four stills within 1.3 s of the stream start on loopback, 60 ms apart, instead of
+spread over 4 s behind one window's blocks). The host logs the window list (id, level, owner, size,
+cut-out or not; titles only for the bench) at stream start, and the viewer logs per-layer diagnostics on
+every change and writes them to `--stats` JSON (`layers`: received bytes, tiles, stills, canvas size,
+frame, viewport rect, drawn as layer / cut-out / display / missing, visible, and why not).
+Loopback after the fix (2600×1688 stream, 800 kbps, `--drift` + `--overlay`, phrz's windows on screen):
+the bench layer VISIBLE across every host-side move (diagnostics: 352,188 → 633,328 → …), 15–17 list
+updates per burst, 0 video and 0 copy-rects for it, its lossless blocks delivered (320 KB), the fully
+covered Sketch window nothing beyond its 3.7 KB still; client drags with the overlay present confirmed
+48–88 ms after release, 0 stale tiles, 0 mismatches; `outage-stop` pass (0.59 s). Scene tests: a layered
+window stays visible across a host-side move under a full-screen overlay; a menu cut-out draws only over
+the window it overlaps; a host-layered window without a viewer canvas is reported, not silently hidden.
+

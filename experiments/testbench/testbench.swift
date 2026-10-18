@@ -13,6 +13,18 @@ final class App: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ n: Notification) {
         let screen = NSScreen.screens.first!
+        // `--overlay`: a full-screen, fully transparent, click-through window at the floating level, like the
+        // overlays some utilities keep on screen (the M3.1 field regression: a viewer that drew such a window as
+        // a cut-out of the display layer painted the desktop over every window layer).
+        if CommandLine.arguments.contains("--overlay") {
+            let o = NSWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            o.isOpaque = false; o.backgroundColor = .clear; o.hasShadow = false; o.ignoresMouseEvents = true
+            o.level = .floating; o.title = "Mirage Test Bench overlay"
+            o.collectionBehavior = [.canJoinAllSpaces, .stationary]
+            o.orderFrontRegardless()
+            window = o
+            return
+        }
         // `--static`: cover the whole screen with a window that never changes (no caret, fixed caption),
         // so a loopback host sees a genuinely static picture (the static-picture refinement test).
         // `--motion`: the same full-screen cover with a continuously animating 640×480 region, so a loopback

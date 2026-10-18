@@ -80,6 +80,8 @@ final class ViewerSession: @unchecked Sendable {
         /// Sequence of the last decoded recovery frame: a loss verdict for an older frame is already healed.
         var lastRecoverySeq: UInt32 = 0
         var lastSeenInListNanos: UInt64 = 0
+        /// Diagnostics: bytes and tile rects received for this layer, stills, video frames decoded.
+        var receivedBytes = 0, tilesApplied = 0, stills = 0, videoFrames = 0
         init(id: UInt32, context: MetalContext) { self.id = id; compositor = Compositor(context: context); compositor.layerID = id; compositor.hasAlpha = id != 0 }
     }
     let context = MetalContext()
@@ -520,6 +522,7 @@ final class ViewerSession: @unchecked Sendable {
             let fresh = t.tiles.filter { isFresh(v, $0.rect, captureSeq: t.header.captureSeq) }
             for tile in fresh where wouldBeStale(v, tile.rect, captureSeq: t.header.captureSeq) { staleCommits += 1 }   // must never happen
             let n = v.compositor.applyTiles(fresh, crossfade: t.refinement)
+            v.receivedBytes += t.bytes; v.tilesApplied += n; v.stills += fresh.filter { $0.format == .lossy }.count
             statsLock.lock(); sTileBytes += t.bytes; sTileRects += n; statsLock.unlock()
             if t.refinement { lastRefinementNanos = now; if Self.debugTiles, refinementLogged < 6 { refinementLogged += 1; log("refinement batch (layer \(v.id)): \(t.tiles.prefix(2).map { "\($0.rect)" })") } }
             let c = v.compositor
@@ -654,6 +657,7 @@ final class ViewerSession: @unchecked Sendable {
                     let grid = TileMask.grid(for: region)
                     let mask = frame.tileMask.flatMap { TileMask(cols: grid.cols, rows: grid.rows, bits: $0) }
                     compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive))
+                    v.receivedBytes += frame.bytes; v.videoFrames += 1
                     if !frame.flags.contains(.progressive) { markCapture(v, region, captureSeq: frame.captureSeq) }
                     notePictureChange(now)
                     statsLock.lock(); let since = connectedAtNanos; statsLock.unlock()
@@ -705,6 +709,12 @@ final class ViewerSession: @unchecked Sendable {
             sFrames = 0; sBytes = 0; sLost = 0; sDecodeNanos = 0; sDropped = 0; sTileBytes = 0; sTileRects = 0; sCopyRects = 0; sNacks = 0; sBursts = 0
             statsLock.unlock()
             predictorLock.lock(); let pstats = predictor.stats; predictorLock.unlock()
+            let diags = videoQueue.sync { layerDiagnostics() }
+            let shape = diags.map { "\($0.id) \($0.drawnAs) \($0.visible) \($0.why ?? "") \($0.canvas) \($0.layeredOnHost)" }
+            if shape != lastDiagLog.map({ "\($0.id) \($0.drawnAs) \($0.visible) \($0.why ?? "") \($0.canvas) \($0.layeredOnHost)" }) || Clock.nowNanos() - lastDiagLogNanos > 10_000_000_000 {
+                lastDiagLog = diags; lastDiagLogNanos = Clock.nowNanos()
+                for d in diags { log("layer diag: \(d.id) '\(d.title)' L\(d.level) host-layered \(d.layeredOnHost) canvas \(d.canvas) rx \(d.receivedBytes / 1000) KB (\(d.tiles) tiles, \(d.stills) stills, \(d.videoFrames) frames) frame \(d.frame.x),\(d.frame.y) \(d.frame.width)x\(d.frame.height) viewport \(d.viewport.x),\(d.viewport.y) \(d.viewport.width)x\(d.viewport.height) drawn as \(d.drawnAs) \(d.visible ? "VISIBLE" : "NOT VISIBLE") \(d.why ?? "")\(d.coveredBy.isEmpty ? "" : " covered by \(d.coveredBy)")") }
+            }
             let inp = inputState()
             let w = displayView?.decoder.width ?? 0, h = displayView?.decoder.height ?? 0
             let upscaling = compositor?.usesMetalFX ?? false
@@ -906,27 +916,42 @@ final class ViewerSession: @unchecked Sendable {
     func scene(pxPerPoint: Double) -> LayerScene? {
         guard let bg = compositor, bg.width > 0 else { return nil }
         let arranged = arrangedWindows()
-        let ppp = Float(pxPerPoint)
-        var items: [LayerScene.Item] = []
-        var keyFound = false
-        for w in arranged {
-            if w.isLayered, let v = layerViews[w.id], v.compositor.width > 0 {
-                let isKey = w.windowLevel == 0 && !keyFound
-                if w.windowLevel == 0 { keyFound = true }
-                items.append(.layer(v.compositor, frame: w.frame, shadow: isKey ? .key(pxPerPoint: ppp) : .inactive(pxPerPoint: ppp), dim: 1))
-            } else {
-                // Cut-outs: menus and popovers (level ≥ 100 or floating 3/8) get a menu shadow, overflow normal
-                // windows an inactive one; the dock (20) and menu bar (24) none.
-                let lv = w.windowLevel
-                let shadow: LayerScene.Shadow? = lv == 0 ? .inactive(pxPerPoint: ppp) : (lv == 20 || lv == 24 || lv == 25) ? nil : .menu(pxPerPoint: ppp)
-                items.append(.cutout(w.frame, shadow: shadow))
-            }
-        }
+        let plan = LayerScenePlan.plan(arranged, hasCanvas: { id in (self.layerViews[id]?.compositor.width ?? 0) > 0 }, display: PixelRect(x: 0, y: 0, width: bg.width, height: bg.height), shadowMargin: Int(48 * pxPerPoint))
+        let items = plan.sceneItems(pxPerPoint: Float(pxPerPoint), canvas: { self.layerViews[$0]?.compositor })
         let (disp, colors) = displacements()
-        let layered = Set(arranged.filter { $0.isLayered && (layerViews[$0.id]?.compositor.width ?? 0) > 0 }.map(\.id))
+        let layered = Set(plan.entries.filter { $0.kind == .layer }.map(\.id))
         let sd = disp.map { LayerScene.Displacement(layerID: layered.contains($0.windowID) ? $0.windowID : 0, displacement: $0) }
         return LayerScene(background: bg, items: items, displacements: sd, bandColors: colors)
     }
+
+    /// Per-layer diagnostics (DESIGN §6 M3.1 field regression): what the viewer holds for every window the
+    /// host lists, and what the composited scene shows of it. `viewport` is where the window lands in the
+    /// drawable (pixels; display-layer pixels when headless), `visible` whether any of it is drawn from
+    /// pixels that contain the window, `why` the reason when not.
+    struct LayerDiag: Codable, Equatable {
+        var id: UInt32, title: String, level: Int, layeredOnHost: Bool, canvas: String, receivedBytes: Int, tiles: Int, stills: Int, videoFrames: Int
+        var frame: PixelRect, viewport: PixelRect, drawnAs: String, coveredBy: [UInt32], visible: Bool, why: String?
+    }
+    /// The drawable rect the display layer was last drawn into (GUI); nil = headless (identity).
+    var lastDest: CGRect? = nil
+    func layerDiagnostics() -> [LayerDiag] {
+        guard let bg = compositor, bg.width > 0 else { return [] }
+        let arranged = arrangedWindows()
+        let plan = LayerScenePlan.plan(arranged, hasCanvas: { id in (self.layerViews[id]?.compositor.width ?? 0) > 0 }, display: PixelRect(x: 0, y: 0, width: bg.width, height: bg.height))
+        let sx = lastDest.map { Double($0.width) / Double(bg.width) } ?? 1, sy = lastDest.map { Double($0.height) / Double(bg.height) } ?? 1
+        let ox = lastDest?.minX ?? 0, oy = lastDest?.minY ?? 0
+        return arranged.filter { $0.windowLevel == 0 || $0.isLayered }.map { w in
+            let v = layerViews[w.id]
+            let vp = PixelRect(x: Int(ox + Double(w.frame.x) * sx), y: Int(oy + Double(w.frame.y) * sy), width: Int(Double(w.frame.width) * sx), height: Int(Double(w.frame.height) * sy))
+            let e = plan.entries.first { $0.id == w.id }
+            return LayerDiag(id: w.id, title: String(w.title.prefix(32)), level: w.windowLevel, layeredOnHost: w.isLayered,
+                             canvas: v.map { "\($0.compositor.width)x\($0.compositor.height)" } ?? "none",
+                             receivedBytes: v?.receivedBytes ?? 0, tiles: v?.tilesApplied ?? 0, stills: v?.stills ?? 0, videoFrames: v?.videoFrames ?? 0,
+                             frame: w.frame, viewport: vp, drawnAs: e?.kind.rawValue ?? "?", coveredBy: e?.coveredBy ?? [], visible: e?.visible ?? false, why: e?.why)
+        }
+    }
+    private var lastDiagLog: [LayerDiag] = []
+    private var lastDiagLogNanos: UInt64 = 0
 
     /// Stream pixels per host display point (for scroll deltas and title-bar heights).
     @MainActor var pixelsPerPoint: Double {
@@ -1086,6 +1111,7 @@ extension ViewerSession {
             var motionFps: [Double]?, motionFrames: [Int]?, motionCopyRects: [Int]?
             var motionMoves: [Int]?, moveFps: [Double]?, burstKB: [Double]?, settleKB: [Double]?, confirmMs: [Double]?, layered: Bool?, layersHeld: Int?, windowCommandsSent: Int?
             var staleTilesDiscarded: Int?, staleTilesCommitted: Int?
+            var layers: [LayerDiag]?
             var samples: [Sample]
         }
         let target = MainActor.assumeIsolated { lastRequest?.bitrateKbps ?? 0 }
@@ -1125,6 +1151,7 @@ extension ViewerSession {
                       motionMoves: scenario?.motionMoves, moveFps: scenario?.moveFps, burstKB: scenario?.burstKB, settleKB: scenario?.settleKB, confirmMs: scenario?.confirmMs,
                       layered: scenario?.layered, layersHeld: layerViews.count - 1, windowCommandsSent: windowCommandsSent,
                       staleTilesDiscarded: staleDiscards, staleTilesCommitted: staleCommits,
+                      layers: videoQueue.sync { layerDiagnostics() },
                       samples: samples)
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         return (try? enc.encode(out)) ?? Data()

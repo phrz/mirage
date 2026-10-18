@@ -317,8 +317,12 @@ public enum ControlMessage: Codable, Equatable {
         public var layered: Bool?
         /// Owning application's name (dock, native chrome).
         public var app: String?
-        public init(id: UInt32, pid: Int32, title: String, frame: PixelRect, z: Int, scrollRect: PixelRect? = nil, level: Int? = nil, layered: Bool? = nil, app: String? = nil) {
-            self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect; self.level = level; self.layered = layered; self.app = app
+        /// Not layered, and safe for the client to draw as a rect of the display layer over window layers
+        /// behind it (menus, popovers, the dock, the menu bar, opaque app windows beyond the layer cap). The
+        /// host leaves it nil for windows that may be transparent overlays.
+        public var cutout: Bool?
+        public init(id: UInt32, pid: Int32, title: String, frame: PixelRect, z: Int, scrollRect: PixelRect? = nil, level: Int? = nil, layered: Bool? = nil, app: String? = nil, cutout: Bool? = nil) {
+            self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect; self.level = level; self.layered = layered; self.app = app; self.cutout = cutout
         }
         public var isLayered: Bool { layered ?? false }
         public var windowLevel: Int { level ?? 0 }

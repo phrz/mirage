@@ -74,7 +74,9 @@ final class VideoNSView: NSView {
         guard changed, let drawable = metalLayer.nextDrawable() else { return }
         let scale = metalLayer.contentsScale
         let r = videoRect
-        SceneRenderer.render(scene, context: context, to: drawable, dest: CGRect(x: r.minX * scale, y: r.minY * scale, width: r.width * scale, height: r.height * scale))
+        let dest = CGRect(x: r.minX * scale, y: r.minY * scale, width: r.width * scale, height: r.height * scale)
+        session.lastDest = dest
+        SceneRenderer.render(scene, context: context, to: drawable, dest: dest)
     }
     private var lastDisplacementCount = 0
     private var lastArrangement = -1

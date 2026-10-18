@@ -425,7 +425,9 @@ public final class Compositor {
         float2 q = abs(in.px - centre) - ext + r;
         float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
         float sigma = max(sh.p.y, 1.0) * 0.45;
-        float a = sh.p.z * exp(-max(d, 0.0) * max(d, 0.0) / (2.0 * sigma * sigma));
+        // Outside the box only: the inside belongs to the window (or, for a clipped cut-out, to the display layer).
+        if (d < 0.0) discard_fragment();
+        float a = sh.p.z * exp(-d * d / (2.0 * sigma * sigma));
         return float4(0, 0, 0, a);
     }
     kernel void nv12ToBGRA(texture2d<float, access::read> yTex [[texture(0)]], texture2d<float, access::read> cTex [[texture(1)]],
@@ -450,7 +452,7 @@ public struct LayerScene {
         case layer(Compositor, frame: PixelRect, shadow: Shadow?, dim: Float)
         /// A rect of the display layer drawn again on top (a menu, the dock, a window beyond the layer cap),
         /// optionally with a shadow (the display stream is captured without shadows).
-        case cutout(PixelRect, shadow: Shadow?)
+        case cutout(PixelRect, shadow: Shadow?, clips: [PixelRect])
     }
     public struct Shadow: Equatable {
         public var cornerRadius: Float, blur: Float, offsetY: Float, opacity: Float
@@ -476,6 +478,11 @@ public enum SceneRenderer {
     /// Draws the scene into `drawable`; `dest` is where the display layer's full rect lands (drawable
     /// pixels); every layer frame is in display-layer pixels and maps through the same transform.
     public static func render(_ scene: LayerScene, context: MetalContext, to drawable: CAMetalDrawable, dest: CGRect) {
+        render(scene, context: context, target: drawable.texture, dest: dest, present: drawable)
+    }
+
+    /// Draws the scene into `target` (a drawable's texture, or any BGRA render target in tests).
+    public static func render(_ scene: LayerScene, context: MetalContext, target: MTLTexture, dest: CGRect, present: CAMetalDrawable? = nil) {
         guard let bg = scene.background, bg.width > 0, let cb = context.commandQueue.makeCommandBuffer() else { return }
         let now = Clock.nowNanos()
         // Settle every visible canvas's crossfades first (a blit each), then one render pass.
@@ -483,10 +490,10 @@ public enum SceneRenderer {
         fades[ObjectIdentifier(bg)] = bg.settleFades(now: now, commandBuffer: cb)
         for item in scene.items { if case .layer(let c, _, _, _) = item { fades[ObjectIdentifier(c)] = c.settleFades(now: now, commandBuffer: cb) } }
         let rp = MTLRenderPassDescriptor()
-        rp.colorAttachments[0].texture = drawable.texture; rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
+        rp.colorAttachments[0].texture = target; rp.colorAttachments[0].loadAction = .clear; rp.colorAttachments[0].storeAction = .store
         rp.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         guard let re = cb.makeRenderCommandEncoder(descriptor: rp) else { return }
-        let dw = Float(drawable.texture.width), dh = Float(drawable.texture.height)
+        let dw = Float(target.width), dh = Float(target.height)
         let sx = Float(dest.width) / Float(bg.width), sy = Float(dest.height) / Float(bg.height)
         // Display-layer pixel rect → drawable pixels / NDC.
         func px(_ r: PixelRect, dx: Int = 0, dy: Int = 0) -> SIMD4<Float> {
@@ -559,11 +566,14 @@ public enum SceneRenderer {
         // 2. Items back to front.
         for item in scene.items.reversed() {
             switch item {
-            case .cutout(let rect, let shadow):
-                let r = rect.intersection(display)
-                guard !r.isEmpty, let tex = bg.canvas else { continue }
+            case .cutout(let rect, let shadow, let clips):
+                // Only where the cut-out overlaps a window layer behind it (the display layer shows it elsewhere).
+                guard let tex = bg.canvas, !clips.isEmpty else { continue }
                 if let s = shadow { drawShadow(s, box: px(rect)) }
-                drawQuad(tex, dst: px(r), src: uv(r, in: bg), alpha: nil)
+                for clip in clips {
+                    let r = clip.intersection(display)
+                    if !r.isEmpty { drawQuad(tex, dst: px(r), src: uv(r, in: bg), alpha: nil) }
+                }
             case .layer(let c, let frame, let shadow, let dim):
                 guard c.canvas != nil else { continue }
                 if let s = shadow { drawShadow(s, box: px(PixelRect(x: frame.x, y: frame.y, width: c.width, height: c.height))) }
@@ -571,7 +581,7 @@ public enum SceneRenderer {
             }
         }
         re.endEncoding()
-        cb.present(drawable)
+        if let present { cb.present(present) }
         cb.commit()
         bg.markRendered()
         for item in scene.items { if case .layer(let c, _, _, _) = item { c.markRendered() } }

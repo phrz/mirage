@@ -141,7 +141,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     cur.start(on: self.queue)
                     self.cursor = cur
                     cap.onStop = { [weak self] err in self?.log("capture stopped: \(err.map { "\($0)" } ?? "ok")") }
-                    if let s = sample { self.reconcileLayers(s.sample, now: now); self.publishWindows(now: now, full: true) }
+                    if let s = sample {
+                        // The window list as the host sees it (levels, owners, sizes; titles only for our bench): the
+                        // first thing to look at when a window does not show up on the viewer.
+                        let area = t.pixelWidth * t.pixelHeight
+                        for w in s.sample.windows { self.log(String(format: "window %u level %d owner %@ %dx%d at %d,%d%@%@", w.id, w.windowLevel, (w.app ?? "?") as NSString, w.frame.width, w.frame.height, w.frame.x, w.frame.y, Self.cutoutSafe(w, displayArea: area) ? " cut-out" : "", w.title.contains("Mirage Test Bench") ? " (bench)" : "")) }
+                        self.reconcileLayers(s.sample, now: now); self.publishWindows(now: now, full: true)
+                    }
                     self.startTimers()
                     c.resume(returning: t.info)
                 } catch { c.resume(throwing: error) }
@@ -511,10 +517,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if l.absentSince == 0 { l.absentSince = now }
             else if now - l.absentSince > layerRetainNanos { layers[id] = nil; ax?.forget(id); log("layer \(id) released") }
         }
-        // Occlusion on the host, frontmost flag, and the capture rate per layer.
+        // Occlusion on the host, frontmost flag, and the capture rate per layer. Only windows that are opaque for
+        // sure occlude: other layers and cut-out-safe windows (menus, the dock, app windows). A transparent
+        // overlay in front of everything (the M3.1 field regression) must not hold every layer's pixels back.
+        let displayArea = displayRect.area
+        let occluders = s.windows.filter { plannedIDs.contains($0.id) || Self.cutoutSafe($0, displayArea: displayArea) }
         for w in planned {
             guard let l = layers[w.id] else { continue }
-            let (fraction, covering) = WindowTracker.occlusion(of: w, in: s.windows, display: displayRect)
+            let (fraction, covering) = WindowTracker.occlusion(of: w, in: occluders, display: displayRect)
             l.visibleFraction = fraction
             l.frontmost = w.id == frontID
             // Tiles of the layer fully inside a covering rect (or outside the display) are occluded.
@@ -1004,7 +1014,26 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// the viewer holds (announced and with its still sent).
     private func currentList() -> [ControlMessage.WindowInfo] {
         guard let s = windows?.current else { return publishedWindows }
-        return s.windows.map { w in var w = w; w.layered = layers[w.id]?.exposed ?? false; if let l = layers[w.id], l.exposed, let r = w.scrollRect { w.scrollRect = l.local(r) }; return w }
+        let displayArea = display?.bounds.area ?? 1
+        return s.windows.map { w in
+            var w = w
+            let exposed = layers[w.id]?.exposed ?? false
+            w.layered = exposed
+            if exposed, let l = layers[w.id], let r = w.scrollRect { w.scrollRect = l.local(r) }
+            w.cutout = exposed ? nil : (Self.cutoutSafe(w, displayArea: displayArea) ? true : nil)
+            return w
+        }
+    }
+    /// Whether a window the display layer carries may be drawn by the client as a cut-out over window layers:
+    /// pop-up menus, popovers, tooltips, the dock and the menu bar (owned by apps or the system UI agents),
+    /// and normal app windows; never Window Server's own windows and never something desktop-sized above
+    /// the normal level (screen shields and transparent overlays, which would paint the display layer, minus
+    /// the layered windows, over everything).
+    static func cutoutSafe(_ w: ControlMessage.WindowInfo, displayArea: Int) -> Bool {
+        if w.app == "Window Server" && w.windowLevel != 24 && w.windowLevel != 25 { return false }
+        if w.windowLevel != 0 && w.frame.area * 10 >= displayArea * 6 { return false }
+        if w.windowLevel == 0 { return w.app != "Dock" && w.frame.area * 10 < displayArea * 9 }
+        return w.windowLevel > 0 && w.windowLevel < 1000
     }
     private func publishWindows(now: UInt64, full: Bool) {
         let list = currentList()
@@ -1227,6 +1256,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Fresh pictures: the display's ladder gates everything until its base is acked; window stills
         // and lossless blocks go one at a time, locus layer first.
         if let d = display { switch d.fresh { case .base, .climb: return; default: break } }
+        // Every window's still before any window's lossless blocks: with many large windows (a real desktop)
+        // one window's blocks would otherwise hold every other window's first picture back for tens of seconds.
+        if let l = ordered.first(where: { if case .still = $0.fresh { return true }; return false }) { freshStep(l, now: now); return }
         for l in ordered {
             switch l.fresh {
             case .still, .blocks: freshStep(l, now: now); return
@@ -1247,7 +1279,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard tileTokens > perSecond * 0.3 * 0.5, Double(refinementInFlight) < perSecond * 0.3 else { return }
         for l in ordered {
             guard let src = l.lastFrame else { continue }
-            let due = l.tracker.due(now: now, limit: 96, centre: locusTile(l))
+            var due = l.tracker.due(now: now, limit: 96, centre: locusTile(l))
+            // Tiles covered on the host (or off the display) wait until they are uncovered (reconcileLayers expedites them then).
+            if !l.occludedTiles.isEmpty {
+                let hidden = due.filter { l.occludedTiles.contains($0) }
+                if !hidden.isEmpty { l.tracker.defer(hidden, now: now, delayNanos: 3_600_000_000_000); due.removeAll { l.occludedTiles.contains($0) } }
+            }
             guard !due.isEmpty else { continue }
             // Take tiles until the budget is spent (allowed to go negative once).
             var take: [Int] = []

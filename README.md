@@ -35,6 +35,9 @@ layer. Dragging a window is local on both sides: a title-bar drag moves the laye
 the host the frame through Accessibility, a host-side drag arrives as window-list frames at 30 Hz, and
 in neither direction does a pixel travel for it (loopback: 0 video frames, 0 copy-rects, 0 bytes of the
 dragged window per 0.8 s burst, against 8 fps of video plus 25 copy-rects and 1–1.7 s to crisp before).
+`--stats` JSON carries per-layer diagnostics (`layers`: bytes received, canvas, frame, viewport rect,
+drawn as layer / cut-out / display, visible or why not); the test bench's `--overlay` opens a transparent
+full-screen window, the case that broke the first mac-daddy run.
 
 ## Build
 
