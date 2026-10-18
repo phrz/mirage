@@ -1400,3 +1400,45 @@ window's content and the underlay are sent. Two parts were avoidable and are gon
 The bare-desktop check still shows desktop at +100 ms, +1 s and +3 s (15 of 15). mac-daddy's next log will
 show the same lines, per app.
 
+**Fill again in the first 30 s (eighth mac-daddy run, ab0df4c).** Steady state was good (20–40 kbps after
+~35 s), but for the first ~30 s each move uncovered fill in jagged tiles again. Reproduced on loopback with
+two new bench windows:
+- `--icons`: a full-screen transparent normal-level window behind everything, with six opaque squares,
+  the way a desktop-icons app window looks to the window list.
+- `--photo [--front]`: an opaque photographic backdrop.
+
+Three causes, all now fixed:
+- **"Covered twice" counted transparent windows.** A transparent full-screen layer made every tile under
+  the bench count as covered twice, so its underlay was deferred. The host now measures where each layer
+  is opaque, from its own capture's alpha (5 points per tile, refreshed every 500 ms). Only opaque
+  coverage counts, for the underlay as well as for "covered twice". The window list carries
+  `opaque: false` for mostly transparent layers, and the viewer counts only opaque layers as hiding the
+  desktop. The log marks such layers "transparent".
+- **The viewer marked a transparent window's whole frame as unclean.** When a window became a layer, the
+  viewer assumed its pixels might sit in the desktop canvas across its whole frame. For a transparent
+  full-screen window that is the entire desktop, filled until it was all re-sent. Only windows that hide
+  what's behind them leave such marks now, and a window reported transparent has its marks withdrawn.
+- **A window ScreenCaptureKit does not list was presented as a layer anyway.** The icons window had a
+  layer, but its exclusion could not be applied, and the viewer correctly refused every desktop write
+  under a layer without an "excluded from" mark, i.e. the whole desktop. A window is now a layer for the
+  viewer only once its exclusion is applied. One unlisted window no longer holds back the others' exclusion.
+  A window that cannot be excluded within 5 s stays part of the desktop picture for the session.
+
+**Upgrade queue.** The q75→normal upgrade of uncovered underlay now runs from its own budget, 15 % of the
+tile budget, after the interactive yield and the motion freeze, so an animating desktop app cannot starve
+it and it never competes with interaction. The 30 s log shows it as "upgrade … of the refine".
+
+Loopback at ~150 ms RTT, 800 kbps, bench drifting, vacated band sampled +100 ms, +1 s and +3 s after each
+burst:
+
+| Case | Desktop shown |
+|---|---|
+| Icons window behind | 30 of 30 |
+| Plain 1.7x | 27 of 27 |
+| Native 2x | 27 of 27 |
+| Photographic backdrop (in front of the person's windows) | 30 of 30 |
+
+The photographic run is the one that isolates the desktop layer: 1.2 MB in the first 30 s (the first
+picture, including 84 KB of underlay and the upgrades), then **5 kbps in the second 30 s** (the clock)
+while the bench keeps drifting.
+

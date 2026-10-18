@@ -20,7 +20,7 @@ final class ScenarioRunner {
     private var lastBench: ControlMessage.WindowInfo?
     /// The bench window, or the last one seen (a window-list update can momentarily drop it).
     private func bench() -> ControlMessage.WindowInfo? {
-        if let w = session.windowsSnapshot().first(where: { $0.title.contains("Mirage Test Bench") && !$0.title.contains("overlay") }) { lastBench = w }
+        if let w = session.windowsSnapshot().first(where: { $0.title.contains("Mirage Test Bench") && !$0.title.contains("overlay") && !$0.title.contains("icons") }) { lastBench = w }
         return lastBench
     }
     /// The bench's visible part (it may have drifted partly off-screen); points are picked inside it,
@@ -164,7 +164,8 @@ final class ScenarioRunner {
                 let ppp = await MainActor.run { session.pixelsPerPoint }
                 let band = captionBand(frameBefore, ppp: ppp)
                 // Only where the scene shows the display layer: no window layer over the band.
-                let coveredByLayer = session.arrangedWindows().contains { $0.isLayered && $0.frame.intersects(band) }
+                // (Only opaque layers hide the desktop: the host marks transparent ones, like the bench's --icons window.)
+                let coveredByLayer = session.arrangedWindows().contains { $0.hidesBehind && $0.frame.intersects(band) && $0.id != now.id }
                 let free = coveredByLayer ? PixelRect.zero : band
                 if !free.isEmpty {
                     Task { [weak self] in

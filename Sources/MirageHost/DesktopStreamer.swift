@@ -103,9 +103,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let rows = layers.values.sorted { $0.account.total > $1.account.total }.map { l -> String in
             let a = l.account
             let who = l.isDisplay ? "desktop" : "\(byID[l.id]?.app ?? "?") \(l.id)"
-            return String(format: "%@ %dx%d vis %d%%: %.0f KB = still %.0f + blocks %.0f + refine %.0f + direct %.0f + video %.0f + underlay %.0f, dirty %.0f tiles/s",
-                          who as NSString, l.width, l.height, Int(l.visibleFraction * 100), Double(a.total) / 1000, Double(a.still) / 1000, Double(a.blocks) / 1000,
-                          Double(a.refine) / 1000, Double(a.direct) / 1000, Double(a.video) / 1000, Double(a.underlay) / 1000, Double(a.dirtyTiles) / 30)
+            return String(format: "%@ %dx%d vis %d%%%@: %.0f KB = still %.0f + blocks %.0f + refine %.0f + direct %.0f + video %.0f + underlay %.0f (upgrade %.0f of the refine), dirty %.0f tiles/s",
+                          who as NSString, l.width, l.height, Int(l.visibleFraction * 100), l.isDisplay || l.opaque ? "" : " transparent", Double(a.total) / 1000, Double(a.still) / 1000, Double(a.blocks) / 1000,
+                          Double(a.refine) / 1000, Double(a.direct) / 1000, Double(a.video) / 1000, Double(a.underlay) / 1000, Double(a.upgrade) / 1000, Double(a.dirtyTiles) / 30)
         }
         let total = layers.values.reduce(0) { $0 + $1.account.total }
         log(String(format: "layer bytes, last 30 s (%.0f kbps): ", Double(total) * 8 / 30 / 1000) + rows.joined(separator: " | "))
@@ -121,6 +121,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Capture sequence from which the display stream excludes each window (filter applied), and windows the
     /// exclusion check found visible in the display stream anyway.
     private var excludedFrom: [UInt32: UInt32] = [:]
+    /// Windows the display stream could not exclude within 5 s of their still (ScreenCaptureKit does not list them):
+    /// they stay part of the desktop picture for the rest of the session.
+    private var unexcludable = Set<UInt32>()
+    private var exposedSince: [UInt32: UInt64] = [:]
     private var exclusionFailing = Set<UInt32>()
     private var verifiedExclusions: Set<UInt32> { Set(excludedFrom.keys).subtracting(exclusionFailing) }
     /// Frames of the windows planned as layers (exposed or not yet) and, for a moment after a move, their previous
@@ -146,22 +150,31 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func updateDisplayHidden(now: UInt64) {
         guard let d = display else { return }
         var shown: [UInt32: PixelRect] = [:]
-        if !screenLocked { for (id, f) in plannedFrames where layers[id]?.exposed ?? false { shown[id] = f } }
+        if !screenLocked { for (id, f) in plannedFrames where (layers[id]?.exposed ?? false) && excludedFrom[id] != nil { shown[id] = f } }
         displayGuard.update(layered: shown, verified: verifiedExclusions, now: now)
         // Tiles fully under a shown window (inset by the corner radius): the underlay.
         let inset = Int(14 * (windows?.pxPerPoint ?? 2))
         let insetFrames = shown.values.map { PixelRect(x: $0.x + inset, y: $0.y + inset, width: $0.width - 2 * inset, height: $0.height - 2 * inset) }
+        // A tile is under a window only where that window's own pixels are opaque (a transparent full-screen window,
+        // an icons window or an overlay, hides nothing); "covered twice" means two opaque windows.
+        let shownLayers = shown.keys.compactMap { layers[$0] }
+        for l in shownLayers { l.refreshOpacity(now: now) }
         var under = Set<Int>(), doubly = Set<Int>()
         for i in 0..<d.tracker.tileCount {
             let r = d.tracker.rect(of: i)
-            let n = insetFrames.reduce(0) { $0 + ($1.intersection(r) == r ? 1 : 0) }
+            var n = 0
+            for l in shownLayers {
+                guard let f = shown[l.id] else { continue }
+                let core = PixelRect(x: f.x + inset, y: f.y + inset, width: f.width - 2 * inset, height: f.height - 2 * inset)
+                if core.intersection(r) == r, l.opaque(over: r) { n += 1 }
+            }
             if n >= 1 { under.insert(i) }
             if n >= 2 { doubly.insert(i) }
         }
         if under != d.underLayer {
             // Uncovered tiles that went out at underlay quality are refined at the normal quality now.
             let uncoveredLossy = d.underlayLossy.subtracting(under)
-            if !uncoveredLossy.isEmpty { d.tracker.markVideo(Array(uncoveredLossy), now: now); d.underlayLossy.subtract(uncoveredLossy) }
+            if !uncoveredLossy.isEmpty { d.upgradePending.formUnion(uncoveredLossy); d.underlayLossy.subtract(uncoveredLossy) }
             d.underLayer = under
         }
         // Desktop under two or more shown windows only shows if both move: its underlay waits until one window covers it.
@@ -577,7 +590,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         var out: [ControlMessage.WindowInfo] = []
         var pixels = 0
         for w in list where w.windowLevel == 0 && w.app != "Window Server" && w.app != "Dock" && w.frame.width >= 64 && w.frame.height >= 64
-                            && (Self.layerApps.map { $0.contains(w.app ?? "") } ?? true) {
+                            && (Self.layerApps.map { apps in apps.contains(w.app ?? "") || apps.contains { w.title.contains($0) } } ?? true) && !unexcludable.contains(w.id) {
             guard out.count < maxWindowLayers, pixels + w.frame.area <= maxLayerPixels else { continue }
             out.append(w); pixels += w.frame.area
         }
@@ -598,6 +611,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         let planned = screenLocked ? [] : plannedLayers(in: s.windows, displayPixels: t.pixelWidth * t.pixelHeight)
         for w in planned { if let f = plannedFrames[w.id], f != w.frame { recentFrames.append((f, now)) } }
+        for w in planned where (layers[w.id]?.exposed ?? false) && excludedFrom[w.id] == nil {
+            let since = exposedSince[w.id] ?? now; exposedSince[w.id] = since
+            if now - since > 5_000_000_000 {
+                unexcludable.insert(w.id)
+                log("layer \(w.id) (\(w.app ?? "?")): the display stream cannot exclude it (ScreenCaptureKit does not list it); it stays part of the desktop picture")
+            }
+        }
         plannedFrames = Dictionary(planned.map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a })
         let plannedIDs = Set(planned.map(\.id))
         var needCatalog: [UInt32] = []
@@ -669,11 +689,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // stream never excluded such a window and kept its pixels in the desktop layer (the ghost).
             let parents = Set(layers.keys).intersection(exposedIDs)
             let missingParents = parents.filter { catalog.window($0) == nil }
-            if missingParents.isEmpty {
+            // Exclude every window ScreenCaptureKit lists; one it does not list must not hold the others back (it is
+            // not presented as a layer until excluded, and is given up after 5 s).
+            if !missingParents.isEmpty { catalog.ensure(Array(missingParents)) { [weak self] in self?.queue.async { guard let self, let s = self.windows?.current else { return }; self.reconcileLayers(s, now: Clock.nowNanos()) } } }
+            do {
                 let scWindows = exposedIDs.compactMap { catalog.window($0) }
-                lastExcludedIDs = exposedIDs
+                // Parents missing from the catalog are left out of what counts as applied, so finding them later re-applies.
+                lastExcludedIDs = exposedIDs.subtracting(missingParents)
                 let skipped = exposedIDs.count - scWindows.count
-                if debugLayers || skipped > 0 && !loggedChildSkip { loggedChildSkip = true; log("display excludes \(scWindows.count) windows (\(skipped) child windows ScreenCaptureKit does not list stay in the display stream)") }
+                if debugLayers || skipped > 0 && !loggedChildSkip { loggedChildSkip = true; log("display excludes \(scWindows.count) windows (\(skipped) windows ScreenCaptureKit does not list stay in the display stream)") }
                 cap.requestExcluded(scWindows, log: { [weak self] in self?.log($0) }, applied: { [weak self] ids in
                     self?.queue.async {
                         guard let self else { return }
@@ -681,10 +705,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                         for id in Array(self.excludedFrom.keys) where !set.contains(id) { self.excludedFrom[id] = nil }
                         for id in ids where self.excludedFrom[id] == nil { self.excludedFrom[id] = self.captureSeq &+ 1 }
                         self.updateDisplayHidden(now: Clock.nowNanos())
+                        if let s = self.windows?.current { self.publishWindows(now: Clock.nowNanos(), full: false); _ = s }
                     }
                 })
-            } else {
-                catalog.ensure(Array(missingParents)) { [weak self] in self?.queue.async { guard let self, let s = self.windows?.current else { return }; self.reconcileLayers(s, now: Clock.nowNanos()) } }
             }
         }
     }
@@ -1218,15 +1241,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let displayArea = display?.bounds.area ?? 1
         return s.windows.map { w in
             var w = w
-            let exposed = !screenLocked && (layers[w.id]?.exposed ?? false)
+            // A window is a layer for the viewer only once the display stream excludes it: until then (and for good,
+            // if ScreenCaptureKit cannot exclude it) the desktop picture carries it and the viewer draws it from there.
+            let exposed = !screenLocked && (layers[w.id]?.exposed ?? false) && excludedFrom[w.id] != nil
             w.layered = exposed
             if exposed, let l = layers[w.id], let r = w.scrollRect { w.scrollRect = l.local(r) }
             w.cutout = exposed ? nil : (Self.cutoutSafe(w, displayArea: displayArea) ? true : nil)
             w.excludedFrom = exposed ? excludedFrom[w.id] : nil
+            w.opaque = exposed && !(layers[w.id]?.opaque ?? true) ? false : nil
             return w
         }
     }
-    /// Test only: MIRAGE_LAYER_APPS="App A,App B" layers only those apps' windows (a loopback run then sees the
+    /// Test only: MIRAGE_LAYER_APPS="App A,title part" layers only those apps' windows (or windows whose title contains an entry) (a loopback run then sees the
     /// rest of the person's screen as part of the display layer, like a bare desktop under the bench).
     static let layerApps: Set<String>? = ProcessInfo.processInfo.environment["MIRAGE_LAYER_APPS"].map { Set($0.split(separator: ",").map { String($0) }) }
 
@@ -1487,9 +1513,40 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Then what people can see before what they cannot: window layers (blocks, backlog, per-tile refinement,
         // locus window first) before the display layer, whose fresh picture includes the underlay under every
         // window (field run: a window's last uncovered column waited 14 s behind the desktop's blocks).
+        // The upgrade of uncovered q75 underlay runs on its own 15 % budget alongside the rest (not only when all
+        // else is idle: a desktop with an animating app would starve it).
+        if let d = display { upgradeStep(d, now: now) }
         let windowLayers = ordered.filter { !$0.isDisplay }
         if refineStep(windowLayers, now: now) { return }
         if let d = display { _ = refineStep([d], now: now) }
+    }
+
+    /// The q75 underlay of areas a move uncovered, refined to the normal quality: after everything else, from its
+    /// own budget (15 % of the tile budget), so it never competes with the interactive or refinement traffic.
+    private var upgradeTokens = 0.0
+    private var lastUpgradeRefill: UInt64 = 0
+    private func upgradeStep(_ d: Layer, now: UInt64) {
+        let rate = Double(lastBudget.tileKbps * 1000 / 8) * 0.15
+        upgradeTokens = min(rate * 0.5, upgradeTokens + Double(now &- (lastUpgradeRefill == 0 ? now : lastUpgradeRefill)) / 1e9 * rate)
+        lastUpgradeRefill = now
+        d.upgradePending.subtract(d.underLayer)   // covered again: nothing to upgrade there now
+        guard !d.upgradePending.isEmpty, upgradeTokens > 0, let src = d.lastFrame else { return }
+        var take: [Int] = []
+        var est = 0.0
+        for i in d.upgradePending.sorted() where !d.occludedTiles.contains(i) {
+            take.append(i); est += Double(d.tracker.rect(of: i).area) / 8
+            if est >= upgradeTokens || take.count >= 24 { break }
+        }
+        guard !take.isEmpty else { return }
+        CVPixelBufferLockBaseAddress(src, .readOnly); defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
+        let f = frameView(src)
+        guard f.width == d.width, f.height == d.height else { return }
+        displaySent(take)
+        let bytes = submitLossless(layer: d, tiles: take, from: f, refinement: true, nanos: now, tracker: d.tracker)
+        upgradeTokens -= Double(bytes)
+        d.tracker.sent(lossless: take, now: now)
+        d.upgradePending.subtract(take)
+        d.account.upgrade += bytes
     }
 
     /// One refinement step over `layers` in order: a fresh picture's next block, a large-backlog block plan, or a

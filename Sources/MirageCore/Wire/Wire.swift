@@ -327,9 +327,14 @@ public enum ControlMessage: Codable, Equatable {
         /// Layered windows: the display capture from which the display stream excludes this window. Desktop pixels
         /// captured before it may show the window; from it on, the desktop under the window is clean.
         public var excludedFrom: UInt32?
-        public init(id: UInt32, pid: Int32, title: String, frame: PixelRect, z: Int, scrollRect: PixelRect? = nil, level: Int? = nil, layered: Bool? = nil, app: String? = nil, cutout: Bool? = nil, excludedFrom: UInt32? = nil) {
-            self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect; self.level = level; self.layered = layered; self.app = app; self.cutout = cutout; self.excludedFrom = excludedFrom
+        /// Layered windows: false when the window's own pixels are mostly transparent (an overlay, a desktop-icons
+        /// window): it hides nothing behind it, so the desktop shows through it.
+        public var opaque: Bool?
+        public init(id: UInt32, pid: Int32, title: String, frame: PixelRect, z: Int, scrollRect: PixelRect? = nil, level: Int? = nil, layered: Bool? = nil, app: String? = nil, cutout: Bool? = nil, excludedFrom: UInt32? = nil, opaque: Bool? = nil) {
+            self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect; self.level = level; self.layered = layered; self.app = app; self.cutout = cutout; self.excludedFrom = excludedFrom; self.opaque = opaque
         }
+        /// Whether this window hides what is behind it (layered and not marked transparent).
+        public var hidesBehind: Bool { isLayered && (opaque ?? true) }
         public var isLayered: Bool { layered ?? false }
         public var windowLevel: Int { level ?? 0 }
     }

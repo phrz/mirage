@@ -638,8 +638,8 @@ final class ViewerSession: @unchecked Sendable {
         lastRefreshAskNanos = now
         let unknown = unknownDesktop
         guard !unknown.isEmpty else { return }
-        let layerRects = arrangedWindows().filter(\.isLayered).map(\.frame)
-        let visible = unknown.filter { _, parts in parts.contains { part in !layerRects.contains { $0.intersection(part) == part } } }.keys.sorted().prefix(4000)
+        let layerRects = arrangedWindows().filter(\.hidesBehind).map(\.frame)
+        let visible = unknown.filter { _, parts in parts.contains { p in !layerRects.contains { $0.intersection(p.rect) == p.rect } } }.keys.sorted().prefix(4000)
         guard !visible.isEmpty else { return }
         sender?.send(.refreshTiles(.init(layer: 0, tiles: visible.map { UInt32($0) })))
     }
@@ -647,14 +647,14 @@ final class ViewerSession: @unchecked Sendable {
     func unknownVisibleCount() -> Int {
         guard let c = compositor, c.width > 0 else { return 0 }
         _ = c
-        let layerRects = arrangedWindows().filter(\.isLayered).map(\.frame)
-        return unknownDesktop.filter { _, parts in parts.contains { part in !layerRects.contains { $0.intersection(part) == part } } }.count
+        let layerRects = arrangedWindows().filter(\.hidesBehind).map(\.frame)
+        return unknownDesktop.filter { _, parts in parts.contains { p in !layerRects.contains { $0.intersection(p.rect) == p.rect } } }.count
     }
     /// Whether the scene draws any of `rect` as fill (no clean desktop pixels known there).
     func desktopUnknown(_ rect: PixelRect) -> Bool {
         guard let c = compositor, c.width > 0 else { return false }
         _ = c
-        return unknownDesktop.values.contains { $0.contains { $0.intersects(rect) } }
+        return unknownDesktop.values.contains { $0.contains { $0.rect.intersects(rect) } }
     }
     /// Desktop tiles fully written by a host update that passed the guard hold clean desktop now.
     private func markDesktopClean(_ rects: [PixelRect]) {
@@ -957,9 +957,9 @@ final class ViewerSession: @unchecked Sendable {
     /// became a layer, so the canvas may still hold that window there; filled with the desktop colour wherever
     /// they show, until a clean write lands. Both on the video queue.
     private var viewerGuard = DisplayGuard(historyNanos: 500_000_000, margin: 0)
-    private var _unknownDesktop: [Int: [PixelRect]] = [:]
+    private var _unknownDesktop: [Int: [(id: UInt32, rect: PixelRect)]] = [:]
     private let desktopLock = NSLock()
-    private var unknownDesktop: [Int: [PixelRect]] {
+    private var unknownDesktop: [Int: [(id: UInt32, rect: PixelRect)]] {
         get { desktopLock.lock(); defer { desktopLock.unlock() }; return _unknownDesktop }
         set { desktopLock.lock(); _unknownDesktop = newValue; desktopLock.unlock() }
     }
@@ -1014,9 +1014,12 @@ final class ViewerSession: @unchecked Sendable {
         let moved = snapshot.contains { $0.isLayered && before[$0.id] != nil && before[$0.id] != $0.frame }
         // Where a newly layered window's pixels may sit in the desktop canvas: its frame minus the desktop-layer
         // windows that were in front of it (the canvas shows those there, not it).
-        let newlyLayered: [[PixelRect]] = snapshot.filter { $0.isLayered && !(before.keys.contains($0.id) && wasLayered.contains($0.id)) }.map { w in
-            w.frame.subtracting(snapshot.filter { $0.z < w.z && !$0.isLayered && $0.windowLevel == 0 }.map(\.frame))
+        // Only windows that hide what is behind them leave their pixels in the desktop canvas (a transparent overlay or
+        // icons window does so only where it is opaque, which is tiny; a full-frame mark would fill the whole desktop).
+        let newlyLayered: [(id: UInt32, pieces: [PixelRect])] = snapshot.filter { $0.hidesBehind && !(before.keys.contains($0.id) && wasLayered.contains($0.id)) }.map { w in
+            (w.id, w.frame.subtracting(snapshot.filter { $0.z < w.z && !$0.isLayered && $0.windowLevel == 0 }.map(\.frame)))
         }
+        let transparentIDs = Set(snapshot.filter { $0.isLayered && !$0.hidesBehind }.map(\.id))
         wasLayered = Set(snapshot.filter(\.isLayered).map(\.id))
         videoQueue.async { [weak self] in
             guard let self else { return }
@@ -1029,14 +1032,16 @@ final class ViewerSession: @unchecked Sendable {
             }
             for id in Array(self.preExclusionArea.keys) where !layered.contains(where: { $0.id == id }) && now - (self.layerViews[id]?.lastSeenInListNanos ?? 0) > 30_000_000_000 { self.preExclusionArea[id] = nil; self.excludedFrom[id] = nil }
             self.viewerGuard.update(layered: Dictionary(layered.map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a }), verified: Set(layered.compactMap { $0.excludedFrom == nil ? nil : $0.id }), now: now)
-            if let c = self.compositor, c.width > 0, !newlyLayered.isEmpty {
+            if let c = self.compositor, c.width > 0, !newlyLayered.isEmpty || !transparentIDs.isEmpty {
                 // The desktop canvas may hold this window exactly where it was when it became a layer.
                 let t = TileTracker(width: c.width, height: c.height)
                 var u = self.unknownDesktop
-                for pieces in newlyLayered { for p in pieces { for i in t.tiles(covering: [p]) {
+                for (id, pieces) in newlyLayered { for p in pieces { for i in t.tiles(covering: [p]) {
                     let part = t.rect(of: i).intersection(p)
-                    if !part.isEmpty { u[i, default: []].append(part) }
+                    if !part.isEmpty { u[i, default: []].append((id, part)) }
                 } } }
+                // A window the host reports transparent left (almost) nothing there: withdraw its marks.
+                if !transparentIDs.isEmpty { for (i, list) in u { let kept = list.filter { !transparentIDs.contains($0.id) }; u[i] = kept.isEmpty ? nil : kept } }
                 self.unknownDesktop = u
             }
             self.enforceLayerMemory(now: now)
@@ -1075,8 +1080,9 @@ final class ViewerSession: @unchecked Sendable {
         // Unknown desktop tiles that the scene shows (no window layer over them).
         refreshDesktopColor(now: Clock.nowNanos())
         let fillColor = desktopColor
-        let layerRects = plan.entries.filter { $0.kind == .layer }.map(\.frame)
-        let fill = unknownDesktop.values.flatMap { $0 }.filter { part in !layerRects.contains { $0.intersection(part) == part } }
+        let opaqueIDs = Set(arranged.filter(\.hidesBehind).map(\.id))
+        let layerRects = plan.entries.filter { $0.kind == .layer && opaqueIDs.contains($0.id) }.map(\.frame)
+        let fill = unknownDesktop.values.flatMap { $0.map(\.rect) }.filter { part in !layerRects.contains { $0.intersection(part) == part } }
         return LayerScene(background: bg, items: items, displacements: sd, bandColors: colors, displayFill: fill, fillColor: fillColor)
     }
 

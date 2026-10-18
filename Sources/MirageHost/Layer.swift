@@ -34,14 +34,42 @@ final class Layer {
     /// ones that went out lossy that way (refined at the normal quality once a window move uncovers them).
     var underLayer = Set<Int>()
     var underlayLossy = Set<Int>()
+    /// Uncovered underlay tiles waiting for their upgrade to the normal quality (rate-limited, served last).
+    var upgradePending = Set<Int>()
     /// Frames (inset) of the shown windows, for ordering the underlay edge-first.
     var underlayEdge: [PixelRect] = []
+    /// Window layers: which of the layer's own 64-px tiles are opaque (alpha 255 at 5 sample points), refreshed
+    /// from the last frame at most every 500 ms; and whether the window is opaque overall (≥ 90 % of tiles).
+    var opaqueTiles = Set<Int>()
+    var opaqueSampledNanos: UInt64 = 0
+    var opaque = true
+    func refreshOpacity(now: UInt64) {
+        guard !isDisplay, let pb = lastFrame, now - opaqueSampledNanos > 500_000_000 else { return }
+        opaqueSampledNanos = now
+        CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pb)?.assumingMemoryBound(to: UInt8.self), CVPixelBufferGetWidth(pb) == width else { return }
+        let stride = CVPixelBufferGetBytesPerRow(pb)
+        var set = Set<Int>()
+        for i in 0..<tracker.tileCount {
+            let r = tracker.rect(of: i)
+            let pts = [(r.x + 2, r.y + 2), (r.maxX - 3, r.y + 2), (r.x + 2, r.maxY - 3), (r.maxX - 3, r.maxY - 3), (r.x + r.width / 2, r.y + r.height / 2)]
+            if pts.allSatisfy({ p in p.0 >= 0 && p.1 >= 0 && p.0 < width && p.1 < height && base[p.1 * stride + p.0 * 4 + 3] == 255 }) { set.insert(i) }
+        }
+        opaqueTiles = set
+        opaque = set.count * 10 >= tracker.tileCount * 9
+    }
+    /// Whether the window's pixels are opaque over a display-coordinate rect (all layer tiles it touches).
+    func opaque(over displayRect: PixelRect) -> Bool {
+        let r = local(displayRect)
+        let ts = tracker.tiles(covering: [r])
+        return !ts.isEmpty && ts.allSatisfy { opaqueTiles.contains($0) }
+    }
     /// Captures with any change, and tile bytes sent, since the last stats line.
     var frames = 0
     var sentBytes = 0, sentRefine = 0, sentDirect = 0
     /// 30 s accounting by class (DESIGN §6 M3.1: what the steady traffic is): first-picture still, lossless blocks,
     /// per-tile refinement, direct changes, video, underlay (display only), and dirty tiles seen.
-    struct Account { var still = 0, blocks = 0, refine = 0, direct = 0, video = 0, underlay = 0, dirtyTiles = 0
+    struct Account { var still = 0, blocks = 0, refine = 0, direct = 0, video = 0, underlay = 0, dirtyTiles = 0, upgrade = 0
         var total: Int { still + blocks + refine + direct + video + underlay } }
     var account = Account()
 
