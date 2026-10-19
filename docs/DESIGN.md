@@ -839,6 +839,10 @@ round trips of prediction. Instead:
   cannot impersonate either side.
 - **Bookmarks.** The connect window lists "C via B" next to direct hosts; if A can reach C
   directly over the tailnet, it prefers the direct path and keeps the relay as a fallback.
+- **The offer itself** is a small toast over the nested viewer window when A detects it:
+  "You're viewing C through B" with two buttons, **Connect directly** (shown only if A can
+  reach C) and **Connect via B**, plus "don't ask for this host". Either choice opens C as its
+  own session in a new window and leaves the nested view alone.
 - **Scope.** Opt-in per host, off for hosts not paired with A; the relay forwards only Mirage
   traffic, never arbitrary ports.
 
