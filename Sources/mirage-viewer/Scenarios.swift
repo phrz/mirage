@@ -265,7 +265,9 @@ final class ScenarioRunner {
             session.log("scenario \(name): ABORT, bench is not frontmost (front: \(status.frontmostApp) \(status.frontmostWindowID) '\(status.frontmostWindowTitle)')"); return
         }
         if sinkDrag { session.log("scenario drag: host is in input-sink mode; frontmost guard waived (only the bench's own window can move)") }
-        let bandOK = await captionVisible(w, ppp: ppp)
+        var bandOK = await captionVisible(w, ppp: ppp)
+        // The bench's first picture may still be its lossy still: give it a few seconds before giving up.
+        for _ in 0..<10 where !bandOK { try? await Task.sleep(for: .seconds(1)); bandOK = await captionVisible(bench() ?? w, ppp: ppp) }
         guard bandOK || (name == "transient" && sinkDrag) else { session.log("scenario \(name): ABORT, the picture does not show the bench's caption band"); return }
         session.log("scenario \(name): checks passed (console unlocked, bench frontmost, caption visible)")
         guardedWindowID = w.id
