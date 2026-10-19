@@ -1,6 +1,7 @@
 import Foundation
 import ScreenCaptureKit
 import CoreMedia
+import VideoToolbox
 import MirageCore
 
 /// One window layer's capture: a *display* SCStream whose filter excludes every other window (the desktop picture,
@@ -45,17 +46,37 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
     struct ConfigKey: Equatable { var w: Int; var h: Int; var fps: Int; var rect: CGRect }
 
+    /// The display's own backing scale (pixels per point). ScreenCaptureKit scales the display *before* it crops the
+    /// source rect, so at any other output scale the window's pixels are resampled with a phase that depends on where the
+    /// window is: a window moved by a few points came back with every tile different (a quarter megabyte per move on
+    /// mac-daddy's 1.89 px/pt stream). The capture is therefore taken at the native scale, where it is position-
+    /// independent, and scaled to the layer's size here with a fixed transform (VTPixelTransfer).
+    private lazy var nativeScale: CGFloat = {
+        guard let m = CGDisplayCopyDisplayMode(display.displayID), m.width > 0 else { return 2 }
+        return CGFloat(m.pixelWidth) / CGFloat(m.width)
+    }()
+    private var transfer: VTPixelTransferSession?
+    private var pool: CVPixelBufferPool?
+    private var poolSize = (0, 0)
+    /// Captured pixel size: native when the layer's scale differs from it, else the layer size.
+    private var captureSize: (Int, Int) {
+        let nw = Int((pointFrame.width * nativeScale).rounded()), nh = Int((pointFrame.height * nativeScale).rounded())
+        if abs(nw - width) <= 2 && abs(nh - height) <= 2 { return (width, height) }
+        return (max(2, nw) & ~1, max(2, nh) & ~1)
+    }
+
     init(window: SCWindow, display: SCDisplay, pointFrame: CGRect, width: Int, height: Int, fps: Int, queue: DispatchQueue) {
         self.window = window; self.display = display; windowID = window.windowID
         self.pointFrame = pointFrame
         self.width = max(2, width) & ~1; self.height = max(2, height) & ~1; self.fps = fps; self.queue = queue
     }
 
-    private var key: ConfigKey { ConfigKey(w: width, h: height, fps: fps, rect: pointFrame) }
+    private var key: ConfigKey { let c = captureSize; return ConfigKey(w: c.0, h: c.1, fps: fps, rect: pointFrame) }
 
     private func configuration() -> SCStreamConfiguration {
         let c = SCStreamConfiguration()
-        c.width = width; c.height = height
+        let size = captureSize
+        c.width = size.0; c.height = size.1
         c.sourceRect = pointFrame.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
         c.pixelFormat = kCVPixelFormatType_32BGRA
         c.showsCursor = false
@@ -144,7 +165,8 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
         // Captured for the frame the window is at now, at the configured size; otherwise the window is moving or the
         // new configuration is not applied yet, and the frame would show it shifted or scaled.
-        guard CVPixelBufferGetWidth(pb) == width, CVPixelBufferGetHeight(pb) == height else { droppedMoved += 1; return }
+        let size = captureSize
+        guard CVPixelBufferGetWidth(pb) == size.0, CVPixelBufferGetHeight(pb) == size.1 else { droppedMoved += 1; return }
         let sr = (info[.screenRect] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0) }
         if Self.debug { hostLog("capture \(windowID): frame screenRect \(sr.map { "\($0)" } ?? "none") following \(pointFrame) dirty \(((info[.dirtyRects] as? [Any]) ?? []).compactMap { ($0 as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0) } })") }
         if display.frame.contains(pointFrame), let d = info[.screenRect] as? NSDictionary, let r = CGRect(dictionaryRepresentation: d) {
@@ -157,7 +179,30 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
         needFull = false
         frames += 1
-        onFrame?(pb, Clock.nowNanos())
+        if size.0 == width && size.1 == height { onFrame?(pb, Clock.nowNanos()) }
+        else if let out = scaled(pb) { onFrame?(out, Clock.nowNanos()) }
+    }
+
+    /// The native-scale capture at the layer's pixel size (alpha kept), from a small pool.
+    private func scaled(_ pb: CVPixelBuffer) -> CVPixelBuffer? {
+        if transfer == nil {
+            var t: VTPixelTransferSession?
+            guard VTPixelTransferSessionCreate(allocator: nil, pixelTransferSessionOut: &t) == noErr, let t else { return nil }
+            VTSessionSetProperty(t, key: kVTPixelTransferPropertyKey_ScalingMode, value: kVTScalingMode_Normal)
+            transfer = t
+        }
+        if pool == nil || poolSize != (width, height) {
+            let attrs: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey: width, kCVPixelBufferHeightKey: height,
+                                          kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+            var p: CVPixelBufferPool?
+            CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey: 4] as CFDictionary, attrs as CFDictionary, &p)
+            pool = p; poolSize = (width, height)
+        }
+        guard let pool, let transfer else { return nil }
+        var out: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &out) == kCVReturnSuccess, let out else { return nil }
+        guard VTPixelTransferSessionTransferImage(transfer, from: pb, to: out) == noErr else { return nil }
+        return out
     }
 
     /// For a window opaque to its edges: all four edge midpoints (outermost pixel) present (the window fills the source rect). Learned
