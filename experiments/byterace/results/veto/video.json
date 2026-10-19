@@ -1,0 +1,70 @@
+{
+  "layers" : [
+    {
+      "copyRectMsPerFrame" : 9.5590114048257373,
+      "copyRects" : 4,
+      "diffMsPerFrame" : 8.6162314329758711,
+      "dirtyTilesPerFrame" : 249.62550335570469,
+      "episodes" : 1,
+      "fallbackCopyRects" : 4,
+      "frames" : 746,
+      "height" : 1176,
+      "hostDetectorOnly" : false,
+      "name" : "player",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "veto" : {
+            "cacheRefs" : 0,
+            "copyRect" : 180,
+            "direct" : 1033829,
+            "estLosslessCPUmsPerFrame" : 40.975592189007898,
+            "estVideoCPUmsPerFrame" : 0,
+            "estVideoWallmsPerFrame" : 0,
+            "kbpsAvg" : 1050.0158646650775,
+            "keyframeCount" : 1,
+            "keyframes" : 46626,
+            "mediaPSNR" : 35.24260319772128,
+            "refinement" : 0,
+            "seconds" : 30.009672292000001,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : 30.1623047246242,
+            "toLossless" : 0,
+            "total" : 3938829,
+            "toVideo" : 1,
+            "video" : 2904820,
+            "videoFrames" : 711
+          }
+        },
+        {
+          "kbps" : 2000,
+          "veto" : {
+            "cacheRefs" : 0,
+            "copyRect" : 180,
+            "direct" : 1033829,
+            "estLosslessCPUmsPerFrame" : 40.922482158176784,
+            "estVideoCPUmsPerFrame" : 0,
+            "estVideoWallmsPerFrame" : 0,
+            "kbpsAvg" : 2468.1322501394011,
+            "keyframeCount" : 1,
+            "keyframes" : 46626,
+            "mediaPSNR" : 39.022632895006637,
+            "refinement" : 0,
+            "seconds" : 30.009672292000001,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : 30.1623047246242,
+            "toLossless" : 0,
+            "total" : 9258480,
+            "toVideo" : 1,
+            "video" : 8224471,
+            "videoFrames" : 741
+          }
+        }
+      ],
+      "width" : 1600
+    }
+  ],
+  "scene" : "video"
+}

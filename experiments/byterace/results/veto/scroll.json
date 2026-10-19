@@ -1,0 +1,70 @@
+{
+  "layers" : [
+    {
+      "copyRectMsPerFrame" : 1.3155797524339361,
+      "copyRects" : 314,
+      "diffMsPerFrame" : 1.8598259721835884,
+      "dirtyTilesPerFrame" : 13.550139275766016,
+      "episodes" : 14,
+      "fallbackCopyRects" : 0,
+      "frames" : 719,
+      "height" : 1176,
+      "hostDetectorOnly" : false,
+      "name" : "document",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "veto" : {
+            "cacheRefs" : 739,
+            "copyRect" : 14130,
+            "direct" : 628728,
+            "estLosslessCPUmsPerFrame" : 0,
+            "estVideoCPUmsPerFrame" : 0,
+            "estVideoWallmsPerFrame" : 0,
+            "kbpsAvg" : 208.6228688387894,
+            "keyframeCount" : 0,
+            "keyframes" : 0,
+            "mediaPSNR" : -1,
+            "refinement" : 0,
+            "seconds" : 24.651487291999999,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 642858,
+            "toVideo" : 0,
+            "video" : 0,
+            "videoFrames" : 0
+          }
+        },
+        {
+          "kbps" : 2000,
+          "veto" : {
+            "cacheRefs" : 739,
+            "copyRect" : 14130,
+            "direct" : 628728,
+            "estLosslessCPUmsPerFrame" : 0,
+            "estVideoCPUmsPerFrame" : 0,
+            "estVideoWallmsPerFrame" : 0,
+            "kbpsAvg" : 208.6228688387894,
+            "keyframeCount" : 0,
+            "keyframes" : 0,
+            "mediaPSNR" : -1,
+            "refinement" : 0,
+            "seconds" : 24.651487291999999,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 642858,
+            "toVideo" : 0,
+            "video" : 0,
+            "videoFrames" : 0
+          }
+        }
+      ],
+      "width" : 1600
+    }
+  ],
+  "scene" : "scroll"
+}

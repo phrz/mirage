@@ -1,0 +1,70 @@
+{
+  "layers" : [
+    {
+      "copyRectMsPerFrame" : 0.91850660639777471,
+      "copyRects" : 314,
+      "diffMsPerFrame" : 1.2993551363004172,
+      "dirtyTilesPerFrame" : 13.550139275766016,
+      "episodes" : 14,
+      "fallbackCopyRects" : 0,
+      "frames" : 719,
+      "height" : 1176,
+      "hostDetectorOnly" : false,
+      "name" : "document",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "race-q" : {
+            "cacheRefs" : 739,
+            "copyRect" : 14130,
+            "direct" : 628728,
+            "estLosslessCPUmsPerFrame" : 0,
+            "estVideoCPUmsPerFrame" : 0.20605988023952088,
+            "estVideoWallmsPerFrame" : 6.0061285988023965,
+            "kbpsAvg" : 208.6228688387894,
+            "keyframeCount" : 0,
+            "keyframes" : 0,
+            "mediaPSNR" : -1,
+            "refinement" : 0,
+            "seconds" : 24.651487291999999,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 642858,
+            "toVideo" : 0,
+            "video" : 0,
+            "videoFrames" : 0
+          }
+        },
+        {
+          "kbps" : 2000,
+          "race-q" : {
+            "cacheRefs" : 739,
+            "copyRect" : 14130,
+            "direct" : 628728,
+            "estLosslessCPUmsPerFrame" : 0,
+            "estVideoCPUmsPerFrame" : 0.19578443113772437,
+            "estVideoWallmsPerFrame" : 5.9174645838323316,
+            "kbpsAvg" : 208.6228688387894,
+            "keyframeCount" : 0,
+            "keyframes" : 0,
+            "mediaPSNR" : -1,
+            "refinement" : 0,
+            "seconds" : 24.651487291999999,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 642858,
+            "toVideo" : 0,
+            "video" : 0,
+            "videoFrames" : 0
+          }
+        }
+      ],
+      "width" : 1600
+    }
+  ],
+  "scene" : "scroll"
+}

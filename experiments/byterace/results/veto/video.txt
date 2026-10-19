@@ -1,0 +1,3 @@
+video/player: 746 frames 1600x1176, 249.6 dirty tiles/frame after copy-rects, 4 copy-rects (4 by the fallback), 1 episodes; diff 8.62 ms/frame, copy-rect search 9.56 ms/frame (analysis 26.4 s)
+    600 kbps veto  3938829 B   1050.0 kbps  (direct 1033829, refine 0, copy 180, video 2904820 of which key 46626; refs 0)  vframes 711 key 1  switches 1/0  text soft 0.0%  PSNR text 30.2 media 35.2  [54.5 s]
+   2000 kbps veto  9258480 B   2468.1 kbps  (direct 1033829, refine 0, copy 180, video 8224471 of which key 46626; refs 0)  vframes 741 key 1  switches 1/0  text soft 0.0%  PSNR text 30.2 media 39.0  [58.0 s]

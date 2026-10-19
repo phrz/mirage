@@ -1,0 +1,9 @@
+mixed/editor: 369 frames 1040x816, 0.4 dirty tiles/frame after copy-rects, 1 copy-rects (0 by the fallback), 6 episodes; diff 0.98 ms/frame, copy-rect search 0.00 ms/frame (analysis 3.0 s)
+    600 kbps veto    28314 B      5.6 kbps  (direct 28269, refine 0, copy 45, video 0 of which key 0; refs 28)  vframes 0 key 0  switches 0/0  text soft 0.0%  PSNR text nan media nan  [1.0 s]
+   2000 kbps veto    28314 B      5.6 kbps  (direct 28269, refine 0, copy 45, video 0 of which key 0; refs 28)  vframes 0 key 0  switches 0/0  text soft 0.0%  PSNR text nan media nan  [0.8 s]
+mixed/terminal: 363 frames 1040x816, 14.7 dirty tiles/frame after copy-rects, 45 copy-rects (44 by the fallback), 5 episodes; diff 1.01 ms/frame, copy-rect search 1.17 ms/frame (analysis 1.8 s)
+    600 kbps veto   509055 B    101.1 kbps  (direct 265404, refine 9364, copy 2025, video 232262 of which key 41961; refs 193)  vframes 57 key 1  switches 3/3  text soft 26.8%  PSNR text 22.7 media nan  [3.5 s]
+   2000 kbps veto   946999 B    188.1 kbps  (direct 265404, refine 9364, copy 2025, video 670206 of which key 41961; refs 193)  vframes 67 key 1  switches 3/3  text soft 26.8%  PSNR text 23.9 media nan  [2.6 s]
+mixed/status: 359 frames 840x816, 16.5 dirty tiles/frame after copy-rects, 0 copy-rects (0 by the fallback), 2 episodes; diff 0.68 ms/frame, copy-rect search 1.98 ms/frame (analysis 1.9 s)
+    600 kbps veto  1359788 B    271.5 kbps  (direct 26553, refine 0, copy 0, video 1333235 of which key 9884; refs 0)  vframes 349 key 1  switches 1/0  text soft 0.0%  PSNR text 27.6 media 46.8  [9.2 s]
+   2000 kbps veto  1887989 B    377.0 kbps  (direct 26553, refine 0, copy 0, video 1861436 of which key 9884; refs 0)  vframes 353 key 1  switches 1/0  text soft 0.0%  PSNR text 27.6 media 49.0  [7.4 s]

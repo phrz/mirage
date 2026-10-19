@@ -1,0 +1,70 @@
+{
+  "layers" : [
+    {
+      "copyRectMsPerFrame" : 0.72841605208333327,
+      "copyRects" : 8,
+      "diffMsPerFrame" : 0.71307353750000002,
+      "dirtyTilesPerFrame" : 31.144050104384135,
+      "episodes" : 1,
+      "fallbackCopyRects" : 0,
+      "frames" : 480,
+      "height" : 1176,
+      "hostDetectorOnly" : false,
+      "name" : "page",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "veto" : {
+            "cacheRefs" : 0,
+            "copyRect" : 360,
+            "direct" : 53182,
+            "estLosslessCPUmsPerFrame" : 36.16936200208329,
+            "estVideoCPUmsPerFrame" : 0,
+            "estVideoWallmsPerFrame" : 0,
+            "kbpsAvg" : 771.9834264814973,
+            "keyframeCount" : 1,
+            "keyframes" : 2836,
+            "mediaPSNR" : 47.622300930934365,
+            "refinement" : 0,
+            "seconds" : 19.354063167,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 1867627,
+            "toVideo" : 1,
+            "video" : 1814085,
+            "videoFrames" : 462
+          }
+        },
+        {
+          "kbps" : 2000,
+          "veto" : {
+            "cacheRefs" : 0,
+            "copyRect" : 360,
+            "direct" : 53182,
+            "estLosslessCPUmsPerFrame" : 36.946055887499831,
+            "estVideoCPUmsPerFrame" : 0,
+            "estVideoWallmsPerFrame" : 0,
+            "kbpsAvg" : 1482.7427063961695,
+            "keyframeCount" : 1,
+            "keyframes" : 2836,
+            "mediaPSNR" : 50.78406327981385,
+            "refinement" : 0,
+            "seconds" : 19.354063167,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 3587137,
+            "toVideo" : 1,
+            "video" : 3533595,
+            "videoFrames" : 476
+          }
+        }
+      ],
+      "width" : 1600
+    }
+  ],
+  "scene" : "anim-rich"
+}

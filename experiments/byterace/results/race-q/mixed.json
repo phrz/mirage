@@ -1,0 +1,200 @@
+{
+  "layers" : [
+    {
+      "copyRectMsPerFrame" : 0.00045191056910569104,
+      "copyRects" : 1,
+      "diffMsPerFrame" : 0.15985738753387532,
+      "dirtyTilesPerFrame" : 0.37771739130434784,
+      "episodes" : 6,
+      "fallbackCopyRects" : 0,
+      "frames" : 369,
+      "height" : 816,
+      "hostDetectorOnly" : false,
+      "name" : "editor",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "race-q" : {
+            "cacheRefs" : 59,
+            "copyRect" : 45,
+            "direct" : 19366,
+            "estLosslessCPUmsPerFrame" : 0.010530143631436313,
+            "estVideoCPUmsPerFrame" : 0.23766153846153845,
+            "estVideoWallmsPerFrame" : 3.9987192769230773,
+            "kbpsAvg" : 14.672414830857303,
+            "keyframeCount" : 1,
+            "keyframes" : 6449,
+            "mediaPSNR" : -1,
+            "refinement" : 10016,
+            "seconds" : 40.453599959000002,
+            "softFraction" : 0.18916863093426992,
+            "softTextTileSeconds" : 143.24197666399968,
+            "textPSNR" : 35.040359423182167,
+            "toLossless" : 2,
+            "total" : 74194,
+            "toVideo" : 2,
+            "video" : 44767,
+            "videoFrames" : 33
+          }
+        },
+        {
+          "kbps" : 2000,
+          "race-q" : {
+            "cacheRefs" : 59,
+            "copyRect" : 45,
+            "direct" : 19366,
+            "estLosslessCPUmsPerFrame" : 0.0095864959349593517,
+            "estVideoCPUmsPerFrame" : 0.17830769230769233,
+            "estVideoWallmsPerFrame" : 3.4592320153846154,
+            "kbpsAvg" : 14.756263981574119,
+            "keyframeCount" : 1,
+            "keyframes" : 6449,
+            "mediaPSNR" : -1,
+            "refinement" : 10016,
+            "seconds" : 40.453599959000002,
+            "softFraction" : 0.18916863093426992,
+            "softTextTileSeconds" : 143.24197666399968,
+            "textPSNR" : 35.198958489269629,
+            "toLossless" : 2,
+            "total" : 74618,
+            "toVideo" : 2,
+            "video" : 45191,
+            "videoFrames" : 34
+          }
+        }
+      ],
+      "width" : 1040
+    },
+    {
+      "copyRectMsPerFrame" : 0.36573815426997242,
+      "copyRects" : 45,
+      "diffMsPerFrame" : 0.26345233608815427,
+      "dirtyTilesPerFrame" : 14.707182320441989,
+      "episodes" : 5,
+      "fallbackCopyRects" : 44,
+      "frames" : 363,
+      "height" : 816,
+      "hostDetectorOnly" : false,
+      "name" : "terminal",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "race-q" : {
+            "cacheRefs" : 342,
+            "copyRect" : 2025,
+            "direct" : 204553,
+            "estLosslessCPUmsPerFrame" : 1.426921848484848,
+            "estVideoCPUmsPerFrame" : 0.17309090909090921,
+            "estVideoWallmsPerFrame" : 3.2912773090909111,
+            "kbpsAvg" : 95.137214954660891,
+            "keyframeCount" : 1,
+            "keyframes" : 41984,
+            "mediaPSNR" : -1,
+            "refinement" : 12759,
+            "seconds" : 40.271685499999997,
+            "softFraction" : 0.91028463089883782,
+            "softTextTileSeconds" : 6978.1572459625113,
+            "textPSNR" : 23.043273684041328,
+            "toLossless" : 3,
+            "total" : 478917,
+            "toVideo" : 3,
+            "video" : 259580,
+            "videoFrames" : 62
+          }
+        },
+        {
+          "kbps" : 2000,
+          "race-q" : {
+            "cacheRefs" : 396,
+            "copyRect" : 2025,
+            "direct" : 208698,
+            "estLosslessCPUmsPerFrame" : 2.6530507190082639,
+            "estVideoCPUmsPerFrame" : 0.3410818181818181,
+            "estVideoWallmsPerFrame" : 6.0780144272727252,
+            "kbpsAvg" : 175.7767004810365,
+            "keyframeCount" : 1,
+            "keyframes" : 41984,
+            "mediaPSNR" : -1,
+            "refinement" : 8827,
+            "seconds" : 40.271685499999997,
+            "softFraction" : 0.90882026438675134,
+            "softTextTileSeconds" : 6966.9315485924799,
+            "textPSNR" : 27.204854387427858,
+            "toLossless" : 3,
+            "total" : 884853,
+            "toVideo" : 3,
+            "video" : 665303,
+            "videoFrames" : 61
+          }
+        }
+      ],
+      "width" : 1040
+    },
+    {
+      "copyRectMsPerFrame" : 3.5614234623955432,
+      "copyRects" : 0,
+      "diffMsPerFrame" : 1.0255800919220055,
+      "dirtyTilesPerFrame" : 16.505586592178769,
+      "episodes" : 2,
+      "fallbackCopyRects" : 0,
+      "frames" : 359,
+      "height" : 816,
+      "hostDetectorOnly" : false,
+      "name" : "status",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "race-q" : {
+            "cacheRefs" : 0,
+            "copyRect" : 0,
+            "direct" : 13821,
+            "estLosslessCPUmsPerFrame" : 20.57482744289695,
+            "estVideoCPUmsPerFrame" : 0.27865642458100603,
+            "estVideoWallmsPerFrame" : 3.766901877094972,
+            "kbpsAvg" : 271.15419250075684,
+            "keyframeCount" : 1,
+            "keyframes" : 9883,
+            "mediaPSNR" : 46.764732182431956,
+            "refinement" : 0,
+            "seconds" : 40.065675915999996,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : 27.640770671787234,
+            "toLossless" : 0,
+            "total" : 1357997,
+            "toVideo" : 1,
+            "video" : 1344176,
+            "videoFrames" : 352
+          }
+        },
+        {
+          "kbps" : 2000,
+          "race-q" : {
+            "cacheRefs" : 0,
+            "copyRect" : 0,
+            "direct" : 13821,
+            "estLosslessCPUmsPerFrame" : 20.833102512534829,
+            "estVideoCPUmsPerFrame" : 0.29159776536312915,
+            "estVideoWallmsPerFrame" : 3.9131878324022389,
+            "kbpsAvg" : 375.20315472817845,
+            "keyframeCount" : 1,
+            "keyframes" : 9883,
+            "mediaPSNR" : 49.255746008466986,
+            "refinement" : 0,
+            "seconds" : 40.065675915999996,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : 27.640770671787234,
+            "toLossless" : 0,
+            "total" : 1879096,
+            "toVideo" : 1,
+            "video" : 1865275,
+            "videoFrames" : 355
+          }
+        }
+      ],
+      "width" : 840
+    }
+  ],
+  "scene" : "mixed"
+}

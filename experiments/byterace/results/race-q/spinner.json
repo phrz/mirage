@@ -1,0 +1,70 @@
+{
+  "layers" : [
+    {
+      "copyRectMsPerFrame" : 0.00016539005736137668,
+      "copyRects" : 0,
+      "diffMsPerFrame" : 0.32190616061185467,
+      "dirtyTilesPerFrame" : 1.6053639846743295,
+      "episodes" : 1,
+      "fallbackCopyRects" : 0,
+      "frames" : 523,
+      "height" : 1176,
+      "hostDetectorOnly" : false,
+      "name" : "settings",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "race-q" : {
+            "cacheRefs" : 376,
+            "copyRect" : 0,
+            "direct" : 30705,
+            "estLosslessCPUmsPerFrame" : 0,
+            "estVideoCPUmsPerFrame" : 0.17210172744721713,
+            "estVideoWallmsPerFrame" : 5.8283925719769663,
+            "kbpsAvg" : 12.278068050614754,
+            "keyframeCount" : 0,
+            "keyframes" : 0,
+            "mediaPSNR" : -1,
+            "refinement" : 0,
+            "seconds" : 20.006404834000001,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 30705,
+            "toVideo" : 0,
+            "video" : 0,
+            "videoFrames" : 0
+          }
+        },
+        {
+          "kbps" : 2000,
+          "race-q" : {
+            "cacheRefs" : 376,
+            "copyRect" : 0,
+            "direct" : 30705,
+            "estLosslessCPUmsPerFrame" : 0,
+            "estVideoCPUmsPerFrame" : 0.17316890595009643,
+            "estVideoWallmsPerFrame" : 5.7471372456813858,
+            "kbpsAvg" : 12.278068050614754,
+            "keyframeCount" : 0,
+            "keyframes" : 0,
+            "mediaPSNR" : -1,
+            "refinement" : 0,
+            "seconds" : 20.006404834000001,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 30705,
+            "toVideo" : 0,
+            "video" : 0,
+            "videoFrames" : 0
+          }
+        }
+      ],
+      "width" : 1600
+    }
+  ],
+  "scene" : "spinner"
+}

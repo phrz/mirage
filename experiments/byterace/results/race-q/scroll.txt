@@ -1,0 +1,5 @@
+scroll/document: 719 frames 1600x1176, 13.6 dirty tiles/frame after copy-rects, 314 copy-rects (0 by the fallback), 14 episodes; diff 1.30 ms/frame, copy-rect search 0.92 ms/frame (analysis 3.0 s)
+    600 kbps race-q   642858 B    208.6 kbps  (direct 628728, refine 0, copy 14130, video 0 of which key 0; refs 739)  vframes 0 key 0  switches 0/0  text soft 0.0%  PSNR text nan media nan  [3.9 s]
+        race estimates: video (shadow session) 0.21 ms CPU, 6.01 ms wall per estimated frame (334); lossless-in-video 0.00 ms CPU total/frame
+   2000 kbps race-q   642858 B    208.6 kbps  (direct 628728, refine 0, copy 14130, video 0 of which key 0; refs 739)  vframes 0 key 0  switches 0/0  text soft 0.0%  PSNR text nan media nan  [3.7 s]
+        race estimates: video (shadow session) 0.20 ms CPU, 5.92 ms wall per estimated frame (334); lossless-in-video 0.00 ms CPU total/frame
