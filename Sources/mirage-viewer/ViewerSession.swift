@@ -471,6 +471,7 @@ final class ViewerSession: @unchecked Sendable {
                     for v in self.layerViews.values { v.lastRecoverySeq = 0; v.losslessAt = [] }
                     self.streamStartNanos = Clock.nowNanos(); self.legibleUnderPointerMs = nil
                 }
+                if info.displayWidth > 0 { hostPxPerPoint = Double(info.width) / Double(info.displayWidth) }
                 Task { @MainActor in model.streamInfo = info; model.status = "streaming \(info.width)x\(info.height) from \(host)" }
             case .cursorShape(let c):
                 if let img = NSImage(data: c.png) {
@@ -684,9 +685,12 @@ final class ViewerSession: @unchecked Sendable {
                     if Self.debugTiles { log("tiles\(t.refinement ? " (refine)" : "") layer \(v.id) seq \(t.header.captureSeq) in watch rect: " + inside.map { "\($0.rect.width)x\($0.rect.height)@\($0.rect.x),\($0.rect.y) \($0.data.count)B \($0.format)" }.joined(separator: "  ")) }
                 }
             }
+            // Display rects first: displayRect takes predictorLock itself (NSLock is not recursive; calling it inside the
+            // lock deadlocked the video queue on the first direct tile, fc43def).
+            let landed = t.staged ? [] : t.tiles.map { displayRect($0.rect, layer: v.id) }
             predictorLock.lock()
             for tile in t.tiles { predictor.hostUpdate(inputSeq: t.header.inputSeq, rect: tile.rect, now: now) }
-            for tile in t.tiles where !t.staged { typeaheadLanded(inputSeq: t.header.inputSeq, rect: displayRect(tile.rect, layer: v.id), now: now) }
+            for r in landed { typeaheadLanded(inputSeq: t.header.inputSeq, rect: r, now: now) }
             predictorLock.unlock()
             sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: t.header.captureNanos, receivedNanos: now, bytes: bytes)))
         case .copyRect(let c):
@@ -1090,6 +1094,8 @@ final class ViewerSession: @unchecked Sendable {
 
     /// Guarded by predictorLock.
     private var typeahead = Typeahead()
+    /// Stream pixels per host point, readable from any queue (typeahead runs on the scenario's task too).
+    private var hostPxPerPoint = 2.0
     /// Key time per predicted glyph, and the measured times: key → drawn here, key → host pixels over it.
     private var typeaheadKeyNanos: [UInt64: UInt64] = [:]
     private(set) var typeaheadVisibleMs: [Double] = [], typeaheadEchoMs: [Double] = []
@@ -1128,8 +1134,7 @@ final class ViewerSession: @unchecked Sendable {
         let size = c.size ?? 13
         let font = c.font.flatMap { NSFont(name: $0, size: size) } ?? NSFont.systemFont(ofSize: size)
         let w = (c.secure ? "•" : ch as NSString).size(withAttributes: [.font: font]).width
-        let ppp = MainActor.assumeIsolated { pixelsPerPoint }
-        return max(1, Int((w * ppp).rounded()))
+        return max(1, Int((w * hostPxPerPoint).rounded()))
     }
     /// What the overlay draws (and the first time each glyph is drawn, for the time-to-visible metric).
     struct TypeaheadView { var glyphs: [Typeahead.Glyph]; var font: String?; var size: Double; var color: [Double]? }
