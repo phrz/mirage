@@ -820,6 +820,28 @@ separate axis and gets its own acceptance test, run with the macOS link conditio
 This is milestone work in its own right (M2.5 or the first part of M3), not a side effect of
 the codec. Built 2026-10-17 as M2.5 (§3.3c); loopback measurements in §6.
 
+### 4b. Deferred: nested sessions become forwarded sessions (phrz, 2026-10-19)
+
+Viewing C inside a Mirage Viewer running on B, from A, compresses twice and stacks two
+round trips of prediction. Instead:
+
+- **Detect it.** B's host knows when one of its windows is a Mirage Viewer (bundle id
+  `com.paulherz.mirage.viewer`) and which host that viewer is connected to; it tells A in the
+  window list. A's viewer then offers, or does automatically per a preference: "Open C
+  directly via B".
+- **Forward, don't re-encode.** B's viewer process (or its host) acts as a relay for an A↔C
+  session: QUIC streams and datagrams are forwarded opaquely, so authentication and
+  encryption stay end to end between A and C and B never sees pixels. A's viewer shows C's
+  own layers, with C's own prediction and refinement, at C's own quality.
+- **Pairing.** A must be authorized on C. Either A is already paired with C, or B brokers a
+  one-time pairing: B shows the 6-digit code from C's `miraged pair` flow to A over the A↔B
+  session, and the CPace exchange itself still runs end to end A↔C through the relay, so B
+  cannot impersonate either side.
+- **Bookmarks.** The connect window lists "C via B" next to direct hosts; if A can reach C
+  directly over the tailnet, it prefers the direct path and keeps the relay as a fallback.
+- **Scope.** Opt-in per host, off for hosts not paired with A; the relay forwards only Mirage
+  traffic, never arbitrary ports.
+
 ## 5. Open questions to settle by measurement, not debate
 
 - HEVC low-latency mode lacks `ConstantBitRate`; verify `DataRateLimits` holds frame sizes
