@@ -1,0 +1,5 @@
+terminal/terminal: 1168 frames 1600x1176, 17.0 dirty tiles/frame after copy-rects, 308 copy-rects (308 by the fallback), 24 episodes; diff 0.63 ms/frame, copy-rect search 1.33 ms/frame (analysis 4.5 s)
+    600 kbps race-q  1959108 B    391.8 kbps  (direct 978300, refine 38924, copy 13860, video 928024 of which key 72771; refs 2513)  vframes 240 key 1  switches 4/4  text soft 62.3%  PSNR text 26.4 media nan  [12.3 s]
+        race estimates: video (shadow session) 0.20 ms CPU, 10.32 ms wall per estimated frame (633); lossless-in-video 0.91 ms CPU total/frame
+   2000 kbps race-q  3213950 B    642.8 kbps  (direct 978300, refine 38924, copy 13860, video 2182866 of which key 72771; refs 2513)  vframes 281 key 1  switches 4/4  text soft 62.3%  PSNR text 36.0 media nan  [14.2 s]
+        race estimates: video (shadow session) 0.25 ms CPU, 6.61 ms wall per estimated frame (633); lossless-in-video 1.19 ms CPU total/frame

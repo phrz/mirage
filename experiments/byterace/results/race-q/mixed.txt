@@ -1,0 +1,15 @@
+mixed/editor: 369 frames 1040x816, 0.4 dirty tiles/frame after copy-rects, 1 copy-rects (0 by the fallback), 6 episodes; diff 0.16 ms/frame, copy-rect search 0.00 ms/frame (analysis 3.1 s)
+    600 kbps race-q    74194 B     14.7 kbps  (direct 19366, refine 10016, copy 45, video 44767 of which key 6449; refs 59)  vframes 33 key 1  switches 2/2  text soft 18.9%  PSNR text 35.0 media nan  [1.1 s]
+        race estimates: video (shadow session) 0.24 ms CPU, 4.00 ms wall per estimated frame (65); lossless-in-video 0.01 ms CPU total/frame
+   2000 kbps race-q    74618 B     14.8 kbps  (direct 19366, refine 10016, copy 45, video 45191 of which key 6449; refs 59)  vframes 34 key 1  switches 2/2  text soft 18.9%  PSNR text 35.2 media nan  [0.7 s]
+        race estimates: video (shadow session) 0.18 ms CPU, 3.46 ms wall per estimated frame (65); lossless-in-video 0.01 ms CPU total/frame
+mixed/terminal: 363 frames 1040x816, 14.7 dirty tiles/frame after copy-rects, 45 copy-rects (44 by the fallback), 5 episodes; diff 0.26 ms/frame, copy-rect search 0.37 ms/frame (analysis 0.6 s)
+    600 kbps race-q   478917 B     95.1 kbps  (direct 204553, refine 12759, copy 2025, video 259580 of which key 41984; refs 342)  vframes 62 key 1  switches 3/3  text soft 91.0%  PSNR text 23.0 media nan  [1.7 s]
+        race estimates: video (shadow session) 0.17 ms CPU, 3.29 ms wall per estimated frame (110); lossless-in-video 1.43 ms CPU total/frame
+   2000 kbps race-q   884853 B    175.8 kbps  (direct 208698, refine 8827, copy 2025, video 665303 of which key 41984; refs 396)  vframes 61 key 1  switches 3/3  text soft 90.9%  PSNR text 27.2 media nan  [2.9 s]
+        race estimates: video (shadow session) 0.34 ms CPU, 6.08 ms wall per estimated frame (110); lossless-in-video 2.65 ms CPU total/frame
+mixed/status: 359 frames 840x816, 16.5 dirty tiles/frame after copy-rects, 0 copy-rects (0 by the fallback), 2 episodes; diff 1.03 ms/frame, copy-rect search 3.56 ms/frame (analysis 2.6 s)
+    600 kbps race-q  1357997 B    271.2 kbps  (direct 13821, refine 0, copy 0, video 1344176 of which key 9883; refs 0)  vframes 352 key 1  switches 1/0  text soft 0.0%  PSNR text 27.6 media 46.8  [14.0 s]
+        race estimates: video (shadow session) 0.28 ms CPU, 3.77 ms wall per estimated frame (358); lossless-in-video 20.57 ms CPU total/frame
+   2000 kbps race-q  1879096 B    375.2 kbps  (direct 13821, refine 0, copy 0, video 1865275 of which key 9883; refs 0)  vframes 355 key 1  switches 1/0  text soft 0.0%  PSNR text 27.6 media 49.3  [14.2 s]
+        race estimates: video (shadow session) 0.29 ms CPU, 3.91 ms wall per estimated frame (358); lossless-in-video 20.83 ms CPU total/frame

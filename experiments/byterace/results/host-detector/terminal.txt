@@ -1,0 +1,13 @@
+terminal/terminal: 1168 frames 1600x1176, 81.4 dirty tiles/frame after copy-rects, 0 copy-rects, 24 episodes; diff 0.61 ms/frame, copy-rect search 0.26 ms/frame (analysis 3.3 s)
+    600 kbps classifier  1990372 B    398.1 kbps  (direct 58292, refine 865215, copy 0, video 1066865 of which key 66646; refs 1454)  vframes 88 key 1  switches 0/0  text soft 31.6%  PSNR text 25.3 media nan  [5.1 s]
+    600 kbps all-lossless 12024857 B   2405.1 kbps  (direct 12024857, refine 0, copy 0, video 0 of which key 0; refs 18082)  vframes 0 key 0  switches 0/0  text soft 0.0%  PSNR text nan media nan  [5.6 s]
+    600 kbps all-video  3356518 B    671.3 kbps  (direct 0, refine 875653, copy 0, video 2480865 of which key 72634; refs 1662)  vframes 566 key 1  switches 24/23  text soft 54.5%  PSNR text 30.9 media nan  [11.5 s]
+    600 kbps race  7389742 B   1478.0 kbps  (direct 6192963, refine 464381, copy 0, video 732398 of which key 3771; refs 8225)  vframes 148 key 1  switches 7/7  text soft 23.1%  PSNR text 26.6 media nan  [19.2 s]
+        race estimates: video (shadow session) 0.25 ms CPU, 10.15 ms wall per estimated frame (593); lossless-in-video 5.11 ms CPU total/frame
+    600 kbps oracle  2069930 B    414.0 kbps  (direct 222182, refine 588644, copy 0, video 1259104 of which key 75014)  vframes 243  switches 6/6  text soft 45.5%  PSNR text 29.2 media nan  [7 of 24 episodes video]
+   2000 kbps classifier  4391903 B    878.4 kbps  (direct 58292, refine 865215, copy 0, video 3468396 of which key 66646; refs 1454)  vframes 342 key 1  switches 0/0  text soft 35.8%  PSNR text 41.6 media nan  [7.9 s]
+   2000 kbps all-lossless 12024857 B   2405.1 kbps  (direct 12024857, refine 0, copy 0, video 0 of which key 0; refs 18082)  vframes 0 key 0  switches 0/0  text soft 0.0%  PSNR text nan media nan  [5.5 s]
+   2000 kbps all-video  5346267 B   1069.3 kbps  (direct 0, refine 875653, copy 0, video 4470614 of which key 72634; refs 1662)  vframes 607 key 1  switches 24/23  text soft 54.5%  PSNR text 47.0 media nan  [11.7 s]
+   2000 kbps race  8855743 B   1771.2 kbps  (direct 6227614, refine 462158, copy 0, video 2165971 of which key 72964; refs 8242)  vframes 192 key 1  switches 6/6  text soft 25.7%  PSNR text 39.7 media nan  [22.3 s]
+        race estimates: video (shadow session) 0.27 ms CPU, 13.64 ms wall per estimated frame (634); lossless-in-video 5.13 ms CPU total/frame
+   2000 kbps oracle  4474718 B    895.0 kbps  (direct 222182, refine 588644, copy 0, video 3663892 of which key 75014)  vframes 367  switches 6/6  text soft 49.3%  PSNR text 43.3 media nan  [7 of 24 episodes video]

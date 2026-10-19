@@ -1,0 +1,21 @@
+terminal/terminal: 1168 frames 1600x1176, 17.0 dirty tiles/frame after copy-rects, 308 copy-rects (308 by the fallback), 24 episodes; diff 0.70 ms/frame, copy-rect search 1.48 ms/frame (analysis 5.0 s)
+    600 kbps classifier  1613418 B    322.7 kbps  (direct 94995, refine 334731, copy 13860, video 1169832 of which key 66646; refs 476)  vframes 281 key 1  switches 0/0  text soft 67.1%  PSNR text 29.1 media nan  [9.5 s]
+    600 kbps all-lossless  1762212 B    352.5 kbps  (direct 1748352, refine 0, copy 13860, video 0 of which key 0; refs 3060)  vframes 0 key 0  switches 0/0  text soft 0.0%  PSNR text nan media nan  [4.9 s]
+    600 kbps all-video  2868212 B    573.7 kbps  (direct 0, refine 357411, copy 13860, video 2496941 of which key 72634; refs 594)  vframes 566 key 1  switches 24/23  text soft 87.7%  PSNR text 28.6 media nan  [16.1 s]
+    600 kbps race  1784956 B    357.0 kbps  (direct 1609233, refine 8672, copy 13860, video 153191 of which key 3771; refs 2640)  vframes 20 key 1  switches 2/2  text soft 26.4%  PSNR text 19.0 media nan  [17.1 s]
+        race estimates: video (shadow session) 0.50 ms CPU, 11.45 ms wall per estimated frame (593); lossless-in-video 1.00 ms CPU total/frame
+    600 kbps race-fast  1825513 B    365.1 kbps  (direct 1028988, refine 37762, copy 13860, video 744903 of which key 73411; refs 2598)  vframes 196 key 1  switches 4/4  text soft 52.7%  PSNR text 27.3 media nan  [17.2 s]
+        race estimates: video (shadow session) 0.33 ms CPU, 10.54 ms wall per estimated frame (593); lossless-in-video 1.05 ms CPU total/frame
+    600 kbps hybrid  1804784 B    361.0 kbps  (direct 1092734, refine 28291, copy 13860, video 669899 of which key 73533; refs 2251)  vframes 174 key 1  switches 3/3  text soft 55.8%  PSNR text 27.3 media nan  [16.3 s]
+        race estimates: video (shadow session) 0.46 ms CPU, 12.25 ms wall per estimated frame (593); lossless-in-video 1.14 ms CPU total/frame
+    600 kbps oracle  1380198 B    276.1 kbps  (direct 945352, refine 12320, copy 13860, video 408666 of which key 71402)  vframes 82  switches 2/2  text soft 50.8%  PSNR text 27.6 media nan  [2 of 24 episodes video]
+   2000 kbps classifier  3977242 B    795.5 kbps  (direct 94995, refine 334731, copy 13860, video 3533656 of which key 66646; refs 476)  vframes 336 key 1  switches 0/0  text soft 71.8%  PSNR text 39.7 media nan  [10.3 s]
+   2000 kbps all-lossless  1762212 B    352.5 kbps  (direct 1748352, refine 0, copy 13860, video 0 of which key 0; refs 3060)  vframes 0 key 0  switches 0/0  text soft 0.0%  PSNR text nan media nan  [4.6 s]
+   2000 kbps all-video  5317620 B   1063.6 kbps  (direct 0, refine 357411, copy 13860, video 4946349 of which key 72634; refs 594)  vframes 607 key 1  switches 24/23  text soft 87.7%  PSNR text 40.4 media nan  [16.8 s]
+   2000 kbps race  1762212 B    352.5 kbps  (direct 1748352, refine 0, copy 13860, video 0 of which key 0; refs 3060)  vframes 0 key 0  switches 0/0  text soft 0.0%  PSNR text nan media nan  [15.3 s]
+        race estimates: video (shadow session) 0.46 ms CPU, 10.47 ms wall per estimated frame (634); lossless-in-video 0.00 ms CPU total/frame
+   2000 kbps race-fast  2636402 B    527.3 kbps  (direct 1598350, refine 19628, copy 13860, video 1004564 of which key 73829; refs 2953)  vframes 127 key 1  switches 2/2  text soft 33.2%  PSNR text 23.6 media nan  [18.0 s]
+        race estimates: video (shadow session) 0.48 ms CPU, 15.35 ms wall per estimated frame (634); lossless-in-video 0.47 ms CPU total/frame
+   2000 kbps hybrid  2602406 B    520.5 kbps  (direct 1266113, refine 22568, copy 13860, video 1299865 of which key 73533; refs 2662)  vframes 161 key 1  switches 2/2  text soft 36.2%  PSNR text 34.5 media nan  [15.4 s]
+        race estimates: video (shadow session) 0.31 ms CPU, 9.53 ms wall per estimated frame (634); lossless-in-video 0.67 ms CPU total/frame
+   2000 kbps oracle  1762212 B    352.5 kbps  (direct 1748352, refine 0, copy 13860, video 0 of which key 0)  vframes 0  switches 0/0  text soft 0.0%  PSNR text nan media nan  [0 of 24 episodes video]

@@ -1,0 +1,70 @@
+{
+  "layers" : [
+    {
+      "copyRectMsPerFrame" : 0.00021524526678141134,
+      "copyRects" : 0,
+      "diffMsPerFrame" : 0.44156013425129093,
+      "dirtyTilesPerFrame" : 0.30663221360895782,
+      "episodes" : 20,
+      "fallbackCopyRects" : 0,
+      "frames" : 1162,
+      "height" : 1176,
+      "hostDetectorOnly" : false,
+      "name" : "editor",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "veto" : {
+            "cacheRefs" : 31,
+            "copyRect" : 0,
+            "direct" : 86336,
+            "estLosslessCPUmsPerFrame" : 0,
+            "estVideoCPUmsPerFrame" : 0,
+            "estVideoWallmsPerFrame" : 0,
+            "kbpsAvg" : 17.263507264152643,
+            "keyframeCount" : 0,
+            "keyframes" : 0,
+            "mediaPSNR" : -1,
+            "refinement" : 0,
+            "seconds" : 40.008556165999998,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 86336,
+            "toVideo" : 0,
+            "video" : 0,
+            "videoFrames" : 0
+          }
+        },
+        {
+          "kbps" : 2000,
+          "veto" : {
+            "cacheRefs" : 31,
+            "copyRect" : 0,
+            "direct" : 86336,
+            "estLosslessCPUmsPerFrame" : 0,
+            "estVideoCPUmsPerFrame" : 0,
+            "estVideoWallmsPerFrame" : 0,
+            "kbpsAvg" : 17.263507264152643,
+            "keyframeCount" : 0,
+            "keyframes" : 0,
+            "mediaPSNR" : -1,
+            "refinement" : 0,
+            "seconds" : 40.008556165999998,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 86336,
+            "toVideo" : 0,
+            "video" : 0,
+            "videoFrames" : 0
+          }
+        }
+      ],
+      "width" : 1600
+    }
+  ],
+  "scene" : "typing"
+}

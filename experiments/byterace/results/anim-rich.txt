@@ -1,0 +1,21 @@
+anim-rich/page: 480 frames 1600x1176, 31.1 dirty tiles/frame after copy-rects, 8 copy-rects (0 by the fallback), 1 episodes; diff 0.63 ms/frame, copy-rect search 0.66 ms/frame (analysis 1.5 s)
+    600 kbps classifier  1813769 B    749.7 kbps  (direct 808, refine 0, copy 360, video 1812601 of which key 2870; refs 0)  vframes 462 key 1  switches 0/0  text soft 0.0%  PSNR text nan media 47.6  [10.3 s]
+    600 kbps all-lossless  8711944 B   3601.1 kbps  (direct 8711584, refine 0, copy 360, video 0 of which key 0; refs 78)  vframes 0 key 0  switches 0/0  text soft 0.0%  PSNR text nan media nan  [9.5 s]
+    600 kbps all-video  1805619 B    746.4 kbps  (direct 0, refine 0, copy 360, video 1805259 of which key 3558; refs 0)  vframes 462 key 1  switches 1/0  text soft 0.0%  PSNR text nan media 47.4  [7.1 s]
+    600 kbps race  2354662 B    973.3 kbps  (direct 682668, refine 0, copy 360, video 1671634 of which key 2832; refs 0)  vframes 426 key 1  switches 1/0  text soft 0.0%  PSNR text nan media 47.6  [40.8 s]
+        race estimates: video (shadow session) 0.30 ms CPU, 9.87 ms wall per estimated frame (449); lossless-in-video 43.63 ms CPU total/frame
+    600 kbps race-fast  2120863 B    876.7 kbps  (direct 386204, refine 0, copy 360, video 1734299 of which key 3533; refs 0)  vframes 444 key 1  switches 1/0  text soft 0.0%  PSNR text nan media 47.4  [39.5 s]
+        race estimates: video (shadow session) 0.24 ms CPU, 15.65 ms wall per estimated frame (449); lossless-in-video 37.41 ms CPU total/frame
+    600 kbps hybrid  2001065 B    827.1 kbps  (direct 228298, refine 0, copy 360, video 1772407 of which key 3589; refs 0)  vframes 453 key 1  switches 1/0  text soft 0.0%  PSNR text nan media 47.4  [40.3 s]
+        race estimates: video (shadow session) 0.24 ms CPU, 9.99 ms wall per estimated frame (449); lossless-in-video 38.63 ms CPU total/frame
+    600 kbps oracle  1805619 B    746.4 kbps  (direct 0, refine 0, copy 360, video 1805259 of which key 3558)  vframes 462  switches 1/0  text soft 0.0%  PSNR text nan media 47.4  [1 of 1 episodes video]
+   2000 kbps classifier  3534127 B   1460.8 kbps  (direct 808, refine 0, copy 360, video 3532959 of which key 2870; refs 0)  vframes 476 key 1  switches 0/0  text soft 0.0%  PSNR text nan media 50.6  [8.1 s]
+   2000 kbps all-lossless  8711944 B   3601.1 kbps  (direct 8711584, refine 0, copy 360, video 0 of which key 0; refs 78)  vframes 0 key 0  switches 0/0  text soft 0.0%  PSNR text nan media nan  [6.6 s]
+   2000 kbps all-video  3540571 B   1463.5 kbps  (direct 0, refine 0, copy 360, video 3540211 of which key 3558; refs 0)  vframes 476 key 1  switches 1/0  text soft 0.0%  PSNR text nan media 50.7  [13.2 s]
+   2000 kbps race  3899077 B   1611.7 kbps  (direct 587436, refine 0, copy 360, video 3311281 of which key 2850; refs 0)  vframes 446 key 1  switches 1/0  text soft 0.0%  PSNR text nan media 51.0  [39.9 s]
+        race estimates: video (shadow session) 0.24 ms CPU, 20.84 ms wall per estimated frame (476); lossless-in-video 37.08 ms CPU total/frame
+   2000 kbps race-fast  3730008 B   1541.8 kbps  (direct 272901, refine 0, copy 360, video 3456747 of which key 3589; refs 0)  vframes 465 key 1  switches 1/0  text soft 0.0%  PSNR text nan media 50.8  [38.4 s]
+        race estimates: video (shadow session) 0.25 ms CPU, 10.03 ms wall per estimated frame (476); lossless-in-video 39.08 ms CPU total/frame
+   2000 kbps hybrid  3630499 B   1500.7 kbps  (direct 119267, refine 0, copy 360, video 3510872 of which key 3566; refs 0)  vframes 472 key 1  switches 1/0  text soft 0.0%  PSNR text nan media 50.8  [43.8 s]
+        race estimates: video (shadow session) 0.27 ms CPU, 21.15 ms wall per estimated frame (476); lossless-in-video 44.10 ms CPU total/frame
+   2000 kbps oracle  3540571 B   1463.5 kbps  (direct 0, refine 0, copy 360, video 3540211 of which key 3558)  vframes 476  switches 1/0  text soft 0.0%  PSNR text nan media 50.7  [1 of 1 episodes video]

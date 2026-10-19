@@ -1,0 +1,70 @@
+{
+  "layers" : [
+    {
+      "copyRectMsPerFrame" : 7.0832265938337802,
+      "copyRects" : 4,
+      "diffMsPerFrame" : 6.700775144772118,
+      "dirtyTilesPerFrame" : 249.62550335570469,
+      "episodes" : 1,
+      "fallbackCopyRects" : 4,
+      "frames" : 746,
+      "height" : 1176,
+      "hostDetectorOnly" : false,
+      "name" : "player",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "race-q" : {
+            "cacheRefs" : 0,
+            "copyRect" : 180,
+            "direct" : 1033829,
+            "estLosslessCPUmsPerFrame" : 470.31593501206453,
+            "estVideoCPUmsPerFrame" : 0.41202159244264508,
+            "estVideoWallmsPerFrame" : 7.7167682253711263,
+            "kbpsAvg" : 1051.8717996269147,
+            "keyframeCount" : 1,
+            "keyframes" : 20661,
+            "mediaPSNR" : 35.31806641001711,
+            "refinement" : 0,
+            "seconds" : 30.009672292000001,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 3945791,
+            "toVideo" : 1,
+            "video" : 2911782,
+            "videoFrames" : 723
+          }
+        },
+        {
+          "kbps" : 2000,
+          "race-q" : {
+            "cacheRefs" : 0,
+            "copyRect" : 180,
+            "direct" : 1033829,
+            "estLosslessCPUmsPerFrame" : 513.71274539544243,
+            "estVideoCPUmsPerFrame" : 0.47452901484480398,
+            "estVideoWallmsPerFrame" : 12.07703216329284,
+            "kbpsAvg" : 2452.4842285472032,
+            "keyframeCount" : 1,
+            "keyframes" : 20661,
+            "mediaPSNR" : 39.126320678324468,
+            "refinement" : 0,
+            "seconds" : 30.009672292000001,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 9199781,
+            "toVideo" : 1,
+            "video" : 8165772,
+            "videoFrames" : 740
+          }
+        }
+      ],
+      "width" : 1600
+    }
+  ],
+  "scene" : "video"
+}

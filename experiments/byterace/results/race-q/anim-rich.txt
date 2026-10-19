@@ -1,0 +1,5 @@
+anim-rich/page: 480 frames 1600x1176, 31.1 dirty tiles/frame after copy-rects, 8 copy-rects (0 by the fallback), 1 episodes; diff 1.10 ms/frame, copy-rect search 1.13 ms/frame (analysis 2.5 s)
+    600 kbps race-q  1918770 B    793.1 kbps  (direct 118714, refine 0, copy 360, video 1799696 of which key 3567; refs 0)  vframes 460 key 1  switches 1/0  text soft 0.0%  PSNR text nan media 47.4  [59.2 s]
+        race estimates: video (shadow session) 0.73 ms CPU, 13.34 ms wall per estimated frame (475); lossless-in-video 80.43 ms CPU total/frame
+   2000 kbps race-q  3643684 B   1506.1 kbps  (direct 118714, refine 0, copy 360, video 3524610 of which key 3567; refs 0)  vframes 474 key 1  switches 1/0  text soft 0.0%  PSNR text nan media 50.8  [52.4 s]
+        race estimates: video (shadow session) 0.54 ms CPU, 11.00 ms wall per estimated frame (475); lossless-in-video 70.95 ms CPU total/frame

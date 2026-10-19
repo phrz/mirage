@@ -1,0 +1,70 @@
+{
+  "layers" : [
+    {
+      "copyRectMsPerFrame" : 1.3269186207191781,
+      "copyRects" : 308,
+      "diffMsPerFrame" : 0.62688384674657538,
+      "dirtyTilesPerFrame" : 16.982005141388175,
+      "episodes" : 24,
+      "fallbackCopyRects" : 308,
+      "frames" : 1168,
+      "height" : 1176,
+      "hostDetectorOnly" : false,
+      "name" : "terminal",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "race-q" : {
+            "cacheRefs" : 2513,
+            "copyRect" : 13860,
+            "direct" : 978300,
+            "estLosslessCPUmsPerFrame" : 0.91108996404109654,
+            "estVideoCPUmsPerFrame" : 0.19951342812006309,
+            "estVideoWallmsPerFrame" : 10.318886255924161,
+            "kbpsAvg" : 391.8402189443355,
+            "keyframeCount" : 1,
+            "keyframes" : 72771,
+            "mediaPSNR" : -1,
+            "refinement" : 38924,
+            "seconds" : 39.998099332999999,
+            "softFraction" : 0.623251186734046,
+            "softTextTileSeconds" : 10200.139168633661,
+            "textPSNR" : 26.371271368233209,
+            "toLossless" : 4,
+            "total" : 1959108,
+            "toVideo" : 4,
+            "video" : 928024,
+            "videoFrames" : 240
+          }
+        },
+        {
+          "kbps" : 2000,
+          "race-q" : {
+            "cacheRefs" : 2513,
+            "copyRect" : 13860,
+            "direct" : 978300,
+            "estLosslessCPUmsPerFrame" : 1.1864798056506853,
+            "estVideoCPUmsPerFrame" : 0.2480552922590841,
+            "estVideoWallmsPerFrame" : 6.6078653112164289,
+            "kbpsAvg" : 642.82054469490561,
+            "keyframeCount" : 1,
+            "keyframes" : 72771,
+            "mediaPSNR" : -1,
+            "refinement" : 38924,
+            "seconds" : 39.998099332999999,
+            "softFraction" : 0.623251186734046,
+            "softTextTileSeconds" : 10200.139168633661,
+            "textPSNR" : 36.040969095055395,
+            "toLossless" : 4,
+            "total" : 3213950,
+            "toVideo" : 4,
+            "video" : 2182866,
+            "videoFrames" : 281
+          }
+        }
+      ],
+      "width" : 1600
+    }
+  ],
+  "scene" : "terminal"
+}

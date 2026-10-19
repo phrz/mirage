@@ -1,0 +1,3 @@
+anim-rich/page: 480 frames 1600x1176, 31.1 dirty tiles/frame after copy-rects, 8 copy-rects (0 by the fallback), 1 episodes; diff 0.71 ms/frame, copy-rect search 0.73 ms/frame (analysis 1.6 s)
+    600 kbps veto  1867627 B    772.0 kbps  (direct 53182, refine 0, copy 360, video 1814085 of which key 2836; refs 0)  vframes 462 key 1  switches 1/0  text soft 0.0%  PSNR text nan media 47.6  [40.2 s]
+   2000 kbps veto  3587137 B   1482.7 kbps  (direct 53182, refine 0, copy 360, video 3533595 of which key 2836; refs 0)  vframes 476 key 1  switches 1/0  text soft 0.0%  PSNR text nan media 50.8  [44.6 s]

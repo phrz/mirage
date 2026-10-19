@@ -1,0 +1,3 @@
+spinner/settings: 523 frames 1600x1176, 1.6 dirty tiles/frame after copy-rects, 0 copy-rects (0 by the fallback), 1 episodes; diff 0.33 ms/frame, copy-rect search 0.00 ms/frame (analysis 1.3 s)
+    600 kbps veto    30705 B     12.3 kbps  (direct 30705, refine 0, copy 0, video 0 of which key 0; refs 376)  vframes 0 key 0  switches 0/0  text soft 0.0%  PSNR text nan media nan  [1.1 s]
+   2000 kbps veto    30705 B     12.3 kbps  (direct 30705, refine 0, copy 0, video 0 of which key 0; refs 376)  vframes 0 key 0  switches 0/0  text soft 0.0%  PSNR text nan media nan  [1.4 s]

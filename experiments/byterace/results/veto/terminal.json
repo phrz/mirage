@@ -1,0 +1,70 @@
+{
+  "layers" : [
+    {
+      "copyRectMsPerFrame" : 1.5468256369863014,
+      "copyRects" : 308,
+      "diffMsPerFrame" : 1.1659913030821918,
+      "dirtyTilesPerFrame" : 16.982005141388175,
+      "episodes" : 24,
+      "fallbackCopyRects" : 308,
+      "frames" : 1168,
+      "height" : 1176,
+      "hostDetectorOnly" : false,
+      "name" : "terminal",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "veto" : {
+            "cacheRefs" : 2282,
+            "copyRect" : 13860,
+            "direct" : 1101648,
+            "estLosslessCPUmsPerFrame" : 0.62270057363013542,
+            "estVideoCPUmsPerFrame" : 0,
+            "estVideoWallmsPerFrame" : 0,
+            "kbpsAvg" : 323.8157866494941,
+            "keyframeCount" : 1,
+            "keyframes" : 73533,
+            "mediaPSNR" : -1,
+            "refinement" : 27705,
+            "seconds" : 39.998099332999999,
+            "softFraction" : 0.50367493847862377,
+            "softTextTileSeconds" : 8243.1523237953479,
+            "textPSNR" : 27.780459001351009,
+            "toLossless" : 3,
+            "total" : 1619002,
+            "toVideo" : 3,
+            "video" : 475789,
+            "videoFrames" : 100
+          }
+        },
+        {
+          "kbps" : 2000,
+          "veto" : {
+            "cacheRefs" : 2282,
+            "copyRect" : 13860,
+            "direct" : 1101648,
+            "estLosslessCPUmsPerFrame" : 0.35189305821917749,
+            "estVideoCPUmsPerFrame" : 0,
+            "estVideoWallmsPerFrame" : 0,
+            "kbpsAvg" : 556.0780229786925,
+            "keyframeCount" : 1,
+            "keyframes" : 73533,
+            "mediaPSNR" : -1,
+            "refinement" : 27705,
+            "seconds" : 39.998099332999999,
+            "softFraction" : 0.51752548075521554,
+            "softTextTileSeconds" : 8469.8305264035153,
+            "textPSNR" : 36.815230291820448,
+            "toLossless" : 3,
+            "total" : 2780258,
+            "toVideo" : 3,
+            "video" : 1637045,
+            "videoFrames" : 161
+          }
+        }
+      ],
+      "width" : 1600
+    }
+  ],
+  "scene" : "terminal"
+}

@@ -1,0 +1,70 @@
+{
+  "layers" : [
+    {
+      "copyRectMsPerFrame" : 0.0001994302103250478,
+      "copyRects" : 0,
+      "diffMsPerFrame" : 0.33068873040152963,
+      "dirtyTilesPerFrame" : 1.6053639846743295,
+      "episodes" : 1,
+      "fallbackCopyRects" : 0,
+      "frames" : 523,
+      "height" : 1176,
+      "hostDetectorOnly" : false,
+      "name" : "settings",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "veto" : {
+            "cacheRefs" : 376,
+            "copyRect" : 0,
+            "direct" : 30705,
+            "estLosslessCPUmsPerFrame" : 0,
+            "estVideoCPUmsPerFrame" : 0,
+            "estVideoWallmsPerFrame" : 0,
+            "kbpsAvg" : 12.278068050614754,
+            "keyframeCount" : 0,
+            "keyframes" : 0,
+            "mediaPSNR" : -1,
+            "refinement" : 0,
+            "seconds" : 20.006404834000001,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 30705,
+            "toVideo" : 0,
+            "video" : 0,
+            "videoFrames" : 0
+          }
+        },
+        {
+          "kbps" : 2000,
+          "veto" : {
+            "cacheRefs" : 376,
+            "copyRect" : 0,
+            "direct" : 30705,
+            "estLosslessCPUmsPerFrame" : 0,
+            "estVideoCPUmsPerFrame" : 0,
+            "estVideoWallmsPerFrame" : 0,
+            "kbpsAvg" : 12.278068050614754,
+            "keyframeCount" : 0,
+            "keyframes" : 0,
+            "mediaPSNR" : -1,
+            "refinement" : 0,
+            "seconds" : 20.006404834000001,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 30705,
+            "toVideo" : 0,
+            "video" : 0,
+            "videoFrames" : 0
+          }
+        }
+      ],
+      "width" : 1600
+    }
+  ],
+  "scene" : "spinner"
+}

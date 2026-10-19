@@ -1,0 +1,70 @@
+{
+  "layers" : [
+    {
+      "copyRectMsPerFrame" : 0.00041972289156626507,
+      "copyRects" : 0,
+      "diffMsPerFrame" : 0.98968753528399311,
+      "dirtyTilesPerFrame" : 0.30663221360895782,
+      "episodes" : 20,
+      "fallbackCopyRects" : 0,
+      "frames" : 1162,
+      "height" : 1176,
+      "hostDetectorOnly" : false,
+      "name" : "editor",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "race-q" : {
+            "cacheRefs" : 67,
+            "copyRect" : 0,
+            "direct" : 65587,
+            "estLosslessCPUmsPerFrame" : 0.010738997418244406,
+            "estVideoCPUmsPerFrame" : 0.23429910714285726,
+            "estVideoWallmsPerFrame" : 6.3953841160714244,
+            "kbpsAvg" : 26.784870605020377,
+            "keyframeCount" : 1,
+            "keyframes" : 2475,
+            "mediaPSNR" : -1,
+            "refinement" : 9389,
+            "seconds" : 40.008556165999998,
+            "softFraction" : 0.078058860765104071,
+            "softTextTileSeconds" : 57.439024207000195,
+            "textPSNR" : 40.873166051183716,
+            "toLossless" : 3,
+            "total" : 133953,
+            "toVideo" : 4,
+            "video" : 58977,
+            "videoFrames" : 49
+          }
+        },
+        {
+          "kbps" : 2000,
+          "race-q" : {
+            "cacheRefs" : 67,
+            "copyRect" : 0,
+            "direct" : 65587,
+            "estLosslessCPUmsPerFrame" : 0.0095905387263339019,
+            "estVideoCPUmsPerFrame" : 0.58824107142857096,
+            "estVideoWallmsPerFrame" : 10.432391008928574,
+            "kbpsAvg" : 26.275779501720102,
+            "keyframeCount" : 1,
+            "keyframes" : 2475,
+            "mediaPSNR" : -1,
+            "refinement" : 9389,
+            "seconds" : 40.008556165999998,
+            "softFraction" : 0.18156362937434223,
+            "softTextTileSeconds" : 133.60222786399964,
+            "textPSNR" : 44.250942054705305,
+            "toLossless" : 3,
+            "total" : 131407,
+            "toVideo" : 4,
+            "video" : 56431,
+            "videoFrames" : 63
+          }
+        }
+      ],
+      "width" : 1600
+    }
+  ],
+  "scene" : "typing"
+}

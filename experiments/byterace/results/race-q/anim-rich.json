@@ -1,0 +1,70 @@
+{
+  "layers" : [
+    {
+      "copyRectMsPerFrame" : 1.1337880354166667,
+      "copyRects" : 8,
+      "diffMsPerFrame" : 1.0950807,
+      "dirtyTilesPerFrame" : 31.144050104384135,
+      "episodes" : 1,
+      "fallbackCopyRects" : 0,
+      "frames" : 480,
+      "height" : 1176,
+      "hostDetectorOnly" : false,
+      "name" : "page",
+      "runs" : [
+        {
+          "kbps" : 600,
+          "race-q" : {
+            "cacheRefs" : 0,
+            "copyRect" : 360,
+            "direct" : 118714,
+            "estLosslessCPUmsPerFrame" : 80.43343074583332,
+            "estVideoCPUmsPerFrame" : 0.7251326315789477,
+            "estVideoWallmsPerFrame" : 13.335051656842102,
+            "kbpsAvg" : 793.12338021987398,
+            "keyframeCount" : 1,
+            "keyframes" : 3567,
+            "mediaPSNR" : 47.410262059651885,
+            "refinement" : 0,
+            "seconds" : 19.354063167,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 1918770,
+            "toVideo" : 1,
+            "video" : 1799696,
+            "videoFrames" : 460
+          }
+        },
+        {
+          "kbps" : 2000,
+          "race-q" : {
+            "cacheRefs" : 0,
+            "copyRect" : 360,
+            "direct" : 118714,
+            "estLosslessCPUmsPerFrame" : 70.952766139583346,
+            "estVideoCPUmsPerFrame" : 0.54402315789473699,
+            "estVideoWallmsPerFrame" : 10.998850168421047,
+            "kbpsAvg" : 1506.1164029732963,
+            "keyframeCount" : 1,
+            "keyframes" : 3567,
+            "mediaPSNR" : 50.843084527755586,
+            "refinement" : 0,
+            "seconds" : 19.354063167,
+            "softFraction" : 0,
+            "softTextTileSeconds" : 0,
+            "textPSNR" : -1,
+            "toLossless" : 0,
+            "total" : 3643684,
+            "toVideo" : 1,
+            "video" : 3524610,
+            "videoFrames" : 474
+          }
+        }
+      ],
+      "width" : 1600
+    }
+  ],
+  "scene" : "anim-rich"
+}

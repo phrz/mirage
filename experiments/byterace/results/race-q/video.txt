@@ -1,0 +1,5 @@
+video/player: 746 frames 1600x1176, 249.6 dirty tiles/frame after copy-rects, 4 copy-rects (4 by the fallback), 1 episodes; diff 6.70 ms/frame, copy-rect search 7.08 ms/frame (analysis 14.5 s)
+    600 kbps race-q  3945791 B   1051.9 kbps  (direct 1033829, refine 0, copy 180, video 2911782 of which key 20661; refs 0)  vframes 723 key 1  switches 1/0  text soft 0.0%  PSNR text nan media 35.3  [477.3 s]
+        race estimates: video (shadow session) 0.41 ms CPU, 7.72 ms wall per estimated frame (741); lossless-in-video 470.32 ms CPU total/frame
+   2000 kbps race-q  9199781 B   2452.5 kbps  (direct 1033829, refine 0, copy 180, video 8165772 of which key 20661; refs 0)  vframes 740 key 1  switches 1/0  text soft 0.0%  PSNR text nan media 39.1  [562.2 s]
+        race estimates: video (shadow session) 0.47 ms CPU, 12.08 ms wall per estimated frame (741); lossless-in-video 513.71 ms CPU total/frame
