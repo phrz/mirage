@@ -66,12 +66,15 @@ final class NativeChromeController: NSObject, NSMenuDelegate {
         case .apps(let list):
             apps = list.apps
             for a in apps where icons[a.bundleID] == nil { loadIcon(a.bundleID) }
-            dock?.update(apps: apps, icons: icons)
+            dock?.update(apps: dockShown, icons: icons)
         case .icon(let i):
             guard let img = NSImage(data: i.png) else { return }
             icons[i.bundleID] = img
             try? i.png.write(to: Self.iconDir.appendingPathComponent(Self.fileName(i.bundleID)))
-            dock?.update(apps: apps, icons: icons)
+            dock?.update(apps: dockShown, icons: icons)
+        case .statusItems(let l):
+            hostStatusItems = l.items
+            if strip != nil { updateStatusStrip() }
         case .menu(let c):
             let k = Key(pid: c.pid, path: c.path)
             if let t = requested[k] { menuLatencies.append(Double(Clock.elapsed(since: t, now: Clock.nowNanos())) / 1e6); requested[k] = nil }
@@ -178,7 +181,7 @@ final class NativeChromeController: NSObject, NSMenuDelegate {
     final class MenuChoice: NSObject { let pid: Int32; let path: [Int]; let title: String
         init(pid: Int32, path: [Int], title: String) { self.pid = pid; self.path = path; self.title = title } }
 
-    @objc private func choose(_ sender: NSMenuItem) {
+    @objc func choose(_ sender: NSMenuItem) {
         guard let c = sender.representedObject as? MenuChoice else { return }
         menuPresses += 1
         session.sendControl(.menuPress(.init(pid: c.pid, path: c.path, title: c.title)))
@@ -194,7 +197,7 @@ final class NativeChromeController: NSObject, NSMenuDelegate {
 
     func start() {
         if dock == nil { dock = RemoteDock(controller: self) }
-        dock?.update(apps: apps, icons: icons)
+        dock?.update(apps: dockShown, icons: icons)
         refreshPanels()
     }
     func stop() {
@@ -208,18 +211,22 @@ final class NativeChromeController: NSObject, NSMenuDelegate {
         guard model.unified else { return }
         let active = NSApp.isActive
         if let dock {
-            if active && dockVisible && !apps.isEmpty { dock.place(); dock.orderFront(nil) } else { dock.orderOut(nil) }
+            if active && dockVisible && !dockShown.isEmpty { dock.place(); dock.orderFront(nil) } else { dock.orderOut(nil) }
         }
         let remoteKey = NSApp.keyWindow is RemoteWindow || (NSApp.keyWindow == nil && installedPid != nil)
         if active && remoteKey { updateStatusStrip() } else { strip?.orderOut(nil) }
     }
 
-    /// Host status items (level-25 windows of third-party apps), right to left as on the host.
-    func statusItems() -> [ControlMessage.WindowInfo] {
-        session.hostOrder().filter { w in
-            w.windowLevel == 25 && !w.isLayered && w.frame.y <= 4 && w.frame.width < 600 &&
-            (Self.statusApps.map { $0.contains(w.app ?? "") } ?? !Self.systemOwners.contains(w.app ?? ""))
-        }.sorted { $0.frame.x < $1.frame.x }
+    /// The host's status items (from its Accessibility tree: macOS 26+ draws them all in one menu-bar window), the ones
+    /// that describe the host itself (clock, Wi-Fi, battery, Control Center, Spotlight…) left out, left to right.
+    private(set) var hostStatusItems: [ControlMessage.StatusItem] = []
+    static let systemBundles: Set<String> = ["com.apple.controlcenter", "com.apple.systemuiserver", "com.apple.Spotlight", "com.apple.TextInputMenuAgent",
+                                             "com.apple.Siri", "com.apple.notificationcenterui", "com.apple.WindowManager", "com.apple.dock", "com.apple.loginwindow"]
+    func statusItems() -> [ControlMessage.StatusItem] {
+        hostStatusItems.filter { i in
+            i.frame.y < 48 && i.frame.width > 0 && i.frame.width < 800 &&
+            (Self.statusApps.map { $0.contains(i.app) } ?? !(Self.systemBundles.contains(i.bundleID) || Self.systemOwners.contains(i.app)))
+        }
     }
 
     func updateStatusStrip() {
@@ -252,6 +259,44 @@ final class NativeChromeController: NSObject, NSMenuDelegate {
         // Status items are wanted before the strip first shows, so it never opens blank.
         if strip == nil { r += statusItems().map(\.frame) }
         return r
+    }
+
+    /// Test only: MIRAGE_DOCK_APPS="A,B" limits the remote dock to those apps (loopback screenshots show no one else's).
+    static let dockApps: Set<String>? = ProcessInfo.processInfo.environment["MIRAGE_DOCK_APPS"].map { Set($0.split(separator: ",").map(String.init)) }
+    var dockShown: [ControlMessage.AppInfo] { Self.dockApps.map { f in apps.filter { f.contains($0.name) } } ?? apps }
+
+    /// The `chrome` scenario: the bench app's menus installed here, every top-level menu opened once (lazy refresh), one
+    /// item chosen, the status strip and the dock shown; returns what it measured. No input is injected.
+    func selfTest(pid: Int32, choose: String, log: (String) -> Void) async -> (barMs: Double?, openMs: [Double], items: Int, chosen: Bool, strip: Int) {
+        let t0 = Clock.nowNanos()
+        install(pid: pid)
+        var barMs: Double? = nil
+        for _ in 0..<300 {
+            if cache[Key(pid: pid, path: [])] != nil { barMs = Double(Clock.elapsed(since: t0, now: Clock.nowNanos())) / 1e6; break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        guard let bar = cache[Key(pid: pid, path: [])] else { log("chrome: no menu bar from the host"); return (nil, [], 0, false, 0) }
+        log("chrome: menu bar after \(barMs.map { String(format: "%.0f ms", $0) } ?? "?"): \(bar.map(\.title))")
+        try? await Task.sleep(for: .seconds(1))   // the walk (every menu's first level)
+        var opens: [Double] = [], items = 0, chosen = false
+        for i in bar.indices {
+            let k = Key(pid: pid, path: [i])
+            let hadCache = cache[k] != nil
+            requested[k] = nil
+            let before = menuLatencies.count, t = Clock.nowNanos()
+            if let m = built[k] { menuWillOpen(m) } else { request(k) }
+            for _ in 0..<300 where menuLatencies.count == before { try? await Task.sleep(for: .milliseconds(10)) }
+            if menuLatencies.count > before { opens.append(Double(Clock.elapsed(since: t, now: Clock.nowNanos())) / 1e6) }
+            let m = built[k]
+            items += m?.items.count ?? 0
+            log("chrome: menu \(bar[i].title) (cached before open: \(hadCache)): \(m?.items.map { $0.isSeparatorItem ? "—" : $0.title + ($0.keyEquivalent.isEmpty ? "" : " ⌘" + $0.keyEquivalent) + ($0.state == .on ? " ✓" : "") + ($0.submenu != nil ? " ▸" : "") }.joined(separator: ", ") ?? "none")")
+            if !chosen, let item = m?.items.first(where: { $0.title == choose }) { self.choose(item); chosen = true; log("chrome: chose '\(choose)' (menuPress sent)") }
+        }
+        updateStatusStrip()
+        strip?.orderFront(nil)
+        if let dock { dock.update(apps: dockShown, icons: icons); dock.place(); dock.orderFront(nil) }
+        log("chrome: status strip \(strip.map { "\($0.rects.count) items, window \($0.windowNumber)" } ?? "none"), dock \(dock.map { "\(self.dockShown.count) apps, window \($0.windowNumber)" } ?? "none"), icons \(icons.count)")
+        return (barMs, opens, items, chosen, strip?.rects.count ?? 0)
     }
 
     func activate(_ app: ControlMessage.AppInfo) {

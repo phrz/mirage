@@ -455,7 +455,7 @@ final class ViewerSession: @unchecked Sendable {
                 statsLock.lock(); let wasLocked = hostStatus?.consoleLocked; hostStatus = h; statsLock.unlock()
                 if wasLocked != h.consoleLocked, h.consoleLocked || wasLocked == true { log(h.consoleLocked ? "host: \(host)'s screen is locked (window layers paused on the host)" : "host: \(host)'s screen is unlocked") }
                 Task { @MainActor in model.hostStatus = h }
-            case .apps, .icon, .menu:
+            case .apps, .icon, .menu, .statusItems:
                 // Native chrome (DESIGN §3.8); counted with the control bytes.
                 if let d = try? Frame.encode(msg) { statsLock.lock(); sControlBytes += d.count; sChromeBytes += d.count; statsLock.unlock() }
                 Task { @MainActor in onChrome?(msg) }
@@ -1436,6 +1436,7 @@ extension ViewerSession {
             var localMoveMsMedian: Double?, localMoveMsMax: Double?, stepJitterMs: [Double]?, redraws: [Int]?
             var switchConfirmMs: [Double]?, switchKB: [Double]?
             var chromeBytes: Int, menuLatencyMs: [Double], menuPresses: Int
+            var menuBarMs: Double?, menuOpenMs: [Double]?, menuItems: Int?, statusItems: Int?, apps: Int?
         }
         let target = MainActor.assumeIsolated { lastRequest?.bitrateKbps ?? 0 }
         let inputStateNow = inputState()
@@ -1484,7 +1485,9 @@ extension ViewerSession {
             return UnifiedStats(windows: u.windows.count, hostFramesApplied: u.hostFramesApplied, localMoves: u.localMoves,
                                 localMoveMsMedian: lm.isEmpty ? nil : median(lm), localMoveMsMax: lm.max(), stepJitterMs: scenario?.stepJitterMs, redraws: scenario?.redraws,
                                 switchConfirmMs: scenario?.switchConfirmMs, switchKB: scenario?.switchKB,
-                                chromeBytes: chromeBytes(), menuLatencyMs: u.chrome?.menuLatencies ?? [], menuPresses: u.chrome?.menuPresses ?? 0)
+                                chromeBytes: chromeBytes(), menuLatencyMs: u.chrome?.menuLatencies ?? [], menuPresses: u.chrome?.menuPresses ?? 0,
+                                menuBarMs: scenario?.chromeResult?.barMs, menuOpenMs: scenario?.chromeResult?.openMs, menuItems: scenario?.chromeResult?.items,
+                                statusItems: scenario?.chromeResult?.strip, apps: u.chrome?.apps.count)
         }
         let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         return (try? enc.encode(out)) ?? Data()

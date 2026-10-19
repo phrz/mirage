@@ -153,6 +153,8 @@ public enum ControlMessage: Codable, Equatable {
     /// of the display layer), so the host neither holds back windows covered on its own screen nor streams desktop
     /// nobody sees.
     case viewInterest(ViewInterest)
+    /// Host → viewer: the host's status items (menu extras), from Accessibility, on change: each a rect of the menu bar.
+    case statusItems(StatusItemList)
 
     // Input, client → host. Coordinates are normalized to the streamed display: (0,0) top-left, (1,1) bottom-right.
     case mouseMove(MouseMove)
@@ -476,6 +478,19 @@ public enum ControlMessage: Codable, Equatable {
         public var pid: Int32
         public var action: Action
         public init(pid: Int32, action: Action) { self.pid = pid; self.action = action }
+    }
+    public struct StatusItem: Codable, Equatable {
+        public var pid: Int32
+        public var app: String
+        public var bundleID: String
+        /// In the menu bar, display-layer pixels.
+        public var frame: PixelRect
+        public var title: String
+        public init(pid: Int32, app: String, bundleID: String, frame: PixelRect, title: String) { self.pid = pid; self.app = app; self.bundleID = bundleID; self.frame = frame; self.title = title }
+    }
+    public struct StatusItemList: Codable, Equatable {
+        public var items: [StatusItem]
+        public init(items: [StatusItem]) { self.items = items }
     }
     public struct ViewInterest: Codable, Equatable {
         /// Unified mode: window layers are shown as separate native windows; the host's own stacking does not hide them.

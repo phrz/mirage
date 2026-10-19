@@ -11,7 +11,38 @@ final class App: NSObject, NSApplicationDelegate {
     /// Written by the measuring session (over ssh) before each scenario; shown live in the window.
     let statusPath = "/tmp/mirage-bench-status.txt"
 
+    var statusItem: NSStatusItem?
+    @objc func benchAction(_ sender: NSMenuItem) { NSLog("bench menu: %@", sender.title) }
+    /// A main menu (File, Edit, View with a submenu, shortcuts, a checked item) and, with `--status`, a status item with
+    /// its own menu: what the native-chrome check (menus from Accessibility, the status strip) reads, our app only.
+    func installMenus() {
+        let main = NSMenu()
+        func menu(_ title: String, _ items: [(String, String)]) {
+            let it = NSMenuItem(); let m = NSMenu(title: title)
+            for (t, k) in items { if t == "-" { m.addItem(.separator()) } else { m.addItem(withTitle: t, action: #selector(benchAction(_:)), keyEquivalent: k).target = self } }
+            it.submenu = m; main.addItem(it)
+        }
+        menu("Mirage Test Bench", [("About the Bench", ""), ("-", ""), ("Quit Bench", "q")])
+        menu("File", [("New Measurement", "n"), ("Open…", "o"), ("-", ""), ("Close", "w")])
+        menu("Edit", [("Undo", "z"), ("Copy", "c"), ("Paste", "v")])
+        menu("View", [("Show Caption", ""), ("Zoom In", "+")])
+        if let view = main.items.last?.submenu {
+            view.items.first?.state = .on
+            let sub = NSMenu(title: "Density"); for t in ["Compact", "Regular", "Roomy"] { sub.addItem(withTitle: t, action: #selector(benchAction(_:)), keyEquivalent: "").target = self }
+            let it = NSMenuItem(title: "Density", action: nil, keyEquivalent: ""); it.submenu = sub; view.addItem(it)
+        }
+        NSApp.mainMenu = main
+        if CommandLine.arguments.contains("--status") {
+            let si = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            si.button?.title = "MTB"
+            let m = NSMenu(); m.addItem(withTitle: "Bench status: measuring", action: nil, keyEquivalent: ""); m.addItem(withTitle: "Ping", action: #selector(benchAction(_:)), keyEquivalent: "").target = self
+            si.menu = m
+            statusItem = si
+        }
+    }
+
     func applicationDidFinishLaunching(_ n: Notification) {
+        installMenus()
         let screen = NSScreen.screens.first!
         // `--overlay`: a full-screen, fully transparent, click-through window at the floating level, like the
         // overlays some utilities keep on screen (the M3.1 field regression: a viewer that drew such a window as

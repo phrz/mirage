@@ -276,6 +276,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.ax = AXWindows(log: self.log)
                     let chrome = NativeChrome(log: self.log, send: { [weak self] m in self?.queue.async { self?.sendControlCounted(m) } })
                     if InputInjector.sinkPath != nil { chrome.sink = { [weak self] m in self?.injector?.record(m) } }
+                    chrome.toPixels = { [weak tracker] r in tracker.map { $0.toPixels(r) } }
                     chrome.start()
                     self.chrome = chrome
                     let cur = CursorMonitor(displayID: t.display.displayID)

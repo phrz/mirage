@@ -83,7 +83,7 @@ final class ScenarioRunner {
     private func guardsStillHold() -> Bool {
         guard let status = session.hostStatus else { session.log("scenario \(name): ABORT, host status lost"); return false }
         guard !status.consoleLocked else { session.log("scenario \(name): ABORT, host console LOCKED"); return false }
-        if name == "drag" || name == "unified", status.inputSink == true { return true }
+        if ["drag", "unified", "chrome"].contains(name), status.inputSink == true { return true }
         guard status.frontmostWindowID == guardedWindowID || status.frontmostApp == "Mirage Test Bench" else {
             session.log("scenario \(name): ABORT, focus moved to \(status.frontmostApp) \(status.frontmostWindowID) '\(status.frontmostWindowTitle)'"); return false
         }
@@ -257,7 +257,7 @@ final class ScenarioRunner {
         guard !status.consoleLocked else { session.log("scenario \(name): ABORT, host console is LOCKED"); return }
         // In input-sink mode nothing the script sends can reach the host's input (window commands move only
         // the bench's own windows there), so the bench need not be frontmost for the drag scenario.
-        let sinkDrag = (name == "drag" || name == "unified") && status.inputSink == true
+        let sinkDrag = ["drag", "unified", "chrome"].contains(name) && status.inputSink == true
         guard sinkDrag || status.frontmostWindowID == w.id || status.frontmostApp == "Mirage Test Bench" else {
             session.log("scenario \(name): ABORT, bench is not frontmost (front: \(status.frontmostApp) \(status.frontmostWindowID) '\(status.frontmostWindowTitle)')"); return
         }
@@ -397,6 +397,11 @@ final class ScenarioRunner {
             }
         case "unified":
             await unifiedRun(end: end, ppp: ppp)
+        case "chrome":
+            guard let c = await MainActor.run(body: { session.unified?.chrome }) else { session.log("scenario chrome: ABORT, not in Unified mode"); return }
+            let r = await c.selfTest(pid: w.pid, choose: "New Measurement", log: { session.log($0) })
+            chromeResult = (r.barMs ?? 9999, r.openMs, r.items, r.chosen, r.strip)
+            try? await Task.sleep(for: .seconds(max(0, seconds - 5)))
         default:
             session.log("unknown scenario \(name)")
         }
@@ -409,6 +414,7 @@ final class ScenarioRunner {
     private(set) var redraws: [Int] = []             // per burst: frames the moved window redrew during its move
     private(set) var switchConfirmMs: [Double] = []  // window switches: host list shows the raised window in front
     private(set) var switchKB: [Double] = []
+    private(set) var chromeResult: (barMs: Double, openMs: [Double], items: Int, chosen: Bool, strip: Int)?
     private func unifiedRun(end: Date, ppp: Double) async {
         guard let u = await MainActor.run(body: { session.unified }) else { session.log("scenario unified: ABORT, not in Unified mode (--unified)"); return }
         session.watchWindowID = bench()?.id ?? 0

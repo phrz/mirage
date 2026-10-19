@@ -18,6 +18,11 @@ final class NativeChrome {
     /// Input-sink mode (loopback measurements): menus are read, presses and activations are recorded, never performed.
     var sink: ((ControlMessage) -> Void)?
 
+    /// Global points → display-layer pixels (nil when off the streamed display).
+    var toPixels: ((CGRect) -> PixelRect?)?
+    private var lastStatus: [ControlMessage.StatusItem] = []
+    private var statusTimer: DispatchSourceTimer?
+
     init(log: @escaping (String) -> Void, send: @escaping (ControlMessage) -> Void) {
         self.log = log; self.send = send
     }
@@ -26,16 +31,49 @@ final class NativeChrome {
         let nc = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification, NSWorkspace.didActivateApplicationNotification,
                      NSWorkspace.didHideApplicationNotification, NSWorkspace.didUnhideApplicationNotification] {
-            observers.append(nc.addObserver(forName: name, object: nil, queue: nil) { [weak self] _ in self?.scheduleApps() })
+            observers.append(nc.addObserver(forName: name, object: nil, queue: nil) { [weak self] _ in self?.scheduleApps(); self?.queue.asyncAfter(deadline: .now() + 1) { self?.publishStatusItems() } })
         }
         scheduleApps(force: true)
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + 0.5, repeating: 3)
+        t.setEventHandler { [weak self] in self?.publishStatusItems() }
+        t.resume(); statusTimer = t
     }
     func stop() {
         for o in observers { NSWorkspace.shared.notificationCenter.removeObserver(o) }
         observers = []
+        statusTimer?.cancel(); statusTimer = nil
     }
     /// A resumed connection: everything again.
-    func resend() { queue.async { self.lastApps = [] }; scheduleApps(force: true) }
+    func resend() { queue.async { self.lastApps = []; self.lastStatus = [] }; scheduleApps(force: true) }
+
+    // MARK: Status items
+
+    /// Every app's menu extras (macOS 26+ draws them all in the one menu-bar window, so Accessibility is where their
+    /// rects and owners are), every 3 s and on app changes, sent when they change.
+    private func publishStatusItems() {
+        guard let toPixels else { return }
+        var items: [ControlMessage.StatusItem] = []
+        for app in NSWorkspace.shared.runningApplications where !app.isTerminated {
+            let e = AXUIElementCreateApplication(app.processIdentifier)
+            AXUIElementSetMessagingTimeout(e, 0.25)
+            guard let bar: AXUIElement = attribute(e, "AXExtrasMenuBar") else { continue }
+            for item in children(bar) {
+                var posRef: CFTypeRef?, sizeRef: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(item, kAXPositionAttribute as CFString, &posRef) == .success,
+                      AXUIElementCopyAttributeValue(item, kAXSizeAttribute as CFString, &sizeRef) == .success else { continue }
+                var pos = CGPoint.zero, size = CGSize.zero
+                guard AXValueGetValue(posRef as! AXValue, .cgPoint, &pos), AXValueGetValue(sizeRef as! AXValue, .cgSize, &size), size.width > 1,
+                      let px = toPixels(CGRect(origin: pos, size: size)) else { continue }
+                let title = string(item, kAXTitleAttribute).flatMap { $0.isEmpty ? nil : $0 } ?? string(item, kAXDescriptionAttribute) ?? ""
+                items.append(.init(pid: app.processIdentifier, app: app.localizedName ?? "?", bundleID: app.bundleIdentifier ?? "", frame: px, title: title))
+            }
+        }
+        items.sort { $0.frame.x < $1.frame.x }
+        guard items != lastStatus else { return }
+        lastStatus = items
+        send(.statusItems(.init(items: items)))
+    }
 
     // MARK: Apps
 
