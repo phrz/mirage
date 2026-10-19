@@ -4,7 +4,7 @@ A remote desktop for Macs and Apple devices that is designed around bad links
 (high latency, ~1 Mbps) and a tailnet instead of accounts. See [docs/DESIGN.md](docs/DESIGN.md)
 for the architecture, the teardown of Astropad's LIQUID that informed it, and the milestones.
 
-**Status: M3.1 (layered desktop).** QUIC link over the tailnet, one-time 6-digit pairing (PAKE), mutual
+**Status: M3.2 (Unified mode and native chrome).** QUIC link over the tailnet, one-time 6-digit pairing (PAKE), mutual
 Ed25519 authentication, and a hybrid desktop codec: ScreenCaptureKit dirty tiles classified by
 motion history; sparse changes (typing, carets, highlights) go as pixel-exact WebP rects on a
 reliable QUIC stream, sustained motion goes through hardware HEVC (low-latency) on QUIC
@@ -40,6 +40,14 @@ drawn as layer / cut-out / display, visible or why not, presentation steps); the
 opens a transparent full-screen window, the case that broke the first mac-daddy run. `MIRAGE_TEST_FRAMES=<dir>`
 makes the viewer record the composited scene at 5 fps, and `experiments/probes/framesheet.swift` turns that into
 change events per layer plus a contact sheet.
+
+M3.2 (DESIGN §3.2 "As built, M3.2", §3.8, §6 "M3.2") adds **Unified mode**: ⌃⌥⌘U (View ▸ Unified Windows, or
+`--unified`) turns every remote window into a native macOS window on the same session, pixel-exact, with the native
+shadow, resizing, Mission Control, ⌘` and the genie minimize, outlined in purple; the host's traffic lights act locally
+(close, minimize into the local Dock, zoom), and moves, resizes and raises are local, with the host following through
+Accessibility. Menus and popovers appear as child windows. While a remote window is key the local menu bar holds its
+app's menus, read through Accessibility and pressed there; a remote dock lists the host's running apps; a strip under
+the menu bar shows the host's third-party status items. In Unified mode the desktop layer is not streamed at all.
 
 ## Build
 
@@ -109,7 +117,7 @@ Admin: `miraged devices`, `miraged revoke <id-prefix>`, `mirage hosts`, `miraged
 The viewer requests the stream at its window size (points × backing scale × `--scale`), so
 resize the window to change resolution; the host's tiles are pixel-exact at that size (a
 window smaller than the host display means downscaled text, which costs 2–3x more per tile
-than native, so prefer `--scale` ≥ 1 on a big screen). `⌃⌥⌘S` toggles the overlay (RTT, frame
+than native, so prefer `--scale` ≥ 1 on a big screen). `⌃⌥⌘U` switches between Desktop and Unified mode, `⌃⌥⌘S` toggles the overlay (RTT, frame
 age, fps, video/tile kbps, the controller's target, capacity and queuing-delay estimates, the
 ladder rung, copy-rects, prediction confirm/mismatch counts), `⌃⌥⌘↑/↓` changes the bitrate
 *cap* by 200 kbps (the controller stays at or below it), `⌃⌥⌘Q` quits. Every other key and
@@ -174,7 +182,8 @@ Sources/MirageCore/Wire        framing, ControlMessage (auth, pairing, stream/ac
                                video datagrams + reassembly (region, tile mask, input seq), tile-stream messages
 Sources/MirageCore/Tiles       TileCodec (WebP), TileTracker (classification, refinement queue), ShiftDetector (copy-rects)
 Sources/MirageCore/Rate        RateController (one-way-delay/dispersion based target, budget split, resolution ladder)
-Sources/MirageCore/Render      Compositor (one Metal canvas per layer, MetalFX), SceneRenderer (layers, cut-outs, shadows), Predictor
+Sources/MirageCore/Render      Compositor (one Metal canvas per layer, MetalFX), SceneRenderer (layers, cut-outs, shadows), Predictor,
+                               UnifiedLayout (which host windows become native windows, where, whose children)
 Sources/MirageCore/Video       VideoToolbox HEVC decoder (macOS + iOS)
 Sources/MirageCore/Crypto      CPace PAKE, device identity, sealed box
 Sources/MirageCore/Transport   QUIC client/host (Network.framework), framed streams, TLS identity
@@ -183,7 +192,8 @@ Sources/MirageCore/Store       on-disk state
 Sources/MirageHost             macOS: display + per-window SCStream capture (layers), tile diff, copy-rect detection, window tracker,
                                AX window commands, per-layer HEVC canvas encoders, tile encoder, pacing, CGEvent input, cursor monitor,
                                `miraged probe-layers` (per-window capture measurements)
-Sources/mirage-viewer          macOS viewer (AppKit window, CAMetalLayer, SwiftUI overlay, scripted scenarios)
+Sources/mirage-viewer          macOS viewer (AppKit window, CAMetalLayer, SwiftUI overlay, scripted scenarios), Unified mode
+                               (a native window per remote window), native chrome (remote menus, dock, status strip)
 Sources/miraged, Sources/mirage  CLIs
 experiments/                   measurements that fixed the design (tilebench, seqbench, probes) and the test bench app
 scripts/                       make-viewer-app.sh, deploy-host.sh, resilience-test.sh (§4a loopback scenarios + dummynet notes)

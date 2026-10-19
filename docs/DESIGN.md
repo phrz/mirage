@@ -209,6 +209,29 @@ desktop-sized above the normal level), the viewer draws a cut-out only where it 
 (and that layer's shadow) behind it, and the host counts only layers and cut-out-safe windows as occluders
 when it holds back covered tiles. Every window gets its still before any window gets lossless blocks.
 
+**As built, M3.2 Unified mode (2026-10-19).** The same session switches Desktop ↔ Unified locally (⌃⌥⌘U, View ▸
+Unified Windows, `--unified`); nothing reconnects. Each window layer becomes a titled `NSWindow` with its standard buttons
+hidden and a transparent full-size title bar: the window server gives it the native shadow (key and inactive), edge
+resizing, Mission Control, ⌘`, the Window menu, tiling and the genie minimize, and every pixel inside is the host's,
+drawn 1:1 from the layer's canvas (one stream pixel per backing pixel; Unified asks for a host-points × backing-scale
+stream when the current one is more than 15 % off) through the same progressive presentation. The traffic lights are
+the host's own pixels: they are already styled and placed for that window's toolbar, which local buttons would have to
+re-learn per window style and would show twice whenever they missed. The host publishes their rect (the macOS 26
+traffic-light child window, `WindowInfo.controls`) and clicks on them are handled locally: close → AX close (the window
+goes when the host's list drops it, after any save sheet), minimize → the local genie into the local Dock plus AX
+minimize (the restore goes to the window's last AX target, since a minimized window leaves the host's list), zoom →
+AX zoom. A title-bar press (right of the traffic lights, top 28 pt) that moves becomes `performDrag`; any local move or
+live resize becomes a local frame override and a window command (move at ≤ 20 Hz plus a trailing send, resize once at
+the end of the live resize); the canvas is drawn 1:1, never stretched, and a resized layer keeps its old picture at
+the top-left until the host's new capture replaces it. A purple outline follows the window's corner radius, measured
+from the canvas alpha. Menus, popovers and tooltips are borderless child windows of the frontmost window of their app
+they touch, cut from the display layer; a sheet-like window in another's top band is its child. A raise on the host
+(an app opening a window) brings that window front here when the viewer is active. A `viewInterest` message tells the
+host what is shown: in Unified mode window layers are not held back for being covered on the host's screen, and the
+display layer is sent only for cut-out-safe windows above the normal level (menus, popovers; the host knows them, so a
+new menu costs no extra round trip) and the rects the viewer asks for (status items); desktop motion elsewhere is not
+encoded at all, and the desktop's fresh picture no longer gates window layers.
+
 Mode summary:
 
 | Mode | Capture | Mask |
@@ -694,6 +717,20 @@ trip, only the final selection travels.
 - **Notifications.** Notification banners are windows at a known level too, so the same
   trick yields a remote notification layer: an agent finishing on the host shows a
   purple-outlined banner in a corner here, even with no remote window open.
+- **As built, M3.2.** Menus: while a remote window is key the local menu bar is the Apple menu, this app's own menu
+  (mode switch, dock, quit), then the remote app's menus from `AXMenuBar`. The bar's titles and every menu's first level
+  are walked once per app (again after 30 s), each menu is refreshed when it opens (it shows the cached items at once and
+  updates in place when the answer arrives, so enabled states and marks follow the app), submenus load the same way, and
+  a choice is an AXPress on the host after checking the item's title is still at that path. Key equivalents are shown;
+  the keystroke itself goes to the host as a key. An app whose menu bar Accessibility cannot read gets its part of the
+  host's menu bar as a strip of pixels under the local menu bar, clicks mapped back. Dock: the host's regular running
+  apps in launch order, icons as 128-px PNGs cached by bundle id on disk, the active app marked; a click activates the
+  app there and brings its windows front here; it floats above the local dock (inside the screen's visible frame) while
+  the viewer is active. Status items: macOS 26+ draws all of them inside the one menu-bar window (no level-25 windows
+  are listed any more), so the host reads each app's `AXExtrasMenuBar` every 3 s and on app changes; the strip under the
+  right end of the local menu bar crops those rects from the display layer, system-owned items (Control Center, the
+  clock, Spotlight, input menus) left out, and a click goes to the item's host coordinates; the menu or popover it opens
+  is a transient anchored under the local item.
 - **Fallback.** Apps with broken Accessibility fall back to masked pixels, same as the rest
   of the desktop. Desktop mode in a full-screen Space needs none of this.
 
@@ -1559,3 +1596,38 @@ renders whole even where others cover it.
   - Watch and drag scenarios: stale bench pixels 0, fill 0, stale commits 0.
 - **No including filter anywhere.** The display layer excludes windows. The codec probe now also excludes
   windows instead of naming the desktop windows.
+
+### M3.2 (2026-10-19, Unified mode and native chrome)
+
+**Loopback** (this MacBook as host and viewer, host in input-sink mode with `MIRAGE_LAYER_APPS="Mirage Test Bench"`,
+two 800×532 pt bench windows, 2 Mbps cap, the GUI viewer in Unified mode, not activated, its windows offset by 660 pt with
+`MIRAGE_TEST_UNIFIED_OFFSET` so they do not sit on top of the host windows they show). The `unified` scenario moves a
+bench's native window here in 50 steps of 3×1.5 pt per 16 ms (what the window server does on a drag; nothing is
+injected) and raises the other one; the `chrome` scenario installs the bench app's menus, opens each, chooses one.
+
+| Measure | Loopback |
+|---|---|
+| Local move: the window takes its new frame | median 0.18 ms, max 6.6 ms per step; worst step-to-step gap 17–23 ms at a 16 ms target (main-thread jitter of the scripted loop; a real drag is the window server's) |
+| Redraws of the moved window during a drag | 0 in 3 of 5 drags (the window server moves the surface); 1–15 when the bench repainted its own caption |
+| Host confirms the dropped frame | 55–121 ms after release (trailing command + AX set + one list sample) |
+| Bytes during a 0.8 s drag / 3 s after | 9.5–13 KB / 2–9 KB (the bench repainting its caption; 74 KB/144 KB once when it repainted while moving) |
+| Window switch (raise the other bench) | host raised it 89–120 ms later; 51–55 KB in 2 s: both windows' active/inactive appearance (title bar, traffic lights) |
+| Desktop layer while Unified is on | 0 KB per 30 s (Desktop mode on the same screen: 0.35–0.75 MB per 30 s) |
+| Menu bar after a window becomes key | 11–485 ms (first walk includes the AX IPC); menus cached before opening; refresh on open 5–11 ms |
+| Menu choice | AXPress request on the host for `[1,0] "New Measurement"` (recorded by the sink) |
+| Native chrome bytes | 84 KB on first connect (16 icons as PNG in JSON), then menus ~1–5 KB each |
+
+Things the loopback runs taught:
+- A viewer whose host is this Mac captures its own remote windows: the host's `MIRAGE_LAYER_APPS` test filter matched the
+  copied window titles and layered them (a hall of mirrors), and windows sitting exactly on their originals were captured
+  over them (the bench layer churned at 125 dirty tiles/s). ScreenCaptureKit no longer honours `sharingType = .none`. On
+  loopback the native windows are titled `remote window <id>` and offset; with a real host neither arises.
+- `NSApp` terminates after its last window closes; ordering the Desktop window out made the viewer quit two seconds into
+  Unified mode. It now stays while Unified is on.
+- A view interest sent before the stream exists was dropped by the host (no streamer yet); the session keeps it and
+  hands it to the streamer it starts. With "nothing of the desktop is shown" from the first frame, the display's base
+  keyframe never went out and its fresh-picture gate held every window back; Unified no longer waits for it.
+- Status items are not windows on macOS 27; `AXExtrasMenuBar` gives their rects (y = 4.5 pt, inside the bar).
+
+**Real link (mac-daddy, 145 ms):** pending the coordinated deploy of c5b6b5e.
+
