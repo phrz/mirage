@@ -41,6 +41,10 @@ public struct ShiftDetector {
     /// 1168 frames of terminal output, 2405 kbps of lossless instead of 352).
     public var fallbackConfidence = 0.8
     public var fallbackCandidates = 3
+    /// The fallback's shift must be at least this many pixels (a 1-px "shift" of mostly flat content verifies trivially) and
+    /// must explain this share of the tiles that changed between the frames.
+    public var fallbackMinShift = 8
+    public var fallbackExplained = 0.6
     public var samplesPerLine = 32
     /// Per-channel tolerance when verifying; a tile matches if ≤ 1 % of its pixels exceed it.
     public var tolerance: Int32 = 16
@@ -155,14 +159,18 @@ public struct ShiftDetector {
             // The ratio test failed: verify the best local minima of the profile SAD (distinct shifts, ±2 lines apart).
             var picked: [Int] = []
             for c in sads.sorted(by: { $0.sad < $1.sad }) where picked.count < fallbackCandidates && !picked.contains(where: { abs($0 - c.shift) <= 2 }) { picked.append(c.shift) }
-            for shift in picked {
+            for shift in picked where abs(shift) >= fallbackMinShift {
                 let dx = vertical ? 0 : shift, dy = vertical ? shift : 0
                 let bounds = PixelRect(x: 0, y: 0, width: min(old.width, new.width), height: min(old.height, new.height))
                 let src = rect.intersection(bounds).intersection(bounds.offset(-dx, -dy)).intersection(rect.offset(-dx, -dy))
                 guard src.width >= 16, src.height >= 16 else { continue }
                 let (mismatch, conf) = verifyTiles(old: old, new: new, src: src, dx: dx, dy: dy, tile: tile)
-                debug?("shift fallback verify (\(dx),\(dy)) conf \(conf)")
-                if conf >= fallbackConfidence { return Result(dx: dx, dy: dy, rect: src, mismatchedTiles: mismatch, confidence: conf) }
+                // Flat tiles verify at any shift; what counts is the tiles that changed: the shift must explain most of them.
+                let (changed, explained) = explainedChange(old: old, new: new, src: src, dx: dx, dy: dy, mismatched: mismatch, tile: tile)
+                debug?("shift fallback verify (\(dx),\(dy)) conf \(conf) explains \(explained)/\(changed) changed tiles")
+                if conf >= fallbackConfidence, changed >= 2, Double(explained) >= fallbackExplained * Double(changed) {
+                    return Result(dx: dx, dy: dy, rect: src, mismatchedTiles: mismatch, confidence: conf)
+                }
             }
             return nil
         }
@@ -174,6 +182,28 @@ public struct ShiftDetector {
         debug?("shift verify (\(dx),\(dy)) src \(src) conf \(conf) mismatched \(mismatch.count)")
         guard conf >= minTileConfidence else { return nil }
         return Result(dx: dx, dy: dy, rect: src, mismatchedTiles: mismatch, confidence: conf)
+    }
+
+    /// Destination tiles that changed in place (new ≠ old at the same position), and how many of those the shift explains
+    /// (they match the shifted source).
+    private func explainedChange(old: Frame, new: Frame, src: PixelRect, dx: Int, dy: Int, mismatched: [PixelRect], tile: Int) -> (changed: Int, explained: Int) {
+        let dst = src.offset(dx, dy)
+        let bad = Set(mismatched.map { $0.y / tile * 100_000 + $0.x / tile })
+        var changed = 0, explained = 0
+        for row in (dst.y / tile)...((dst.maxY - 1) / tile) {
+            for col in (dst.x / tile)...((dst.maxX - 1) / tile) {
+                let t = PixelRect(x: col * tile, y: row * tile, width: tile, height: tile).intersection(dst)
+                guard !t.isEmpty else { continue }
+                var differs = false
+                rows: for y in t.y..<t.maxY {
+                    if memcmp(new.base.advanced(by: y * new.stride + t.x * 4), old.base.advanced(by: y * old.stride + t.x * 4), t.width * 4) != 0 { differs = true; break rows }
+                }
+                guard differs else { continue }
+                changed += 1
+                if !bad.contains(row * 100_000 + col) { explained += 1 }
+            }
+        }
+        return (changed, explained)
     }
 
     /// Compares new[src + (dx,dy)] against old[src] per frame-aligned tile of the destination, with tolerance.

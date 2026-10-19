@@ -41,6 +41,14 @@ final class ByteRaceFixTests: XCTestCase {
             XCTAssertEqual(r?.dy, -lineH, "one line up")
             XCTAssertGreaterThanOrEqual(r?.confidence ?? 0, 0.8)
             XCTAssertTrue(log.contains { $0.hasPrefix("shift fallback verify (0,-30)") }, "found by the fallback: \(log)")
+            // Mostly flat content with one changed spot: a tiny shift verifies on the flat tiles but explains nothing changed.
+            var flatA = [UInt8](repeating: 30, count: w * h * 4), flatB = flatA
+            for y in 200..<230 { for x in 300..<400 { let o = (y * w + x) * 4; flatB[o] = 220; flatB[o + 1] = 220; flatB[o + 2] = 220 } }
+            flatA.withUnsafeBytes { p1 in flatB.withUnsafeBytes { p2 in
+                let f1 = ShiftDetector.Frame(base: p1.baseAddress!, stride: w * 4, width: w, height: h)
+                let f2 = ShiftDetector.Frame(base: p2.baseAddress!, stride: w * 4, width: w, height: h)
+                XCTAssertNil(d.detect(old: f1, new: f2, rect: PixelRect(x: 0, y: 0, width: w, height: h)), "no copy-rect for a change in place")
+            } }
             // The fallback never accepts a shift that does not verify: an unrelated frame yields nothing.
             var noise = [UInt8](repeating: 0, count: w * h * 4); var s: UInt32 = 7
             for i in 0..<noise.count { s = s &* 1664525 &+ 1013904223; noise[i] = UInt8(s >> 24) }
