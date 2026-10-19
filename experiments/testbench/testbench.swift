@@ -100,6 +100,32 @@ final class App: NSObject, NSApplicationDelegate {
     }
     var dockLike: NSWindow?
     var vibrancy: [NSWindow] = []
+    /// `--terminal` (with --still): the bench's text becomes a dark monospace build log that appends lines in bursts of
+    /// 15–80 lines/s for 0.5–3 s with pauses, scrolled to the end so every line scrolls the view by one line (what
+    /// experiments/byterace found the scroll detector missing: one-line shifts of monospace output).
+    func startTerminal(_ tv: NSTextView) {
+        tv.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 1); tv.textColor = NSColor(calibratedWhite: 0.85, alpha: 1)
+        tv.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        tv.string = ""
+        let words = ["Compiling", "Linking", "warning:", "note:", "Sources/MirageCore/Tiles/TileTracker.swift", "Build", "complete!", "[42/317]", "swiftc", "-O", "MirageHost", "DesktopStreamer.o", "CompileSwift", "normal", "arm64"]
+        var rng: UInt64 = 7, n = 0
+        func burst() {
+            let rate = 15 + Int(rng >> 40) % 66, secs = 0.5 + Double(Int(rng >> 20) % 26) / 10
+            let count = Int(Double(rate) * secs)
+            var sent = 0
+            Timer.scheduledTimer(withTimeInterval: 1 / Double(rate), repeats: true) { t in
+                guard sent < count else { t.invalidate(); DispatchQueue.main.asyncAfter(deadline: .now() + 1.5 + Double(Int(rng >> 30) % 20) / 10) { burst() }; return }
+                sent += 1; n += 1
+                var line = String(format: "[%4d] ", n)
+                for _ in 0..<6 { rng = rng &* 6364136223846793005 &+ 1442695040888963407; line += words[Int(rng >> 33) % words.count] + " " }
+                tv.textStorage?.append(NSAttributedString(string: line + "\n", attributes: [.font: tv.font!, .foregroundColor: tv.textColor!]))
+                if (tv.textStorage?.length ?? 0) > 60_000 { tv.textStorage?.deleteCharacters(in: NSRange(location: 0, length: 20_000)) }
+                tv.scrollToEndOfDocument(nil)
+            }
+            rng = rng &* 6364136223846793005 &+ 1442695040888963407
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { burst() }
+    }
     /// `--vibrancy`: a Dock hover without the Dock: a translucent behind-window material band near the bottom of the
     /// screen whose six "icons" magnify one after another (0.3 s each, like the pointer sweeping along the Dock), over a
     /// coloured block that moves behind it, so the band's blur re-renders every frame. A big region changing continuously
@@ -241,6 +267,7 @@ final class App: NSObject, NSApplicationDelegate {
             if CommandLine.arguments.contains("--tooltip") { startTooltips(over: w) }
             if CommandLine.arguments.contains("--docklike") { startDockLike(screen: screen, near: w.frame) }
             if CommandLine.arguments.contains("--vibrancy") { startVibrancy(screen: screen) }
+            if CommandLine.arguments.contains("--terminal") { startTerminal(tv) }
             updateCaption()
             window = w
             if isBurst {
