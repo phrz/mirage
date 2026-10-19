@@ -136,10 +136,10 @@ public struct RateController {
         if recovered { ackedFrames += 1; return }
         ackedBytes.append((now, bytes)); ackedBytes.removeAll { now &- $0.nanos > 1_000_000_000 }
         if let rtt = rttNanos {
+            // srtt only: the minimum RTT (the tier's input) comes from the delay probes. A video frame's RTT is measured
+            // from its pacer's estimated end, which under heavy pacing reads low; one such sample took the minimum under
+            // 100 ms and the tier to Normal at srtt 949 ms and 8 % loss (phrz's session, 22:47:45Z).
             srttNanos = srttNanos * 0.8 + rtt * 0.2
-            if minRTTWindowStart == 0 { minRTTWindowStart = now }
-            minRTTCandidate = min(minRTTCandidate, rtt); minRTTNanos = min(minRTTNanos, rtt)
-            if Clock.elapsed(since: minRTTWindowStart, now: now) > 30_000_000_000 { minRTTNanos = minRTTCandidate; minRTTCandidate = .infinity; minRTTWindowStart = now }
         }
         // One-way delay proxy (receiver clock − host clock); its minimum is the base, the rest is queue.
         noteOWD(Double(lastReceived) - Double(sentNanos), now: now, source: "video")

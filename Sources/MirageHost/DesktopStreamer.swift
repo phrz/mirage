@@ -1131,7 +1131,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         CVPixelBufferLockBaseAddress(dsrc, .readOnly); defer { CVPixelBufferUnlockBaseAddress(dsrc, .readOnly) }
         let disp = frameView(dsrc)
         for l in layers.values where !l.isDisplay && l.exposed && !screenLocked {
-            guard let src = l.lastFrame, l.width >= 96, l.height >= 96 else { continue }
+            // Only once the display filter that excludes it is in force: before, the display stream shows it by design
+            // (phrz's session: a false "SHOWS THIS WINDOW" 3 ms before the filter applied, and the window guarded for it).
+            guard excludedFrom[l.id] != nil, let src = l.lastFrame, l.width >= 96, l.height >= 96 else { continue }
             CVPixelBufferLockBaseAddress(src, .readOnly); defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
             let w = frameView(src)
             func lum(_ f: ShiftDetector.Frame, _ x: Int, _ y: Int) -> Int { let p = f.base.advanced(by: y * f.stride + x * 4).assumingMemoryBound(to: UInt8.self); return Int(p[0]) + 2 * Int(p[1]) + Int(p[2]) }
@@ -2178,7 +2180,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let previous = self.lastTier
                 self.lastTier = rc.tier; self.log("link tier: \(rc.tier.name) (capacity \(rc.capacityKbps) kbps, srtt \(Int(rc.srttMs)) ms, loss \(String(format: "%.1f", rc.lossPercent)) %)")
                 // A worse tier restarts lossy-first from the tiny rung; a better one just lets the ladder climb.
-                if !first, let d = self.display, d.fresh == .done, rc.tier.rawValue > (previous?.rawValue ?? 0) {
+                // Only when the worse tier's policy differs (Normal and Constrained share one: a restart between them
+                // bought nothing and dropped the whole screen to the tiny rung, phrz's session 22:48:22Z).
+                if !first, let d = self.display, d.fresh == .done, rc.tier.rawValue > (previous?.rawValue ?? 0), rc.tier.policy != previous?.policy {
                     self.rc?.dropToTinyRung(now: tnow); self.lastRebuildNanos = tnow
                     self.rebuildAllEncoders(keyframes: true)
                     self.beginFreshPicture(.tierChange, detail: " to \(rc.tier.name)")
