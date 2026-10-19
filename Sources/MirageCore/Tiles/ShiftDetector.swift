@@ -35,6 +35,12 @@ public struct ShiftDetector {
     /// wrong shift; the SAD search already chose it decisively. At a 1:1 native stream ~30 % of
     /// text tiles differ in glyph anti-aliasing after a real scroll (measured on mac-daddy).
     public var minTileConfidence = 0.55
+    /// When the profile ratio test fails, the best few candidate shifts are verified tile by tile and accepted at this
+    /// confidence: monospace output scrolled by one line has a line profile whose SAD at the true shift is *above* the SAD
+    /// at zero (749 against 507), though the shift verifies at 0.91–0.93 (experiments/byterace finding 1: 0 copy-rects in
+    /// 1168 frames of terminal output, 2405 kbps of lossless instead of 352).
+    public var fallbackConfidence = 0.8
+    public var fallbackCandidates = 3
     public var samplesPerLine = 32
     /// Per-channel tolerance when verifying; a tile matches if ≤ 1 % of its pixels exceed it.
     public var tolerance: Int32 = 16
@@ -129,6 +135,7 @@ public struct ShiftDetector {
         let limit = min(maxShift, lines - minLines)
         var best = (shift: 0, sad: Double.infinity)
         var zero = Double.infinity
+        var sads: [(shift: Int, sad: Double)] = []
         pOld.withUnsafeBufferPointer { po in pNew.withUnsafeBufferPointer { pn in
             for s in -limit...limit {
                 // new[l] ≈ old[l - s]
@@ -140,10 +147,25 @@ public struct ShiftDetector {
                 let sad = Double(acc) / Double(l1 - l0)
                 if s == 0 { zero = sad }
                 if s != 0 && sad < best.sad { best = (s, sad) }
+                if s != 0 { sads.append((s, sad)) }
             }
         } }
         debug?("shift \(vertical ? "v" : "h") rect \(rect) zero \(Int(zero)) best \(best.shift):\(Int(best.sad)) var \(variation)")
-        guard best.sad < maxRatioToZero * zero else { return nil }
+        guard best.sad < maxRatioToZero * zero else {
+            // The ratio test failed: verify the best local minima of the profile SAD (distinct shifts, ±2 lines apart).
+            var picked: [Int] = []
+            for c in sads.sorted(by: { $0.sad < $1.sad }) where picked.count < fallbackCandidates && !picked.contains(where: { abs($0 - c.shift) <= 2 }) { picked.append(c.shift) }
+            for shift in picked {
+                let dx = vertical ? 0 : shift, dy = vertical ? shift : 0
+                let bounds = PixelRect(x: 0, y: 0, width: min(old.width, new.width), height: min(old.height, new.height))
+                let src = rect.intersection(bounds).intersection(bounds.offset(-dx, -dy)).intersection(rect.offset(-dx, -dy))
+                guard src.width >= 16, src.height >= 16 else { continue }
+                let (mismatch, conf) = verifyTiles(old: old, new: new, src: src, dx: dx, dy: dy, tile: tile)
+                debug?("shift fallback verify (\(dx),\(dy)) conf \(conf)")
+                if conf >= fallbackConfidence { return Result(dx: dx, dy: dy, rect: src, mismatchedTiles: mismatch, confidence: conf) }
+            }
+            return nil
+        }
         let dx = vertical ? 0 : best.shift, dy = vertical ? best.shift : 0
         let bounds = PixelRect(x: 0, y: 0, width: min(old.width, new.width), height: min(old.height, new.height))
         let src = rect.intersection(bounds).intersection(bounds.offset(-dx, -dy)).intersection(rect.offset(-dx, -dy))

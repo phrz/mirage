@@ -78,7 +78,10 @@ public struct TileTracker {
     }
 
     /// Records this capture's dirty tiles and classifies them.
-    public mutating func classify(dirty: [Int], now: UInt64) -> Plan {
+    /// `copyGate`: a copy-rect explained at least half of this layer's change in this frame or the last 300 ms: then
+    /// nothing is motion (a scroll's unexplained frames, momentum steps and exposed strips stay copy-rect + lossless;
+    /// experiments/byterace: scroll 675 → 209 kbps at 2000 kbps and 291 → 209 at 600, text crisp instead of soft 93 %).
+    public mutating func classify(dirty: [Int], now: UInt64, copyGate: Bool = false) -> Plan {
         var plan = Plan()
         guard !dirty.isEmpty else { return plan }
         // History update.
@@ -90,7 +93,9 @@ public struct TileTracker {
             cells[i] = c
         }
         var videoSet = Set<Int>()
-        if dirty.count >= tuning.motionTileCount {
+        if copyGate {
+            // Copy-rect gate: no motion this frame.
+        } else if dirty.count >= tuning.motionTileCount {
             videoSet = Set(dirty)
         } else {
             // Sustained small motion: clusters of frequently-dirty tiles.
@@ -189,11 +194,27 @@ public struct TileTracker {
     public func isCrisp(_ i: Int) -> Bool { !cells[i].pending && cells[i].lastLosslessNanos >= cells[i].lastDirtyNanos }
 
     /// Marks tiles as updated by a copy-rect (they are crisp again if the source was crisp).
-    public mutating func markCopied(_ tiles: [Int], now: UInt64) {
+    public mutating func markCopied(_ tiles: [Int], now: UInt64) { markCopied(tiles, dx: 0, dy: 0, now: now) }
+    /// Destination tiles a copy-rect by (dx, dy) filled: they are as crisp as the pixels they came from. A destination
+    /// tile takes the worst of the source tiles it overlaps: video-soft source text stays pending (with its due time),
+    /// else it would never be refined once the scroll stops (experiments/byterace finding 2: text soft 93 % of the time
+    /// after scrolling in the classifier's replay).
+    public mutating func markCopied(_ tiles: [Int], dx: Int, dy: Int, now: UInt64) {
+        let before = cells
+        let bounds = PixelRect(x: 0, y: 0, width: width, height: height)
         for i in tiles {
+            let src = rect(of: i).offset(-dx, -dy).intersection(bounds)
+            let sources = src.isEmpty ? [] : self.tiles(covering: [src])
+            let soft = sources.filter { before[$0].pending && before[$0].viaVideo }
             var c = cells[i]
-            c.lastDirtyNanos = now; c.lastLosslessNanos = now
-            c.pending = false; c.pendingSince = 0; c.viaVideo = false; c.direct = false
+            c.lastDirtyNanos = now; c.lastLosslessNanos = now; c.direct = false
+            if soft.isEmpty {
+                c.pending = false; c.pendingSince = 0; c.viaVideo = false
+            } else {
+                c.pending = true; c.viaVideo = true
+                c.pendingSince = soft.map { before[$0].pendingSince }.min() ?? now
+                c.dueNanos = soft.map { before[$0].dueNanos }.max() ?? (now &+ tuning.settleNanos)
+            }
             cells[i] = c
         }
     }

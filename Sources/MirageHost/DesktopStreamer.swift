@@ -968,6 +968,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Copy-rects: window drags (display layer, for windows it still carries) from the window list,
         // scrolls from line signatures.
         var explained = Set<Int>()
+        var copies: [(tiles: [Int], dx: Int, dy: Int)] = []
+        let dirtyBeforeCopies = dirty.count
         var copyRectsThisCapture = 0
         if let old, prev != nil {
             if layer.isDisplay {
@@ -982,7 +984,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     guard let r else { continue }
                     let dest = tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])
                     let mismatched = Set(tracker.tiles(covering: r.mismatchedTiles))
-                    explained.formUnion(dest.filter { !mismatched.contains($0) })
+                    explained.formUnion(dest.filter { !mismatched.contains($0) }); copies.append((dest.filter { !mismatched.contains($0) }, r.dx, r.dy))
                     sendTileMessage(.copyRect(.init(header: header(layer: 0, nanos: nanos), rect: r.rect, dx: r.dx, dy: r.dy)), captureNanos: nanos)
                     if debugLayers { log("layer 0 drag copy-rect for window \(d.id) \(r.rect) by (\(r.dx), \(r.dy)) (layers: \(layers.keys.sorted()))") }
                     statCopyRects += 1; copyRectsThisCapture += 1
@@ -1011,7 +1013,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if region.height >= 96 || region.width >= 96, let r = detector.detect(old: old, new: new, rect: region) {
                     let dest = tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])
                     let mismatched = Set(tracker.tiles(covering: r.mismatchedTiles))
-                    explained.formUnion(dest.filter { !mismatched.contains($0) })
+                    explained.formUnion(dest.filter { !mismatched.contains($0) }); copies.append((dest.filter { !mismatched.contains($0) }, r.dx, r.dy))
                     sendTileMessage(.copyRect(.init(header: header(layer: layer.id, nanos: nanos), rect: r.rect, dx: r.dx, dy: r.dy)), captureNanos: nanos)
                     if debugLayers { log("layer \(layer.id) copy-rect \(r.rect) by (\(r.dx), \(r.dy)) confidence \(r.confidence)") }
                     if known == nil {
@@ -1025,7 +1027,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         if !explained.isEmpty {
             dirty.removeAll { explained.contains($0) }
-            tracker.markCopied(Array(explained), now: now)
+            for c in copies { tracker.markCopied(c.tiles, dx: c.dx, dy: c.dy, now: now) }
+            // Copy-rect gate: a copy-rect explained at least half of this frame's change; for 300 ms nothing here is motion.
+            if explained.count * 2 >= dirtyBeforeCopies { layer.copyGateNanos = now }
         }
         // Occluded on the host (covered by a window in front, or off the display): tracked, not sent. They
         // become due when uncovered (reconcileLayers expedites them) and are then sent from the frame of that moment.
@@ -1038,7 +1042,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
         }
 
-        var plan = tracker.classify(dirty: dirty, now: now)
+        var plan = tracker.classify(dirty: dirty, now: now, copyGate: Clock.elapsed(since: layer.copyGateNanos, now: now) < 300_000_000 && layer.copyGateNanos > 0)
         // Motion bookkeeping for the refinement freeze: classified video, copy-rects, or the input stream.
         if !plan.video.isEmpty || copyRectsThisCapture > 0 { lastMotionNanos = now }
         if let hint = injector?.motionHintNanos, hint > lastMotionNanos { lastMotionNanos = hint }

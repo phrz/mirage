@@ -13,6 +13,8 @@ final class Layer {
     private(set) var width: Int, height: Int
     var tracker: TileTracker
     var lastFrame: CVPixelBuffer?
+    /// When a copy-rect last explained at least half of this layer's change (the copy-rect gate, TileTracker.classify).
+    var copyGateNanos: UInt64 = 0
     /// Position on the display (display layer: the whole display), stream pixels.
     var frame: PixelRect
     var capturer: WindowCapturer?
