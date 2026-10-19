@@ -225,6 +225,7 @@ final class ScenarioRunner {
             session.log("scenario keys: \(n) keystrokes sent in \(Int(activeSeconds)) s, \(st.packets) packets, queue \(st.queued), dropped by cap \(st.dropped)")
             return
         }
+        if name == "realapps" { await realApps(); return }
         // Wait for the stream and the window list.
         for _ in 0..<250 where bench() == nil || (session.compositor?.width ?? 0) == 0 { try? await Task.sleep(for: .milliseconds(100)) }
         guard let w = bench() else { session.log("scenario: no Mirage Test Bench window on the host"); return }
@@ -457,6 +458,123 @@ final class ScenarioRunner {
             if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() } else { FileManager.default.createFile(atPath: url.path, contents: Data(line.utf8)) }
         }
         t.resume(); shotTimer = t
+    }
+
+    // MARK: Real apps (phrz's permission, 2026-10-20): a Finder window on ~/MirageScratch only, the Dock hovered (pointer
+    // moves, no clicks), widget focus toggled by clicking that Finder window and the bench. Nothing else is touched.
+    private(set) var realLog: [String] = []
+    private func note(_ s: String) { realLog.append(s); session.log("scenario realapps: " + s) }
+    private func realGuards() -> Bool {
+        guard let st = session.hostStatus else { note("ABORT: no host status"); return false }
+        if st.consoleLocked { note("ABORT: host console locked"); return false }
+        if (st.viewers ?? 1) > 1 { note("ABORT: another viewer is connected (\(st.viewers!))"); return false }
+        return true
+    }
+    private func scratchWindow() -> ControlMessage.WindowInfo? {
+        session.windowsSnapshot().first { $0.app == "Finder" && $0.title == "MirageScratch" && $0.windowLevel == 0 }
+    }
+    private func moveTo(_ x: Int, _ y: Int) { let (nx, ny) = normalized(x, y); session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true) }
+    private var shotRects: [String: PixelRect] = [:]
+    private var realShotTimer: DispatchSourceTimer?
+    private func startRealShots(dir: URL, fps: Double) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var n = 0
+        let q = DispatchQueue(label: "mirage.realshots")
+        let t = DispatchSource.makeTimerSource(queue: q)
+        t.schedule(deadline: .now(), repeating: 1 / max(0.2, fps))
+        t.setEventHandler { [weak self] in
+            guard let self, let ctx = self.session.context, let sc = self.session.scene(pxPerPoint: 2), let bg = sc.background else { return }
+            n += 1
+            for (name, r) in self.shotRects {
+                let crop = r.intersection(PixelRect(x: 0, y: 0, width: bg.width, height: bg.height))
+                guard crop.area > 0 else { continue }
+                UnifiedShots.write(scene: sc, crop: crop, context: ctx, to: dir.appendingPathComponent(String(format: "%@-%04d.png", name, n)))
+            }
+        }
+        t.resume(); realShotTimer = t
+    }
+    private func realApps() async {
+        for _ in 0..<250 where scratchWindow() == nil || (session.compositor?.width ?? 0) == 0 || session.hostStatus == nil { try? await Task.sleep(for: .milliseconds(100)) }
+        guard var w = scratchWindow(), let comp = session.compositor else { note("ABORT: no Finder window on MirageScratch"); return }
+        guard realGuards() else { return }
+        let ppp = await MainActor.run { session.pixelsPerPoint }
+        let H = comp.height, W = comp.width
+        let dockBand = PixelRect(x: 0, y: H - Int(170 * ppp), width: W, height: Int(170 * ppp))
+        shotRects = ["dock": dockBand]
+        if let dir = ProcessInfo.processInfo.environment["MIRAGE_TEST_BENCH_SHOTS"].map({ URL(fileURLWithPath: $0) }) {
+            let fps = ProcessInfo.processInfo.environment["MIRAGE_TEST_BENCH_FPS"].flatMap { Double($0) } ?? 2
+            startRealShots(dir: dir, fps: fps)
+        }
+        session.watchWindowID = w.id
+        note("Finder window \(w.id) at \(w.frame), layered \(w.isLayered); waiting 20 s for the first picture")
+        try? await Task.sleep(for: .seconds(20))
+        // Raise it through Accessibility (AXRaise + activate Finder): no click is needed, and none can land elsewhere.
+        w = scratchWindow() ?? w
+        let inside = (w.frame.x + w.frame.width * 2 / 3, w.frame.y + min(w.frame.height - Int(40 * ppp), Int(200 * ppp)))
+        guard realGuards() else { return }
+        session.sendWindowCommand(.init(id: w.id, action: .raise)); try? await Task.sleep(for: .milliseconds(1200))
+        guard session.hostStatus?.frontmostApp == "Finder", session.hostStatus?.frontmostWindowTitle == "MirageScratch" else { note("ABORT: the scratch window is not frontmost (\(session.hostStatus?.frontmostApp ?? "?") '\(session.hostStatus?.frontmostWindowTitle ?? "")')"); return }
+        // 1. Scroll: 3 bursts of 40 wheel events, down then up.
+        shotRects["finder"] = PixelRect(x: w.frame.x - 64, y: w.frame.y - 64, width: w.frame.width + 128, height: w.frame.height + 128)
+        let c0 = session.totalBytes(), cr0 = session.samples.reduce(0) { $0 + $1.copyRects }
+        var dir = -1.0
+        for b in 0..<3 {
+            guard realGuards() else { return }
+            moveTo(inside.0, inside.1)
+            let (nx, ny) = normalized(inside.0, inside.1)
+            for _ in 0..<40 {
+                guard let win = scratchWindow() else { break }
+                let seq = session.send(.scroll(.init(x: nx, y: ny, dx: 0, dy: 30 * dir, precise: true, modifiers: 0)), scripted: true)
+                let rect = session.scrollRect(for: win, titleBarPx: Int(52 * ppp))
+                session.predict(kind: .scroll, windowID: win.id, rect: rect, dx: 0, dy: Int((30 * dir * ppp).rounded()), inputSeq: seq)
+                try? await Task.sleep(for: .milliseconds(33))
+            }
+            await measureCrisp(burstEnd: Clock.nowNanos())
+            note(String(format: "scroll burst %d: time-to-crisp %.0f ms", b + 1, crispMs.last ?? -1))
+            try? await Task.sleep(for: .milliseconds(800))
+            dir = -dir
+        }
+        try? await Task.sleep(for: .seconds(2))
+        let cr1 = session.samples.reduce(0) { $0 + $1.copyRects }
+        note("scroll: \(cr1 - cr0) copy-rects, \(String(format: "%.0f", Double(session.totalBytes() - c0) / 1000)) KB")
+        // 2. Move: three title-bar drags of the layered window (local drag, AX moves), each settling 4 s.
+        for b in 0..<3 {
+            guard realGuards(), let win = scratchWindow() else { return }
+            let old = win.frame
+            shotRects["finder"] = PixelRect(x: old.x - 400, y: old.y - 300, width: old.width + 800, height: old.height + 600)
+            let b0 = session.totalBytes()
+            let dx = b % 2 == 0 ? 6 : -6, dy = b % 2 == 0 ? 3 : -3
+            if win.isLayered {
+                session.beginLayerDrag(windowID: win.id)
+                for k in 1...50 { session.dragLayer(windowID: win.id, to: old.offset(dx * k, dy * k)); try? await Task.sleep(for: .milliseconds(16)) }
+                session.endLayerDrag(windowID: win.id)
+            } else { note("Finder window is not a layer; skipping drags"); break }
+            try? await Task.sleep(for: .seconds(4))
+            note(String(format: "move %d: %.0f KB in 4.8 s", b + 1, Double(session.totalBytes() - b0) / 1000))
+        }
+        // 3. Dock hover: the pointer sweeps along the Dock band twice (no clicks), then rests above it for 10 s.
+        guard realGuards() else { return }
+        let y = H - Int(35 * ppp)
+        let d0 = session.totalBytes()
+        for pass in 0..<2 {
+            for k in 0...60 {
+                let x = pass == 0 ? W * k / 60 : W - W * k / 60
+                moveTo(x, y); try? await Task.sleep(for: .milliseconds(80))
+            }
+        }
+        moveTo(W / 2, H / 2)
+        try? await Task.sleep(for: .seconds(10))
+        note(String(format: "dock hover: %.0f KB during and 10 s after", Double(session.totalBytes() - d0) / 1000))
+        // 4. Widget focus: alternate Finder (the scratch window) and the bench in front, 3 times, 5 s each.
+        for k in 0..<3 {
+            guard realGuards() else { return }
+            if let b = bench() { session.sendWindowCommand(.init(id: b.id, action: .raise)); try? await Task.sleep(for: .seconds(5)) }
+            guard realGuards(), let win = scratchWindow() else { return }
+            session.sendWindowCommand(.init(id: win.id, action: .raise))
+            try? await Task.sleep(for: .seconds(5))
+            note("widget focus toggle \(k + 1) done")
+        }
+        note("done")
     }
 
     // MARK: Transient windows (tooltips, menus): when one goes, the area it covered must show current pixels within ~1 RTT.

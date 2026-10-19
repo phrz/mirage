@@ -239,6 +239,14 @@ public struct TileTracker {
         return out.prefix(limit).map { $0.0 }
     }
 
+    /// Due tiles pending as direct changes (rate-limited or held back changed pixels), oldest first.
+    public func dueDirect(now: UInt64, limit: Int) -> [Int] {
+        var out: [(Int, UInt64)] = []
+        for i in 0..<cells.count where cells[i].pending && cells[i].direct && !cells[i].viaVideo && cells[i].dueNanos <= now { out.append((i, cells[i].pendingSince)) }
+        out.sort { $0.1 != $1.1 ? $0.1 < $1.1 : $0.0 < $1.0 }
+        return out.prefix(limit).map { $0.0 }
+    }
+
     public mutating func sent(lossless tiles: [Int], now: UInt64) {
         for i in tiles {
             var c = cells[i]

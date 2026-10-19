@@ -40,6 +40,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var statDirtyMissed = 0
     /// Picture audit (TileAudit): every 5 s, fingerprints of desktop tiles the viewer should hold.
     private var lastAuditNanos: UInt64 = 0, auditCursor = 0, statAudited = 0, statAuditRefreshed = 0
+    /// When the display filter excluding each window was applied: its exclusion is checked only a second later (the
+    /// last display frame may predate the filter: a false "SHOWS THIS WINDOW" 19 ms after it applied, eea3220).
+    private var excludedAtNanos: [UInt32: UInt64] = [:]
     private func sendAudit(now: UInt64) {
         guard let d = display, let src = d.lastFrame, !screenLocked, !unifiedView else { return }
         CVPixelBufferLockBaseAddress(src, .readOnly); defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
@@ -158,7 +161,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if !caps.isEmpty { log("window captures, last 30 s: " + caps.joined(separator: " | ")) }
         if statDirtyMissed > 0 { log("display: \(statDirtyMissed) changed tiles outside ScreenCaptureKit's dirty rects in the last 30 s (found by the full diff)") }
         statDirtyMissed = 0
-        if statAudited > 0 { log("picture audit, last 30 s: \(statAudited) desktop tiles fingerprinted, \(statAuditRefreshed) asked for again by the viewer") }
+        if statAudited > 0 { log("picture audit, last 30 s: \(statAudited) desktop tiles fingerprinted, \(statAuditRefreshed) asked for again by the viewer; \(statDirectDue) held-back changed tiles sent when due") }
+        statDirectDue = 0
         statAudited = 0; statAuditRefreshed = 0
         for l in layers.values { l.account = Layer.Account() }
     }
@@ -549,7 +553,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // drag run moves nothing but them).
         if InputInjector.consoleLocked() { return }
         if InputInjector.sinkPath != nil, w.app != "Mirage Test Bench" || ![.move, .raise, .resize].contains(c.action) { injector?.record(.windowCommand(c)); return }
-        let origin = (c.x != nil && c.y != nil) ? windows.originInPoints(x: c.x!, y: c.y!) : nil
+        // Whole points: a fractional origin (stream pixels ÷ 1.89 on mac-daddy) made the window list report a size that
+        // wobbled by a pixel as the window moved, and every wobble re-sent the layer (~400 KB per Finder drag).
+        let origin = (c.x != nil && c.y != nil) ? { let p = windows.originInPoints(x: c.x!, y: c.y!); return CGPoint(x: p.x.rounded(), y: p.y.rounded()) }() : nil
         let size = (c.width != nil && c.height != nil) ? CGSize(width: Double(c.width!) / windows.pxPerPoint, height: Double(c.height!) / windows.pxPerPoint) : nil
         if c.action == .move || c.action == .raise { lastMotionNanos = Clock.nowNanos() }
         if let seq = c.inputSeq { injector?.noteApplied(seq: seq) }
@@ -765,7 +771,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if let l = layers[w.id] {
                 l.absentSince = 0
                 l.frame = w.frame
-                if Layer.even(w.frame.width) != l.width || Layer.even(w.frame.height) != l.height {
+                // Resized only when its size in points changed by a point or more: pixel rounding of a moving window's
+                // frame at a fractional scale is not a resize (each one re-announced and re-sent the whole layer).
+                let ps = s.pointBounds[w.id]?.size ?? .zero
+                let pointResize = l.pointSize == .zero || abs(ps.width - l.pointSize.width) >= 1 || abs(ps.height - l.pointSize.height) >= 1
+                if l.pointSize == .zero { l.pointSize = ps }
+                if pointResize, Layer.even(w.frame.width) != l.width || Layer.even(w.frame.height) != l.height {
+                    l.pointSize = ps
                     // Resized on the host: the layer starts over at the new size (a still, then blocks).
                     l.resize(width: w.frame.width, height: w.frame.height)
                     log("layer \(w.id) resized to \(w.frame.width)x\(w.frame.height)")
@@ -867,7 +879,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                         guard let self else { return }
                         let set = Set(ids)
                         for id in Array(self.excludedFrom.keys) where !set.contains(id) { self.excludedFrom[id] = nil }
-                        for id in ids where self.excludedFrom[id] == nil { self.excludedFrom[id] = self.captureSeq &+ 1 }
+                        for id in ids where self.excludedFrom[id] == nil { self.excludedFrom[id] = self.captureSeq &+ 1; self.excludedAtNanos[id] = Clock.nowNanos() }
                         self.updateDisplayHidden(now: Clock.nowNanos())
                         if let s = self.windows?.current { self.publishWindows(now: Clock.nowNanos(), full: false); _ = s }
                     }
@@ -1162,7 +1174,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         for l in layers.values where !l.isDisplay && l.exposed && !screenLocked {
             // Only once the display filter that excludes it is in force: before, the display stream shows it by design
             // (phrz's session: a false "SHOWS THIS WINDOW" 3 ms before the filter applied, and the window guarded for it).
-            guard excludedFrom[l.id] != nil, let src = l.lastFrame, l.width >= 96, l.height >= 96 else { continue }
+            guard excludedFrom[l.id] != nil, Clock.elapsed(since: excludedAtNanos[l.id] ?? now, now: now) >= 1_000_000_000,
+                  let src = l.lastFrame, l.width >= 96, l.height >= 96 else { continue }
             CVPixelBufferLockBaseAddress(src, .readOnly); defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
             let w = frameView(src)
             func lum(_ f: ShiftDetector.Frame, _ x: Int, _ y: Int) -> Int { let p = f.base.advanced(by: y * f.stride + x * 4).assumingMemoryBound(to: UInt8.self); return Int(p[0]) + 2 * Int(p[1]) + Int(p[2]) }
@@ -1767,6 +1780,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard display != nil else { return }
         presentLevels(now: now)
         refillTiles(now: now)
+        sendDueDirect(now: now)
         // Priority 4: refinement runs on leftover budget only. It yields for 150 ms after any changed
         // pixels went out, keeps 30 % of the tile budget in reserve for them, and never has more than
         // ~300 ms of the link in flight (so it cannot build the queue the next keystroke would wait in).
@@ -1825,6 +1839,34 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// One refinement step over `layers` in order: a fresh picture's next block, a large-backlog block plan, or a
     /// batch of due tiles. True if something was started (or a block is pending for one of them).
+    /// Changed pixels the rate limit held back (a tile changed again within 80 ms) are a direct change, not refinement:
+    /// they go when due, presented on arrival, before any refinement and whatever gates it. They used to wait in the
+    /// refinement pass, which yields 150 ms after every direct change (forever while the pointer moves), freezes during
+    /// motion, waits for the first picture and serves every window's backlog before the desktop: the tiles a moving
+    /// Dock tooltip had just left stayed stale until another tooltip repainted them (phrz's ghost labels, traced on
+    /// mac-daddy with real Dock hovers: each label update covered its new place, the place it left was rate-limited).
+    private var statDirectDue = 0
+    private func sendDueDirect(now: UInt64) {
+        let perSecond = Double(lastBudget.tileKbps * 1000 / 8)
+        for l in layers.values {
+            guard let src = l.lastFrame else { continue }
+            let due = l.tracker.dueDirect(now: now, limit: 64).filter { !l.occludedTiles.contains($0) }
+            guard !due.isEmpty else { continue }
+            // From the reserve the refinement pass keeps for changed pixels: may go down to -30 % of a second's budget.
+            guard tileTokens > -perSecond * 0.3 else { return }
+            CVPixelBufferLockBaseAddress(src, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
+            let f = frameView(src)
+            guard f.width == l.width, f.height == l.height else { continue }
+            if l.isDisplay { displaySent(due) }
+            let bytes = submitLossless(layer: l, tiles: due, from: f, refinement: false, nanos: now, tracker: l.tracker)
+            tileTokens -= Double(bytes)
+            l.tracker.sent(lossless: due, now: now)
+            lastDirectNanos = now
+            statDirectDue += due.count
+        }
+    }
+
     private func refineStep(_ layers: [Layer], now: UInt64) -> Bool {
         for l in layers {
             switch l.fresh {

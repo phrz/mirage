@@ -17,6 +17,8 @@ final class Layer {
     var copyGateNanos: UInt64 = 0
     /// Position on the display (display layer: the whole display), stream pixels.
     var frame: PixelRect
+    /// The window's size in points when the layer was sized (a resize is a change of a point or more).
+    var pointSize: CGSize = .zero
     var capturer: WindowCapturer?
     /// The viewer has been told this layer exists (`.reset`) and holds its first picture (the still).
     var announced = false

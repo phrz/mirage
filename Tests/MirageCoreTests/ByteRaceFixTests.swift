@@ -75,3 +75,19 @@ final class ByteRaceFixTests: XCTestCase {
         XCTAssertTrue(t.due(now: 3_000_000_000, limit: 100).contains(2 * cols), "and it is refined once due")
     }
 }
+
+final class DirectDueTests: XCTestCase {
+    /// A tile that changes again within the rate limit is a direct change due 80 ms later, not refinement.
+    func testRateLimitedChangeIsDueDirect() {
+        var t = TileTracker(width: 640, height: 640)
+        _ = t.classify(dirty: [5], now: 1_000_000_000)                 // sent now
+        let p = t.classify(dirty: [5], now: 1_010_000_000)             // changed again 10 ms later: held back
+        XCTAssertTrue(p.lossless.isEmpty)
+        XCTAssertTrue(t.isDirectPending(5))
+        XCTAssertEqual(t.dueDirect(now: 1_050_000_000, limit: 10), [], "not yet due")
+        XCTAssertEqual(t.dueDirect(now: 1_081_000_000, limit: 10), [5], "due after the rate limit, as a direct change")
+        // Refinement after video is not direct.
+        _ = t.classify(dirty: Array(30..<90), now: 2_000_000_000)
+        XCTAssertFalse(t.dueDirect(now: 9_000_000_000, limit: 200).contains(60))
+    }
+}
