@@ -241,6 +241,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if debugLayers { log("display: \(due.count) tiles may hold window pixels and are visible: re-sending from the desktop") }
     }
 
+    /// Streamers with a connected viewer (this process): what HostStatus.viewers reports.
+    private static let liveLock = NSLock()
+    nonisolated(unsafe) private static var live = Set<ObjectIdentifier>()
+    static func liveCount() -> Int { liveLock.lock(); defer { liveLock.unlock() }; return live.count }
+    private func setLive(_ on: Bool) { Self.liveLock.lock(); if on { Self.live.insert(ObjectIdentifier(self)) } else { Self.live.remove(ObjectIdentifier(self)) }; Self.liveLock.unlock() }
+
     public init(log: @escaping @Sendable (String) -> Void) {
         self.log = log
         hostLog = log
@@ -270,6 +276,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             queue.async {
                 do {
                     self.output = output
+                    self.setLive(true)
                     self.capturer = cap
                     self.target = t
                     self.request = req
@@ -553,7 +560,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.statTimer?.cancel(); self.statTimer = nil
                 self.refineTimer?.cancel(); self.refineTimer = nil
                 self.rateTimer?.cancel(); self.rateTimer = nil
-                self.capturer = nil; self.output = nil
+                self.capturer = nil; self.output = nil; self.setLive(false)
                 self.unacked = [:]; self.sentFrames = [:]; self.recentlyPurged = [:]; self.paceCursorNanos = 0
                 var resent = 0
                 for (_, v) in self.tileSent {
@@ -600,6 +607,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     let now = Clock.nowNanos()
                     let gapMs = self.suspendedAt > 0 ? (Clock.elapsed(since: self.suspendedAt, now: now)) / 1_000_000 : 0
                     self.output = output
+                    self.setLive(true)
                     self.capturer = cap
                     self.lastExcludedIDs = Set(excluded.map(\.windowID))
                     let old = self.target
@@ -646,7 +654,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.statTimer?.cancel(); self.statTimer = nil
                 self.refineTimer?.cancel(); self.refineTimer = nil
                 self.rateTimer?.cancel(); self.rateTimer = nil
-                self.capturer = nil; self.output = nil
+                self.capturer = nil; self.output = nil; self.setLive(false)
                 self.layers = [:]
                 self.chrome?.stop(); self.chrome = nil
                 let inj = self.injector; self.injector = nil
@@ -2165,7 +2173,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             self.secVideoBytes = 0; self.secTileBytes = 0; self.secVideoFrames = 0
             if InputInjector.consoleLocked() != self.screenLocked, let cur = self.windows?.current { self.reconcileLayers(cur, now: tnow); self.publishWindows(now: tnow, full: false) }
             let front: (app: String, id: UInt32, title: String) = self.windows?.frontmost() ?? (app: "", id: 0, title: "")
-            let status = ControlMessage.HostStatus(consoleLocked: self.screenLocked || InputInjector.consoleLocked(), frontmostApp: front.app, frontmostWindowID: front.id, frontmostWindowTitle: front.title, inputSink: InputInjector.sinkPath != nil)
+            let status = ControlMessage.HostStatus(consoleLocked: self.screenLocked || InputInjector.consoleLocked(), frontmostApp: front.app, frontmostWindowID: front.id, frontmostWindowTitle: front.title, inputSink: InputInjector.sinkPath != nil, viewers: Self.liveCount())
             // On change, and every 10 s regardless (sparse when idle; the viewer's keepalive is its own datagram).
             if status != self.lastHostStatus || Clock.elapsed(since: self.lastHostStatusNanos, now: tnow) > 10_000_000_000 {
                 self.lastHostStatus = status; self.lastHostStatusNanos = tnow

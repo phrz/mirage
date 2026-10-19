@@ -514,8 +514,11 @@ public enum ControlMessage: Codable, Equatable {
         /// The host records input to a file instead of injecting it (MIRAGE_INPUT_SINK); the input-integrity
         /// scenario refuses to run unless this is true.
         public var inputSink: Bool?
-        public init(consoleLocked: Bool, frontmostApp: String, frontmostWindowID: UInt32, frontmostWindowTitle: String, inputSink: Bool? = nil) {
-            self.consoleLocked = consoleLocked; self.frontmostApp = frontmostApp; self.frontmostWindowID = frontmostWindowID; self.frontmostWindowTitle = frontmostWindowTitle; self.inputSink = inputSink
+        /// Viewers streaming from this host right now, this one included: a scripted run refuses to start (and stops)
+        /// while anyone else is connected.
+        public var viewers: Int?
+        public init(consoleLocked: Bool, frontmostApp: String, frontmostWindowID: UInt32, frontmostWindowTitle: String, inputSink: Bool? = nil, viewers: Int? = nil) {
+            self.consoleLocked = consoleLocked; self.frontmostApp = frontmostApp; self.frontmostWindowID = frontmostWindowID; self.frontmostWindowTitle = frontmostWindowTitle; self.inputSink = inputSink; self.viewers = viewers
         }
     }
     /// What the host's rate controller is doing, once a second, for the overlay and --headless JSON.

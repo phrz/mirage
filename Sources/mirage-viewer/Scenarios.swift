@@ -82,6 +82,7 @@ final class ScenarioRunner {
     private var guardedWindowID: UInt32 = 0
     private func guardsStillHold() -> Bool {
         guard let status = session.hostStatus else { session.log("scenario \(name): ABORT, host status lost"); return false }
+        if (status.viewers ?? 1) > 1 { session.log("scenario \(name): ABORT, another viewer is connected to the host (\(status.viewers!) streaming)"); return false }
         guard !status.consoleLocked else { session.log("scenario \(name): ABORT, host console LOCKED"); return false }
         if ["drag", "unified", "chrome", "transient"].contains(name), status.inputSink == true { return true }
         guard status.frontmostWindowID == guardedWindowID || status.frontmostApp == "Mirage Test Bench" else {
@@ -256,6 +257,7 @@ final class ScenarioRunner {
         guard let w = bench() else { session.log("scenario \(name): ABORT, bench window gone"); return }
         guard let status = session.hostStatus else { session.log("scenario \(name): ABORT, no host status"); return }
         guard !status.consoleLocked else { session.log("scenario \(name): ABORT, host console is LOCKED"); return }
+        guard (status.viewers ?? 1) <= 1 else { session.log("scenario \(name): ABORT, another viewer is connected to the host (\(status.viewers!) streaming); a scripted run never shares a host with a person"); return }
         // In input-sink mode nothing the script sends can reach the host's input (window commands move only
         // the bench's own windows there), so the bench need not be frontmost for the drag scenario.
         let sinkDrag = ["drag", "unified", "chrome", "transient"].contains(name) && status.inputSink == true
