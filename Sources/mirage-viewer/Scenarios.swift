@@ -311,6 +311,27 @@ final class ScenarioRunner {
             }
             keyLatencyMs = latencies
             // No ⌘A + ⌫ cleanup (review M9): the typed text stays in the bench's own field, which closes with it.
+        case "typeahead":
+            // Typing as in `typing`, through the viewer's prediction (DESIGN §3.5 item 4): each key is predicted at the
+            // host's caret, confirmed by the next caret report, and erased when the host's pixels over it arrive.
+            session.resetWatched()
+            let text = Array("the quick brown fox jumps over the lazy dog while mirage predicts glyphs ")
+            var i = 0
+            while Date() < end {
+                if i % 6 == 0, !guardsStillHold() { break }
+                let ch = text[i % text.count]; i += 1
+                let code: UInt16 = ch == " " ? 49 : 0
+                let seq = session.send(.key(.init(keyCode: code, down: true, isRepeat: false, modifiers: 0, characters: String(ch))), scripted: true)
+                session.typeaheadKey(keyCode: code, characters: String(ch), modifiers: [], seq: seq)
+                _ = session.typeaheadSnapshot()   // what a window would draw on its next frame (time-to-visible)
+                session.send(.key(.init(keyCode: code, down: false, isRepeat: false, modifiers: 0, characters: nil)), scripted: true)
+                try? await Task.sleep(for: .milliseconds(160))
+                _ = session.typeaheadSnapshot()
+            }
+            try? await Task.sleep(for: .seconds(2))
+            _ = session.typeaheadSnapshot()
+            let c = session.typeaheadCounts()
+            session.log("scenario typeahead: \(c.shown) predicted, \(c.confirmed) confirmed, \(c.mismatched) mismatched, \(c.expired) expired")
         case "typing":
             // Caret sits where the raise-click put it (lower half of the text); type at 6 keys/s.
             session.resetWatched()

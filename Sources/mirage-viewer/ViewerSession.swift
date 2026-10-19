@@ -488,6 +488,10 @@ final class ViewerSession: @unchecked Sendable {
                 statsLock.lock(); let wasLocked = hostStatus?.consoleLocked; hostStatus = h; statsLock.unlock()
                 if wasLocked != h.consoleLocked, h.consoleLocked || wasLocked == true { log(h.consoleLocked ? "host: \(host)'s screen is locked (window layers paused on the host)" : "host: \(host)'s screen is unlocked") }
                 Task { @MainActor in model.hostStatus = h }
+            case .caret(let c):
+                predictorLock.lock(); typeahead.host(c, now: Clock.nowNanos()); predictorLock.unlock()
+                if let d = try? Frame.encode(msg) { statsLock.lock(); sControlBytes += d.count; statsLock.unlock() }
+                onChange?()
             case .apps, .icon, .menu, .statusItems:
                 // Native chrome (DESIGN §3.8); counted with the control bytes.
                 if let d = try? Frame.encode(msg) { statsLock.lock(); sControlBytes += d.count; sChromeBytes += d.count; statsLock.unlock() }
@@ -682,6 +686,7 @@ final class ViewerSession: @unchecked Sendable {
             }
             predictorLock.lock()
             for tile in t.tiles { predictor.hostUpdate(inputSeq: t.header.inputSeq, rect: tile.rect, now: now) }
+            for tile in t.tiles where !t.staged { typeaheadLanded(inputSeq: t.header.inputSeq, rect: displayRect(tile.rect, layer: v.id), now: now) }
             predictorLock.unlock()
             sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: t.header.captureNanos, receivedNanos: now, bytes: bytes)))
         case .copyRect(let c):
@@ -1081,6 +1086,67 @@ final class ViewerSession: @unchecked Sendable {
         }
     }
 
+    // MARK: Typeahead (DESIGN §3.5 item 4)
+
+    /// Guarded by predictorLock.
+    private var typeahead = Typeahead()
+    /// Key time per predicted glyph, and the measured times: key → drawn here, key → host pixels over it.
+    private var typeaheadKeyNanos: [UInt64: UInt64] = [:]
+    private(set) var typeaheadVisibleMs: [Double] = [], typeaheadEchoMs: [Double] = []
+    var typeaheadEnabled = ProcessInfo.processInfo.environment["MIRAGE_NO_TYPEAHEAD"] == nil
+    /// On predictorLock.
+    private func typeaheadLanded(inputSeq: UInt64, rect: PixelRect, now: UInt64) {
+        let before = typeahead.glyphs
+        typeahead.pixels(inputSeq: inputSeq, rect: rect)
+        for g in before where !typeahead.glyphs.contains(where: { $0.seq == g.seq }) {
+            if let k = typeaheadKeyNanos.removeValue(forKey: g.seq) { typeaheadEchoMs.append(Double(Clock.elapsed(since: k, now: now)) / 1e6) }
+        }
+    }
+    /// A key the viewer just sent (`seq`): predicted, taken back (backspace), or the predictions invalidated.
+    func typeaheadKey(keyCode: UInt16, characters: String?, modifiers: NSEvent.ModifierFlags, seq: UInt64) {
+        guard typeaheadEnabled, seq != 0 else { return }
+        let now = Clock.nowNanos()
+        predictorLock.lock(); defer { predictorLock.unlock() }
+        let unpredictable: Set<UInt16> = [36, 76, 48, 53, 123, 124, 125, 126, 115, 116, 117, 119, 121]
+        if keyCode == 51, modifiers.intersection([.command, .option, .control]).isEmpty { typeahead.backspace(seq: seq); return }
+        guard modifiers.intersection([.command, .control]).isEmpty, !unpredictable.contains(keyCode),
+              let ch = characters, ch.count == 1, let scalar = ch.unicodeScalars.first, scalar.value >= 0x20, scalar.value != 0x7f,
+              !(0xF700...0xF8FF).contains(scalar.value) else { typeahead.invalidate(after: seq); return }
+        guard let adv = advancePx(ch, caret: typeahead.caret) else { return }
+        if typeahead.typed(ch, advancePx: adv, seq: seq, now: now) != nil {
+            typeaheadKeyNanos[seq] = now
+            if typeaheadKeyNanos.count > 256 { typeaheadKeyNanos = typeaheadKeyNanos.filter { $0.key + 128 > seq } }
+        }
+        onChange?()
+    }
+    func typeaheadInvalidate(seq: UInt64) { predictorLock.lock(); typeahead.invalidate(after: seq); predictorLock.unlock() }
+    /// A click is about to be sent (it moves the caret): predictions wait for the host's report after it.
+    func typeaheadInvalidateBeforeClick() { typeaheadInvalidate(seq: lastInputSeqSent() + 1) }
+    /// The glyph's advance in display pixels, in the host's font (the same font ships on both Macs; else the system font).
+    private func advancePx(_ ch: String, caret: ControlMessage.CaretInfo?) -> Int? {
+        guard let c = caret else { return nil }
+        let size = c.size ?? 13
+        let font = c.font.flatMap { NSFont(name: $0, size: size) } ?? NSFont.systemFont(ofSize: size)
+        let w = (c.secure ? "•" : ch as NSString).size(withAttributes: [.font: font]).width
+        let ppp = MainActor.assumeIsolated { pixelsPerPoint }
+        return max(1, Int((w * ppp).rounded()))
+    }
+    /// What the overlay draws (and the first time each glyph is drawn, for the time-to-visible metric).
+    struct TypeaheadView { var glyphs: [Typeahead.Glyph]; var font: String?; var size: Double; var color: [Double]? }
+    func typeaheadSnapshot(drawnNow: Bool = true) -> TypeaheadView {
+        predictorLock.lock(); defer { predictorLock.unlock() }
+        let now = Clock.nowNanos()
+        typeahead.expire(now: now)
+        if drawnNow { for g in typeahead.glyphs where !typeaheadDrawn.contains(g.seq) { typeaheadDrawn.insert(g.seq); if let k = typeaheadKeyNanos[g.seq] { typeaheadVisibleMs.append(Double(Clock.elapsed(since: k, now: now)) / 1e6) } } }
+        if typeaheadDrawn.count > 512 { typeaheadDrawn = Set(typeaheadDrawn.sorted().suffix(128)) }
+        return TypeaheadView(glyphs: typeahead.glyphs, font: typeahead.caret?.font, size: typeahead.caret?.size ?? 13, color: typeahead.caret?.color)
+    }
+    private var typeaheadDrawn = Set<UInt64>()
+    func typeaheadCounts() -> (shown: Int, confirmed: Int, mismatched: Int, expired: Int) {
+        predictorLock.lock(); defer { predictorLock.unlock() }
+        return (typeahead.shown, typeahead.confirmed, typeahead.mismatched, typeahead.expired)
+    }
+
     // MARK: Window arrangement, local window management, prediction
 
     /// Host window frames (display coordinates) by id, as last published; layered windows' canvases map
@@ -1407,7 +1473,7 @@ final class ViewerSession: @unchecked Sendable {
         predictor.expire(now: Clock.nowNanos())
         return (predictor.displacements(), bandColors)
     }
-    var hasPendingPredictions: Bool { predictorLock.lock(); defer { predictorLock.unlock() }; return predictor.hasPending || !localFrames.isEmpty || localRaise != nil }
+    var hasPendingPredictions: Bool { predictorLock.lock(); defer { predictorLock.unlock() }; return predictor.hasPending || !localFrames.isEmpty || localRaise != nil || !typeahead.glyphs.isEmpty }
     /// Whether the picture needs a redraw for reasons the compositors do not know (local arrangement).
     var arrangementGeneration: Int { predictorLock.lock(); defer { predictorLock.unlock() }; return Int(hostListSeq) }
 
@@ -1475,7 +1541,9 @@ extension ViewerSession {
             var samples: [Sample]
             var unified: UnifiedStats? = nil
             var transientSamples: [String]? = nil, transientGhosts: Int? = nil, dockGhostMs: [Double]? = nil
+            var typeahead: TypeaheadStats? = nil
         }
+        struct TypeaheadStats: Codable { var shown: Int, confirmed: Int, mismatched: Int, expired: Int; var accuracy: Double?; var visibleMsMedian: Double?, visibleMsMax: Double?, echoMsMedian: Double?, echoMsP95: Double? }
         struct UnifiedStats: Codable {
             var windows: Int, hostFramesApplied: Int, localMoves: Int
             var localMoveMsMedian: Double?, localMoveMsMax: Double?, stepJitterMs: [Double]?, redraws: [Int]?
@@ -1524,6 +1592,13 @@ extension ViewerSession {
                       staleSamples: scenario?.staleSamples, staleBenchPixels: scenario?.stalePurple, staleAt: scenario?.staleAt,
                       guardDrops: videoQueue.sync { guardDrops }, unknownDesktopTiles: unknownDesktop.count, fillSamples: scenario?.fillSamples, unknownVisibleTiles: unknownVisibleCount(), preExclusionDrops: videoQueue.sync { preExclusionDrops },
                       samples: samples)
+        let tc = typeaheadCounts()
+        if tc.shown > 0 {
+            predictorLock.lock(); let vis = typeaheadVisibleMs, echo = typeaheadEchoMs; predictorLock.unlock()
+            out.typeahead = TypeaheadStats(shown: tc.shown, confirmed: tc.confirmed, mismatched: tc.mismatched, expired: tc.expired,
+                                           accuracy: tc.confirmed + tc.mismatched > 0 ? Double(tc.confirmed) / Double(tc.confirmed + tc.mismatched) : nil,
+                                           visibleMsMedian: vis.isEmpty ? nil : median(vis), visibleMsMax: vis.max(), echoMsMedian: echo.isEmpty ? nil : median(echo), echoMsP95: echo.isEmpty ? nil : p95(echo))
+        }
         out.transientSamples = scenario?.transientSamples; out.transientGhosts = scenario?.transientGhosts; out.dockGhostMs = scenario?.dockGhostMs
         out.unified = MainActor.assumeIsolated { () -> UnifiedStats? in
             guard let u = unified else { return nil }

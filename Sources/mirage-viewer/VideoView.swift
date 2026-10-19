@@ -77,6 +77,41 @@ final class VideoNSView: NSView {
         let dest = CGRect(x: r.minX * scale, y: r.minY * scale, width: r.width * scale, height: r.height * scale)
         session.lastDest = dest
         SceneRenderer.render(scene, context: context, to: drawable, dest: dest)
+        drawTypeahead()
+    }
+
+    // Typeahead overlay (DESIGN §3.5 item 4): predicted glyphs in the host's font at the predicted caret, underlined until
+    // the host's caret confirms them; gone when the host's pixels over them arrive.
+    private let typeaheadLayer = CALayer()
+    private var glyphLayers: [UInt64: (text: CATextLayer, line: CALayer)] = [:]
+    private func drawTypeahead() {
+        guard let session, let comp = session.compositor, comp.width > 0 else { return }
+        if typeaheadLayer.superlayer == nil { typeaheadLayer.zPosition = 5; layer?.addSublayer(typeaheadLayer) }
+        let v = session.typeaheadSnapshot()
+        let r = videoRect, k = r.width / CGFloat(comp.width)
+        let ppp = MainActor.assumeIsolated { session.pixelsPerPoint }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        let live = Set(v.glyphs.map(\.seq))
+        for (seq, l) in glyphLayers where !live.contains(seq) { l.text.removeFromSuperlayer(); l.line.removeFromSuperlayer(); glyphLayers[seq] = nil }
+        let pt = CGFloat(v.size) * CGFloat(ppp) * k
+        let font = v.font.flatMap { NSFont(name: $0, size: pt) } ?? NSFont.systemFont(ofSize: pt)
+        let color = v.color.map { NSColor(srgbRed: $0[0], green: $0[1], blue: $0[2], alpha: $0.count > 3 ? $0[3] : 1) } ?? NSColor.textColor
+        for g in v.glyphs {
+            let frame = CGRect(x: r.minX + CGFloat(g.rect.x) * k, y: r.minY + CGFloat(g.rect.y) * k, width: CGFloat(g.rect.width) * k + 2, height: CGFloat(g.rect.height) * k)
+            let l = glyphLayers[g.seq] ?? {
+                let t = CATextLayer(); t.contentsScale = window?.backingScaleFactor ?? 2; t.alignmentMode = .left
+                let line = CALayer(); line.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.8).cgColor
+                typeaheadLayer.addSublayer(t); typeaheadLayer.addSublayer(line)
+                glyphLayers[g.seq] = (t, line); return (t, line)
+            }()
+            l.text.string = NSAttributedString(string: g.text, attributes: [.font: font, .foregroundColor: color])
+            // The line box: the glyph's baseline sits where the font puts it in a line of that height.
+            let lineH = font.ascender - font.descender
+            l.text.frame = CGRect(x: frame.minX, y: frame.minY + (frame.height - lineH) / 2, width: frame.width, height: lineH + 2)
+            l.line.frame = CGRect(x: frame.minX, y: frame.maxY - max(1, k * 2), width: frame.width - 2, height: max(1, k * 2))
+            l.line.isHidden = g.confirmed
+        }
     }
     private var lastDisplacementCount = 0
     private var lastArrangement = -1
@@ -210,6 +245,7 @@ final class VideoNSView: NSView {
     }
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        session?.typeaheadInvalidateBeforeClick()
         if let d = drag { session?.endDrag(windowID: d.windowID) }
         drag = nil; layerDrag = nil
         guard !observeOnly else { return }
@@ -275,9 +311,10 @@ final class VideoNSView: NSView {
     private func handleLocal(_ e: NSEvent) -> Bool { MainActor.assumeIsolated { LocalShortcuts.handle(e, session: session) } }
 
     private func key(_ e: NSEvent, down: Bool) {
-        guard !observeOnly else { return }
-        session?.send(.key(.init(keyCode: e.keyCode, down: down, isRepeat: down && e.isARepeat, modifiers: flags(e),
-                                 characters: down ? e.characters : nil)))
+        guard !observeOnly, let session else { return }
+        let seq = session.send(.key(.init(keyCode: e.keyCode, down: down, isRepeat: down && e.isARepeat, modifiers: flags(e),
+                                          characters: down ? e.characters : nil)))
+        if down { session.typeaheadKey(keyCode: e.keyCode, characters: e.characters, modifiers: e.modifierFlags, seq: seq) }
     }
     override func keyDown(with event: NSEvent) { if !handleLocal(event) { key(event, down: true) } }
     override func keyUp(with event: NSEvent) { if !observeOnly, event.modifierFlags.intersection([.control, .option, .command, .shift]) == [.control, .option, .command] { return }; key(event, down: false) }

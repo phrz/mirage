@@ -157,6 +157,9 @@ public enum ControlMessage: Codable, Equatable {
     case viewInterest(ViewInterest)
     /// Host → viewer: the host's status items (menu extras), from Accessibility, on change: each a rect of the menu bar.
     case statusItems(StatusItemList)
+    /// Host → viewer: the focused text element's caret, from Accessibility (typeahead, DESIGN §3.5 item 4); nil caret
+    /// when nothing editable has focus.
+    case caret(CaretInfo)
 
     // Input, client → host. Coordinates are normalized to the streamed display: (0,0) top-left, (1,1) bottom-right.
     case mouseMove(MouseMove)
@@ -480,6 +483,26 @@ public enum ControlMessage: Codable, Equatable {
         public var pid: Int32
         public var action: Action
         public init(pid: Int32, action: Action) { self.pid = pid; self.action = action }
+    }
+    public struct CaretInfo: Codable, Equatable {
+        /// The insertion point (a zero-width line, height of the line), display-layer pixels; nil = no editable focus.
+        public var caret: PixelRect?
+        /// The focused element's frame (predicted glyphs are clipped to it), display-layer pixels.
+        public var field: PixelRect?
+        public var pid: Int32
+        /// Font of the character before the caret (PostScript name, size in points) and its colour (sRGB 0–1).
+        public var font: String?
+        public var size: Double?
+        public var color: [Double]?
+        /// A selection is active (typing replaces it: no prediction).
+        public var selection: Bool
+        /// Secure field (password): predict bullets, never characters.
+        public var secure: Bool
+        /// The last client input the host had applied when it read the caret.
+        public var inputSeq: UInt64
+        public init(caret: PixelRect?, field: PixelRect?, pid: Int32, font: String?, size: Double?, color: [Double]?, selection: Bool, secure: Bool, inputSeq: UInt64) {
+            self.caret = caret; self.field = field; self.pid = pid; self.font = font; self.size = size; self.color = color; self.selection = selection; self.secure = secure; self.inputSeq = inputSeq
+        }
     }
     public struct StatusItem: Codable, Equatable {
         public var pid: Int32

@@ -29,6 +29,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var ax: AXWindows?
     /// Native chrome (DESIGN §3.8): menus, running apps, icons.
     private var chrome: NativeChrome?
+    /// Typeahead (DESIGN §3.5 item 4): the focused text element's caret.
+    private var caret: CaretTracker?
     /// What the viewer shows (M3.2): in Unified mode window layers are not held back for being covered on this screen,
     /// and the display layer is sent only where the viewer shows it (menus, popovers, the status-item strip).
     private var interest: ControlMessage.ViewInterest?
@@ -290,6 +292,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     chrome.toPixels = { [weak tracker] r in tracker.map { $0.toPixels(r) } }
                     chrome.start()
                     self.chrome = chrome
+                    let caret = CaretTracker(toPixels: { [weak tracker] r in tracker?.toPixels(r) ?? .zero },
+                                             inputSeq: { [weak self] in self?.injector?.inputSeq(before: Clock.nowNanos()) ?? 0 },
+                                             send: { [weak self] m in self?.queue.async { self?.sendControlCounted(m) } })
+                    caret.start()
+                    self.caret = caret
                     let cur = CursorMonitor(displayID: t.display.displayID)
                     cur.onShape = { [weak self] s in self?.output?.sendControl(.cursorShape(s)) }
                     cur.onPosition = { [weak self] p in self?.output?.sendControl(.cursorPosition(p)) }
@@ -479,6 +486,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
             return
         }
+        switch input { case .key, .mouseButton: caret?.kick(); default: break }
         inputQueue.async {
             self.injector?.handle(input)
             if case .scroll(let s) = input, let t = self.target, let w = self.windows {
@@ -651,7 +659,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     // Window layers the viewer already holds are announced again (their pixel size), then
                     // their capturers restart and the first frame's full diff sends whatever changed.
                     for l in self.layers.values where !l.isDisplay && l.announced { self.sendTileMessage(.reset(layer: l.id, width: l.width, height: l.height), captureNanos: now) }
-                    self.chrome?.resend()
+                    self.chrome?.resend(); self.caret?.resend()
                     if let s = self.windows?.sample(captureSeq: self.captureSeq, now: now, force: true) { self.reconcileLayers(s.sample, now: now) }
                     self.publishWindows(now: now, full: true)
                     self.startTimers()
@@ -675,6 +683,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.capturer = nil; self.output = nil; self.setLive(false)
                 self.layers = [:]
                 self.chrome?.stop(); self.chrome = nil
+                self.caret?.stop(); self.caret = nil
                 let inj = self.injector; self.injector = nil
                 self.inputQueue.async { inj?.releaseAll() }
                 c.resume()
