@@ -221,8 +221,8 @@ traffic-light child window, `WindowInfo.controls`) and clicks on them are handle
 goes when the host's list drops it, after any save sheet), minimize → the local genie into the local Dock plus AX
 minimize (the restore goes to the window's last AX target, since a minimized window leaves the host's list), zoom →
 AX zoom. A title-bar press (right of the traffic lights, top 28 pt) that moves becomes `performDrag`; any local move or
-live resize becomes a local frame override and a window command (move at ≤ 20 Hz plus a trailing send, resize once at
-the end of the live resize); the canvas is drawn 1:1, never stretched, and a resized layer keeps its old picture at
+live resize becomes a local frame override and one window command once it settles (a move 150 ms after the drag
+stops, a resize at the end of the live resize: each host-side move re-captures the window there, §6 M3.2); the canvas is drawn 1:1, never stretched, and a resized layer keeps its old picture at
 the top-left until the host's new capture replaces it. A purple outline follows the window's corner radius, measured
 from the canvas alpha. Menus, popovers and tooltips are borderless child windows of the frontmost window of their app
 they touch, cut from the display layer; a sheet-like window in another's top band is its child. A raise on the host
@@ -1629,5 +1629,27 @@ Things the loopback runs taught:
   keyframe never went out and its fresh-picture gate held every window back; Unified no longer waits for it.
 - Status items are not windows on macOS 27; `AXExtrasMenuBar` gives their rects (y = 4.5 pt, inside the bar).
 
-**Real link (mac-daddy, 145 ms):** pending the coordinated deploy of c5b6b5e.
+**Real link (mac-daddy running c5b6b5e, this MacBook in Tokyo, RTT 145 ms, 800 kbps cap, stream 3024×1700, two
+800×500 pt bench windows, guards on: console unlocked, bench frontmost).**
+
+| Measure | mac-daddy |
+|---|---|
+| Local move: the window takes its new frame | median 0.5 ms, max 2.8 ms per step; worst step gap 18–20 ms (16 ms target) |
+| Host confirms the dropped frame | 194–272 ms with moves streamed at 20 Hz; 346–359 ms with one debounced move (150 ms after the drag stops + RTT + AX) |
+| Bytes during a 0.8 s drag | 32–128 KB with moves streamed; 3.3–57 KB with the debounced move (the rest is the previous switch's refinement) |
+| Bytes in the 3 s after the drop | **246–314 KB**: the host re-captures and re-refines the moved window (see below) |
+| Window switch | host raised it 200–330 ms later (11 ms when it already was in front); **75–182 KB** in 2 s |
+| Menu bar after a window becomes key | 156 ms (one RTT; the walk follows); every menu cached before opening; refresh on open 151–165 ms; the choice pressed on the host |
+| Status strip | 1 item; the crop shows the menu bar's overflow chevron, not the bench's item: macOS 27 keeps a new app's status item out of the visible bar until it is allowed, while Accessibility still reports it |
+| Native chrome bytes | 127 KB on connect (14–15 app icons), menus ~1–5 KB |
+| Desktop layer while Unified is on | 0–14 KB per 30 s |
+
+Frame sheets (5 s apart, the two native windows as this Mac shows them, with the window server's shadow and the purple
+outline) show the windows correct and crisp between moves; the frame taken right after a move shows the moved window's
+text soft for a moment. That is the cost found here: with 5dbdf60's per-window capture (a display stream minus every
+other window, `sourceRect` following the frame) a host-side move makes the layer's capture shift and churn (copy-rects
+inside the layer, a ~300-tile refinement backlog, a keyframe), so every move costs a quarter megabyte and a visible soft
+step, where M3.1's window streams moved for free. Unified therefore sends the host one move per drag, debounced, instead
+of a stream; the capture side of it is open (it affects Desktop-mode host drags the same way). Raises cost 75–180 KB for
+the same reason plus the active/inactive appearance change. phrz's verdict: pending.
 

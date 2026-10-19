@@ -1267,8 +1267,8 @@ final class ViewerSession: @unchecked Sendable {
         predictorLock.lock(); localFrames[windowID] = lf; predictorLock.unlock()
     }
     // Unified mode (DESIGN §3.5 item 2): native windows move and resize under the window server; each change becomes a
-    // local frame override and a window command, throttled to 20 Hz with a trailing send, so the host follows and the
-    // override retires once the host's list reflects the last command.
+    // local frame override, and the host is sent one window command once the change has settled; the override retires
+    // once the host's list reflects it.
     private var trailingCommand: [UInt32: DispatchWorkItem] = [:]   // main thread
     private var lastUnifiedCommandNanos: [UInt32: UInt64] = [:]    // main thread
     @MainActor func moveLayerLocally(windowID: UInt32, to frame: PixelRect) { setLocalFrame(windowID: windowID, frame: frame, action: .move, immediate: false) }
@@ -1301,11 +1301,13 @@ final class ViewerSession: @unchecked Sendable {
             if var cur = self.localFrames[windowID], cur.frame == f { cur.inputSeq = seq; cur.releasedNanos = Clock.nowNanos(); self.localFrames[windowID] = cur }
             self.predictorLock.unlock()
         }
-        if immediate || Clock.elapsed(since: lastUnifiedCommandNanos[windowID] ?? 0, now: now) > 50_000_000 { send() }
+        // Unified mode needs the host window only where it ends up (nobody sees the host's screen): one move when the
+        // local drag has been still for 150 ms, not a stream of them (each move re-captures the window there).
+        if immediate { send() }
         else {
             let w = DispatchWorkItem { MainActor.assumeIsolated { send() } }
             trailingCommand[windowID] = w
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(60), execute: w)
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(150), execute: w)
         }
         onChange?()
     }
