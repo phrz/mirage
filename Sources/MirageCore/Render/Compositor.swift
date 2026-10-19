@@ -86,6 +86,9 @@ public final class Compositor {
     public var hasAlpha = false
     /// The layer this canvas shows (0 = the display layer); displacements are keyed by it.
     public var layerID: UInt32 = 0
+    /// A window layer's corner radius in canvas pixels, measured from its alpha (`sampleCornerRadius`): its shadow follows
+    /// the window's own shape, not a fixed radius (a squarer shadow box drew a dark inset outline in the corner).
+    public var cornerRadius: Float?
     /// Receiver clock of the last write (layer cache eviction).
     public private(set) var lastWriteNanos: UInt64 = 0
     /// Bytes of texture memory this canvas holds (canvas + scratch + incoming).
@@ -422,6 +425,7 @@ public final class Compositor {
                 guard let tex = device.makeTexture(descriptor: d) else { continue }
                 var pixels = [UInt8](repeating: 0, count: dw * dh * 4)
                 guard pixels.withUnsafeMutableBytes({ TileCodec.decode(t.data, into: $0.baseAddress!, width: dw, height: dh, stride: dw * 4) }) else { continue }
+                if hasAlpha { Self.clampPremultiplied(&pixels) }
                 tex.replace(region: MTLRegionMake2D(0, 0, dw, dh), mipmapLevel: 0, withBytes: pixels, bytesPerRow: dw * 4)
                 blit?.endEncoding(); blit = nil
                 for dst in targets(r, staged: staged, crossfade: crossfade, cb) { drawScaled(tex, into: dst, rect: r, commandBuffer: cb) }
@@ -462,6 +466,24 @@ public final class Compositor {
         if !faded.isEmpty { let start = Clock.nowNanos(); for r in faded { beginFade(r, durationNanos: crossfadeNanos, start: start) } }
         if n > 0 && (!staged || shownNow) { bump() }
         return n
+    }
+
+    /// Window canvases hold premultiplied pixels (the capture's, kept exact by lossless WebP). Lossy WebP does not keep
+    /// the colour of transparent pixels: a decoded still or middle level has colour where alpha is 0 (a window's rounded
+    /// corners), which premultiplied blending adds on top of the desktop: square, whitish corners whenever a window was
+    /// at a lossy level (phrz, Desktop mode, during drags while every move re-sent the window). Each channel is clamped
+    /// to its alpha, the premultiplied invariant.
+    static func clampPremultiplied(_ p: inout [UInt8]) {
+        p.withUnsafeMutableBufferPointer { b in
+            var i = 0
+            while i + 3 < b.count {
+                let a = b[i + 3]
+                if b[i] > a { b[i] = a }
+                if b[i + 1] > a { b[i + 1] = a }
+                if b[i + 2] > a { b[i + 2] = a }
+                i += 4
+            }
+        }
     }
 
     /// Starts a crossfade for `rect`: the new pixels live in `incoming` until the fade ends, when
@@ -804,7 +826,10 @@ public enum SceneRenderer {
                 }
             case .layer(let c, let frame, let shadow, let dim):
                 guard c.canvas != nil else { continue }
-                if let s = shadow { drawShadow(s, box: px(PixelRect(x: frame.x, y: frame.y, width: c.width, height: c.height))) }
+                if var s = shadow {
+                    if let r = c.cornerRadius { s.cornerRadius = r }
+                    drawShadow(s, box: px(PixelRect(x: frame.x, y: frame.y, width: c.width, height: c.height)))
+                }
                 drawCanvas(c, frame: frame, layerID: c.layerID, alpha: c.hasAlpha || dim < 1 ? dim : nil)
             }
         }

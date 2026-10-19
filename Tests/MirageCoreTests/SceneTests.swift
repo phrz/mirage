@@ -78,4 +78,42 @@ final class SceneTests: XCTestCase {
         XCTAssertFalse(plan.entries[0].visible)
         XCTAssertNotNil(plan.entries[0].why)
     }
+
+    /// A window layer at a lossy level (its first still or middle level) keeps its rounded corners: where the window is
+    /// transparent the desktop shows, whatever colour lossy WebP left in those pixels (they were square and whitish).
+    func testLossyLevelKeepsTransparentCornersDuringAndAfterAMove() throws {
+        guard let ctx = MetalContext() else { throw XCTSkip("no Metal device") }
+        let bg = Compositor(context: ctx); bg.configure(width: 300, height: 200)
+        solid(bg, PixelRect(x: 0, y: 0, width: 300, height: 200), bgra: (255, 0, 0, 255))        // desktop: blue
+        let win = Compositor(context: ctx); win.layerID = 9; win.hasAlpha = true; win.configure(width: 120, height: 80)
+        // A window picture with transparent 16-px corners whose colour is white (what the lossy codec can leave there).
+        var px = [UInt8](repeating: 0, count: 120 * 80 * 4)
+        for y in 0..<80 { for x in 0..<120 {
+            let o = (y * 120 + x) * 4
+            let cx = x < 16 ? 16 - x : (x >= 104 ? x - 103 : 0), cy = y < 16 ? 16 - y : (y >= 64 ? y - 63 : 0)
+            let outside = cx * cx + cy * cy > 256
+            px[o] = 200; px[o + 1] = 200; px[o + 2] = 200; px[o + 3] = outside ? 0 : 255
+            if outside { px[o] = 255; px[o + 1] = 255; px[o + 2] = 255 }
+        } }
+        let data = px.withUnsafeBytes { TileCodec.encodeLossy(base: $0.baseAddress!, width: 120, height: 80, stride: 480, outWidth: 120, outHeight: 80, quality: 75) }!
+        win.applyTiles([.init(rect: PixelRect(x: 0, y: 0, width: 120, height: 80), format: .lossy, data: data)])
+        let t = target(ctx, 300, 200)
+        // The shadow follows the measured corner (16 px here): just inside the window's own arc but outside a 12-px box the
+        // old fixed-radius shadow left a wedge of bare desktop next to a dark outline.
+        let e = expectation(description: "radius"); var measured: Double?
+        win.sampleCornerRadius { measured = $0; e.fulfill() }
+        wait(for: [e], timeout: 5)
+        XCTAssertEqual(measured ?? 0, 16, accuracy: 3)
+        win.cornerRadius = Float(measured ?? 16)
+        for frame in [PixelRect(x: 40, y: 40, width: 120, height: 80), PixelRect(x: 97, y: 61, width: 120, height: 80)] {   // at rest, then moved locally
+            let w = ControlMessage.WindowInfo(id: 9, pid: 1, title: "", frame: frame, z: 0, level: 0, layered: true)
+            _ = render(ctx, bg: bg, layers: [9: win], windows: [w], into: t)
+            let corner = pixel(ctx, t, frame.x + 1, frame.y + 1), inside = pixel(ctx, t, frame.x + 60, frame.y + 40)
+            // The desktop (blue, darkened by the window's own shadow) shows in the transparent corner, never the white
+            // the lossy codec left there or the window's grey.
+            XCTAssertGreaterThan(Int(corner.b), Int(corner.r) + 60, "desktop shows in the transparent corner at \(frame)")
+            XCTAssertLessThan(Int(corner.r), 60, "no white in the corner at \(frame)")
+            XCTAssertGreaterThan(Int(inside.r), 150, "the window shows inside at \(frame)")
+        }
+    }
 }

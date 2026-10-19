@@ -228,6 +228,7 @@ final class ScenarioRunner {
         for _ in 0..<250 where bench() == nil || (session.compositor?.width ?? 0) == 0 { try? await Task.sleep(for: .milliseconds(100)) }
         guard let w = bench() else { session.log("scenario: no Mirage Test Bench window on the host"); return }
         session.log("scenario \(name) for \(Int(seconds)) s against window \(w.id) \(w.frame)")
+        if let dir = ProcessInfo.processInfo.environment["MIRAGE_TEST_BENCH_SHOTS"].map({ URL(fileURLWithPath: $0) }) { startBenchShots(dir: dir, benchID: w.id) }
         session.watchRect = w.frame
         let ppp = await MainActor.run { session.pixelsPerPoint }
         if name == "fovea" {
@@ -407,6 +408,30 @@ final class ScenarioRunner {
         default:
             session.log("unknown scenario \(name)")
         }
+    }
+
+    /// MIRAGE_TEST_BENCH_SHOTS: the composited scene around the bench (its arranged frame + 32 px), off-screen, at
+    /// MIRAGE_TEST_BENCH_FPS, with `bench.jsonl` (time, frame) so sheets can be read against the scenario's log.
+    private var shotTimer: DispatchSourceTimer?
+    private func startBenchShots(dir: URL, benchID: UInt32) {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fps = ProcessInfo.processInfo.environment["MIRAGE_TEST_BENCH_FPS"].flatMap { Double($0) } ?? 2
+        let t0 = Clock.nowNanos()
+        var n = 0
+        let q = DispatchQueue(label: "mirage.benchshots")
+        let t = DispatchSource.makeTimerSource(queue: q)
+        t.schedule(deadline: .now(), repeating: 1 / max(0.2, fps))
+        t.setEventHandler { [weak self] in
+            guard let self, let ctx = self.session.context, let sc = self.session.scene(pxPerPoint: 2),
+                  let f = self.session.arrangedWindows().first(where: { $0.id == benchID })?.frame, let bg = sc.background else { return }
+            let crop = PixelRect(x: f.x - 32, y: f.y - 32, width: f.width + 64, height: f.height + 64).intersection(PixelRect(x: 0, y: 0, width: bg.width, height: bg.height))
+            n += 1
+            UnifiedShots.write(scene: sc, crop: crop, context: ctx, to: dir.appendingPathComponent(String(format: "bench-%04d.png", n)))
+            let line = "{\"n\":\(n),\"ms\":\(Clock.elapsed(since: t0, now: Clock.nowNanos()) / 1_000_000),\"x\":\(crop.x),\"y\":\(crop.y),\"w\":\(crop.width),\"h\":\(crop.height)}\n"
+            let url = dir.appendingPathComponent("bench.jsonl")
+            if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close() } else { FileManager.default.createFile(atPath: url.path, contents: Data(line.utf8)) }
+        }
+        t.resume(); shotTimer = t
     }
 
     // MARK: Transient windows (tooltips, menus): when one goes, the area it covered must show current pixels within ~1 RTT.

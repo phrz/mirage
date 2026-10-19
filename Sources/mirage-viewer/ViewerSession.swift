@@ -666,6 +666,7 @@ final class ViewerSession: @unchecked Sendable {
             guard let v = layerView(layer) else { break }
             let staged = v.compositor.stagedTiles
             v.compositor.commitStaged()
+            if layer != 0 { measureCorner(v) }
             if staged > 0 { v.step("commit", now: now) }
             let c = v.compositor
             if c.width > 0, !v.stagedLossless.isEmpty {
@@ -699,6 +700,14 @@ final class ViewerSession: @unchecked Sendable {
         }
         onChange?()
         if case .reset = msg {} else { notePictureChange(now) }
+    }
+
+    /// A window layer's corner radius from its alpha, after each presented level (its shadow follows it).
+    private func measureCorner(_ v: LayerView) {
+        let c = v.compositor
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {   // after the commit's crossfade has landed
+            c.sampleCornerRadius { r in if let r, r > 0 { c.cornerRadius = Float(r) } }
+        }
     }
 
     /// Desktop tiles (64-px rects) under `rects` that the scene draws as fill: no clean pixels known, not under a window layer.

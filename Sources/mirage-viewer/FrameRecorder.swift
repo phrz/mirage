@@ -67,11 +67,25 @@ final class FrameRecorder {
 enum UnifiedShots {
     static let directory: URL? = ProcessInfo.processInfo.environment["MIRAGE_TEST_UNIFIED_SHOTS"].map { URL(fileURLWithPath: $0) }
     static func write(_ c: Compositor, source: PixelRect, context: MetalContext, to url: URL) {
-        let w = max(1, source.width), h = max(1, source.height)
+        render(context: context, width: source.width, height: source.height, to: url) { target in
+            SceneRenderer.renderCrop(c, source: source, displacements: [], bandColors: [:], context: context, target: target, clear: MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0))
+        }
+    }
+    /// Test knob `MIRAGE_TEST_BENCH_SHOTS=<dir>` (any mode, `--scenario` runs): the composited scene cropped to the bench
+    /// window plus a margin, `bench-NNNN.png` at `MIRAGE_TEST_BENCH_FPS` (default 2): what the person sees of our own
+    /// window and its corners and shadow, and nothing of the rest of the screen.
+    static func write(scene: LayerScene, crop: PixelRect, context: MetalContext, to url: URL) {
+        guard let bg = scene.background, bg.width > 0 else { return }
+        render(context: context, width: crop.width, height: crop.height, to: url) { target in
+            SceneRenderer.render(scene, context: context, target: target, dest: CGRect(x: -crop.x, y: -crop.y, width: bg.width, height: bg.height))
+        }
+    }
+    private static func render(context: MetalContext, width: Int, height: Int, to url: URL, draw: (MTLTexture) -> Void) {
+        let w = max(1, width), h = max(1, height)
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false)
         d.usage = [.renderTarget, .shaderRead]; d.storageMode = .private
         guard let target = context.device.makeTexture(descriptor: d) else { return }
-        SceneRenderer.renderCrop(c, source: source, displacements: [], bandColors: [:], context: context, target: target, clear: MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0))
+        draw(target)
         let stride = w * 4
         guard let buf = context.device.makeBuffer(length: stride * h, options: .storageModeShared), let cb = context.commandQueue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return }
         blit.copy(from: target, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0), sourceSize: MTLSize(width: w, height: h, depth: 1),
