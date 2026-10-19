@@ -13,8 +13,10 @@ public enum Mirage {
     public static let idleTimeoutMs: Int = 45_000
     /// Viewer keepalive: one small datagram ping this often.
     public static let keepaliveSeconds = 10
-    /// A suspended session waits this long for its viewer to come back.
-    public static let resumeWindowSeconds = 300
+    /// A suspended session waits this long for its viewer to come back: a day, like mosh (a laptop closed overnight
+    /// comes back to the same session). Memory is bounded separately: the oldest suspended sessions shed their pixel
+    /// caches first (`HostConnections.suspendedBytesBudget`) and keep their authentication, tier and sequences.
+    public static let resumeWindowSeconds = 86_400
 }
 
 /// Length-prefixed JSON frames on a reliable QUIC stream.

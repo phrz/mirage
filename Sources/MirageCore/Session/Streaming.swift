@@ -34,6 +34,11 @@ public protocol DesktopStreamer: AnyObject, Sendable {
     /// viewer's kept picture current with a masked keyframe and the diff against the last frame it saw.
     func resume(_ request: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo
     func stop() async
+    /// Bytes of pixel caches a suspended session holds (last frames, encoder canvases).
+    func cachedBytes() async -> Int
+    /// Memory pressure among suspended sessions: drop the pixel caches, keep everything else (tier, rate controller,
+    /// sequences, input state). A resumed session then sends each layer's picture again instead of a diff.
+    func shedCaches() async
 }
 
 /// Per-QUIC-connection state shared by its streams: the datagram flow and the streamer.
@@ -148,7 +153,14 @@ public actor HostConnections {
     private var suspended: [Data: Suspended] = [:]
     private var reapers: [Data: Task<Void, Never>] = [:]
     /// How long a suspended session waits for its viewer before the streamer is stopped for good.
-    public var resumeWindow: Duration = .seconds(300)
+    public var resumeWindow: Duration = .seconds(Mirage.resumeWindowSeconds)
+    /// Pixel caches all suspended sessions may hold together; beyond it the oldest shed theirs (MIRAGE_SUSPENDED_MB).
+    public var suspendedBytesBudget = (ProcessInfo.processInfo.environment["MIRAGE_SUSPENDED_MB"].flatMap { Int($0) } ?? 1536) << 20
+    /// Suspended sessions kept at all; beyond it the oldest is stopped.
+    public var maxSuspended = 16
+    private var shed = Set<Data>()
+    public func setBudget(bytes: Int, maxSessions: Int) { suspendedBytesBudget = bytes; maxSuspended = maxSessions }
+    public private(set) var shedCount = 0
 
     public init() {}
     public func connection(_ id: UUID) -> HostConnection {
@@ -177,7 +189,7 @@ public actor HostConnections {
     public func claim(token: Data, deviceID: String, by id: UUID) async -> (streamer: DesktopStreamer, request: ControlMessage.StreamRequest?)? {
         guard let me = connections[id] else { return nil }
         if let s = suspended.removeValue(forKey: token) {
-            reapers.removeValue(forKey: token)?.cancel()
+            reapers.removeValue(forKey: token)?.cancel(); shed.remove(token)
             guard s.deviceID == deviceID else { Task { await s.streamer.stop() }; return nil }
             active[token] = id; me.resumeToken = token; me.deviceID = deviceID
             await s.suspending.value
@@ -204,8 +216,25 @@ public actor HostConnections {
             guard !Task.isCancelled, let self else { return }
             if let s = await self.expire(token) { await s.streamer.stop() }
         }
+        Task { [weak self] in await suspending.value; await self?.enforceBudget() }
     }
-    private func expire(_ token: Data) -> Suspended? { reapers[token] = nil; return suspended.removeValue(forKey: token) }
+    /// Oldest first: beyond `maxSuspended` sessions are stopped, beyond the byte budget their pixel caches are shed.
+    public func enforceBudget() async {
+        let byAge = suspended.sorted { $0.value.since < $1.value.since }
+        if byAge.count > maxSuspended {
+            for (token, _) in byAge.prefix(byAge.count - maxSuspended) { if let s = expire(token) { await s.streamer.stop() } }
+        }
+        var entries: [(token: Data, bytes: Int)] = []
+        for (token, s) in suspended.sorted(by: { $0.value.since < $1.value.since }) where !shed.contains(token) { entries.append((token, await s.streamer.cachedBytes())) }
+        var total = entries.reduce(0) { $0 + $1.bytes }
+        for e in entries where total > suspendedBytesBudget {
+            guard let s = suspended[e.token] else { continue }
+            await s.streamer.shedCaches()
+            shed.insert(e.token); shedCount += 1
+            total -= e.bytes
+        }
+    }
+    private func expire(_ token: Data) -> Suspended? { reapers[token] = nil; shed.remove(token); return suspended.removeValue(forKey: token) }
     public var suspendedCount: Int { suspended.count }
 }
 

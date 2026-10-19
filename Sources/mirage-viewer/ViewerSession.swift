@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import CoreVideo
+import Network
 import MirageCore
 
 /// Everything the viewer knows about one host connection, published for SwiftUI.
@@ -192,6 +193,7 @@ final class ViewerSession: @unchecked Sendable {
     }
 
     func start() {
+        watchWakeAndPath()
         Task { await run() }
     }
 
@@ -214,7 +216,9 @@ final class ViewerSession: @unchecked Sendable {
             // While the host may still hold our session (resume window), dial every second with a 4 s
             // timeout: the §4a bar is "back within 2 s of the path returning", a failed dial costs one
             // 1.2 KB datagram, and QUIC's own Initial retransmits back off too slowly to meet it alone.
-            if resumable { delay = min(delay, 1) }
+            // For the first five minutes; after that (a night's sleep, a dead network) the backoff applies, and a wake or a
+            // network change dials at once instead (`nudge`).
+            if resumable, Date().timeIntervalSince(disconnectedAt ?? Date()) < 300 { delay = min(delay, 1) }
             log("viewer: \(failure); reconnecting in \(delay) s (attempt \(attempt))")
             await MainActor.run {
                 model.reconnecting = (attempt, delay)
@@ -222,8 +226,37 @@ final class ViewerSession: @unchecked Sendable {
                 lastRequest = nil   // re-request the stream once the new connection is up
                 if pendingRequest == nil, let r = lastRequestSent { pendingRequest = r }
             }
-            try? await Task.sleep(for: .seconds(delay))
+            let wait = Task { _ = try? await Task.sleep(for: .seconds(delay)) }
+            backoffWait = wait
+            await wait.value
+            backoffWait = nil
         }
+    }
+    /// The backoff sleep in progress (cancelled by `nudge`).
+    private var backoffWait: Task<Void, Never>?
+    private var wakeObservers: [NSObjectProtocol] = []
+    private var pathMonitor: NWPathMonitor?
+    /// The Mac woke or the network changed: a dead connection is dropped and the host dialed at once (the resume token
+    /// brings the same session back for a day, DESIGN §4a), instead of after the backoff.
+    func nudge(_ why: String) {
+        statsLock.lock(); let last = lastHostPacketNanos; statsLock.unlock()
+        let silent = last > 0 ? Double(Clock.elapsed(since: last, now: Clock.nowNanos())) / 1e9 : 0
+        log("viewer: \(why)\(silent > 0 ? String(format: " (%.0f s since the host was last heard)", silent) : ""); dialing now")
+        if sender != nil, silent > 3 { dropConnection() }
+        backoffWait?.cancel()
+    }
+    private func watchWakeAndPath() {
+        wakeObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: nil) { [weak self] _ in self?.nudge("woke from sleep") })
+        let m = NWPathMonitor()
+        var lastPath: String?
+        m.pathUpdateHandler = { [weak self] p in
+            let desc = p.status == .satisfied ? p.availableInterfaces.map(\.name).joined(separator: ",") : "none"
+            defer { lastPath = desc }
+            guard let lp = lastPath, lp != desc, p.status == .satisfied else { return }
+            self?.nudge("network changed (\(lp) → \(desc))")
+        }
+        m.start(queue: DispatchQueue(label: "mirage.viewer.path"))
+        pathMonitor = m
     }
 
     /// The stream request we last sent, kept across reconnects.

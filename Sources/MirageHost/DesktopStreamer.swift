@@ -589,6 +589,24 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
     private var suspendedAt: UInt64 = 0
 
+    public func cachedBytes() async -> Int {
+        await withCheckedContinuation { c in queue.async {
+            func b(_ p: CVPixelBuffer?) -> Int { p.map { CVPixelBufferGetDataSize($0) } ?? 0 }
+            c.resume(returning: self.layers.values.reduce(0) { $0 + b($1.lastFrame) + b($1.canvas) + b($1.scaled) })
+        } }
+    }
+    public func shedCaches() async {
+        await withCheckedContinuation { c in queue.async {
+            let before = self.layers.values.reduce(0) { $0 + ($1.lastFrame.map { CVPixelBufferGetDataSize($0) } ?? 0) }
+            for l in self.layers.values {
+                l.lastFrame = nil; l.canvas = nil; l.scaled = nil; l.transfer = nil; l.encoder = nil
+                l.forceFullDiff = true
+            }
+            self.log("suspended session: pixel caches shed (\(before >> 20) MB of last frames); a resume sends every layer's picture again")
+            c.resume()
+        } }
+    }
+
     /// A new connection presented this session's token. The viewer kept its picture, so: rebind the
     /// output, restart capture (display and window layers), and bring the picture current with a keyframe
     /// masked to the tiles the viewer does not have crisp plus the diff of each layer's first capture
