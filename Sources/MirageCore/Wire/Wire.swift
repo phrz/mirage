@@ -275,8 +275,12 @@ public enum ControlMessage: Codable, Equatable {
         public var maxFPS: Int
         /// Display to stream: nil = main display, else a CGDirectDisplayID.
         public var displayID: UInt32?
-        public init(width: Int, height: Int, bitrateKbps: Int = 800, maxFPS: Int = 30, displayID: UInt32? = nil) {
-            self.width = width; self.height = height; self.bitrateKbps = bitrateKbps; self.maxFPS = maxFPS; self.displayID = displayID
+        /// Stream at the display's native pixels when the requested size is within 15 % of them: 1:1 is the only scale at
+        /// which every scroll and window move is a whole-pixel shift (exact copy-rects, layers captured without rescaling);
+        /// the viewer scales the picture into its window.
+        public var snapNative: Bool?
+        public init(width: Int, height: Int, bitrateKbps: Int = 800, maxFPS: Int = 30, displayID: UInt32? = nil, snapNative: Bool? = nil) {
+            self.width = width; self.height = height; self.bitrateKbps = bitrateKbps; self.maxFPS = maxFPS; self.displayID = displayID; self.snapNative = snapNative
         }
     }
     public struct StreamInfo: Codable, Equatable {

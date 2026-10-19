@@ -40,6 +40,7 @@ struct Options {
         if let i = args.firstIndex(of: "--headless") { o.headless = true; args.remove(at: i) }
         if let i = args.firstIndex(of: "--observe") { o.observe = true; args.remove(at: i) }
         if let i = args.firstIndex(of: "--unified") { o.unified = true; args.remove(at: i) }
+        if let i = args.firstIndex(of: "--native-snap") { args.remove(at: i) }   // read by ViewerSession.snapNative
         if let i = args.firstIndex(of: "--probe-input") { o.probeInput = true; args.remove(at: i) }
         if let v = value("--window") { let p = v.split(separator: "x").compactMap { Int($0) }; if p.count == 2 { o.window = (p[0], p[1]) } }
         if args.isEmpty { return o }   // launched from Finder/Dock: show the connect window

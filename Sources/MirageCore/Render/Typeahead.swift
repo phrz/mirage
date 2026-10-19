@@ -27,6 +27,9 @@ public struct Typeahead {
     /// Silent predictions while untrusted: (seq, expected caret x after it).
     private var silent: [(seq: UInt64, x: Int)] = []
     public private(set) var shown = 0, confirmed = 0, mismatched = 0, expired = 0
+    /// Each mismatch: what was predicted against what the host reported (diagnostics).
+    public struct Miss: Equatable { public var text: String; public var predictedX: Int, predictedY: Int, hostX: Int, hostY: Int, glyphWidth: Int }
+    public private(set) var misses: [Miss] = []
     public var timeoutNanos: UInt64 = 2_000_000_000
 
     public init() {}
@@ -49,6 +52,7 @@ public struct Typeahead {
             for i in glyphs.indices where !glyphs[i].confirmed && glyphs[i].seq <= c.inputSeq { glyphs[i].confirmed = true; confirmed += 1 }
         } else {
             mismatched += covered.count
+            if misses.count < 64 { misses.append(Miss(text: covered.map(\.text).joined(), predictedX: last.rect.maxX, predictedY: last.rect.y, hostX: cr.x, hostY: cr.y, glyphWidth: last.rect.width)) }
             glyphs = []; trusted = false; silentStreak = 0; silent = []
         }
     }

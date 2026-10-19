@@ -54,6 +54,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         var w = Double(max(req.width, 64)), h = Double(max(req.height, 64))
         if w / h > aspect { w = h * aspect } else { h = w / aspect }
         w = min(w, pw * scale); h = min(h, ph * scale)   // never upscale beyond native pixels
+        if req.snapNative == true, StreamScale.snapsToNative(requestedWidth: w, nativeWidth: pw * scale) { w = pw * scale; h = ph * scale }
         let ew = Int(w) & ~1, eh = Int(h) & ~1
         let name = "display \(display.displayID) (\(display.width)x\(display.height) pt, \(Int(pw))x\(Int(ph)) px)"
         let info = ControlMessage.StreamInfo(width: ew, height: eh, displayID: display.displayID, displayWidth: display.width, displayHeight: display.height,

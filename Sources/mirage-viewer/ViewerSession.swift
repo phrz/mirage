@@ -166,6 +166,8 @@ final class ViewerSession: @unchecked Sendable {
     private(set) var legibleUnderPointerMs: Double? = nil
     private var refinementLogged = 0
     static let debugTiles = ProcessInfo.processInfo.environment["MIRAGE_DEBUG_TILES"] != nil
+    /// Native-scale snap (StreamScale): flag while it is measured (MIRAGE_NATIVE_SNAP=1 or --native-snap).
+    static var snapNative = ProcessInfo.processInfo.environment["MIRAGE_NATIVE_SNAP"] == "1" || CommandLine.arguments.contains("--native-snap")
     static let debugPresent = ProcessInfo.processInfo.environment["MIRAGE_DEBUG_PRESENT"] != nil
     func resetWatched() { videoQueue.async { self.watchedTileBytes = 0; self.watchedTileCount = 0; self.watchedDirectBytes = 0; self.watchedVideoFrames = 0; self.watchedCopyRects = 0 } }
     func windowsSnapshot() -> [ControlMessage.WindowInfo] { predictorLock.lock(); defer { predictorLock.unlock() }; return windows }
@@ -438,7 +440,7 @@ final class ViewerSession: @unchecked Sendable {
 
     func requestStream(width: Int, height: Int) {
         Task { @MainActor in
-            let req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: model.bitrateKbps, maxFPS: 30)
+            let req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: model.bitrateKbps, maxFPS: 30, snapNative: Self.snapNative ? true : nil)
             if req == lastRequest { return }
             guard let sender else { pendingRequest = req; log("stream request \(width)x\(height) queued until connected"); return }
             lastRequest = req; lastRequestSent = req
@@ -1147,6 +1149,7 @@ final class ViewerSession: @unchecked Sendable {
         return TypeaheadView(glyphs: typeahead.glyphs, font: typeahead.caret?.font, size: typeahead.caret?.size ?? 13, color: typeahead.caret?.color)
     }
     private var typeaheadDrawn = Set<UInt64>()
+    func typeaheadMisses() -> [Typeahead.Miss] { predictorLock.lock(); defer { predictorLock.unlock() }; return typeahead.misses }
     func typeaheadCounts() -> (shown: Int, confirmed: Int, mismatched: Int, expired: Int) {
         predictorLock.lock(); defer { predictorLock.unlock() }
         return (typeahead.shown, typeahead.confirmed, typeahead.mismatched, typeahead.expired)
@@ -1548,7 +1551,7 @@ extension ViewerSession {
             var transientSamples: [String]? = nil, transientGhosts: Int? = nil, dockGhostMs: [Double]? = nil
             var typeahead: TypeaheadStats? = nil
         }
-        struct TypeaheadStats: Codable { var shown: Int, confirmed: Int, mismatched: Int, expired: Int; var accuracy: Double?; var visibleMsMedian: Double?, visibleMsMax: Double?, echoMsMedian: Double?, echoMsP95: Double? }
+        struct TypeaheadStats: Codable { var shown: Int, confirmed: Int, mismatched: Int, expired: Int; var accuracy: Double?; var visibleMsMedian: Double?, visibleMsMax: Double?, echoMsMedian: Double?, echoMsP95: Double?; var misses: [String]? }
         struct UnifiedStats: Codable {
             var windows: Int, hostFramesApplied: Int, localMoves: Int
             var localMoveMsMedian: Double?, localMoveMsMax: Double?, stepJitterMs: [Double]?, redraws: [Int]?
@@ -1602,7 +1605,8 @@ extension ViewerSession {
             predictorLock.lock(); let vis = typeaheadVisibleMs, echo = typeaheadEchoMs; predictorLock.unlock()
             out.typeahead = TypeaheadStats(shown: tc.shown, confirmed: tc.confirmed, mismatched: tc.mismatched, expired: tc.expired,
                                            accuracy: tc.confirmed + tc.mismatched > 0 ? Double(tc.confirmed) / Double(tc.confirmed + tc.mismatched) : nil,
-                                           visibleMsMedian: vis.isEmpty ? nil : median(vis), visibleMsMax: vis.max(), echoMsMedian: echo.isEmpty ? nil : median(echo), echoMsP95: echo.isEmpty ? nil : p95(echo))
+                                           visibleMsMedian: vis.isEmpty ? nil : median(vis), visibleMsMax: vis.max(), echoMsMedian: echo.isEmpty ? nil : median(echo), echoMsP95: echo.isEmpty ? nil : p95(echo),
+                                           misses: typeaheadMisses().map { "'\($0.text)' predicted end \($0.predictedX),\($0.predictedY) host caret \($0.hostX),\($0.hostY) (glyph \($0.glyphWidth) px)" })
         }
         out.transientSamples = scenario?.transientSamples; out.transientGhosts = scenario?.transientGhosts; out.dockGhostMs = scenario?.dockGhostMs
         out.unified = MainActor.assumeIsolated { () -> UnifiedStats? in
