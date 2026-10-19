@@ -249,12 +249,19 @@ final class LinkTierTests: XCTestCase {
         sel.update(rateKbps: 800, limitedByLink: false, rttMs: 500, lossPercent: 0, now: 2_000_000_000)
         XCTAssertEqual(sel.tier, .normal)
         sel.update(rateKbps: 800, limitedByLink: false, rttMs: 500, lossPercent: 0, now: 3_100_000_000)
-        XCTAssertEqual(sel.tier, .extreme, "worse tier after 2 s")
-        sel.update(rateKbps: 800, limitedByLink: false, rttMs: 200, lossPercent: 0, now: 4_000_000_000)
-        sel.update(rateKbps: 800, limitedByLink: false, rttMs: 200, lossPercent: 0, now: 9_000_000_000)
+        XCTAssertEqual(sel.tier, .normal, "Extreme needs its condition for 10 s, not 2")
+        sel.update(rateKbps: 800, limitedByLink: false, rttMs: 500, lossPercent: 0, now: 11_100_000_000)
+        XCTAssertEqual(sel.tier, .extreme, "worse tier (Extreme) after 10 s")
+        sel.update(rateKbps: 800, limitedByLink: false, rttMs: 200, lossPercent: 0, now: 12_000_000_000)
+        sel.update(rateKbps: 800, limitedByLink: false, rttMs: 200, lossPercent: 0, now: 17_000_000_000)
         XCTAssertEqual(sel.tier, .extreme, "better tier needs 10 s")
-        sel.update(rateKbps: 800, limitedByLink: false, rttMs: 200, lossPercent: 0, now: 14_100_000_000)
+        sel.update(rateKbps: 800, limitedByLink: false, rttMs: 200, lossPercent: 0, now: 22_100_000_000)
         XCTAssertEqual(sel.tier, .constrained)
+        // Other worse tiers keep the 2 s dwell.
+        var s2 = TierSelector(initial: .normal)
+        s2.update(rateKbps: 800, limitedByLink: false, rttMs: 200, lossPercent: 0, now: 1_000_000_000)
+        s2.update(rateKbps: 800, limitedByLink: false, rttMs: 200, lossPercent: 0, now: 3_100_000_000)
+        XCTAssertEqual(s2.tier, .constrained)
     }
     func testControllerReportsConstrainedOnThisLink() {
         var rc = RateController(initialKbps: 800, maxKbps: 800, nativePixels: 1000)

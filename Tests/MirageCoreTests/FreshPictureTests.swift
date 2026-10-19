@@ -25,3 +25,14 @@ final class TierInputTests: XCTestCase {
         XCTAssertEqual(LinkTier.normal.policy, LinkTier.constrained.policy)
     }
 }
+
+final class ExtremeDwellTests: XCTestCase {
+    func testExtremeNeedsTenSeconds() {
+        var t = TierSelector(initial: .constrained)
+        var now: UInt64 = 1_000_000_000
+        for _ in 0..<5 { t.update(rateKbps: 300, limitedByLink: true, rttMs: 150, lossPercent: 0, now: now); now += 1_000_000_000 }
+        XCTAssertEqual(t.tier, .constrained, "a 5 s dip under our own burst is not Extreme")
+        for _ in 0..<7 { t.update(rateKbps: 300, limitedByLink: true, rttMs: 150, lossPercent: 0, now: now); now += 1_000_000_000 }
+        XCTAssertEqual(t.tier, .extreme)
+    }
+}

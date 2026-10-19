@@ -56,6 +56,7 @@ public struct TierSelector: Equatable {
     private var candidateSince: UInt64 = 0
     public var dwellNanosDown: UInt64 = 2_000_000_000   // to a worse tier
     public var dwellNanosUp: UInt64 = 10_000_000_000    // to a better tier
+    public var dwellNanosExtreme: UInt64 = 10_000_000_000  // into Extreme
 
     public init(initial: LinkTier = .normal) { tier = initial; candidate = initial }
 
@@ -64,7 +65,10 @@ public struct TierSelector: Equatable {
         let wanted = LinkTier.classify(rateKbps: rateKbps, limitedByLink: limitedByLink, rttMs: rttMs, lossPercent: lossPercent)
         if wanted != candidate { candidate = wanted; candidateSince = now }
         guard candidate != tier else { return tier }
-        let dwell = candidate.rawValue > tier.rawValue ? dwellNanosDown : dwellNanosUp
+        // Extreme (video on the tiny rung, a whole fresh picture on entry) needs its condition for 10 s: a target that dips
+        // under our own burst (a window resent after a move) took a Constrained session to Extreme and back within 15 s,
+        // restarting the whole picture each time (mac-daddy, 2026-10-20).
+        let dwell = candidate.rawValue > tier.rawValue ? (candidate == .extreme ? max(dwellNanosDown, dwellNanosExtreme) : dwellNanosDown) : dwellNanosUp
         if now &- candidateSince >= dwell { tier = candidate }
         return tier
     }

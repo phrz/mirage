@@ -1195,6 +1195,8 @@ final class ViewerSession: @unchecked Sendable {
         return TypeaheadView(glyphs: typeahead.glyphs, font: typeahead.caret?.font, size: typeahead.caret?.size ?? 13, color: typeahead.caret?.color)
     }
     private var typeaheadDrawn = Set<UInt64>()
+    /// Bytes received for one layer so far (scenarios: per-layer cost of an interaction).
+    func layerBytes(_ id: UInt32) -> Int { videoQueue.sync { layerViews[id]?.receivedBytes ?? 0 } }
     func typeaheadMisses() -> [Typeahead.Miss] { predictorLock.lock(); defer { predictorLock.unlock() }; return typeahead.misses }
     func typeaheadCounts() -> (shown: Int, confirmed: Int, mismatched: Int, expired: Int) {
         predictorLock.lock(); defer { predictorLock.unlock() }

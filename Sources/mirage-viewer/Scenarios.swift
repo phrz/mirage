@@ -463,7 +463,7 @@ final class ScenarioRunner {
     // MARK: Real apps (phrz's permission, 2026-10-20): a Finder window on ~/MirageScratch only, the Dock hovered (pointer
     // moves, no clicks), widget focus toggled by clicking that Finder window and the bench. Nothing else is touched.
     private(set) var realLog: [String] = []
-    private func note(_ s: String) { realLog.append(s); session.log("scenario realapps: " + s) }
+    private func note(_ s: String) { let t = "t=\(session.samples.count)s "; realLog.append(t + s); session.log("scenario realapps: " + t + s) }
     private func realGuards() -> Bool {
         guard let st = session.hostStatus else { note("ABORT: no host status"); return false }
         if st.consoleLocked { note("ABORT: host console locked"); return false }
@@ -512,8 +512,29 @@ final class ScenarioRunner {
         w = scratchWindow() ?? w
         let inside = (w.frame.x + w.frame.width * 2 / 3, w.frame.y + min(w.frame.height - Int(40 * ppp), Int(200 * ppp)))
         guard realGuards() else { return }
-        session.sendWindowCommand(.init(id: w.id, action: .raise)); try? await Task.sleep(for: .milliseconds(1200))
+        session.sendWindowCommand(.init(id: w.id, action: .raise))
+        for _ in 0..<60 { try? await Task.sleep(for: .milliseconds(100)); if session.hostStatus?.frontmostWindowTitle == "MirageScratch" { break } }
         guard session.hostStatus?.frontmostApp == "Finder", session.hostStatus?.frontmostWindowTitle == "MirageScratch" else { note("ABORT: the scratch window is not frontmost (\(session.hostStatus?.frontmostApp ?? "?") '\(session.hostStatus?.frontmostWindowTitle ?? "")')"); return }
+        // Moves first, on a quiet link: the first picture and its refinement done (tiles under 60 kbps for 3 s, up to 60 s),
+        // so a move's bytes are the move's.
+        var quietFor = 0
+        for _ in 0..<60 { try? await Task.sleep(for: .seconds(1)); if let l = session.samples.last, l.tileKbps + l.kbps < 60 { quietFor += 1 } else { quietFor = 0 }; if quietFor >= 3 { break } }
+        note("link quiet for \(quietFor) s; drags")
+        // 2. Move: three title-bar drags of the layered window (local drag, AX moves), each settling 4 s.
+        for b in 0..<3 {
+            guard realGuards(), let win = scratchWindow() else { return }
+            let old = win.frame
+            shotRects["finder"] = PixelRect(x: old.x - 400, y: old.y - 300, width: old.width + 800, height: old.height + 600)
+            let b0 = session.totalBytes(), f0 = session.layerBytes(win.id), d0 = session.layerBytes(0)
+            let dx = b % 2 == 0 ? 6 : -6, dy = b % 2 == 0 ? 3 : -3
+            if win.isLayered {
+                session.beginLayerDrag(windowID: win.id)
+                for k in 1...50 { session.dragLayer(windowID: win.id, to: old.offset(dx * k, dy * k)); try? await Task.sleep(for: .milliseconds(16)) }
+                session.endLayerDrag(windowID: win.id)
+            } else { note("Finder window is not a layer; skipping drags"); break }
+            try? await Task.sleep(for: .seconds(4))
+            note(String(format: "move %d: %.1f KB in 4.8 s (Finder layer %.1f KB, desktop %.1f KB)", b + 1, Double(session.totalBytes() - b0) / 1000, Double(session.layerBytes(win.id) - f0) / 1000, Double(session.layerBytes(0) - d0) / 1000))
+        }
         // 1. Scroll: 3 bursts of 40 wheel events, down then up.
         shotRects["finder"] = PixelRect(x: w.frame.x - 64, y: w.frame.y - 64, width: w.frame.width + 128, height: w.frame.height + 128)
         let c0 = session.totalBytes(), cr0 = session.samples.reduce(0) { $0 + $1.copyRects }
@@ -537,21 +558,6 @@ final class ScenarioRunner {
         try? await Task.sleep(for: .seconds(2))
         let cr1 = session.samples.reduce(0) { $0 + $1.copyRects }
         note("scroll: \(cr1 - cr0) copy-rects, \(String(format: "%.0f", Double(session.totalBytes() - c0) / 1000)) KB")
-        // 2. Move: three title-bar drags of the layered window (local drag, AX moves), each settling 4 s.
-        for b in 0..<3 {
-            guard realGuards(), let win = scratchWindow() else { return }
-            let old = win.frame
-            shotRects["finder"] = PixelRect(x: old.x - 400, y: old.y - 300, width: old.width + 800, height: old.height + 600)
-            let b0 = session.totalBytes()
-            let dx = b % 2 == 0 ? 6 : -6, dy = b % 2 == 0 ? 3 : -3
-            if win.isLayered {
-                session.beginLayerDrag(windowID: win.id)
-                for k in 1...50 { session.dragLayer(windowID: win.id, to: old.offset(dx * k, dy * k)); try? await Task.sleep(for: .milliseconds(16)) }
-                session.endLayerDrag(windowID: win.id)
-            } else { note("Finder window is not a layer; skipping drags"); break }
-            try? await Task.sleep(for: .seconds(4))
-            note(String(format: "move %d: %.0f KB in 4.8 s", b + 1, Double(session.totalBytes() - b0) / 1000))
-        }
         // 3. Dock hover: the pointer sweeps along the Dock band twice (no clicks), then rests above it for 10 s.
         guard realGuards() else { return }
         let y = H - Int(35 * ppp)

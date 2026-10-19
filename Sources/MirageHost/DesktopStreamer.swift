@@ -1837,8 +1837,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         d.account.upgrade += bytes
     }
 
-    /// One refinement step over `layers` in order: a fresh picture's next block, a large-backlog block plan, or a
-    /// batch of due tiles. True if something was started (or a block is pending for one of them).
     /// Changed pixels the rate limit held back (a tile changed again within 80 ms) are a direct change, not refinement:
     /// they go when due, presented on arrival, before any refinement and whatever gates it. They used to wait in the
     /// refinement pass, which yields 150 ms after every direct change (forever while the pointer moves), freezes during
@@ -1867,6 +1865,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
     }
 
+    /// One refinement step over `layers` in order: a fresh picture's next block, a large-backlog block plan, or a
+    /// batch of due tiles. True if something was started (or a block is pending for one of them).
     private func refineStep(_ layers: [Layer], now: UInt64) -> Bool {
         for l in layers {
             switch l.fresh {
