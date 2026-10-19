@@ -338,7 +338,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         windows?.setDisplay(t.display.displayID, streamWidth: w)
         blockInFlight = nil
         sendTileMessage(.reset(layer: 0, width: w, height: h), captureNanos: now)
-        beginFreshPicture(reason: "stream start or resize")
+        beginFreshPicture(.streamStart)
         if let s = windows?.sample(captureSeq: captureSeq, now: now, force: true) { reconcileLayers(s.sample, now: now) }
     }
 
@@ -1229,9 +1229,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     // MARK: Fresh pictures (DESIGN §3.3 "lossy first")
 
     /// Starts the display layer's fresh-picture sequence; the next keyframe is its base.
-    private func beginFreshPicture(reason: String) {
+    private func beginFreshPicture(_ trigger: FreshPictureTrigger, detail: String = "") {
+        guard trigger.restartsWholePicture else { return }
         display?.fresh = .base(seq: 0)
-        log("fresh picture (\(reason)): tiny keyframe first, then ladder climb, then large lossless blocks")
+        log("fresh picture (\(trigger.rawValue)\(detail)): tiny keyframe first, then ladder climb, then large lossless blocks")
     }
 
     /// Called when a video frame is acked as decoded.
@@ -2024,8 +2025,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             case .base: l.fresh = .base(seq: seq)
             case .climb: l.fresh = .climb(seq: seq)
             default:
-                // A keyframe that replaces most of the display is a fresh picture too (large invalidation).
-                if l.isDisplay, mask.count * 10 >= l.tracker.tileCount * 4 { beginFreshPicture(reason: "large invalidation"); l.fresh = .base(seq: seq) }
+                // A keyframe outside a fresh picture (loss recovery, an encoder rebuilt for a rung change) is just that,
+                // however much it covers: it never restarts the whole picture (FreshPictureTrigger).
+                break
             }
         }
     }
@@ -2175,7 +2177,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if !first, let d = self.display, d.fresh == .done, rc.tier.rawValue > (previous?.rawValue ?? 0) {
                     self.rc?.dropToTinyRung(now: tnow); self.lastRebuildNanos = tnow
                     self.rebuildAllEncoders(keyframes: true)
-                    self.beginFreshPicture(reason: "tier change to \(rc.tier.name)")
+                    self.beginFreshPicture(.tierChange, detail: " to \(rc.tier.name)")
                 }
             }
             self.checkExclusion(now: tnow)

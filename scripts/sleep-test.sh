@@ -13,7 +13,13 @@ H=$1; shift; P=7799
 case "${1:-}" in 7[0-9][0-9][0-9]) P=$1; shift;; esac
 OUT=${OUT:-/tmp/mirage-sleep}; mkdir -p "$OUT"
 V=${VIEWER:-.build/release/mirage-viewer}
+# Never alongside a person: refuse to start (and to start each further run) while any other viewer streams from the host.
+others_streaming() {
+    if [ -n "${HOSTLOG:-}" ]; then L=$(cat "$HOSTLOG"); elif [ "$H" != localhost ]; then L=$(ssh "$H" 'cat ~/Library/Logs/mirage-host.log' 2>/dev/null); else L=""; fi
+    printf '%s\n' "$L" | awk '/listening on/{s=NR} {l[NR]=$0} END{for(i=s;i<=NR;i++) print l[i]}' | grep -E "streaming display|\] closed$" | tail -1 | grep -q "streaming display"
+}
 for N in "$@"; do
+    if others_streaming; then echo "REFUSED: another viewer is streaming from $H; not starting the $N s run"; exit 1; fi
     R="$OUT/stop-$N"; mkdir -p "$R"
     "$V" "$H" --port "$P" --headless --duration $((N + 75)) --bitrate 800 --window 1512x982 --stats "$R/stats.json" > "$R/viewer.out" 2> "$R/viewer.log" &
     VP=$!

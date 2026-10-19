@@ -99,6 +99,37 @@ final class App: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { cycle() }
     }
     var dockLike: NSWindow?
+    var vibrancy: [NSWindow] = []
+    /// `--vibrancy`: a Dock hover without the Dock: a translucent behind-window material band near the bottom of the
+    /// screen whose six "icons" magnify one after another (0.3 s each, like the pointer sweeping along the Dock), over a
+    /// coloured block that moves behind it, so the band's blur re-renders every frame. A big region changing continuously
+    /// that must stay motion/tiles for that region, never a whole-desktop restart (phrz's Dock hover on 949c064).
+    func startVibrancy(screen: NSScreen) {
+        let band = NSRect(x: screen.frame.minX + 120, y: screen.frame.minY + 90, width: min(900, screen.frame.width - 240), height: 110)
+        let back = NSWindow(contentRect: NSRect(x: band.minX, y: band.minY - 20, width: 160, height: band.height + 40), styleMask: [.borderless], backing: .buffered, defer: false)
+        back.backgroundColor = NSColor(calibratedRed: 0.9, green: 0.3, blue: 0.1, alpha: 1); back.title = "Mirage Test Bench vibrancy back"; back.ignoresMouseEvents = true
+        back.level = NSWindow.Level(rawValue: 19); back.orderFrontRegardless()
+        let w = NSWindow(contentRect: band, styleMask: [.borderless], backing: .buffered, defer: false)
+        w.isOpaque = false; w.backgroundColor = .clear; w.level = NSWindow.Level(rawValue: 20); w.ignoresMouseEvents = true; w.title = "Mirage Test Bench vibrancy"
+        let fx = NSVisualEffectView(frame: NSRect(origin: .zero, size: band.size)); fx.material = .hudWindow; fx.blendingMode = .behindWindow; fx.state = .active
+        fx.wantsLayer = true; fx.layer?.cornerRadius = 18; fx.layer?.masksToBounds = true
+        var icons: [NSView] = []
+        for i in 0..<6 {
+            let v = NSView(frame: NSRect(x: 30 + CGFloat(i) * 140, y: 25, width: 60, height: 60)); v.wantsLayer = true
+            v.layer?.backgroundColor = NSColor(calibratedHue: CGFloat(i) / 6, saturation: 0.7, brightness: 0.9, alpha: 1).cgColor; v.layer?.cornerRadius = 14
+            fx.addSubview(v); icons.append(v)
+        }
+        w.contentView = fx; w.orderFrontRegardless()
+        vibrancy = [back, w]
+        var t = 0
+        Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { _ in
+            t += 1
+            let x = band.minX + CGFloat((t * 6) % Int(band.width - 160))
+            back.setFrameOrigin(NSPoint(x: x, y: back.frame.minY))
+            let hot = (t / 9) % 6
+            for (i, v) in icons.enumerated() { let s: CGFloat = i == hot ? 1.5 : 1; v.layer?.setAffineTransform(CGAffineTransform(scaleX: s, y: s)) }
+        }
+    }
 
     func applicationDidFinishLaunching(_ n: Notification) {
         installMenus()
@@ -209,6 +240,7 @@ final class App: NSObject, NSApplicationDelegate {
             w.orderFrontRegardless()
             if CommandLine.arguments.contains("--tooltip") { startTooltips(over: w) }
             if CommandLine.arguments.contains("--docklike") { startDockLike(screen: screen, near: w.frame) }
+            if CommandLine.arguments.contains("--vibrancy") { startVibrancy(screen: screen) }
             updateCaption()
             window = w
             if isBurst {
