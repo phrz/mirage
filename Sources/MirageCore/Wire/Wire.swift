@@ -160,6 +160,9 @@ public enum ControlMessage: Codable, Equatable {
     /// Host → viewer: the focused text element's caret, from Accessibility (typeahead, DESIGN §3.5 item 4); nil caret
     /// when nothing editable has focus.
     case caret(CaretInfo)
+    /// Host → viewer: fingerprints of desktop tiles the host believes the viewer holds (`TileAudit`); the viewer asks
+    /// for the ones its canvas does not match (`refreshTiles`).
+    case tileAudit(TileAuditMessage)
 
     // Input, client → host. Coordinates are normalized to the streamed display: (0,0) top-left, (1,1) bottom-right.
     case mouseMove(MouseMove)
@@ -487,6 +490,15 @@ public enum ControlMessage: Codable, Equatable {
         public var pid: Int32
         public var action: Action
         public init(pid: Int32, action: Action) { self.pid = pid; self.action = action }
+    }
+    public struct TileAuditMessage: Codable, Equatable {
+        public var layer: UInt32
+        /// The capture the fingerprints were taken from: a viewer tile written from a later capture is not compared.
+        public var captureSeq: UInt32
+        public var tiles: [UInt32]
+        /// 16 bytes per tile, in `tiles` order.
+        public var prints: Data
+        public init(layer: UInt32, captureSeq: UInt32, tiles: [UInt32], prints: Data) { self.layer = layer; self.captureSeq = captureSeq; self.tiles = tiles; self.prints = prints }
     }
     public struct CaretInfo: Codable, Equatable {
         /// The insertion point (a zero-width line, height of the line), display-layer pixels; nil = no editable focus.

@@ -191,6 +191,8 @@ public struct TileTracker {
     }
 
     /// The client has this tile pixel-exact (last update was lossless or a copy of crisp pixels, nothing pending).
+    /// When the tile last changed (receiver of the audit: only tiles quiet for a while are compared).
+    public func lastDirty(_ i: Int) -> UInt64 { cells[i].lastDirtyNanos }
     public func isCrisp(_ i: Int) -> Bool { !cells[i].pending && cells[i].lastLosslessNanos >= cells[i].lastDirtyNanos }
 
     /// Marks tiles as updated by a copy-rect (they are crisp again if the source was crisp).

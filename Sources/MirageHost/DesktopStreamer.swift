@@ -38,6 +38,32 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var lastInterestLog: UInt64 = 0
     /// Display tiles that changed outside ScreenCaptureKit's dirty rects (logged every 30 s).
     private var statDirtyMissed = 0
+    /// Picture audit (TileAudit): every 5 s, fingerprints of desktop tiles the viewer should hold.
+    private var lastAuditNanos: UInt64 = 0, auditCursor = 0, statAudited = 0, statAuditRefreshed = 0
+    private func sendAudit(now: UInt64) {
+        guard let d = display, let src = d.lastFrame, !screenLocked, !unifiedView else { return }
+        CVPixelBufferLockBaseAddress(src, .readOnly); defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
+        let f = frameView(src)
+        guard f.width == d.width, f.height == d.height else { return }
+        let t = d.tracker
+        func auditable(_ i: Int) -> Bool {
+            t.isCrisp(i) && !d.occludedTiles.contains(i) && !d.underLayer.contains(i) && Clock.elapsed(since: t.lastDirty(i), now: now) > 2_000_000_000
+        }
+        // Tiles that changed in the last two minutes (where a lost write would be), then a slow sweep of the rest.
+        var tiles: [Int] = []
+        for i in 0..<t.tileCount where auditable(i) && Clock.elapsed(since: t.lastDirty(i), now: now) < 120_000_000_000 && tiles.count < 400 { tiles.append(i) }
+        var swept = 0, k = 0
+        while swept < 96, k < t.tileCount {
+            let i = (auditCursor + k) % t.tileCount; k += 1
+            if auditable(i), !tiles.contains(i) { tiles.append(i); swept += 1 }
+        }
+        auditCursor = (auditCursor + k) % max(1, t.tileCount)
+        guard !tiles.isEmpty else { return }
+        var prints = Data(capacity: tiles.count * 16)
+        for i in tiles { prints.append(contentsOf: TileAudit.fingerprint(f, t.rect(of: i))) }
+        statAudited += tiles.count
+        sendControlCounted(.tileAudit(.init(layer: 0, captureSeq: captureSeq, tiles: tiles.map(UInt32.init), prints: prints)))
+    }
     /// Window-command targets of windows that left the list (minimized from the viewer), for the restore.
     private var lastTargets: [UInt32: (target: AXWindows.Target, nanos: UInt64)] = [:]
     private var request: ControlMessage.StreamRequest?
@@ -132,6 +158,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if !caps.isEmpty { log("window captures, last 30 s: " + caps.joined(separator: " | ")) }
         if statDirtyMissed > 0 { log("display: \(statDirtyMissed) changed tiles outside ScreenCaptureKit's dirty rects in the last 30 s (found by the full diff)") }
         statDirtyMissed = 0
+        if statAudited > 0 { log("picture audit, last 30 s: \(statAudited) desktop tiles fingerprinted, \(statAuditRefreshed) asked for again by the viewer") }
+        statAudited = 0; statAuditRefreshed = 0
         for l in layers.values { l.account = Layer.Account() }
     }
     private var statWindowCommands = 0
@@ -481,6 +509,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             queue.async {
                 guard r.layer == 0, let d = self.display else { return }
                 let tiles = r.tiles.map(Int.init).filter { $0 >= 0 && $0 < d.tracker.tileCount }
+                self.statAuditRefreshed += tiles.count
                 d.taint.mark(tiles); d.taintScheduled.subtract(tiles)
                 if self.debugLayers { self.log("viewer asks for \(tiles.count) desktop tiles it holds no clean pixels for") }
             }
@@ -1388,7 +1417,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 // (one step per uncovered region, not one now and one when the guard lets go).
                 if l.isDisplay, displayGuard.releasing(now: now), Clock.elapsed(since: since, now: now) < 3_000_000_000 { complete = false }
             }
-            let stuck = Clock.elapsed(since: since, now: now) > 20_000_000_000 && Clock.elapsed(since: l.lastStagedNanos, now: now) > 3_000_000_000
+            // A level that cannot complete (something visible keeps owing refinement) is presented anyway: after 20 s during
+            // the first picture, after 4 s in steady state, where activity anywhere on the desktop otherwise held a settled
+            // region's refinement back for 20 s (phrz: desktop widgets never settling between their clear and colour states).
+            let stuckAfter: UInt64 = l.fresh == .done ? 4_000_000_000 : 20_000_000_000
+            let stuck = Clock.elapsed(since: since, now: now) > stuckAfter && Clock.elapsed(since: l.lastStagedNanos, now: now) > min(3_000_000_000, stuckAfter / 4)
             guard complete || stuck else { continue }
             l.stagedOpenSince = nil
             l.levelsCommitted += 1
@@ -2209,6 +2242,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             self.secSkippedBudget = 0
             self.secVideoBytes = 0; self.secTileBytes = 0; self.secVideoFrames = 0
             if InputInjector.consoleLocked() != self.screenLocked, let cur = self.windows?.current { self.reconcileLayers(cur, now: tnow); self.publishWindows(now: tnow, full: false) }
+            if Clock.elapsed(since: self.lastAuditNanos, now: tnow) >= 5_000_000_000 { self.lastAuditNanos = tnow; self.sendAudit(now: tnow) }
             let front: (app: String, id: UInt32, title: String) = self.windows?.frontmost() ?? (app: "", id: 0, title: "")
             let status = ControlMessage.HostStatus(consoleLocked: self.screenLocked || InputInjector.consoleLocked(), frontmostApp: front.app, frontmostWindowID: front.id, frontmostWindowTitle: front.title, inputSink: InputInjector.sinkPath != nil, viewers: Self.liveCount())
             // On change, and every 10 s regardless (sparse when idle; the viewer's keepalive is its own datagram).

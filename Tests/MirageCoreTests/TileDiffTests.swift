@@ -41,3 +41,17 @@ final class TileDiffTests: XCTestCase {
         } }
     }
 }
+
+final class TileAuditTests: XCTestCase {
+    func testStaleTooltipDiffersNoiseDoesNot() {
+        let w = 64, h = 64
+        func make(_ f: (Int, Int) -> UInt8) -> [UInt8] { var p = [UInt8](repeating: 255, count: w * h * 4); for y in 0..<h { for x in 0..<w { let v = f(x, y); let o = (y * w + x) * 4; p[o] = v; p[o + 1] = v; p[o + 2] = v } }; return p }
+        let wallpaper = make { x, y in UInt8(20 + (x * 3 + y * 5) % 17) }
+        let ghost = make { x, y in (10..<54).contains(x) && (20..<44).contains(y) ? 70 : UInt8(20 + (x * 3 + y * 5) % 17) }   // a dark-grey label fragment
+        var noisy = wallpaper; var s: UInt32 = 3
+        for i in stride(from: 0, to: noisy.count, by: 4) { s = s &* 1664525 &+ 1013904223; let d = Int(s >> 29) - 4; for c in 0..<3 { noisy[i + c] = UInt8(max(0, min(255, Int(noisy[i + c]) + d))) } }
+        func fp(_ p: [UInt8]) -> [UInt8] { p.withUnsafeBytes { TileAudit.fingerprint(ShiftDetector.Frame(base: $0.baseAddress!, stride: w * 4, width: w, height: h), PixelRect(x: 0, y: 0, width: w, height: h)) } }
+        XCTAssertTrue(TileAudit.differs(fp(ghost)[...], fp(wallpaper)[...]), "a stale label is caught")
+        XCTAssertFalse(TileAudit.differs(fp(noisy)[...], fp(wallpaper)[...]), "capture noise (±4) and lossy coding are not")
+    }
+}

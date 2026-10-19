@@ -495,6 +495,9 @@ final class ViewerSession: @unchecked Sendable {
                 predictorLock.lock(); typeahead.host(c, now: Clock.nowNanos()); predictorLock.unlock()
                 if let d = try? Frame.encode(msg) { statsLock.lock(); sControlBytes += d.count; statsLock.unlock() }
                 onChange?()
+            case .tileAudit(let a):
+                if let d = try? Frame.encode(msg) { statsLock.lock(); sControlBytes += d.count; statsLock.unlock() }
+                videoQueue.async { self.audit(a) }
             case .apps, .icon, .menu, .statusItems:
                 // Native chrome (DESIGN §3.8); counted with the control bytes.
                 if let d = try? Frame.encode(msg) { statsLock.lock(); sControlBytes += d.count; sChromeBytes += d.count; statsLock.unlock() }
@@ -652,7 +655,10 @@ final class ViewerSession: @unchecked Sendable {
             // draws as fill (nothing clean known there, not under a window layer), that part is shown at once too: any
             // clean picture beats the fill.
             let staged = t.staged ? fresh : []
-            let shown = t.staged ? [] : fresh
+            var shown = t.staged ? [] : fresh
+            // Test only: MIRAGE_TEST_DROP_DESKTOP=N silently drops every Nth directly shown desktop write (a lost write,
+            // the failure the picture audit must heal).
+            if v.id == 0, Self.testDropEvery > 0, !shown.isEmpty { testDropCount += 1; if testDropCount % Self.testDropEvery == 0 { testDropped += shown.count; shown = [] } }
             let fillParts = t.staged && v.id == 0 ? visibleFillTiles(touching: staged.map(\.rect)) : []
             if v.id == 0 { markDesktopClean(shown.map(\.rect) + fillParts) }
             var n = 0
@@ -751,6 +757,46 @@ final class ViewerSession: @unchecked Sendable {
         let c = v.compositor
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {   // after the commit's crossfade has landed
             c.sampleCornerRadius { r in if let r, r > 0 { c.cornerRadius = Float(r) } }
+        }
+    }
+
+    /// Picture audit (TileAudit), on the video queue: fingerprints of the host's view of desktop tiles against this
+    /// canvas; a tile that differs (and is not newer here, staged or fading) is asked for again.
+    private(set) var auditCompared = 0, auditMismatched = 0
+    static let testDropEvery = ProcessInfo.processInfo.environment["MIRAGE_TEST_DROP_DESKTOP"].flatMap { Int($0) } ?? 0
+    private var testDropCount = 0
+    private(set) var testDropped = 0
+    private func audit(_ a: ControlMessage.TileAuditMessage) {
+        guard a.layer == 0, let v = displayView, v.compositor.width > 0, a.prints.count == a.tiles.count * 16 else { return }
+        let c = v.compositor
+        let t = TileTracker(width: c.width, height: c.height)
+        var idx: [Int] = [], rects: [PixelRect] = []
+        for (k, ti) in a.tiles.enumerated() {
+            let i = Int(ti)
+            guard i < t.tileCount else { continue }
+            if i < v.tileCaptureSeq.count, v.tileCaptureSeq[i] > a.captureSeq { continue }   // newer pixels here
+            let r = t.rect(of: i)
+            if c.isStaged(tile: i) || c.fading(r) { continue }
+            idx.append(k); rects.append(r)
+        }
+        guard !rects.isEmpty else { return }
+        let prints = [UInt8](a.prints)
+        c.read(rects) { [weak self] datas in
+            guard let self, datas.count == rects.count else { return }
+            var bad: [UInt32] = []
+            for (n, d) in datas.enumerated() {
+                let r = rects[n]
+                let mine: [UInt8] = d.withUnsafeBytes { p in TileAudit.fingerprint(ShiftDetector.Frame(base: p.baseAddress!, stride: r.width * 4, width: r.width, height: r.height), PixelRect(x: 0, y: 0, width: r.width, height: r.height)) }
+                let k = idx[n]
+                if TileAudit.differs(mine[...], prints[(k * 16)..<(k * 16 + 16)]) { bad.append(a.tiles[k]) }
+            }
+            self.videoQueue.async {
+                self.auditCompared += datas.count; self.auditMismatched += bad.count
+                if !bad.isEmpty {
+                    self.log("picture audit: \(bad.count) of \(datas.count) desktop tiles differ from the host's; asking for them again")
+                    self.sender?.send(.refreshTiles(.init(layer: 0, tiles: bad)))
+                }
+            }
         }
     }
 

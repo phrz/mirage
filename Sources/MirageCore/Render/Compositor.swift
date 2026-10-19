@@ -239,6 +239,31 @@ public final class Compositor {
         for y in r0...r1 { for x in c0...c1 { stagedMask[y * cols + x] = true } }
     }
     /// Tiles of the next level written off-screen and not yet presented.
+    /// Whether a 64-px tile holds a staged level not yet presented (the audit does not compare those).
+    public func isStaged(tile i: Int) -> Bool { i >= 0 && i < stagedMask.count && stagedMask[i] }
+    /// Whether a running crossfade covers `rect`.
+    public func fading(_ rect: PixelRect) -> Bool { lock.lock(); defer { lock.unlock() }; return fades.contains { $0.rect.intersects(rect) } }
+    /// The canvas pixels of `rects` (BGRA, tightly packed per rect), read back for the picture audit.
+    public func read(_ rects: [PixelRect], completion: @escaping ([Data]) -> Void) {
+        guard let canvas, !rects.isEmpty, let cb = commandQueue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { completion([]); return }
+        let bounds = PixelRect(x: 0, y: 0, width: width, height: height)
+        let rs = rects.map { $0.intersection(bounds) }
+        let total = rs.reduce(0) { $0 + $1.area * 4 }
+        guard total > 0, let buf = device.makeBuffer(length: total, options: .storageModeShared) else { completion([]); blit.endEncoding(); return }
+        var off = 0, offsets: [Int] = []
+        for r in rs {
+            offsets.append(off)
+            guard r.area > 0 else { continue }
+            blit.copy(from: canvas, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: r.x, y: r.y, z: 0), sourceSize: MTLSize(width: r.width, height: r.height, depth: 1),
+                      to: buf, destinationOffset: off, destinationBytesPerRow: r.width * 4, destinationBytesPerImage: r.area * 4)
+            off += r.area * 4
+        }
+        blit.endEncoding()
+        cb.addCompletedHandler { _ in
+            completion(zip(rs, offsets).map { r, o in Data(bytes: buf.contents().advanced(by: o), count: r.area * 4) })
+        }
+        cb.commit()
+    }
     public var stagedTiles: Int { stagedMask.reduce(0) { $0 + ($1 ? 1 : 0) } }
     public var hasStaged: Bool { stagedMask.contains(true) || commitPending != nil }
 
