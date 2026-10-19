@@ -41,6 +41,65 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
+    var tooltips: [NSWindow] = []
+    /// `--tooltip`: two bright green help-level windows (like the Dock's app-name tooltips) that fade in, stay 1.5 s, fade
+    /// out and stay away 2.5 s, one over the desktop left of the bench and one over the bench's text: the transient-ghost
+    /// check samples where they were after they go.
+    func startTooltips(over bench: NSWindow) {
+        let level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.helpWindow)))
+        let b = bench.frame
+        // 0: over the desktop; 1: over the bench; 2: straddling the bench's left edge (the desktop tiles that touch a window).
+        for (i, r) in [NSRect(x: max(8, b.minX - 200), y: b.midY, width: 160, height: 26), NSRect(x: b.midX - 80, y: b.midY - 60, width: 160, height: 26),
+                       NSRect(x: b.minX - 100, y: b.minY + 80, width: 160, height: 26)].enumerated() {
+            let t = NSWindow(contentRect: r, styleMask: [.borderless], backing: .buffered, defer: false)
+            t.level = level; t.isOpaque = true; t.backgroundColor = NSColor(calibratedRed: 0.1, green: 0.95, blue: 0.2, alpha: 1)
+            t.hasShadow = true; t.ignoresMouseEvents = true; t.title = "Mirage Test Bench tooltip \(i)"
+            t.collectionBehavior = [.transient, .ignoresCycle]
+            tooltips.append(t)
+        }
+        func cycle() {
+            for t in tooltips { t.alphaValue = 0; t.orderFrontRegardless() }
+            NSAnimationContext.runAnimationGroup({ c in c.duration = 0.12; for t in tooltips { t.animator().alphaValue = 1 } })
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                NSAnimationContext.runAnimationGroup({ c in c.duration = 0.15; for t in self.tooltips { t.animator().alphaValue = 0 } }, completionHandler: {
+                    for t in self.tooltips { t.orderOut(nil) }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { cycle() }
+                })
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { cycle() }
+    }
+
+    /// `--docklike`: what the Dock is on macOS 27, one full-screen transparent window at the Dock level (20), click-through,
+    /// drawing its own app-name tooltips inside: here two green labels (one clear of the bench, one straddling its left
+    /// edge) that fade in, stay 1.5 s, fade out and stay away 2.5 s. No window list change ever announces them.
+    func startDockLike(screen: NSScreen, near b: NSRect) {
+        let o = NSWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        o.isOpaque = false; o.backgroundColor = .clear; o.hasShadow = false; o.ignoresMouseEvents = true
+        o.level = NSWindow.Level(rawValue: 20); o.title = "Mirage Test Bench docklike"
+        o.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        let root = NSView(frame: NSRect(origin: .zero, size: screen.frame.size)); root.wantsLayer = true
+        var labels: [NSView] = []
+        for r in [NSRect(x: max(8, b.minX - screen.frame.minX - 200), y: b.minY - screen.frame.minY + 40, width: 160, height: 26),
+                  NSRect(x: b.minX - screen.frame.minX - 100, y: b.minY - screen.frame.minY + 140, width: 160, height: 26)] {
+            let v = NSView(frame: r); v.wantsLayer = true
+            v.layer?.backgroundColor = NSColor(calibratedRed: 0.1, green: 0.95, blue: 0.2, alpha: 1).cgColor; v.layer?.cornerRadius = 6
+            v.alphaValue = 0; root.addSubview(v); labels.append(v)
+        }
+        o.contentView = root
+        o.orderFrontRegardless()
+        dockLike = o
+        func cycle() {
+            NSAnimationContext.runAnimationGroup({ c in c.duration = 0.12; for v in labels { v.animator().alphaValue = 1 } })
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                NSAnimationContext.runAnimationGroup({ c in c.duration = 0.2; for v in labels { v.animator().alphaValue = 0 } })
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.7) { cycle() }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { cycle() }
+    }
+    var dockLike: NSWindow?
+
     func applicationDidFinishLaunching(_ n: Notification) {
         installMenus()
         let screen = NSScreen.screens.first!
@@ -148,6 +207,8 @@ final class App: NSObject, NSApplicationDelegate {
             // Normal level (the host's window list only carries layer-0 windows), ordered front without activating.
             tv.isSelectable = false; tv.isEditable = false
             w.orderFrontRegardless()
+            if CommandLine.arguments.contains("--tooltip") { startTooltips(over: w) }
+            if CommandLine.arguments.contains("--docklike") { startDockLike(screen: screen, near: w.frame) }
             updateCaption()
             window = w
             if isBurst {

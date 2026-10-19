@@ -21,7 +21,7 @@ final class ScenarioRunner {
     private var lastBench: ControlMessage.WindowInfo?
     /// The bench window, or the last one seen (a window-list update can momentarily drop it).
     private func bench() -> ControlMessage.WindowInfo? {
-        if let w = session.windowsSnapshot().first(where: { $0.title.contains("Mirage Test Bench") && ($0.app ?? "Mirage Test Bench") == "Mirage Test Bench" && !$0.title.contains("overlay") && !$0.title.contains("icons") }) { lastBench = w }
+        if let w = session.windowsSnapshot().first(where: { $0.title.contains("Mirage Test Bench") && ($0.app ?? "Mirage Test Bench") == "Mirage Test Bench" && !$0.title.contains("overlay") && !$0.title.contains("icons") && !$0.title.contains("docklike") && !$0.title.contains("tooltip") }) { lastBench = w }
         return lastBench
     }
     /// The bench's visible part (it may have drifted partly off-screen); points are picked inside it,
@@ -83,7 +83,7 @@ final class ScenarioRunner {
     private func guardsStillHold() -> Bool {
         guard let status = session.hostStatus else { session.log("scenario \(name): ABORT, host status lost"); return false }
         guard !status.consoleLocked else { session.log("scenario \(name): ABORT, host console LOCKED"); return false }
-        if ["drag", "unified", "chrome"].contains(name), status.inputSink == true { return true }
+        if ["drag", "unified", "chrome", "transient"].contains(name), status.inputSink == true { return true }
         guard status.frontmostWindowID == guardedWindowID || status.frontmostApp == "Mirage Test Bench" else {
             session.log("scenario \(name): ABORT, focus moved to \(status.frontmostApp) \(status.frontmostWindowID) '\(status.frontmostWindowTitle)'"); return false
         }
@@ -243,7 +243,7 @@ final class ScenarioRunner {
         // Let the opening keyframe's full-screen lossless refinement finish first (up to 60 s): the
         // measurements are about the interaction, not the first picture.
         var quiet = 0
-        let maxWait = name == "drag" ? 20 : 60   // other windows on the host may never go quiet; the drag measures its own layer
+        let maxWait = name == "transient" ? 4 : name == "drag" ? 20 : 60   // other windows on the host may never go quiet; the drag measures its own layer
         for _ in 0..<maxWait {
             try? await Task.sleep(for: .seconds(1))
             if let last = session.samples.last, last.tileKbps + last.kbps < 60 { quiet += 1 } else { quiet = 0 }
@@ -257,7 +257,7 @@ final class ScenarioRunner {
         guard !status.consoleLocked else { session.log("scenario \(name): ABORT, host console is LOCKED"); return }
         // In input-sink mode nothing the script sends can reach the host's input (window commands move only
         // the bench's own windows there), so the bench need not be frontmost for the drag scenario.
-        let sinkDrag = ["drag", "unified", "chrome"].contains(name) && status.inputSink == true
+        let sinkDrag = ["drag", "unified", "chrome", "transient"].contains(name) && status.inputSink == true
         guard sinkDrag || status.frontmostWindowID == w.id || status.frontmostApp == "Mirage Test Bench" else {
             session.log("scenario \(name): ABORT, bench is not frontmost (front: \(status.frontmostApp) \(status.frontmostWindowID) '\(status.frontmostWindowTitle)')"); return
         }
@@ -397,6 +397,8 @@ final class ScenarioRunner {
             }
         case "unified":
             await unifiedRun(end: end, ppp: ppp)
+        case "transient":
+            await transientRun(end: end)
         case "chrome":
             guard let c = await MainActor.run(body: { session.unified?.chrome }) else { session.log("scenario chrome: ABORT, not in Unified mode"); return }
             let r = await c.selfTest(pid: w.pid, choose: "New Measurement", log: { session.log($0) })
@@ -405,6 +407,70 @@ final class ScenarioRunner {
         default:
             session.log("unknown scenario \(name)")
         }
+    }
+
+    // MARK: Transient windows (tooltips, menus): when one goes, the area it covered must show current pixels within ~1 RTT.
+    /// "offset ms:green or ok" per sample of the display layer where a bench tooltip was, after it left the window list.
+    private(set) var transientSamples: [String] = []
+    private(set) var transientGhosts = 0
+    /// `--docklike` bench: the labels are pixels inside one full-screen window; their rects follow from the bench frame
+    /// (points, AppKit → stream pixels). Each label is sampled every 100 ms; after it has shown, the time until the
+    /// display layer stops showing green there is measured from the moment the host stops capturing it (unknown here:
+    /// the label is up 1.5 s + a 0.2 s fade, so a green sample 2.2 s after it first appeared means a ghost).
+    private(set) var dockGhostMs: [Double] = []
+    private func dockLikeRun(end: Date, bench w: ControlMessage.WindowInfo, ppp: Double) async {
+        let f = w.frame
+        let rects = [PixelRect(x: max(Int(8 * ppp), f.x - Int(200 * ppp)), y: f.maxY - Int((40 + 26) * ppp), width: Int(160 * ppp), height: Int(26 * ppp)),
+                     PixelRect(x: f.x - Int(100 * ppp), y: f.maxY - Int((140 + 26) * ppp), width: Int(100 * ppp), height: Int(26 * ppp))]
+        var firstGreen: [UInt64?] = [nil, nil]
+        while Date() < end {
+            guard let comp = session.compositor else { break }
+            for (i, r) in rects.enumerated() {
+                let c = PixelRect(x: r.x + r.width / 4, y: r.y + r.height / 2, width: r.width / 2, height: 1)
+                let green: Bool = await withCheckedContinuation { cont in comp.sampleEdgeColor(of: c, bottom: false) { col in cont.resume(returning: col.y > 0.7 && col.x < 0.45 && col.z < 0.45) } }
+                let now = Clock.nowNanos()
+                if green { if firstGreen[i] == nil { firstGreen[i] = now } }
+                else if let t = firstGreen[i] {
+                    let shownMs = Double(Clock.elapsed(since: t, now: now)) / 1e6
+                    dockGhostMs.append(max(0, shownMs - 1700))   // beyond 1.5 s up + 0.2 s fade
+                    session.log(String(format: "scenario transient: dock label %d shown for %.0f ms (%.0f ms beyond its time)", i, shownMs, max(0, shownMs - 1700)))
+                    firstGreen[i] = nil
+                }
+            }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+    }
+    private func transientRun(end: Date) async {
+        if session.windowsSnapshot().contains(where: { $0.title.contains("docklike") }), let w = bench() {
+            await dockLikeRun(end: end, bench: w, ppp: await MainActor.run { session.pixelsPerPoint }); return
+        }
+        var present: [UInt32: PixelRect] = [:]
+        var checks: [(due: UInt64, offsetMs: Int, rect: PixelRect, id: UInt32)] = []
+        while Date() < end || !checks.isEmpty {
+            let tips = session.windowsSnapshot().filter { $0.title.contains("Mirage Test Bench tooltip") }
+            let now = Clock.nowNanos()
+            for t in tips { present[t.id] = t.frame }
+            for (id, f) in present where !tips.contains(where: { $0.id == id }) {
+                present[id] = nil
+                // The part of it clear of window layers (a tooltip may straddle a window's edge).
+                let clear = f.subtracting(session.arrangedWindows().filter(\.isLayered).map(\.frame)).max { $0.area < $1.area } ?? f
+                let center = PixelRect(x: clear.x + clear.width / 4, y: clear.y + clear.height / 2, width: max(1, clear.width / 2), height: 1)
+                if Date() < end { for ms in [200, 500, 1000, 3000] { checks.append((now + UInt64(ms) * 1_000_000, ms, center, id)) } }
+            }
+            for c in checks where c.due <= now {
+                guard let comp = session.compositor else { continue }
+                // Only where no window layer covers it (the tooltip over the bench is hidden under the layer anyway).
+                let covered = session.arrangedWindows().contains { $0.isLayered && $0.frame.intersection(c.rect) == c.rect }
+                if covered { transientSamples.append("\(c.id)@\(c.offsetMs):under-layer"); continue }
+                if tips.contains(where: { $0.frame.intersects(c.rect) }) { transientSamples.append("\(c.id)@\(c.offsetMs):back"); continue }
+                let green: Bool = await withCheckedContinuation { cont in comp.sampleEdgeColor(of: c.rect, bottom: false) { col in cont.resume(returning: col.y > 0.7 && col.x < 0.45 && col.z < 0.45) } }
+                transientSamples.append("\(c.id)@\(c.offsetMs):\(green ? "GHOST" : "ok")")
+                if green { transientGhosts += 1; session.log("scenario transient: tooltip \(c.id) still shown in the display layer \(c.offsetMs) ms after it went") }
+            }
+            checks.removeAll { $0.due <= now }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        session.log("scenario transient: \(transientGhosts) ghost samples of \(transientSamples.filter { $0.hasSuffix("ok") || $0.hasSuffix("GHOST") }.count): \(transientSamples.joined(separator: " "))")
     }
 
     // MARK: Unified mode (M3.2): the bench's native window moved and raised here, as the window server would on a drag;

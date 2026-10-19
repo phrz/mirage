@@ -1432,6 +1432,7 @@ extension ViewerSession {
             var guardDrops: Int?, unknownDesktopTiles: Int?, fillSamples: Int?, unknownVisibleTiles: Int?, preExclusionDrops: Int?
             var samples: [Sample]
             var unified: UnifiedStats? = nil
+            var transientSamples: [String]? = nil, transientGhosts: Int? = nil, dockGhostMs: [Double]? = nil
         }
         struct UnifiedStats: Codable {
             var windows: Int, hostFramesApplied: Int, localMoves: Int
@@ -1481,6 +1482,7 @@ extension ViewerSession {
                       staleSamples: scenario?.staleSamples, staleBenchPixels: scenario?.stalePurple, staleAt: scenario?.staleAt,
                       guardDrops: videoQueue.sync { guardDrops }, unknownDesktopTiles: unknownDesktop.count, fillSamples: scenario?.fillSamples, unknownVisibleTiles: unknownVisibleCount(), preExclusionDrops: videoQueue.sync { preExclusionDrops },
                       samples: samples)
+        out.transientSamples = scenario?.transientSamples; out.transientGhosts = scenario?.transientGhosts; out.dockGhostMs = scenario?.dockGhostMs
         out.unified = MainActor.assumeIsolated { () -> UnifiedStats? in
             guard let u = unified else { return nil }
             let lm = scenario?.localMoveMs ?? []
