@@ -34,6 +34,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var interest: ControlMessage.ViewInterest?
     private var unifiedView: Bool { interest?.unified ?? false }
     private var lastInterestLog: UInt64 = 0
+    /// Display tiles that changed outside ScreenCaptureKit's dirty rects (logged every 30 s).
+    private var statDirtyMissed = 0
     /// Window-command targets of windows that left the list (minimized from the viewer), for the restore.
     private var lastTargets: [UInt32: (target: AXWindows.Target, nanos: UInt64)] = [:]
     private var request: ControlMessage.StreamRequest?
@@ -126,6 +128,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             return "\(l.id): \(c.frames) passed, \(c.skippedUnchanged) unchanged, \(c.droppedMoved) moved, \(c.droppedEdge) shifted, \(c.excludedCount) excluded"
         }
         if !caps.isEmpty { log("window captures, last 30 s: " + caps.joined(separator: " | ")) }
+        if statDirtyMissed > 0 { log("display: \(statDirtyMissed) changed tiles outside ScreenCaptureKit's dirty rects in the last 30 s (found by the full diff)") }
+        statDirtyMissed = 0
         for l in layers.values { l.account = Layer.Account() }
     }
     private var statWindowCommands = 0
@@ -856,40 +860,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// video frame plus a full lossless refinement pass (measured: ~400 KB per flicker).
     private static let diffTolerance: Int32 = 4
 
-    /// Bounding box of the pixels that differ beyond the tolerance inside `r`, or nil if none do.
-    /// Sparse updates (a typed glyph, a caret) are a fraction of their 64-px tile; sending the tight
-    /// box instead of the tile halves typing's bytes. Alpha counts too (a window's rounded corners).
     private func tileChangedBox(_ a: ShiftDetector.Frame, _ b: ShiftDetector.Frame, _ r: PixelRect, alphaLayer: Bool = false) -> PixelRect? {
-        let n = r.width * 4
-        var x0 = Int.max, x1 = -1, y0 = Int.max, y1 = -1
-        let tol = Self.diffTolerance
-        for y in r.y..<r.maxY {
-            let pa = a.base.advanced(by: y * a.stride + r.x * 4), pb = b.base.advanced(by: y * b.stride + r.x * 4)
-            if memcmp(pa, pb, n) == 0 { continue }
-            let ua = pa.assumingMemoryBound(to: UInt8.self), ub = pb.assumingMemoryBound(to: UInt8.self)
-            var rowChanged = false
-            for x in 0..<r.width {
-                let o = x * 4
-                var changed = abs(Int32(ua[o]) - Int32(ub[o])) > tol || abs(Int32(ua[o + 1]) - Int32(ub[o + 1])) > tol || abs(Int32(ua[o + 2]) - Int32(ub[o + 2])) > tol
-                if alphaLayer {
-                    // A window's rounded corners: the anti-aliased edge pixels re-render a little differently from
-                    // frame to frame (measured: four 23×23 corner boxes "changing" on a still window, ±10 levels);
-                    // semi-transparent pixels get a wide tolerance, fully transparent ones never count.
-                    let aa = Int32(ua[o + 3]), ab = Int32(ub[o + 3])
-                    if aa == 0 && ab == 0 { changed = false }
-                    else if aa < 255 || ab < 255 { changed = abs(aa - ab) > 48 || abs(Int32(ua[o]) - Int32(ub[o])) > 48 || abs(Int32(ua[o + 1]) - Int32(ub[o + 1])) > 48 || abs(Int32(ua[o + 2]) - Int32(ub[o + 2])) > 48 }
-                    else if abs(aa - ab) > tol { changed = true }
-                }
-                if changed {
-                    rowChanged = true
-                    if x < x0 { x0 = x }
-                    if x > x1 { x1 = x }
-                }
-            }
-            if rowChanged { if y < y0 { y0 = y }; y1 = y }
-        }
-        guard x1 >= 0 else { return nil }
-        return PixelRect(x: r.x + x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1)
+        TileDiff.changedBox(a, b, r, tolerance: Int32(Self.diffTolerance), alphaLayer: alphaLayer)
     }
 
     /// One captured frame of one layer (on `queue`). `dirtyRects` are SCK's (display layer) or empty
@@ -907,7 +879,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let new = frameView(pb)
         guard new.width == layer.width, new.height == layer.height else { return }   // a stale frame around a resize
         var tracker = layer.tracker
-        var dirty = (layer.isDisplay && !layer.forceFullDiff) ? tracker.tiles(covering: dirtyRects) : Array(0..<tracker.tileCount)
+        // Every tile is a candidate, the display's too: ScreenCaptureKit's dirty rects can leave out a change (the Dock's
+        // tooltips on macOS 27 vanish without one, phrz's tile-aligned ghost labels: the vacated tiles were never diffed,
+        // and the next capture already held the cleared desktop, so nothing ever found them). The tolerant diff below
+        // starts with a row-wise memcmp, so unchanged tiles cost little; changes outside the reported rects are counted.
+        let reported = layer.isDisplay ? Set(tracker.tiles(covering: dirtyRects)) : []
+        var dirty = Array(0..<tracker.tileCount)
         layer.forceFullDiff = false
         let prev = layer.lastFrame
         var old: ShiftDetector.Frame? = nil
@@ -927,6 +904,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 return true
             }
             statDiffPruned += before - dirty.count
+            if layer.isDisplay, !layer.forceFullDiff {
+                let missed = dirty.filter { !reported.contains($0) }.count
+                if missed > 0 { statDirtyMissed += missed }
+            }
         } else {
             // First frame of the layer: the display goes through one keyframe then refines lossless; a
             // window layer is announced, gets one lossy still, then refines lossless.

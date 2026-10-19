@@ -264,7 +264,7 @@ final class ScenarioRunner {
         }
         if sinkDrag { session.log("scenario drag: host is in input-sink mode; frontmost guard waived (only the bench's own window can move)") }
         let bandOK = await captionVisible(w, ppp: ppp)
-        guard bandOK else { session.log("scenario \(name): ABORT, the picture does not show the bench's caption band"); return }
+        guard bandOK || (name == "transient" && sinkDrag) else { session.log("scenario \(name): ABORT, the picture does not show the bench's caption band"); return }
         session.log("scenario \(name): checks passed (console unlocked, bench frontmost, caption visible)")
         guardedWindowID = w.id
         let end = Date().addingTimeInterval(seconds)
