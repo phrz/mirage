@@ -35,4 +35,14 @@ final class BackdropHoldTests: XCTestCase {
         t.sent(lossless: [5], now: 2_000_000_000)
         XCTAssertNil(t.oldestDueDirect(now: 3_000_000_000))
     }
+
+    /// A copy-rect destination tile with wrong pixels is a direct change due now, even if it was queued as video refinement.
+    func testMarkDirectTurnsVideoRefinementIntoADueDirectChange() {
+        var t = TileTracker(width: 640, height: 640)
+        t.markVideo([7, 8], now: 1_000_000_000)
+        XCTAssertEqual(t.dueDirect(now: 1_000_000_000, limit: 10), [])
+        t.markDirect([7], now: 1_000_000_000)
+        XCTAssertEqual(t.dueDirect(now: 1_000_000_000, limit: 10), [7])
+        XCTAssertTrue(t.isDirectPending(7)); XCTAssertFalse(t.isDirectPending(8))
+    }
 }

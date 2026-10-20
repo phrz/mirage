@@ -202,7 +202,7 @@ public struct TileTracker {
     public mutating func markDirect(_ tiles: [Int], now: UInt64) {
         for i in tiles {
             var c = cells[i]
-            c.pending = true; c.direct = true; c.held = false
+            c.pending = true; c.direct = true; c.held = false; c.viaVideo = false
             if c.pendingSince == 0 { c.pendingSince = now }
             c.dueNanos = now
             cells[i] = c

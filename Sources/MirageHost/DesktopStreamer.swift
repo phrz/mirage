@@ -161,9 +161,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if !caps.isEmpty { log("window captures, last 30 s: " + caps.joined(separator: " | ")) }
         if statDirtyMissed > 0 { log("display: \(statDirtyMissed) changed tiles outside ScreenCaptureKit's dirty rects in the last 30 s (found by the full diff)") }
         statDirtyMissed = 0
-        if statAudited > 0 { log("picture audit, last 30 s: \(statAudited) desktop tiles fingerprinted, \(statAuditRefreshed) asked for again by the viewer; \(statDirectDue) held-back changed tiles sent when due (longest wait \(statDirectWaitMaxNanos / 1_000_000) ms)") }
+        if statAudited > 0 { log("picture audit, last 30 s: \(statAudited) desktop tiles fingerprinted, \(statAuditRefreshed) asked for again by the viewer; \(statDirectDue) held-back changed tiles sent when due (longest wait \(statDirectWaitMaxNanos / 1_000_000) ms), \(statCopyCorrections) of them copy-rect corrections") }
         if statBackdropLevels > 0 { log("moved-window backdrops, last 30 s: \(statBackdropTiles) tiles held, \(statBackdropLevels) lossy levels \(statBackdropBytes / 1000) KB, \(statBackdropReleased) tiles released to lossless refinement when idle") }
-        statDirectDue = 0; statDirectWaitMaxNanos = 0; statBackdropTiles = 0; statBackdropLevels = 0; statBackdropBytes = 0; statBackdropReleased = 0
+        statDirectDue = 0; statDirectWaitMaxNanos = 0; statCopyCorrections = 0; statBackdropTiles = 0; statBackdropLevels = 0; statBackdropBytes = 0; statBackdropReleased = 0
         statAudited = 0; statAuditRefreshed = 0
         for l in layers.values { l.account = Layer.Account() }
     }
@@ -1025,6 +1025,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Copy-rects: window drags (display layer, for windows it still carries) from the window list,
         // scrolls from line signatures.
         var explained = Set<Int>()
+        // Destination tiles a copy-rect fills with pixels that do not match the host's: wrong on the viewer even where the host
+        // saw no change (a static path bar inside the copied rect: phrz's doubled Finder path bar on mac-daddy). Direct changes.
+        var wrongAfterCopy = Set<Int>()
         var copies: [(tiles: [Int], dx: Int, dy: Int)] = []
         let dirtyBeforeCopies = dirty.count
         var copyRectsThisCapture = 0
@@ -1041,6 +1044,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     guard let r else { continue }
                     let dest = tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])
                     let mismatched = Set(tracker.tiles(covering: r.mismatchedTiles))
+                    wrongAfterCopy.formUnion(mismatched)
                     explained.formUnion(dest.filter { !mismatched.contains($0) }); copies.append((dest.filter { !mismatched.contains($0) }, r.dx, r.dy))
                     sendTileMessage(.copyRect(.init(header: header(layer: 0, nanos: nanos), rect: r.rect, dx: r.dx, dy: r.dy)), captureNanos: nanos)
                     if debugLayers { log("layer 0 drag copy-rect for window \(d.id) \(r.rect) by (\(r.dx), \(r.dy)) (layers: \(layers.keys.sorted()))") }
@@ -1070,6 +1074,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if region.height >= 96 || region.width >= 96, let r = detector.detect(old: old, new: new, rect: region) {
                     let dest = tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])
                     let mismatched = Set(tracker.tiles(covering: r.mismatchedTiles))
+                    wrongAfterCopy.formUnion(mismatched)
                     explained.formUnion(dest.filter { !mismatched.contains($0) }); copies.append((dest.filter { !mismatched.contains($0) }, r.dx, r.dy))
                     sendTileMessage(.copyRect(.init(header: header(layer: layer.id, nanos: nanos), rect: r.rect, dx: r.dx, dy: r.dy)), captureNanos: nanos)
                     if debugLayers { log("layer \(layer.id) copy-rect \(r.rect) by (\(r.dx), \(r.dy)) confidence \(r.confidence)") }
@@ -1100,6 +1105,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
 
         var plan = tracker.classify(dirty: dirty, now: now, copyGate: Clock.elapsed(since: layer.copyGateNanos, now: now) < 300_000_000 && layer.copyGateNanos > 0)
+        if !wrongAfterCopy.isEmpty {
+            // Wrong pixels never wait for video or refinement: due now as direct changes (sendDueDirect, borrowing after 150 ms).
+            let wrong = wrongAfterCopy.subtracting(layer.occludedTiles)
+            plan.lossless.removeAll { wrong.contains($0) }
+            let videoBefore = plan.video.count
+            plan.video.removeAll { wrong.contains($0) }
+            if plan.video.count != videoBefore { if plan.video.isEmpty { plan.videoRegion = .zero; plan.wholeFrame = false } else if !plan.wholeFrame { plan.videoRegion = tracker.boundingRect(plan.video) } }
+            tracker.markDirect(Array(wrong), now: now)
+            statCopyCorrections += wrong.count
+        }
         // Motion bookkeeping for the refinement freeze: classified video, copy-rects, or the input stream.
         if !plan.video.isEmpty || copyRectsThisCapture > 0 { lastMotionNanos = now }
         if let hint = injector?.motionHintNanos, hint > lastMotionNanos { lastMotionNanos = hint }
@@ -1871,7 +1886,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// motion, waits for the first picture and serves every window's backlog before the desktop: the tiles a moving
     /// Dock tooltip had just left stayed stale until another tooltip repainted them (phrz's ghost labels, traced on
     /// mac-daddy with real Dock hovers: each label update covered its new place, the place it left was rate-limited).
-    private var statDirectDue = 0, statDirectWaitMaxNanos: UInt64 = 0
+    private var statDirectDue = 0, statDirectWaitMaxNanos: UInt64 = 0, statCopyCorrections = 0
     private func sendDueDirect(now: UInt64) {
         let perSecond = Double(lastBudget.tileKbps * 1000 / 8)
         for l in layers.values {
