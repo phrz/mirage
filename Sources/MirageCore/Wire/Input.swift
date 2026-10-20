@@ -191,6 +191,9 @@ public struct InputChannel {
     /// Takes a sequence number for something that travels outside the input channel (a window command on
     /// the control stream): the host's window list reports it as applied like any input.
     public mutating func reserveSequence() -> UInt64 { nextSeq += 1; return nextSeq }
+    /// Continues numbering after `seq` (a relaunched viewer resuming a host session: the host applies only sequence
+    /// numbers above the last one it saw, so a channel starting again at 1 would have every event taken for a duplicate).
+    public mutating func continueAfter(_ seq: UInt64) { nextSeq = max(nextSeq, seq) }
     /// Age of the oldest unacked discrete event, or 0.
     public func oldestUnackedNanos(now: UInt64) -> UInt64 { unackedSince.first.map { now &- $0 } ?? 0 }
     public mutating func setRTT(nanos: UInt64) { rttNanos = nanos }

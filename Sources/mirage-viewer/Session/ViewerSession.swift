@@ -186,7 +186,10 @@ final class ViewerSession: @unchecked Sendable {
         self.host = host; self.port = port; self.pairCode = pairCode; self.model = model
         MainActor.assumeIsolated { model.hostName = host }
         if let context { layerViews[0] = LayerView(id: 0, context: context) }
-        resumeToken = ViewerCredentials.savedResumeToken(host: host, port: port)
+        if let saved = ViewerCredentials.savedResume(host: host, port: port) {
+            // A relaunched app (iOS): resume the host's session; input numbering continues past what the host has applied.
+            resumeToken = saved.token; input.continueAfter(saved.inputSeq + (1 << 20))
+        }
     }
 
     /// The host is this Mac (loopback tests).
@@ -258,6 +261,7 @@ final class ViewerSession: @unchecked Sendable {
     }
     private func watchWakeAndPath() {
         wakeObservers.append(PlatformEvents.observeWake { [weak self] why in self?.nudge(why) })
+        if let o = PlatformEvents.observeSuspend({ [weak self] in self?.saveResume() }) { wakeObservers.append(o) }
         let m = NWPathMonitor()
         var lastPath: String?
         m.pathUpdateHandler = { [weak self] p in
@@ -269,6 +273,9 @@ final class ViewerSession: @unchecked Sendable {
         m.start(queue: DispatchQueue(label: "mirage.viewer.path"))
         pathMonitor = m
     }
+
+    /// Keeps the resume token and the input numbering where the platform persists them (iOS: the keychain).
+    private func saveResume() { if let t = resumeToken { ViewerCredentials.saveResume(t, inputSeq: lastInputSeqSent(), host: host, port: port) } }
 
     /// The stream request we last sent, kept across reconnects.
     @MainActor private var lastRequestSent: ControlMessage.StreamRequest?
@@ -327,7 +334,7 @@ final class ViewerSession: @unchecked Sendable {
             let welcome = try await session.authenticate(resumeToken: resumeToken)
             let resumed = welcome.resumed == true
             if resumeToken != nil { if resumed { resumes += 1 } else { reconnects += 1 } }
-            if let t = welcome.resumeToken { resumeToken = t; ViewerCredentials.saveResumeToken(t, host: host, port: port) }
+            if let t = welcome.resumeToken { resumeToken = t; saveResume() }
             if resumeToken != nil, !resumed {
                 // The host did not know us (restarted, or the window passed): a fresh stream follows. The
                 // picture stays until its first keyframe replaces it; predictions from the old session are void.

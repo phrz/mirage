@@ -36,6 +36,15 @@ enum PlatformEvents {
         NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: nil) { _ in handler("back in the foreground") }
         #endif
     }
+
+    /// Calls `handler` when the app is about to be suspended (iOS: it may be ended without another word); nil on macOS.
+    static func observeSuspend(_ handler: @escaping @Sendable () -> Void) -> NSObjectProtocol? {
+        #if os(macOS)
+        return nil
+        #else
+        return NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil) { _ in handler() }
+        #endif
+    }
 }
 
 /// The viewer's long-term identity and its resume token. macOS keeps both as before (identity file in the Mirage
@@ -54,22 +63,23 @@ enum ViewerCredentials {
         #endif
     }
 
-    private struct SavedToken: Codable { var token: Data; var savedAt: Date }
+    /// A resume token with the last input sequence number sent under it (a resumed session continues the numbering).
+    struct SavedResume: Codable { var token: Data; var inputSeq: UInt64; var savedAt: Date }
 
     /// A resume token saved for this host that the host may still honour.
-    static func savedResumeToken(host: String, port: UInt16) -> Data? {
+    static func savedResume(host: String, port: UInt16) -> SavedResume? {
         #if os(macOS)
         return nil
         #else
-        guard let d = Keychain.read("resume-\(host):\(port)"), let t = try? JSONDecoder().decode(SavedToken.self, from: d),
+        guard let d = Keychain.read("resume-\(host):\(port)"), let t = try? JSONDecoder().decode(SavedResume.self, from: d),
               Date().timeIntervalSince(t.savedAt) < Double(Mirage.resumeWindowSeconds) else { return nil }
-        return t.token
+        return t
         #endif
     }
 
-    static func saveResumeToken(_ token: Data, host: String, port: UInt16) {
+    static func saveResume(_ token: Data, inputSeq: UInt64, host: String, port: UInt16) {
         #if !os(macOS)
-        if let d = try? JSONEncoder().encode(SavedToken(token: token, savedAt: Date())) { _ = Keychain.write("resume-\(host):\(port)", d) }
+        if let d = try? JSONEncoder().encode(SavedResume(token: token, inputSeq: inputSeq, savedAt: Date())) { _ = Keychain.write("resume-\(host):\(port)", d) }
         #endif
     }
 }

@@ -47,6 +47,24 @@ final class TouchInputTests: XCTestCase {
         XCTAssertEqual(q.x, 0); XCTAssertEqual(q.y, 1)
     }
 
+    /// A relaunched viewer resuming the host's session must number its input past what the host already applied.
+    func testRelaunchedChannelContinuesNumbering() throws {
+        var host = InputReceiver()
+        var first = InputChannel()
+        for _ in 0..<5 { first.enqueue(.key(.init(keyCode: 0, down: true, isRepeat: false, modifiers: 0, characters: "a")), now: 0) }
+        _ = host.receive(try XCTUnwrap(InputPacket.decode(try XCTUnwrap(first.packet(now: 0)))))
+        XCTAssertEqual(host.lastEventSeq, 5)
+
+        var fresh = InputChannel()   // a new process starts at 1: everything would be a duplicate
+        fresh.enqueue(.key(.init(keyCode: 1, down: true, isRepeat: false, modifiers: 0, characters: "s")), now: 0)
+        XCTAssertTrue(host.receive(try XCTUnwrap(InputPacket.decode(try XCTUnwrap(fresh.packet(now: 0))))).apply.isEmpty)
+
+        var resumed = InputChannel()
+        resumed.continueAfter(first.lastSequence + (1 << 20))
+        resumed.enqueue(.key(.init(keyCode: 1, down: true, isRepeat: false, modifiers: 0, characters: "s")), now: 0)
+        XCTAssertEqual(host.receive(try XCTUnwrap(InputPacket.decode(try XCTUnwrap(resumed.packet(now: 0))))).apply.count, 1)
+    }
+
     func testMomentumCoastsAndStops() {
         var m = ScrollMomentum()
         m.start(vx: 0, vy: 1000)
