@@ -824,6 +824,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         let planned = screenLocked ? [] : plannedLayers(in: s.windows, displayPixels: t.pixelWidth * t.pixelHeight)
         for w in planned { if let f = plannedFrames[w.id], f != w.frame { recentFrames.append((f, now)) } }
+        for w in planned where excludedFrom[w.id] != nil { exposedSince[w.id] = nil }   // excluded: the wait is over
         for w in planned where (layers[w.id]?.exposed ?? false) && excludedFrom[w.id] == nil {
             let since = exposedSince[w.id] ?? now; exposedSince[w.id] = since
             if Clock.elapsed(since: since, now: now) > 5_000_000_000 {
@@ -855,6 +856,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             } else {
                 let l = Layer(id: w.id, width: w.frame.width, height: w.frame.height, frame: w.frame, now: now)
                 layers[w.id] = l
+                // A new layer's wait for its exclusion starts now: a stale start (the layer of a stream before a resume
+                // with a fresh picture) marked every window unexcludable within a frame of being exposed again, and
+                // after an app relaunch every window stayed in the desktop picture for good.
+                exposedSince[w.id] = nil
                 startCapturer(for: l, sample: s, needCatalog: &needCatalog)
             }
         }
