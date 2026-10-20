@@ -1102,7 +1102,8 @@ final class ViewerSession: @unchecked Sendable {
     var inputAutoFlush = false { didSet { inputQueue.async { self.input.autoFlush = self.inputAutoFlush } } }
     /// What the channel looks like, for the overlay and --stats.
     struct InputState { var queued = 0, dropped = 0, packets = 0; var held = false; var oldestMs = 0.0 }
-    func inputState() -> InputState { inputQueue.sync { let now = Clock.nowNanos(); return InputState(queued: input.queuedEvents, dropped: input.droppedByCap, packets: input.packetsSent, held: input.held, oldestMs: Double(input.oldestUnackedNanos(now: now)) / 1e6) } }
+    /// `queued`: keystrokes only (pointer events are best effort, never counted or replayed late).
+    func inputState() -> InputState { inputQueue.sync { let now = Clock.nowNanos(); return InputState(queued: input.queuedKeystrokes, dropped: input.droppedByCap, packets: input.packetsSent, held: input.held && input.queuedKeystrokes > 0, oldestMs: Double(input.oldestUnackedNanos(now: now)) / 1e6) } }
     private(set) var keysSent: [String] = []   // scenario record: "seq:down:chars"
 
     private func startInputTimer() {
@@ -1569,6 +1570,14 @@ final class ViewerSession: @unchecked Sendable {
     func predict(kind: Predictor.Kind, windowID: UInt32, rect: PixelRect, dx: Int, dy: Int, inputSeq: UInt64) {
         let now = Clock.nowNanos()
         predictorLock.lock()
+        var rect = rect
+        if kind == .scroll {
+            // A scroll is predicted only over the host's scroll rect for that window (its AX scroll area), whatever the caller
+            // guessed: the iPhone's first scroll frames showed the band at the bottom of the whole window (c3c67a6 had fixed
+            // the Mac's callers, not the iOS one). Until the host knows the rect, nothing is predicted.
+            guard let known = windows.first(where: { $0.id == windowID })?.scrollRect else { predictorLock.unlock(); return }
+            rect = known
+        }
         predictor.predict(kind: kind, windowID: windowID, rect: rect, dx: dx, dy: dy, inputSeq: inputSeq, now: now)
         let needColor = bandColors[windowID] == nil
         let layered = windows.first(where: { $0.id == windowID })?.isLayered ?? false

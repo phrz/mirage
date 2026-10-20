@@ -162,8 +162,12 @@ public struct InputChannel {
         /// First retransmit after max(this, 1.2 × RTT); doubles every 4 unanswered retransmits up to `maxRetransmitNanos`.
         public var baseRetransmitNanos: UInt64 = 60_000_000
         public var maxRetransmitNanos: UInt64 = 10_000_000_000
-        /// Discrete events unacked for this long put the channel on hold: the user chooses flush or discard.
+        /// Keystrokes unacked for this long put the channel on hold: the user chooses flush or discard.
         public var holdAfterNanos: UInt64 = 10_000_000_000
+        /// Pointer events (scrolls, button presses) are best effort: older than this unacked, they are dropped, never
+        /// replayed after a gap (a stale click replayed is dangerous; phrz's banner counted hundreds of scroll events as
+        /// "keystrokes"). Button releases stay reliable: a lost one would leave the host's button down.
+        public var bestEffortLifetimeNanos: UInt64 = 1_000_000_000
         public init() {}
     }
     public var tuning = Tuning()
@@ -186,6 +190,27 @@ public struct InputChannel {
     public init() {}
 
     public var queuedEvents: Int { unacked.count }
+    /// Keystrokes waiting (key downs): what the "typed while disconnected" banner counts.
+    public var queuedKeystrokes: Int { unacked.reduce(0) { n, e in if case .key(let k) = e.message, k.down { return n + 1 }; return n } }
+    /// Pointer events dropped as stale.
+    public private(set) var droppedStale = 0
+    static func isBestEffort(_ m: ControlMessage) -> Bool {
+        switch m {
+        case .scroll: return true
+        case .mouseButton(let b): return b.down
+        default: return false
+        }
+    }
+    /// Drops best-effort events that went unacked too long.
+    private mutating func dropStale(now: UInt64) {
+        guard unacked.contains(where: { Self.isBestEffort($0.message) }) else { return }
+        var keep: [InputPacket.Event] = [], since: [UInt64] = []
+        for (e, t) in zip(unacked, unackedSince) {
+            if Self.isBestEffort(e.message), now &- t > tuning.bestEffortLifetimeNanos { droppedStale += 1; continue }
+            keep.append(e); since.append(t)
+        }
+        unacked = keep; unackedSince = since
+    }
     public var lastSeq: UInt64 { nextSeq }
     public var lastSequence: UInt64 { nextSeq }
     /// Takes a sequence number for something that travels outside the input channel (a window command on
@@ -226,6 +251,7 @@ public struct InputChannel {
 
     /// The packet to send now (nil if nothing is outstanding), and arms the retransmit timer.
     public mutating func packet(now: UInt64) -> Data? {
+        dropStale(now: now)
         let pointerPending = pointer.map { $0.seq > ackedPointerSeq } ?? false
         if unacked.isEmpty && !pointerPending { retransmits = 0; return nil }
         var events: [InputPacket.Event] = []
@@ -246,7 +272,10 @@ public struct InputChannel {
     /// Time-driven: a packet to resend if the retransmit timer expired, else nil. Also moves the
     /// channel to "held" after a long gap (unless `autoFlush`).
     public mutating func tick(now: UInt64) -> Data? {
-        if !held, !autoFlush, let since = unackedSince.first, now &- since > tuning.holdAfterNanos { held = true }
+        dropStale(now: now)
+        // Only keystrokes are held for a decision (pointer events are never replayed late).
+        if !held, !autoFlush, let i = unacked.firstIndex(where: { if case .key = $0.message { return true }; return false }),
+           now &- unackedSince[i] > tuning.holdAfterNanos { held = true }
         let pointerPending = pointer.map { $0.seq > ackedPointerSeq } ?? false
         guard !unacked.isEmpty || pointerPending, now >= nextRetransmitNanos else { return nil }
         retransmits += 1
@@ -260,7 +289,7 @@ public struct InputChannel {
         }
         if a.pointerSeq > ackedPointerSeq { ackedPointerSeq = a.pointerSeq }
         retransmits = 0
-        if held && unacked.isEmpty { held = false }
+        if held && queuedKeystrokes == 0 { held = false }
     }
 
     /// The user chose to send what was typed during the gap.

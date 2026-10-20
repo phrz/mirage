@@ -168,3 +168,27 @@ final class InputWireTests: XCTestCase {
         XCTAssertTrue(b.inBurst(now: t0 + 21_000_000_000))
     }
 }
+
+final class BestEffortPointerTests: XCTestCase {
+    /// A disconnect with scrolls, clicks and keys queued: only the keys are held and counted; stale scrolls and presses go.
+    func testOnlyKeystrokesAreHeldAndCountedAcrossAGap() {
+        var ch = InputChannel()
+        let t0: UInt64 = 1_000_000_000
+        for i in 0..<300 { ch.enqueue(.scroll(.init(x: 0.5, y: 0.5, dx: 0, dy: -3, precise: true, modifiers: 0)), now: t0 + UInt64(i) * 1_000_000) }
+        ch.enqueue(.mouseButton(.init(button: 0, down: true, x: 0.5, y: 0.5, clickCount: 1, modifiers: 0)), now: t0)
+        ch.enqueue(.mouseButton(.init(button: 0, down: false, x: 0.5, y: 0.5, clickCount: 1, modifiers: 0)), now: t0)
+        ch.enqueue(.key(.init(keyCode: 0, down: true, isRepeat: false, modifiers: 0, characters: "a")), now: t0)
+        ch.enqueue(.key(.init(keyCode: 0, down: false, isRepeat: false, modifiers: 0, characters: "a")), now: t0)
+        XCTAssertEqual(ch.queuedKeystrokes, 1)
+        _ = ch.tick(now: t0 + 11_000_000_000)   // 11 s without an answer
+        XCTAssertTrue(ch.held, "a keystroke waits for the user's decision")
+        XCTAssertEqual(ch.queuedKeystrokes, 1, "the banner counts the one keystroke, not 300 scrolls")
+        XCTAssertEqual(ch.queuedEvents, 3, "the button release and the key down/up stay; scrolls and the press are gone")
+        XCTAssertEqual(ch.droppedStale, 301)
+        // Pointer events alone never hold the channel.
+        var p = InputChannel()
+        p.enqueue(.scroll(.init(x: 0.5, y: 0.5, dx: 0, dy: -3, precise: true, modifiers: 0)), now: t0)
+        _ = p.tick(now: t0 + 11_000_000_000)
+        XCTAssertFalse(p.held); XCTAssertEqual(p.queuedEvents, 0)
+    }
+}
