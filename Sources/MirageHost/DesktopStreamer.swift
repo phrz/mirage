@@ -1043,7 +1043,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     if r == nil, let (rdx, rdy) = detector.refine(old: old, new: new, rect: d.old, dx: dx0, dy: dy0, radius: effort.shiftSearch.refineRadius), (rdx, rdy) != (dx0, dy0) {
                         r = detector.verify(old: old, new: new, rect: d.old, dx: rdx, dy: rdy)
                     }
-                    guard let r else { continue }
+                    guard let r0 = r, let r = ShiftDetector.trimmed(r0) else { continue }
                     let dest = tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])
                     let mismatched = Set(tracker.tiles(covering: r.mismatchedTiles))
                     wrongAfterCopy.formUnion(mismatched)
@@ -1073,7 +1073,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 }
                 var region = (known ?? (layer.isDisplay ? win?.frame : nil) ?? bb).intersection(bb)
                 if region.width < 64 || region.height < 64 { region = bb }
-                if region.height >= 96 || region.width >= 96, let r = detector.detect(old: old, new: new, rect: region) {
+                if region.height >= 96 || region.width >= 96, let r0 = detector.detect(old: old, new: new, rect: region), let r = ShiftDetector.trimmed(r0) {
                     let dest = tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])
                     let mismatched = Set(tracker.tiles(covering: r.mismatchedTiles))
                     wrongAfterCopy.formUnion(mismatched)

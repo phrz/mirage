@@ -70,3 +70,16 @@ final class CopyFromWrongTests: XCTestCase {
         XCTAssertEqual(t.releaseHeld(now: 9_000_000_000), 2)
     }
 }
+
+final class CopyTrimTests: XCTestCase {
+    /// A scroll under a translucent toolbar: the toolbar's tile row does not match; the copy-rect leaves it out.
+    func testMismatchedLeadingRowsAreTrimmed() {
+        let r = ShiftDetector.Result(dx: 0, dy: -30, rect: PixelRect(x: 0, y: 30, width: 640, height: 610),
+                                     mismatchedTiles: (0..<10).map { PixelRect(x: $0 * 64, y: 0, width: 64, height: 64) } + [PixelRect(x: 128, y: 320, width: 64, height: 64)],
+                                     confidence: 0.8)
+        let t = ShiftDetector.trimmed(r)!
+        XCTAssertEqual(t.rect.offset(t.dx, t.dy), PixelRect(x: 0, y: 64, width: 640, height: 546), "destination starts below the toolbar row")
+        XCTAssertEqual(t.mismatchedTiles, [PixelRect(x: 128, y: 320, width: 64, height: 64)], "an inner mismatch stays (sent as a correction)")
+        XCTAssertNil(ShiftDetector.trimmed(.init(dx: 0, dy: 10, rect: PixelRect(x: 0, y: 0, width: 64, height: 128), mismatchedTiles: [PixelRect(x: 0, y: 10, width: 64, height: 54), PixelRect(x: 0, y: 64, width: 64, height: 64)], confidence: 0)))
+    }
+}

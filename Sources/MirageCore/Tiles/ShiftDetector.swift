@@ -27,6 +27,43 @@ public struct ShiftDetector {
         public var confidence: Double
     }
 
+    /// The copy-rect without its leading and trailing tile rows and columns that mostly do not match: what a scroll area
+    /// under a translucent toolbar or status bar carries (Finder's scroll view extends under its Liquid Glass toolbar, so the
+    /// copy stacked the toolbar on the viewer until corrections landed a round trip later). Nil when too little is left.
+    public static func trimmed(_ r: Result, tile: Int = 64) -> Result? {
+        var dst = r.rect.offset(r.dx, r.dy)
+        let bad = r.mismatchedTiles
+        func mostlyBad(_ strip: PixelRect) -> Bool {
+            guard strip.area > 0 else { return false }
+            return bad.reduce(0) { $0 + $1.intersection(strip).area } * 2 >= strip.area
+        }
+        while dst.height > tile {   // top rows
+            let end = min(dst.maxY, (dst.y / tile + 1) * tile)
+            guard mostlyBad(PixelRect(x: dst.x, y: dst.y, width: dst.width, height: end - dst.y)) else { break }
+            dst = PixelRect(x: dst.x, y: end, width: dst.width, height: dst.maxY - end)
+        }
+        while dst.height > tile {   // bottom rows
+            let start = max(dst.y, ((dst.maxY - 1) / tile) * tile)
+            guard mostlyBad(PixelRect(x: dst.x, y: start, width: dst.width, height: dst.maxY - start)) else { break }
+            dst = PixelRect(x: dst.x, y: dst.y, width: dst.width, height: start - dst.y)
+        }
+        while dst.width > tile {    // left columns
+            let end = min(dst.maxX, (dst.x / tile + 1) * tile)
+            guard mostlyBad(PixelRect(x: dst.x, y: dst.y, width: end - dst.x, height: dst.height)) else { break }
+            dst = PixelRect(x: end, y: dst.y, width: dst.maxX - end, height: dst.height)
+        }
+        while dst.width > tile {    // right columns
+            let start = max(dst.x, ((dst.maxX - 1) / tile) * tile)
+            guard mostlyBad(PixelRect(x: start, y: dst.y, width: dst.maxX - start, height: dst.height)) else { break }
+            dst = PixelRect(x: dst.x, y: dst.y, width: start - dst.x, height: dst.height)
+        }
+        guard dst.width >= tile, dst.height >= tile else { return nil }
+        var out = r
+        out.rect = dst.offset(-r.dx, -r.dy)
+        out.mismatchedTiles = bad.map { $0.intersection(dst) }.filter { !$0.isEmpty }
+        return out
+    }
+
     public var maxShift = 600
     public var minLines = 48
     /// The best shift's SAD must be below this fraction of the SAD at shift 0.
