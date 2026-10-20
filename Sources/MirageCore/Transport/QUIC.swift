@@ -139,4 +139,6 @@ public final class QUICHost: @unchecked Sendable {
     }
 
     public func stop() { listener.cancel() }
+    /// The port listened on (once ready): the one asked for, or the one the system chose for port 0.
+    public var port: UInt16? { listener.port?.rawValue }
 }

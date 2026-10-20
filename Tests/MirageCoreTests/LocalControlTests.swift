@@ -23,7 +23,7 @@ final class LocalControlTests: XCTestCase {
         func add(_ e: LocalControl.Event) { lock.lock(); list.append(e); lock.unlock() }
         var all: [LocalControl.Event] { lock.lock(); defer { lock.unlock() }; return list }
         var count: Int { all.count }
-        func wait(_ what: String, after: Int = 0, timeout: TimeInterval = 5, _ match: (LocalControl.Event) -> Bool) async throws -> LocalControl.Event {
+        func wait(_ what: String, after: Int = 0, timeout: TimeInterval = Loopback.timeout, _ match: (LocalControl.Event) -> Bool) async throws -> LocalControl.Event {
             let end = Date().addingTimeInterval(timeout)
             while Date() < end { if let e = all.dropFirst(after).first(where: match) { return e }; try await Task.sleep(for: .milliseconds(20)) }
             throw MirageError.transport("no \(what) event: \(all)")
@@ -39,7 +39,9 @@ final class LocalControlTests: XCTestCase {
         let hostID = try hostStore.identity(role: "host", name: "test-host")
         let tls = try TLSIdentity.loadOrCreate(store: hostStore)
         let ctx = HostContext(identity: hostID, store: hostStore, tlsFingerprint: tls.fingerprint, log: { _ in })
-        let port = UInt16.random(in: 40_000...60_000)
+        // The QUIC host first, on a port the system picks: the pairing link carries it.
+        let (host, port) = try await Loopback.host(tls: tls, ctx: ctx)
+        defer { host.stop() }
         let server = LocalControlServer(ctx: ctx, port: port, log: { _ in })
         try server.start()
         var st = stat(); XCTAssertEqual(stat(hostStore.url(LocalControl.socketName).path, &st), 0)
@@ -57,17 +59,11 @@ final class LocalControlTests: XCTestCase {
         XCTAssertTrue(link.pins(publicKey: hostID.publicKey))
         XCTAssertEqual(link.port, port)
 
-        let host = try QUICHost(port: port, tls: tls)
-        let ready = expectation(description: "listening")
-        host.start(onStream: { conn, id, remote in Task { await HostSession.handle(connection: conn, connectionID: id, remote: remote, ctx: ctx) } },
-                   onState: { if case .ready = $0 { ready.fulfill() } })
-        await fulfillment(of: [ready], timeout: 5)
-        defer { host.stop() }
         var dialLink = link; dialLink.address = "127.0.0.1"
 
         func pair(_ name: String, answer: Bool) async throws {
             let client = QUICClient(host: "127.0.0.1", port: port)
-            try await client.connect(timeout: 5)
+            try await client.connect(timeout: Loopback.timeout)
             defer { client.close() }
             let control = try await client.openStream()
             let session = ClientSession(identity: DeviceIdentity(name: name), store: viewerStore, alias: "test-host", tlsFingerprint: client.tlsFingerprint!, stream: control)

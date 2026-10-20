@@ -84,19 +84,14 @@ final class ResumePictureTests: XCTestCase {
         try hostStore.authorize(viewerID.record)
         let streamer = PictureStreamer()
         let ctx = HostContext(identity: hostID, store: hostStore, tlsFingerprint: tls.fingerprint, log: { _ in }, makeStreamer: { streamer })
-        let port = UInt16.random(in: 40_000...60_000)
-        let host = try QUICHost(port: port, tls: tls)
-        let ready = expectation(description: "listening")
-        host.start(onStream: { conn, id, remote in Task { await HostSession.handle(connection: conn, connectionID: id, remote: remote, ctx: ctx) } },
-                   onState: { if case .ready = $0 { ready.fulfill() } })
-        await fulfillment(of: [ready], timeout: 5)
+        let (host, port) = try await Loopback.host(tls: tls, ctx: ctx)
         defer { host.stop() }
         try viewerStore.remember(host: .init(hostID: hostID.id, hostName: hostID.name, publicKey: hostID.publicKey, endpoint: "127.0.0.1", pairedAt: Date()), as: "127.0.0.1")
 
         /// One viewer connection, as ViewerSession makes it: authenticate (with the token), streams, flow, stream request.
         func connect(token: Data?, holdsPicture: Bool?) async throws -> (QUICClient, ControlMessage.Welcome) {
             let client = QUICClient(host: "127.0.0.1", port: port)
-            try await client.connect(timeout: 5)
+            try await client.connect(timeout: Loopback.timeout)
             let control = try await client.openStream()
             let session = ClientSession(identity: viewerID, store: viewerStore, alias: "127.0.0.1", tlsFingerprint: client.tlsFingerprint!, stream: control)
             let welcome = try await session.authenticate(resumeToken: token)
@@ -113,8 +108,9 @@ final class ResumePictureTests: XCTestCase {
         XCTAssertNotEqual(w1.resumed, true)
         XCTAssertEqual(streamer.viewerTiles, 48)
         let token = try XCTUnwrap(w1.resumeToken)
+        // No wait for the host to notice: a token claims the session whether the host has suspended it already or still
+        // holds it for the old connection (HostConnections.claim). A fixed 300 ms sleep here was a wall-clock guess.
         c1.close()
-        try await Task.sleep(for: .milliseconds(300))   // the host notices and suspends the session
 
         // 2. The bug: the app relaunched (empty canvases) and resumed with a request that did not say so. The host
         // brought a "kept" picture current: nothing to send, the viewer stays empty (grey).
@@ -124,7 +120,6 @@ final class ResumePictureTests: XCTestCase {
         XCTAssertEqual(streamer.lastPlan, .bringCurrent)
         XCTAssertEqual(streamer.viewerTiles, 0, "reproduces the grey resume: a relaunched viewer that says nothing gets nothing")
         c2.close()
-        try await Task.sleep(for: .milliseconds(300))
 
         // 3. The fix: the relaunched viewer says it holds no picture; the same session resumes with a fresh one.
         streamer.relaunchViewer()
@@ -134,7 +129,6 @@ final class ResumePictureTests: XCTestCase {
         XCTAssertEqual(streamer.lastPlan, .fresh(.viewerEmpty))
         XCTAssertEqual(streamer.viewerTiles, 48)
         c3.close()
-        try await Task.sleep(for: .milliseconds(300))
 
         // 4. An outage with the picture kept (the Mac viewer's sleep/wake or network change): brought current, nothing resent.
         let (c4, w4) = try await connect(token: token, holdsPicture: true)

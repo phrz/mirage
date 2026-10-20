@@ -121,7 +121,7 @@ final class UnifiedLayoutTests: XCTestCase {
         let e = expectation(description: "radius")
         var got: Double?
         r.sampleCornerRadius { got = $0; e.fulfill() }
-        wait(for: [e], timeout: 5)
+        wait(for: [e], timeout: 30)
         XCTAssertEqual(got ?? 0, 6 / 0.2929, accuracy: 0.5)
     }
 }

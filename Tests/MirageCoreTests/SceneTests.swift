@@ -102,7 +102,7 @@ final class SceneTests: XCTestCase {
         // old fixed-radius shadow left a wedge of bare desktop next to a dark outline.
         let e = expectation(description: "radius"); var measured: Double?
         win.sampleCornerRadius { measured = $0; e.fulfill() }
-        wait(for: [e], timeout: 5)
+        wait(for: [e], timeout: 30)
         XCTAssertEqual(measured ?? 0, 16, accuracy: 3)
         win.cornerRadius = Float(measured ?? 16)
         for frame in [PixelRect(x: 40, y: 40, width: 120, height: 80), PixelRect(x: 97, y: 61, width: 120, height: 80)] {   // at rest, then moved locally

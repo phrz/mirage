@@ -158,9 +158,10 @@ final class DirectTouchTests: XCTestCase {
 
     /// The mode is kept in UserDefaults; direct touch unless set otherwise (or set to something unknown).
     func testTouchModeDefaultsToDirectAndPersists() throws {
-        let d = try XCTUnwrap(UserDefaults(suiteName: "DirectTouchTests"))
-        d.removePersistentDomain(forName: "DirectTouchTests")
-        defer { d.removePersistentDomain(forName: "DirectTouchTests") }
+        // A suite of its own per run: concurrent runs shared "DirectTouchTests" and saw each other's writes.
+        let suite = "DirectTouchTests-\(UUID().uuidString)"
+        let d = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { d.removePersistentDomain(forName: suite) }
         XCTAssertEqual(TouchMode.stored(d), .direct)
         TouchMode.trackpad.store(d)
         XCTAssertEqual(TouchMode.stored(d), .trackpad)

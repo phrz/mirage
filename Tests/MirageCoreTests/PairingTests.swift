@@ -88,17 +88,12 @@ final class PairingFlowTests: XCTestCase {
         let hostID = try hostStore.identity(role: "host", name: "test-host")
         let tls = try TLSIdentity.loadOrCreate(store: hostStore)
         let ctx = HostContext(identity: hostID, store: hostStore, tlsFingerprint: tls.fingerprint, log: { _ in })
-        let port = UInt16.random(in: 40_000...60_000)
-        let host = try QUICHost(port: port, tls: tls)
-        let ready = expectation(description: "listening")
-        host.start(onStream: { conn, id, remote in Task { await HostSession.handle(connection: conn, connectionID: id, remote: remote, ctx: ctx) } },
-                   onState: { if case .ready = $0 { ready.fulfill() } })
-        await fulfillment(of: [ready], timeout: 5)
+        let (host, port) = try await Loopback.host(tls: tls, ctx: ctx)
         return Rig(host: host, port: port, ctx: ctx, hostID: hostID, hostStore: hostStore, viewerStore: viewerStore, tmp: tmp)
     }
     private func pair(_ r: Rig, viewer: DeviceIdentity, _ body: (ClientSession) async throws -> DeviceRecord) async throws -> DeviceRecord {
         let client = QUICClient(host: "127.0.0.1", port: r.port)
-        try await client.connect(timeout: 5)
+        try await client.connect(timeout: Loopback.timeout)
         defer { client.close() }
         let control = try await client.openStream()
         let session = ClientSession(identity: viewer, store: r.viewerStore, alias: "test-host", tlsFingerprint: client.tlsFingerprint!, stream: control)
