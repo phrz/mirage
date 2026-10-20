@@ -174,34 +174,4 @@ final class DirectTouchTests: XCTestCase {
         d.set("joystick", forKey: TouchMode.defaultsKey)
         XCTAssertEqual(TouchMode.stored(d), .direct)
     }
-
-    /// A one-finger swipe at fit: nothing to pan, so the picture gives a little (rubber band) and settles back.
-    func testSwipeAtFitOnlyRubberBands() {
-        var v = ZoomViewport()
-        v.setLayout(container: CGRect(x: 0, y: 0, width: 400, height: 800), keyboardTop: nil, content: CGSize(width: 1600, height: 1000))
-        let o = v.origin
-        for _ in 0..<20 { v.pan(by: CGPoint(x: 10, y: 0), rubberBand: true) }
-        XCTAssertEqual(v.origin, o, "nothing moves at fit")
-        XCTAssertGreaterThan(v.overscroll.x, 10)
-        XCTAssertLessThanOrEqual(v.overscroll.x, ZoomViewport.rubberLimit)
-        XCTAssertEqual(v.pictureRect.minX, o.x + v.overscroll.x, accuracy: 1e-9, "the picture is drawn stretched")
-        v.pan(by: CGPoint(x: -50, y: 0), rubberBand: true)
-        XCTAssertEqual(v.pull.x, 150, accuracy: 1e-9, "travel back undoes the stretch first")
-        for _ in 0..<120 { v.relax(dt: 1.0 / 60) }
-        XCTAssertEqual(v.overscroll, .zero, "springs back")
-    }
-
-    /// Zoomed, the swipe pans until the edge, then stretches.
-    func testSwipeZoomedPansThenStretchesAtTheEdge() {
-        var v = ZoomViewport()
-        v.setLayout(container: CGRect(x: 0, y: 0, width: 400, height: 800), keyboardTop: nil, content: CGSize(width: 1600, height: 1000))
-        v.setZoom(3, about: CGPoint(x: 200, y: 400))
-        let o = v.origin
-        v.pan(by: CGPoint(x: 30, y: 0), rubberBand: true)
-        XCTAssertEqual(v.origin.x, o.x + 30, accuracy: 1e-9)
-        XCTAssertEqual(v.pull, .zero)
-        v.pan(by: CGPoint(x: 10_000, y: 0), rubberBand: true)
-        XCTAssertEqual(v.origin.x, 0, accuracy: 1e-9, "the left edge meets the container's")
-        XCTAssertGreaterThan(v.overscroll.x, 0)
-    }
 }

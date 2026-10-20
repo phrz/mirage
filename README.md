@@ -96,7 +96,7 @@ as a small overlay. The hand button in the pill switches the touch mode (kept ac
 |---|---|
 | tap / taps in a row | click there / double-click (at the first tap's point) |
 | hold 0.35 s, then drag | press there (a tinted ring round the pointer while the button is down) and drag; lift to release; held without moving, a long click |
-| one finger swipe | pans the view (with momentum; at fit it only rubber-bands); sends nothing |
+| one finger swipe | pans the view as any iOS scroll view (it is a UIScrollView: its momentum and rubber band), until the picture's edges meet the screen's safe area, the control pill and the keyboard (so at fit in landscape it moves just enough to clear the pill and the home indicator, and otherwise only rubber-bands); a touch stops a coast without clicking; sends nothing |
 | two-finger drag | the pointer goes where the fingers came down and the content there scrolls (with momentum) |
 | two-finger tap | right-click at its centre |
 | pinch, three-finger drag, two-finger double tap | zoom, pan and fit ↔ 1:1, as below |

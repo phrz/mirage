@@ -173,4 +173,118 @@ final class ZoomViewportTests: XCTestCase {
             XCTAssertEqual(back.x, 0.5, accuracy: 1e-9); XCTAssertEqual(back.y, 0.5, accuracy: 1e-9)
         }
     }
+
+    // MARK: Bounds: every corner of the picture can be brought into view
+
+    /// A phone's geometry as DesktopUIView sees it (view points): its bounds, its safe area in both orientations, the
+    /// control pill's bottom edge and the keyboard's height (with the accessory row).
+    private struct Phone {
+        let name: String
+        let size: CGSize                       // portrait
+        let portraitInsets: (top: Double, bottom: Double)
+        let landscapeInsets: (side: Double, bottom: Double)
+        let pillBottom: (portrait: Double, landscape: Double)
+        let keyboard: (portrait: Double, landscape: Double)
+    }
+    private let phones = [
+        Phone(name: "iPhone 17 Pro Max", size: CGSize(width: 440, height: 956), portraitInsets: (62, 34), landscapeInsets: (62, 20), pillBottom: (95, 37), keyboard: (382, 255)),
+        Phone(name: "iPhone 17 Pro", size: CGSize(width: 402, height: 874), portraitInsets: (62, 34), landscapeInsets: (62, 20), pillBottom: (95, 37), keyboard: (382, 255)),
+        Phone(name: "iPhone SE", size: CGSize(width: 375, height: 667), portraitInsets: (20, 0), landscapeInsets: (0, 0), pillBottom: (53, 37), keyboard: (306, 243)),
+    ]
+
+    /// The viewport as DesktopUIView lays it out: the picture fitted into the safe area (in landscape the full height),
+    /// visible where the safe area, the pill and the keyboard leave it.
+    private func layout(_ phone: Phone, landscape: Bool, keyboard: Bool, content: CGSize) -> (ZoomViewport, CGSize) {
+        let b = landscape ? CGSize(width: phone.size.height, height: phone.size.width) : phone.size
+        let (top, left, bottom, right) = landscape
+            ? (0.0, phone.landscapeInsets.side, phone.landscapeInsets.bottom, phone.landscapeInsets.side)
+            : (phone.portraitInsets.top, 0.0, phone.portraitInsets.bottom, 0.0)
+        let container = landscape
+            ? CGRect(x: left, y: 0, width: b.width - left - right, height: b.height)
+            : CGRect(x: 0, y: top, width: b.width, height: b.height - top - bottom)
+        let pill = landscape ? phone.pillBottom.landscape : phone.pillBottom.portrait
+        let clearTop = max(top, pill)
+        let unobstructed = CGRect(x: left, y: clearTop, width: b.width - left - right, height: b.height - bottom - clearTop)
+        let k = keyboard ? Double(b.height) - (landscape ? phone.keyboard.landscape : phone.keyboard.portrait) : nil
+        var v = ZoomViewport()
+        v.setLayout(container: container, unobstructed: unobstructed, keyboardTop: k, content: content)
+        return (v, b)
+    }
+
+    /// At several zooms, in both orientations, with and without the keyboard: a pan toward each corner brings that corner
+    /// pixel of the picture into the visible area, the picture's edges meeting the visible area's edges exactly where it
+    /// is larger than it, and the scroll view's insets put its range (where the rubber band starts) right there.
+    func testEveryCornerPixelIsReachableAtEveryZoomOrientationAndKeyboard() {
+        let contents = [CGSize(width: 3840, height: 2160), CGSize(width: 3024, height: 1964), CGSize(width: 1600, height: 1000)]
+        var checked = 0
+        for phone in phones { for content in contents { for landscape in [false, true] { for keyboard in [false, true] {
+            let (base, size) = layout(phone, landscape: landscape, keyboard: keyboard, content: content)
+            let oneToOne = base.oneToOneZoom(hostPixelWidth: Double(content.width), screenScale: 3)
+            for z in [1.0, 1.5, 2.0, 3.0, oneToOne, 99] {
+                var v = base
+                v.setZoomRange(oneToOne: oneToOne)
+                v.setZoom(z, about: CGPoint(x: v.visible.midX, y: v.visible.midY))
+                let vis = v.visible
+                let tag = "\(phone.name) \(landscape ? "landscape" : "portrait")\(keyboard ? " keyboard" : "") \(Int(content.width))x\(Int(content.height)) at \(String(format: "%.2f", v.zoom))x"
+                for (sx, sy, name) in [(1.0, 1.0, "top-left"), (-1.0, 1.0, "top-right"), (1.0, -1.0, "bottom-left"), (-1.0, -1.0, "bottom-right")] {
+                    var c = v
+                    c.pan(by: CGPoint(x: sx * 100_000, y: sy * 100_000))
+                    let r = c.pictureRect
+                    let px = CGRect(x: sx > 0 ? 0 : content.width - 1, y: sy > 0 ? 0 : content.height - 1, width: 1, height: 1)
+                    let corner = c.viewRect(contentRect: px)
+                    XCTAssertTrue(vis.insetBy(dx: -0.01, dy: -0.01).contains(corner), "\(tag): the \(name) pixel \(corner) is outside the visible \(vis)")
+                    // Where the picture is larger than the visible area, its edge meets the visible area's edge.
+                    if r.width > vis.width + 0.5 { XCTAssertEqual(sx > 0 ? r.minX : r.maxX, sx > 0 ? vis.minX : vis.maxX, accuracy: 0.01, "\(tag) \(name) x") }
+                    else { XCTAssertTrue(r.minX >= vis.minX - 0.51 && r.maxX <= vis.maxX + 0.51, "\(tag): a fitting width stays inside") }
+                    if r.height > vis.height + 0.5 { XCTAssertEqual(sy > 0 ? r.minY : r.maxY, sy > 0 ? vis.minY : vis.maxY, accuracy: 0.01, "\(tag) \(name) y") }
+                    else { XCTAssertTrue(r.minY >= vis.minY - 0.51 && r.maxY <= vis.maxY + 0.51, "\(tag): a fitting height stays inside") }
+                    // A UIScrollView with these insets stops (and starts its rubber band) exactly here: its contentOffset
+                    // runs from −inset to contentSize + inset − bounds.
+                    let i = c.scrollInsets(viewSize: size)
+                    let offset = CGPoint(x: sx > 0 ? -i.left : r.width + i.right - size.width, y: sy > 0 ? -i.top : r.height + i.bottom - size.height)
+                    XCTAssertEqual(-offset.x, r.minX, accuracy: 0.01, "\(tag) \(name): the scroll view's x range ends where the pan does")
+                    XCTAssertEqual(-offset.y, r.minY, accuracy: 0.01, "\(tag) \(name): the scroll view's y range ends where the pan does")
+                    XCTAssertGreaterThanOrEqual(min(i.top, i.left, i.bottom, i.right), -0.51, "\(tag): insets are never negative")
+                    checked += 1
+                }
+            }
+        } } } }
+        XCTAssertEqual(checked, 3 * 3 * 2 * 2 * 6 * 4)
+    }
+
+    /// phrz (2026-10-21): zoomed in, the top-right of the picture (the menu bar's status items, Control Center) stayed
+    /// under the control pill, and in landscape the bottom (the Dock) under the home indicator: the pan stopped at the
+    /// container, which reaches under both. Now the pan goes on until those edges clear them.
+    func testThePillAndTheHomeIndicatorNeverHideAnEdge() {
+        let content = CGSize(width: 3840, height: 2160)
+        // Portrait at 1:1 (taller than the visible area): the top edge comes down to the pill's bottom.
+        var (p, _) = layout(phones[0], landscape: false, keyboard: false, content: content)
+        p.setZoomRange(oneToOne: 3.9); p.setZoom(3.9, about: CGPoint(x: 220, y: 500))
+        p.pan(by: CGPoint(x: -100_000, y: 100_000))
+        XCTAssertEqual(p.pictureRect.minY, 95, accuracy: 0.01)
+        XCTAssertEqual(p.pictureRect.maxX, 440, accuracy: 0.01)
+        // Landscape at fit: the picture fills the height under the pill and the home indicator, so it pans by both.
+        var (l, _) = layout(phones[0], landscape: true, keyboard: false, content: content)
+        XCTAssertEqual(l.pictureRect.minY, 0, accuracy: 0.01, "fitted to the full height")
+        XCTAssertEqual(l.pictureRect.height, 440, accuracy: 0.01)
+        l.pan(by: CGPoint(x: 0, y: 100_000)); XCTAssertEqual(l.pictureRect.minY, 37, accuracy: 0.01)
+        l.pan(by: CGPoint(x: 0, y: -100_000)); XCTAssertEqual(l.pictureRect.maxY, 420, accuracy: 0.01)
+        // Landscape zoomed: the left and right edges stop at the safe area (the Dynamic Island's side, the rounded corners).
+        l.setZoom(2, about: CGPoint(x: 478, y: 220))
+        l.pan(by: CGPoint(x: 100_000, y: 0)); XCTAssertEqual(l.pictureRect.minX, 62, accuracy: 0.01)
+        l.pan(by: CGPoint(x: -100_000, y: 0)); XCTAssertEqual(l.pictureRect.maxX, 956 - 62, accuracy: 0.01)
+    }
+
+    /// A layout that has not changed leaves the picture where the scroll view put it (its rubber band, past the range);
+    /// any real change clamps it.
+    func testAnUnchangedLayoutLeavesTheRubberBandAlone() {
+        var v = portrait()
+        v.setZoom(3, about: CGPoint(x: 196.5, y: 438.5))
+        let past = CGPoint(x: 30, y: v.origin.y)   // 30 pt past the left edge
+        v.scrolled(to: past)
+        v.setLayout(container: v.container, keyboardTop: nil, content: v.content)
+        XCTAssertEqual(v.origin, past)
+        v.setLayout(container: v.container, keyboardTop: 600, content: v.content)
+        XCTAssertEqual(v.origin.x, 0, accuracy: 0.01)
+    }
 }

@@ -8,10 +8,16 @@ import CoreGraphics
 ///
 /// Rules, per axis: a picture that fits the visible area stays put (centred in the container, lifted above the
 /// on-screen keyboard when that covers it); a picture larger than the visible area can be panned until its edges meet
-/// the visible area's edges (the container's top and sides, the keyboard's top), never further.
+/// the visible area's edges, never further (a scroll view's rubber band past them is presentation only, `scrolled(to:)`).
+/// The visible area is what nothing covers: the safe area (the Dynamic Island, the home indicator and the rounded corners
+/// in either orientation), below the control pill, above the keyboard. The container, where the picture is fitted at
+/// zoom 1, can be larger (landscape fits the full height, under the pill and the home indicator), so there a fitted
+/// picture still pans by what they cover.
 public struct ZoomViewport: Equatable {
-    /// Where the picture lives: the view's safe area.
+    /// Where the picture is fitted at zoom 1 (view points).
     public private(set) var container: CGRect = .zero
+    /// What nothing covers but the keyboard (view points): the safe area below the control pill. Defaults to the container.
+    public private(set) var unobstructed: CGRect = .zero
     /// The top of the on-screen keyboard (view points), nil while it is hidden.
     public private(set) var keyboardTop: Double?
     /// The picture's own size (stream pixels).
@@ -25,11 +31,12 @@ public struct ZoomViewport: Equatable {
 
     public init() {}
 
-    /// The part of the container the keyboard leaves visible.
+    /// The part of the view the picture can be seen in: the unobstructed area above the keyboard.
     public var visible: CGRect {
-        guard let k = keyboardTop, k < container.maxY else { return container }
-        let bottom = max(container.minY, min(container.maxY, k))
-        return CGRect(x: container.minX, y: container.minY, width: container.width, height: bottom - container.minY)
+        let u = unobstructed
+        guard let k = keyboardTop, k < u.maxY else { return u }
+        let bottom = max(u.minY, min(u.maxY, k))
+        return CGRect(x: u.minX, y: u.minY, width: u.width, height: bottom - u.minY)
     }
 
     /// The picture at zoom 1: the content's aspect fitted into the container.
@@ -43,8 +50,7 @@ public struct ZoomViewport: Equatable {
     /// Where the picture is drawn (view points).
     public var pictureRect: CGRect {
         let f = fitSize
-        let o = overscroll
-        return CGRect(x: origin.x + o.x, y: origin.y + o.y, width: f.width * zoom, height: f.height * zoom)
+        return CGRect(x: origin.x, y: origin.y, width: f.width * zoom, height: f.height * zoom)
     }
 
     /// Zoom at which one host display pixel is one device pixel: `hostPixelWidth` is the host display's native width
@@ -62,31 +68,63 @@ public struct ZoomViewport: Equatable {
 
     // MARK: Layout
 
-    /// New container, keyboard or content size. A container or content change (rotation, a new stream) keeps the zoom and
-    /// the picture point at the centre of the visible area; a keyboard change keeps the picture where it is, clamped.
-    public mutating func setLayout(container c: CGRect, keyboardTop k: Double?, content s: CGSize) {
+    /// New container, unobstructed area, keyboard or content size. A container or content change (rotation, a new
+    /// stream) keeps the zoom and the picture point at the centre of the visible area (at fit: the picture centred in
+    /// the container); a keyboard or obstruction change keeps the picture where it is, clamped. No change: nothing moves
+    /// (a scroll view's rubber band may hold the picture past its range meanwhile).
+    public mutating func setLayout(container c: CGRect, unobstructed u: CGRect? = nil, keyboardTop k: Double?, content s: CGSize) {
+        let u = u.map { let i = $0.intersection(c); return i.isNull || i.isEmpty ? c : i } ?? c
+        guard c != container || u != unobstructed || k != keyboardTop || s != content else { return }
         let reanchor = c != container || s != content
         let had = pictureRect.width > 0 && pictureRect.height > 0 && content.width > 0
         let mid = CGPoint(x: visible.midX, y: visible.midY)
         let anchor = had ? normalized(mid) : CGPoint(x: 0.5, y: 0.5)
-        container = c; keyboardTop = k; content = s
+        container = c; unobstructed = u; keyboardTop = k; content = s
         if reanchor {
             let p = pictureRect.size, v = visible
-            origin = CGPoint(x: v.midX - anchor.x * p.width, y: v.midY - anchor.y * p.height)
+            origin = zoom <= minZoom + 1e-9
+                ? CGPoint(x: c.midX - p.width / 2, y: c.midY - p.height / 2)
+                : CGPoint(x: v.midX - anchor.x * p.width, y: v.midY - anchor.y * p.height)
         }
         clamp()
     }
 
-    /// Keeps the picture within the rules above.
-    public mutating func clamp() {
+    /// Where the picture's origin may be, per axis: one point on an axis where it fits the visible area, else from its
+    /// far edge meeting the visible area's far edge to its near edge meeting the near one.
+    public var originRange: (x: ClosedRange<Double>, y: ClosedRange<Double>) {
         let p = pictureRect.size, v = visible, c = container
-        origin.x = Self.clampAxis(origin.x, size: p.width, lo: v.minX, hi: v.maxX, centre: c.midX)
-        origin.y = Self.clampAxis(origin.y, size: p.height, lo: v.minY, hi: v.maxY, centre: c.midY)
+        return (Self.axisRange(size: p.width, lo: v.minX, hi: v.maxX, centre: c.midX),
+                Self.axisRange(size: p.height, lo: v.minY, hi: v.maxY, centre: c.midY))
     }
 
-    static func clampAxis(_ o: Double, size p: Double, lo: Double, hi: Double, centre: Double) -> Double {
-        if p <= hi - lo + 0.5 { return min(max(centre - p / 2, lo), hi - p) }   // fits: centred, inside the visible span
-        return min(max(o, hi - p), lo)                                         // larger: its edges stop at the span's
+    static func axisRange(size p: Double, lo: Double, hi: Double, centre: Double) -> ClosedRange<Double> {
+        if p <= hi - lo + 0.5 { let o = min(max(centre - p / 2, lo), hi - p); return o...o }   // fits: centred, inside the span
+        return (hi - p)...lo                                                                   // larger: edges stop at the span's
+    }
+
+    /// Keeps the picture within the rules above.
+    public mutating func clamp() {
+        let r = originRange
+        origin.x = min(max(origin.x, r.x.lowerBound), r.x.upperBound)
+        origin.y = min(max(origin.y, r.y.lowerBound), r.y.upperBound)
+    }
+
+    /// A scroll view's position, as is: its rubber band may hold the picture past `originRange` until it springs back.
+    public mutating func scrolled(to o: CGPoint) { origin = o }
+
+    /// Edge insets (view points), as UIKit's.
+    public struct Insets: Equatable {
+        public var top, left, bottom, right: Double
+        public init(top: Double, left: Double, bottom: Double, right: Double) { self.top = top; self.left = left; self.bottom = bottom; self.right = right }
+    }
+
+    /// The content insets that give a scroll view filling a `size` view (its content the picture: contentSize =
+    /// `pictureRect.size`, contentOffset = −origin) exactly `originRange` as its scrollable range: its offset runs from
+    /// −left to contentSize + right − size, so its rubber band starts where the picture's edges meet the visible area's.
+    public func scrollInsets(viewSize b: CGSize) -> Insets {
+        let r = originRange, p = pictureRect.size
+        return Insets(top: r.y.upperBound, left: r.x.upperBound,
+                      bottom: Double(b.height) - Double(p.height) - r.y.lowerBound, right: Double(b.width) - Double(p.width) - r.x.lowerBound)
     }
 
     // MARK: Mapping
@@ -115,53 +153,16 @@ public struct ZoomViewport: Equatable {
     /// Zooms to `z` (clamped to the range) keeping the picture point under `anchor` where it is.
     public mutating func setZoom(_ z: Double, about anchor: CGPoint) {
         let n = normalized(anchor)
-        pull = .zero
         zoom = min(maxZoom, max(minZoom, z))
         let p = pictureRect.size
         origin = CGPoint(x: anchor.x - n.x * p.width, y: anchor.y - n.y * p.height)
         clamp()
     }
 
-    /// Moves the picture by a finger's travel.
+    /// Moves the picture by a finger's travel (or a follow's push), clamped.
     public mutating func pan(by d: CGPoint) {
         origin.x += d.x; origin.y += d.y
         clamp()
-    }
-
-    /// A direct-touch swipe's travel beyond where the picture can go (view points): shown as a small rubber-band offset
-    /// (`overscroll`, at most `rubberLimit`) that springs back once the finger lifts (`relax`). Presentation only.
-    public private(set) var pull: CGPoint = .zero
-    public static let rubberLimit = 24.0
-    public var overscroll: CGPoint { CGPoint(x: Self.rubber(pull.x), y: Self.rubber(pull.y)) }
-    static func rubber(_ x: Double) -> Double {
-        let l = rubberLimit
-        return (x < 0 ? -1 : 1) * l * (1 - exp(-abs(x) / l))
-    }
-
-    /// Moves the picture by a finger's travel, clamped as `pan(by:)`; what the clamp holds back stretches the rubber band
-    /// (and travel back the other way relaxes it first). At fit nothing moves: the picture only gives a little and returns.
-    public mutating func pan(by d: CGPoint, rubberBand: Bool) {
-        guard rubberBand else { pan(by: d); return }
-        // Travel back toward the edge undoes the stretch first.
-        func unstretch(_ d: Double, _ pull: Double) -> (rest: Double, pull: Double) {
-            guard pull != 0, d != 0, (d < 0) != (pull < 0) else { return (d, pull) }
-            let take = abs(d) >= abs(pull) ? -pull : d
-            return (d - take, pull + take)
-        }
-        let ux = unstretch(d.x, pull.x), uy = unstretch(d.y, pull.y)
-        let before = origin
-        pan(by: CGPoint(x: ux.rest, y: uy.rest))
-        pull = CGPoint(x: ux.pull + ux.rest - (origin.x - before.x), y: uy.pull + uy.rest - (origin.y - before.y))
-    }
-
-    /// One frame of the rubber band springing back (time constant `tau`). Returns true while it is still stretched.
-    @discardableResult
-    public mutating func relax(dt: Double, tau: Double = 0.08) -> Bool {
-        guard pull != .zero else { return false }
-        let k = exp(-max(0, dt) / tau)
-        pull = CGPoint(x: pull.x * k, y: pull.y * k)
-        if abs(pull.x) < 0.3, abs(pull.y) < 0.3 { pull = .zero }
-        return pull != .zero
     }
 
     /// Sets zoom and origin outright (an animation's frame), clamped.

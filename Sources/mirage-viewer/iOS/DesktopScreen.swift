@@ -15,18 +15,21 @@ struct DesktopScreen: View {
     @AppStorage(TouchMode.defaultsKey) private var touchMode = TouchMode.direct
     @State private var toolbarShown = true
     @State private var hideToolbar: Task<Void, Never>?
+    /// The pill's (or its handle's) bottom edge on screen: a zoomed picture pans down until it clears it.
+    @State private var pillBottom: CGFloat = 0
 
     var body: some View {
         ZStack {
             GeometryReader { geo in
                 let landscape = geo.size.width > geo.size.height
                 ZStack(alignment: .topLeading) {
-                    DesktopView(session: session, model: model, keyboard: $keyboard, touchMode: touchMode, safeInsets: UIEdgeInsets(top: geo.safeAreaInsets.top, left: geo.safeAreaInsets.leading, bottom: geo.safeAreaInsets.bottom, right: geo.safeAreaInsets.trailing))
+                    DesktopView(session: session, model: model, keyboard: $keyboard, touchMode: touchMode, safeInsets: UIEdgeInsets(top: geo.safeAreaInsets.top, left: geo.safeAreaInsets.leading, bottom: geo.safeAreaInsets.bottom, right: geo.safeAreaInsets.trailing), topObstruction: pillBottom)
                         .ignoresSafeArea()
                     if model.showStats {
                         StatsPanel(model: model).padding(.top, landscape ? 8 : 44).padding(.leading, 8)
                     }
                     toolbar
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { pillBottom = $0 }
                         .frame(maxWidth: .infinity, alignment: .trailing)
                         .padding(.top, landscape ? 8 : 4).padding(.trailing, 8)
                 }
@@ -155,6 +158,7 @@ struct DesktopView: UIViewRepresentable {
     @Binding var keyboard: Bool
     let touchMode: TouchMode
     let safeInsets: UIEdgeInsets
+    let topObstruction: CGFloat
 
     func makeUIView(context: Context) -> DesktopUIView {
         let v = DesktopUIView(frame: .zero)
@@ -165,6 +169,7 @@ struct DesktopView: UIViewRepresentable {
     }
     func updateUIView(_ v: DesktopUIView, context: Context) {
         v.safeInsets = safeInsets
+        v.topObstruction = topObstruction
         v.touchMode = touchMode
         v.setSoftKeyboard(keyboard)
         v.updateCursorLayer()

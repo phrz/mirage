@@ -9,9 +9,10 @@ import MirageCore
 /// - Direct touch (the default; `DirectTouch` decides the gestures from the raw touches): everything happens where the
 ///   finger is. A tap clicks there (taps in a row double-click); a finger held still for 0.35 s presses the button there
 ///   (a tinted ring round the pointer while it is down), moving then drags and lifting releases; a one-finger swipe pans
-///   the view (presentation only, with momentum; at fit it only rubber-bands); two fingers scroll at the point where they
-///   came down (the pointer goes there first); a two-finger tap right-clicks at its centre. The pointer jumps to the
-///   touches; there is no relative motion and no edge follow.
+///   the view (presentation only) as a UIScrollView does, because it is one: its pan recognizer, moved onto this view,
+///   with its deceleration and its rubber band past the picture's edges (at fit it only rubber-bands); two fingers
+///   scroll at the point where they came down (the pointer goes there first); a two-finger tap right-clicks at its
+///   centre. The pointer jumps to the touches; there is no relative motion and no edge follow.
 /// - Trackpad: one finger moves the pointer (relative, accelerated), a tap clicks (two taps in a row double-click), two
 ///   fingers scroll at the pointer (with momentum), a two-finger tap right-clicks, a long press holds the button for a
 ///   drag, and zoomed, the view follows the pointer at the edges.
@@ -26,7 +27,7 @@ import MirageCore
 /// about its centre (and its fingers' travel pans), from fit up to 1:1 host pixels and beyond; a three-finger drag
 /// pans; a two-finger double tap toggles fit and 1:1 there. Zoomed, the view follows the pointer at the edges and,
 /// from 1.5×, the caret while typing.
-final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
+final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UIScrollViewDelegate {
     override class var layerClass: AnyClass { CAMetalLayer.self }
     private var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
     private let cursorLayer = CALayer()
@@ -68,8 +69,24 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private var trackpadRecognizers: [UIGestureRecognizer] = []
     private weak var wheelRecognizer: UIPanGestureRecognizer?
     private var lastWheelTranslation = CGPoint.zero
-    /// A direct-touch swipe's coast after the finger lifts (view points per second).
+    /// A three-finger view pan's coast after the fingers lift (view points per second). One finger is the scroll view's.
     private var viewMomentum = ScrollMomentum()
+    private var threeFingerPan = false
+    /// Direct touch's one-finger pan: a real UIScrollView, so the pan, its deceleration, its rubber band and its spring
+    /// back are UIKit's own. Its content is the picture (`zoomView`, the fitted size, at zoomScale = the zoom), its
+    /// contentInset the viewport's range (`ZoomViewport.scrollInsets`), its contentOffset −origin. It takes no touches
+    /// itself (they all reach this view and `DirectTouch`); its pan recognizer is moved onto this view, held back by
+    /// `panGate` until the finger has moved past the tap slop, and refused once a hold or a second finger has begun.
+    private let scrollView = UIScrollView()
+    private let zoomView = UIView()
+    private let panGate = PanGate()
+    /// Set while this view moves the scroll view itself (its delegate calls then are echoes, not motion).
+    private var pushing = false
+    private var pushedFit = CGSize.zero
+    /// A touch that stopped a coasting pan is no click (as in any iOS scroll view).
+    private var touchStoppedCoast = false
+    /// The demo's record of the last one-finger drag (where it was let go, how fast, where UIKit said it would stop).
+    fileprivate var demoDrag = DragRecord()
     /// On-screen keyboard: shown on request; sticky modifiers from its accessory bar apply to the next key.
     private var softKeyboard = false
     private var sticky: UInt64 = 0
@@ -81,6 +98,8 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private(set) var viewport = ZoomViewport()
     /// The screen's safe area in this view (SwiftUI passes it in; the view itself covers the whole screen).
     var safeInsets: UIEdgeInsets = .zero { didSet { if safeInsets != oldValue { syncViewport() } } }
+    /// The bottom of the control pill (or its handle) in this view: the picture can be panned down until it clears it.
+    var topObstruction: CGFloat = 0 { didSet { if topObstruction != oldValue { syncViewport() } } }
     /// What the current two- or three-finger gesture turned out to be: undecided until the fingers either spread
     /// (zoom) or travel together (scroll); three fingers pan the view.
     private enum MultiTouch { case idle, undecided, scroll, zoom, viewPan }
@@ -117,6 +136,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         holdRing.path = UIBezierPath(ovalIn: CGRect(x: -Self.ringRadius, y: -Self.ringRadius, width: 2 * Self.ringRadius, height: 2 * Self.ringRadius)).cgPath
         holdRing.isHidden = true
         layer.addSublayer(holdRing)
+        installScrollView()
         installGestures()
         applyTouchMode()
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardFrame(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
@@ -151,6 +171,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         if momentum.active { let d = momentum.step(dt: dt); scroll(viewDX: d.dx, viewDY: d.dy) }
         if touchMode == .direct { perform(direct.tick(time: CACurrentMediaTime())) }
         stepViewMomentum(dt: dt)
+        if scrollView.isTracking || scrollView.isDecelerating { pullFromScrollView() }
         syncViewport()
         stepZoomAnimation()
         followCaret(dt: dt)
@@ -179,17 +200,29 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         CATransaction.commit()
         session?.compositor?.invalidate()
         forceRedraw = true
+        if scrollView.frame != bounds { pushing = true; scrollView.frame = bounds; pushing = false; pushedFit = .zero }
         syncViewport()
+        pushViewport()
         updateCursorLayer()
         scheduleStreamRequest()
     }
 
-    /// The container is the safe area; in landscape the picture also takes the full height (nothing sits above it, and
-    /// the home indicator floats over it).
+    /// The container (where the picture is fitted) is the safe area; in landscape the picture also takes the full height
+    /// (nothing sits above it, and the home indicator floats over it).
     private var containerRect: CGRect {
         var i = safeInsets
         if bounds.width > bounds.height { i.top = 0; i.bottom = 0 }
         return bounds.inset(by: i)
+    }
+
+    /// What nothing covers (but the keyboard): the safe area in either orientation (the Dynamic Island, the home
+    /// indicator, the rounded corners), below the control pill. A zoomed picture pans until its edges meet this; the
+    /// container alone reached under the pill (portrait and landscape) and under the home indicator (landscape), so the
+    /// menu bar's right end and the Dock's bottom could never be uncovered there.
+    private var unobstructedRect: CGRect {
+        let r = bounds.inset(by: safeInsets)
+        let top = min(max(r.minY, topObstruction), r.maxY)
+        return CGRect(x: r.minX, y: top, width: r.width, height: r.maxY - top)
     }
 
     private var screenScale: CGFloat { window?.screen.scale ?? traitCollection.displayScale }
@@ -206,35 +239,131 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         var content = CGSize(width: 16, height: 10)
         if let comp = session?.compositor, comp.width > 0, comp.height > 0 { content = CGSize(width: comp.width, height: comp.height) }
         let before = viewport
-        viewport.setLayout(container: containerRect, keyboardTop: keyboardHeight > 0 ? Double(bounds.height - keyboardHeight) : nil, content: content)
+        viewport.setLayout(container: containerRect, unobstructed: unobstructedRect, keyboardTop: keyboardHeight > 0 ? Double(bounds.height - keyboardHeight) : nil, content: content)
         viewport.setZoomRange(oneToOne: oneToOne)
         if viewport != before { viewportChanged() }
     }
 
-    /// Something moved the picture: redraw, and move the overlays with it.
-    private func viewportChanged() {
+    /// Something moved the picture: redraw, and move the overlays with it (and the scroll view, unless it moved it).
+    private func viewportChanged(byScrollView: Bool = false) {
         forceRedraw = true
         updateCursorLayer()
+        if !byScrollView { pushViewport() }
     }
 
-    /// Stops what moves the view by itself (a double tap's zoom, the caret glide, a swipe's coast) when a person takes over.
-    private func stopAutoMotion() { zoomAnimation = nil; caretGlide = nil; viewMomentum.stop() }
+    /// Stops what moves the view by itself (a double tap's zoom, the caret glide, a coast) when a person takes over.
+    private func stopAutoMotion() { zoomAnimation = nil; caretGlide = nil; viewMomentum.stop(); stopScrollPhysics() }
 
-    /// A direct-touch swipe's coast, and its rubber band springing back once no finger holds it.
+    /// A three-finger pan's coast (one finger's is the scroll view's).
     private func stepViewMomentum(dt: Double) {
-        if viewMomentum.active {
-            let d = viewMomentum.step(dt: dt), before = viewport.origin
-            viewport.pan(by: CGPoint(x: d.dx, y: d.dy))
-            if viewport.origin == before { viewMomentum.stop() }   // at the edge: nothing left to coast
-            caretGlide = nil
-            viewportChanged()
+        guard viewMomentum.active else { return }
+        let d = viewMomentum.step(dt: dt), before = viewport.origin
+        viewport.pan(by: CGPoint(x: d.dx, y: d.dy))
+        if viewport.origin == before { viewMomentum.stop() }   // at the edge: nothing left to coast
+        caretGlide = nil
+        viewportChanged()
+    }
+
+    // MARK: The scroll view (direct touch's one-finger pan)
+
+    private func installScrollView() {
+        let s = scrollView
+        s.isUserInteractionEnabled = false   // every touch reaches this view; only its pan recognizer works here
+        s.backgroundColor = .clear
+        s.contentInsetAdjustmentBehavior = .never
+        s.automaticallyAdjustsScrollIndicatorInsets = false
+        s.showsHorizontalScrollIndicator = false; s.showsVerticalScrollIndicator = false
+        s.decelerationRate = .normal
+        s.bounces = true; s.alwaysBounceHorizontal = true; s.alwaysBounceVertical = true   // at fit it still gives, and returns
+        s.bouncesZoom = false
+        s.scrollsToTop = false
+        s.delegate = self
+        zoomView.isUserInteractionEnabled = false
+        zoomView.backgroundColor = .clear
+        s.addSubview(zoomView)
+        insertSubview(s, at: 0)
+        let pan = s.panGestureRecognizer
+        pan.maximumNumberOfTouches = 1
+        pan.cancelsTouchesInView = false   // DirectTouch keeps seeing the finger (and decides tap, hold, pan, two fingers)
+        pan.delaysTouchesEnded = false
+        pan.allowedScrollTypesMask = []    // an iPad trackpad's scroll scrolls the Mac (the wheel recognizer), never the view
+        addGestureRecognizer(pan)
+        panGate.slop = direct.slop
+        panGate.delegate = self
+        addGestureRecognizer(panGate)
+        pan.require(toFail: panGate)
+    }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? { zoomView }
+
+    /// The viewport as the scroll view's zoom, content, insets and offset (no-op when they already match).
+    private func pushViewport() {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let s = scrollView
+        pushing = true; defer { pushing = false }
+        s.minimumZoomScale = min(viewport.minZoom, viewport.zoom)
+        s.maximumZoomScale = max(viewport.maxZoom, viewport.zoom)
+        s.pinchGestureRecognizer?.isEnabled = false   // the pinch is DirectTouch's (scroll unless they clearly pinch)
+        let fit = viewport.fitSize
+        if fit != pushedFit {
+            s.zoomScale = 1
+            zoomView.transform = .identity
+            zoomView.frame = CGRect(origin: .zero, size: fit)
+            s.contentSize = fit
+            pushedFit = fit
         }
-        let held = direct.phase == .panning || direct.phase == .multi(.viewPan)
-        if !held, viewport.pull != .zero { viewport.relax(dt: dt); viewportChanged() }
+        if abs(s.zoomScale - viewport.zoom) > 1e-9 { s.zoomScale = viewport.zoom }
+        let i = viewport.scrollInsets(viewSize: bounds.size)
+        let inset = UIEdgeInsets(top: i.top, left: i.left, bottom: i.bottom, right: i.right)
+        if s.contentInset != inset { s.contentInset = inset }
+        let offset = CGPoint(x: -viewport.origin.x, y: -viewport.origin.y)
+        // UIKit rounds offsets to device pixels: a smaller difference is that rounding, not a move.
+        if abs(s.contentOffset.x - offset.x) > 0.25 || abs(s.contentOffset.y - offset.y) > 0.25 { s.setContentOffset(offset, animated: false) }
+    }
+
+    /// The scroll view moved the picture (a drag, its deceleration, its rubber band springing back).
+    private func pullFromScrollView() {
+        let o = CGPoint(x: -scrollView.contentOffset.x, y: -scrollView.contentOffset.y)
+        guard o != viewport.origin else { return }
+        viewport.scrolled(to: o)
+        viewportChanged(byScrollView: true)
+    }
+
+    func scrollViewDidScroll(_ s: UIScrollView) { if !pushing { pullFromScrollView() } }
+
+    func scrollViewWillBeginDragging(_ s: UIScrollView) {
+        momentum.stop(); zoomAnimation = nil; caretGlide = nil; viewMomentum.stop()
+        demoDrag.began(at: s.contentOffset)
+    }
+    func scrollViewWillEndDragging(_ s: UIScrollView, withVelocity v: CGPoint, targetContentOffset t: UnsafeMutablePointer<CGPoint>) {
+        demoDrag.ended(at: s.contentOffset, velocity: v, target: t.pointee)
+    }
+
+    /// Whether the scroll view holds the picture past its range (its rubber band).
+    private var scrollOutOfRange: Bool {
+        let r = viewport.originRange, o = viewport.origin
+        return o.x < r.x.lowerBound - 0.5 || o.x > r.x.upperBound + 0.5 || o.y < r.y.lowerBound - 0.5 || o.y > r.y.upperBound + 0.5
+    }
+
+    /// Stops the scroll view's coast (where it is) and any rubber band (back in range at once): something else moves the view now.
+    private func stopScrollPhysics() {
+        guard scrollView.isDecelerating || scrollOutOfRange else { return }
+        pushing = true; scrollView.setContentOffset(scrollView.contentOffset, animated: false); pushing = false
+        pullFromScrollView()
+        viewport.clamp()
+        viewportChanged()
+    }
+
+    /// Ends the scroll view's drag (a second finger came down: two fingers scroll or pinch from here).
+    private func cancelScrollPan() {
+        let p = scrollView.panGestureRecognizer
+        guard p.state == .began || p.state == .changed else { return }
+        p.isEnabled = false; p.isEnabled = touchMode == .direct
     }
 
     private func animateZoom(to z: Double, about anchor: CGPoint, duration: Double = 0.25) {
         caretGlide = nil
+        stopScrollPhysics()
         zoomAnimation = (viewport, anchor, z, CACurrentMediaTime(), duration)
     }
 
@@ -242,7 +371,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         guard let a = zoomAnimation else { return }
         let t = min(1, (CACurrentMediaTime() - a.start) / a.duration), e = t * t * (3 - 2 * t)
         var v = a.from
-        v.setLayout(container: viewport.container, keyboardTop: viewport.keyboardTop, content: viewport.content)
+        v.setLayout(container: viewport.container, unobstructed: viewport.unobstructed, keyboardTop: viewport.keyboardTop, content: viewport.content)
         v.setZoom(a.from.zoom * pow(a.to / a.from.zoom, e), about: a.anchor)
         viewport = v
         if t >= 1 { zoomAnimation = nil }
@@ -407,12 +536,14 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private func applyTouchMode() {
         for g in trackpadRecognizers { g.isEnabled = touchMode == .trackpad }
         wheelRecognizer?.isEnabled = touchMode == .direct
+        scrollView.isScrollEnabled = touchMode == .direct   // its pan recognizer: direct touch's one-finger pan
+        panGate.isEnabled = touchMode == .direct
     }
 
     private func touchModeChanged() {
         perform(direct.cancel())
         if pressing { pressEnded() }
-        momentum.stop(); viewMomentum.stop()
+        momentum.stop(); viewMomentum.stop(); stopScrollPhysics()
         multi = .idle; multiActive.removeAll()
         applyTouchMode()
         updateCursorLayer()
@@ -426,6 +557,9 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         guard touchMode == .direct else { super.touchesBegan(touches, with: event); return }
         let now = CACurrentMediaTime()
+        // A finger on a coasting view stops it there (and is no click), as in any scroll view; a rubber band finishes.
+        if direct.touchCount == 0 { touchStoppedCoast = false }
+        if scrollView.isDecelerating, !scrollOutOfRange { stopScrollPhysics(); touchStoppedCoast = true }
         for t in touches { perform(direct.began(touchID(t), at: t.location(in: self), time: now)) }
     }
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
@@ -448,8 +582,10 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         for a in actions {
             switch a {
             case .click(let p, let n):
+                guard !touchStoppedCoast else { continue }
                 jumpPointer(to: p); click(count: n)
             case .holdBegan(let p):
+                panGate.hold()   // no pan from here: the finger drags what it holds
                 jumpPointer(to: p); pressBegan()
             case .holdMoved(let p):
                 jumpPointer(to: p, send: false); pressMoved()
@@ -470,11 +606,14 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             case .pinchEnded:
                 break
             case .pan(let dx, let dy):
-                momentum.stop(); stopAutoMotion()
-                viewport.pan(by: CGPoint(x: dx, y: dy), rubberBand: true)
+                // One finger: the scroll view pans (its recognizer sees the same finger). Three: the view pans here.
+                guard case .multi(.viewPan) = direct.phase else { continue }
+                momentum.stop(); stopAutoMotion(); threeFingerPan = true
+                viewport.pan(by: CGPoint(x: dx, y: dy))
                 viewportChanged()
             case .panEnded(let vx, let vy):
-                if viewport.pull == .zero { viewMomentum.start(vx: vx, vy: vy) }
+                if threeFingerPan { threeFingerPan = false; viewMomentum.start(vx: vx, vy: vy) }
+                else if direct.touchCount >= 2 { cancelScrollPan() }   // a second finger: it scrolls or pinches now
             case .zoomToggle(let p):
                 toggleZoom(at: p)
             }
@@ -504,6 +643,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
         if g is UIHoverGestureRecognizer || other is UIHoverGestureRecognizer { return true }
+        if g === panGate || other === panGate { return true }   // it only ever holds the scroll view's pan back
         // Scroll, pinch and the three-finger pan all see the fingers; `multi` decides which one acts.
         func isMulti(_ r: UIGestureRecognizer) -> Bool {
             r is UIPinchGestureRecognizer || ((r as? UIPanGestureRecognizer).map { $0.minimumNumberOfTouches >= 2 } ?? false)
@@ -929,6 +1069,45 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 }
 
+/// Holds the scroll view's pan back until DirectTouch would call the touch a pan: the finger has moved past the tap
+/// slop before the hold began, alone. It fails then (the pan may begin: `require(toFail:)`), and recognizes (the pan
+/// never begins) when a hold begins (`hold()`) or a second finger comes down first. It never cancels or delays a touch:
+/// DirectTouch sees every one.
+final class PanGate: UIGestureRecognizer {
+    var slop: CGFloat = 10
+    private var start: CGPoint?
+
+    init() {
+        super.init(target: nil, action: nil)
+        cancelsTouchesInView = false; delaysTouchesBegan = false; delaysTouchesEnded = false
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard state == .possible else { return }
+        if start != nil || touches.count > 1 { state = .ended; return }   // two fingers: they scroll or pinch
+        start = touches.first?.location(in: view)
+    }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent) {
+        guard state == .possible, let s = start, let p = touches.first?.location(in: view) else { return }
+        if hypot(p.x - s.x, p.y - s.y) > slop { state = .failed }   // a pan: the scroll view takes it from here
+    }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) { if state == .possible { state = .failed } }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) { if state == .possible { state = .failed } }
+    /// DirectTouch's hold began: the finger drags what it holds, the view stays.
+    func hold() { if state == .possible { state = .ended } }
+    override func reset() { start = nil }
+}
+
+/// The demo's view of one drag of the scroll view: where it was let go and how fast, where UIKit said it would come to
+/// rest (`targetContentOffset`), and how far past the picture's range the rubber band went.
+struct DragRecord {
+    var count = 0
+    var start = CGPoint.zero, lift = CGPoint.zero, velocity = CGPoint.zero, target = CGPoint.zero
+    var liftTime = 0.0, ended = false
+    mutating func began(at o: CGPoint) { count += 1; start = o; ended = false }
+    mutating func ended(at o: CGPoint, velocity v: CGPoint, target t: CGPoint) { lift = o; velocity = v; target = t; liftTime = CACurrentMediaTime(); ended = true }
+}
+
 /// The on-screen keyboard's extra row: keys an iPhone keyboard lacks (Esc, Tab, arrows) and sticky ⌃ ⌥ ⌘ for the next key.
 final class KeyAccessoryBar: UIView {
     private weak var owner: DesktopUIView?
@@ -1003,6 +1182,7 @@ extension DesktopUIView {
         await pause(3)
         guard let session, let comp = session.compositor, comp.width > 0 else { log("no picture"); return }
         let bench = session.windowsSnapshot().first { $0.title.contains("Mirage Test Bench") && !$0.title.contains("overlay") }
+        if UserDefaults.standard.string(forKey: "demo") == "pan" { await runPanDemo(log: log, describe: describe, hold: hold); return }
         if touchMode == .direct { await runDirectDemo(bench: bench, log: log, describe: describe, hold: hold); return }
         let target = bench.map { (Double($0.frame.x + $0.frame.width / 2) / Double(comp.width), Double($0.frame.y + $0.frame.height / 3) / Double(comp.height)) } ?? (0.4, 0.4)
         log("moving the pointer to \(target); \(describe()); 1:1 is \(String(format: "%.2f", oneToOne))x, max \(String(format: "%.2f", viewport.maxZoom))x")
@@ -1184,30 +1364,13 @@ extension DesktopUIView {
         log("dropped: bench at \(benchFrame().map { "\($0)" } ?? "?")")
         await pause(1.5)
 
-        log("one-finger swipe at fit: the view only rubber-bands")
-        let o0 = viewport.origin
-        down(1, body)
-        var maxPull = 0.0
-        for i in 1...20 { move(1, CGPoint(x: body.x + Double(i) * 6, y: body.y)); maxPull = max(maxPull, abs(viewport.overscroll.x)); await pause(0.016) }
-        up(1, CGPoint(x: body.x + 120, y: body.y))
-        await pause(0.8)
-        log(String(format: "fit swipe: picture moved %.1f pt, rubber band at most %.1f pt, now %.1f", viewport.origin.x - o0.x, maxPull, viewport.overscroll.x))
-
         log("pinch out about the bench")
         down(1, CGPoint(x: body.x - 30, y: body.y)); down(2, CGPoint(x: body.x + 30, y: body.y))
         for i in 1...30 { let s = 30 + Double(i) * 2.5; move(1, CGPoint(x: body.x - s, y: body.y)); move(2, CGPoint(x: body.x + s, y: body.y)); await pause(0.016) }
         up(1, CGPoint(x: body.x - 105, y: body.y)); up(2, CGPoint(x: body.x + 105, y: body.y))
         await pause(0.5)
         log("pinched: \(describe())")
-        let o1 = viewport.origin
-        log("one-finger swipe zoomed: pans the view, with momentum")
-        down(1, body)
-        for i in 1...12 { move(1, CGPoint(x: body.x - Double(i) * 8, y: body.y - Double(i) * 3)); await pause(0.016) }
-        up(1, CGPoint(x: body.x - 96, y: body.y - 36))
-        let o2 = viewport.origin
-        await pause(1.5)
-        log(String(format: "swipe moved the view by %.0f,%.0f pt, then coasted %.0f,%.0f more; ", o2.x - o1.x, o2.y - o1.y, viewport.origin.x - o2.x, viewport.origin.y - o2.y) + describe())
-
+        // One-finger pans are the scroll view's: `-demo pan` drives them with real touches.
         log("two-finger tap: right click at its centre")
         down(1, CGPoint(x: body.x - 15, y: body.y)); down(2, CGPoint(x: body.x + 15, y: body.y)); await pause(0.08)
         up(1, CGPoint(x: body.x - 15, y: body.y)); up(2, CGPoint(x: body.x + 15, y: body.y))
@@ -1219,6 +1382,83 @@ extension DesktopUIView {
         }
         await pause(1)
         log("done: \(describe()); typeahead \(session.typeaheadCounts()), predictions \(model?.stats.predictions ?? (0, 0, 0, 0))")
+    }
+
+    /// `-demo pan`: direct touch's one-finger pan (the scroll view) at 2× and 3×, with real touches: a UIScrollView's
+    /// pan recognizer cannot be driven from code, so each step logs `demo: await …` and waits (up to `-demoWait` s,
+    /// default 120) for a swipe from the simulator's touch injection, then reports where the picture came to rest
+    /// against the visible area. First a fling (momentum: UIKit's own deceleration and where it said it would stop),
+    /// then a pan toward each corner at 2× and at 3× (`demo: shot corner-3x-…` holds for a screenshot once there).
+    /// `-demoLandscape 1` runs it in landscape.
+    func runPanDemo(log: @escaping (String) -> Void, describe: () -> String, hold: Double) async {
+        func pause(_ s: Double) async { try? await Task.sleep(for: .milliseconds(Int(s * 1000))) }
+        let wait = Double(UserDefaults.standard.string(forKey: "demoWait") ?? "") ?? 120
+        if UserDefaults.standard.bool(forKey: "demoLandscape") { rotateForDemo(.landscapeRight); await pause(4) }
+        func rect(_ r: CGRect) -> String { String(format: "%.1f,%.1f %.1fx%.1f", r.minX, r.minY, r.width, r.height) }
+        func geometry() -> String {
+            "bounds \(rect(bounds)), safe area \(safeInsets.top),\(safeInsets.left),\(safeInsets.bottom),\(safeInsets.right), pill bottom \(topObstruction), container \(rect(viewport.container)), visible \(rect(viewport.visible)), picture \(rect(viewport.pictureRect)) at \(String(format: "%.2f", viewport.zoom))x; scroll view: zoom \(String(format: "%.2f", scrollView.zoomScale)), content \(Int(scrollView.contentSize.width))x\(Int(scrollView.contentSize.height)), inset \(scrollView.contentInset), offset \(scrollView.contentOffset)"
+        }
+        log("pan demo: \(geometry())")
+        /// Waits for one or more drags (each followed by its coast and rubber band) until `done` holds at rest, or no new
+        /// drag starts for 8 s after the last one came to rest. Returns the number of drags and the farthest the picture
+        /// went past its range.
+        func awaitDrags(until done: () -> Bool) async -> (drags: Int, overshoot: Double) {
+            let first = demoDrag.count, t0 = CACurrentMediaTime()
+            var overshoot = 0.0, restSince: Double?
+            while CACurrentMediaTime() - t0 < wait {
+                let r = viewport.originRange, o = viewport.origin
+                let past = max(r.x.lowerBound - o.x, o.x - r.x.upperBound, r.y.lowerBound - o.y, o.y - r.y.upperBound, 0)
+                overshoot = max(overshoot, past)
+                let moving = scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating || past > 0.5 || direct.touchCount > 0
+                if demoDrag.count > first, !moving {
+                    if done() { break }
+                    if restSince == nil { restSince = CACurrentMediaTime() }
+                    if CACurrentMediaTime() - restSince! > 8 { break }
+                } else { restSince = nil }
+                await pause(0.016)
+            }
+            return (demoDrag.count - first, overshoot)
+        }
+        func zoom(to z: Double) async {
+            animateZoom(to: z, about: CGPoint(x: viewport.visible.midX, y: viewport.visible.midY))
+            await pause(0.6)
+            log(String(format: "zoomed to %.2fx: ", viewport.zoom) + geometry())
+        }
+
+        await zoom(to: 2)
+        log("await fling: one fast swipe, any direction")
+        let t0 = CACurrentMediaTime()
+        let f = await awaitDrags { true }
+        let d = demoDrag
+        let coast = hypot(scrollView.contentOffset.x - d.lift.x, scrollView.contentOffset.y - d.lift.y)
+        log(String(format: "fling: %d drag(s); let go at %.0f,%.0f at %.2f,%.2f pt/ms; UIKit's target %.0f,%.0f; came to rest at %.0f,%.0f after coasting %.0f pt in %.2f s; rubber band at most %.1f pt past the edge (%.1f s in all)",
+                   f.drags, d.lift.x, d.lift.y, d.velocity.x, d.velocity.y, d.target.x, d.target.y, scrollView.contentOffset.x, scrollView.contentOffset.y, coast,
+                   d.ended ? CACurrentMediaTime() - d.liftTime : 0, f.overshoot, CACurrentMediaTime() - t0))
+        log("after the fling: " + geometry())
+
+        let corners: [(name: String, n: CGPoint)] = [("top-left", CGPoint(x: 0, y: 0)), ("top-right", CGPoint(x: 1, y: 0)), ("bottom-left", CGPoint(x: 0, y: 1)), ("bottom-right", CGPoint(x: 1, y: 1))]
+        for z in [2.0, 3.0] {
+            await zoom(to: z)
+            for c in corners {
+                guard let comp = session?.compositor, comp.width > 0 else { return }
+                // The corner pixel of the picture, as a view rect: reached when it is inside the visible area.
+                func pixel() -> CGRect {
+                    viewport.viewRect(contentRect: CGRect(x: c.n.x * CGFloat(comp.width - 1), y: c.n.y * CGFloat(comp.height - 1), width: 1, height: 1))
+                }
+                func reached() -> Bool { viewport.visible.insetBy(dx: -0.5, dy: -0.5).contains(pixel()) }
+                log("await corner \(c.name) at \(Int(z))x: swipe toward it (the picture's \(c.name) corner comes into view)")
+                let r = await awaitDrags(until: reached)
+                let p = viewport.pictureRect, v = viewport.visible
+                let edges = String(format: "picture edges vs visible: left %+.1f, top %+.1f, right %+.1f, bottom %+.1f", p.minX - v.minX, p.minY - v.minY, p.maxX - v.maxX, p.maxY - v.maxY)
+                log("corner \(c.name) at \(Int(z))x: \(reached() ? "REACHED" : "NOT reached") after \(r.drags) drag(s), rubber band at most \(String(format: "%.1f", r.overshoot)) pt; pixel \(rect(pixel())); \(edges)")
+                if z == 3 {
+                    log("shot corner-3x-\(c.name): " + geometry())
+                    await pause(hold)
+                }
+            }
+        }
+        await zoom(to: 1)
+        log("done: " + geometry())
     }
 
     /// A one-finger pan's relative move (at the slow-speed gain), with the pointer follow and the host message it sends.
