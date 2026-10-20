@@ -1,6 +1,8 @@
 import Foundation
 import Metal
+#if canImport(MetalFX)
 import MetalFX
+#endif
 import CoreVideo
 import QuartzCore
 
@@ -68,7 +70,11 @@ public final class Compositor {
     private var scratch: MTLTexture?       // copy-rect intermediate
     private var videoRGB: MTLTexture?      // decoded frame converted to BGRA (encoded size)
     private var videoUp: MTLTexture?       // upscaled to native when below native
+    #if canImport(MetalFX)
     private var scaler: MTLFXSpatialScaler?
+    #else
+    private var scaler: AnyObject?   // MetalFX is not in the iOS Simulator SDK: bilinear there
+    #endif
     private var incoming: MTLTexture?      // pixels still crossfading in (refinement, progressive steps)
     public struct Fade: Equatable { public var rect: PixelRect; public var startNanos: UInt64; public var durationNanos: UInt64 }
     private var fades: [Fade] = []
@@ -389,6 +395,7 @@ public final class Compositor {
 
     private func upscale(_ src: MTLTexture, to dst: MTLTexture, commandBuffer cb: MTLCommandBuffer) {
         let key = (src.width, src.height, dst.width, dst.height)
+        #if canImport(MetalFX)
         if scaler == nil || scalerSize != key {
             let d = MTLFXSpatialScalerDescriptor()
             d.inputWidth = src.width; d.inputHeight = src.height; d.outputWidth = dst.width; d.outputHeight = dst.height
@@ -404,6 +411,11 @@ public final class Compositor {
         } else {
             drawScaled(src, into: dst, rect: PixelRect(x: 0, y: 0, width: dst.width, height: dst.height), commandBuffer: cb)
         }
+        #else
+        let t0 = CACurrentMediaTime()
+        _ = key
+        drawScaled(src, into: dst, rect: PixelRect(x: 0, y: 0, width: dst.width, height: dst.height), commandBuffer: cb)
+        #endif
         lastUpscaleMs = (CACurrentMediaTime() - t0) * 1000
     }
 

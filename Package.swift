@@ -28,7 +28,8 @@ let package = Package(
             name: "MirageCore",
             dependencies: ["CWebP"],
             swiftSettings: [.swiftLanguageMode(.v5)],
-            linkerSettings: [.linkedFramework("Metal"), .linkedFramework("MetalFX"), .linkedFramework("VideoToolbox")]
+            // MetalFX autolinks from `import MetalFX` (absent from the iOS Simulator SDK, so it cannot be linked unconditionally).
+            linkerSettings: [.linkedFramework("Metal"), .linkedFramework("VideoToolbox")]
         ),
         // macOS-only host side: ScreenCaptureKit capture, VideoToolbox encode, CGEvent input, cursor.
         .target(

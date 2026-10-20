@@ -71,10 +71,15 @@ struct IdentityFile: Codable {
 }
 
 public enum DeviceNames {
+    /// Set once at launch where the system has no computer name (iOS).
+    nonisolated(unsafe) public static var deviceName: String?
     /// The user-facing computer name ("mac-daddy"), falling back to the host name.
     public static func current() -> String {
-        #if canImport(SystemConfiguration)
+        #if os(macOS)
         if let n = SCDynamicStoreCopyComputerName(nil, nil) as String?, !n.isEmpty { return n }
+        #else
+        // iOS: the app sets the device model ("iPhone", "iPad") at launch; the user-assigned name needs an entitlement.
+        if let n = deviceName, !n.isEmpty { return n }
         #endif
         return ProcessInfo.processInfo.hostName
             .replacingOccurrences(of: ".localdomain", with: "")

@@ -62,6 +62,9 @@ public struct TLSIdentity {
     }
 
     private static func run(_ tool: String, _ args: [String]) throws {
+        #if !os(macOS)
+        throw MirageError.storage("host TLS identities are generated on macOS only")   // hosts are Macs; iOS is a client
+        #else
         let p = Process()
         p.executableURL = URL(fileURLWithPath: tool)
         p.arguments = args
@@ -71,5 +74,6 @@ public struct TLSIdentity {
             let msg = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
             throw MirageError.storage("\(tool) \(args.first ?? "") failed: \(msg)")
         }
+        #endif
     }
 }
