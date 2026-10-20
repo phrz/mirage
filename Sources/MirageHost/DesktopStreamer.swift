@@ -1068,6 +1068,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Destination tiles a copy-rect fills with pixels that do not match the host's: wrong on the viewer even where the host
         // saw no change (a static path bar inside the copied rect: phrz's doubled Finder path bar on mac-daddy). Direct changes.
         var wrongAfterCopy = Set<Int>()
+        // Rows and columns a copy-rect left out (ShiftDetector.trimmed): a translucent toolbar over scrolling content changes
+        // every frame; it goes once, 300 ms after it last changed, not at every capture (2 MB per scroll phase on c9f678d).
+        var trimmedEdges = Set<Int>()
         var copies: [(tiles: [Int], dx: Int, dy: Int)] = []
         let dirtyBeforeCopies = dirty.count
         var copyRectsThisCapture = 0
@@ -1082,6 +1085,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                         r = detector.verify(old: old, new: new, rect: d.old, dx: rdx, dy: rdy)
                     }
                     guard let r0 = r, let r = ShiftDetector.trimmed(r0) else { continue }
+                    trimmedEdges.formUnion(Set(tracker.tiles(covering: [r0.rect.offset(r0.dx, r0.dy)])).subtracting(tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])))
                     let dest = tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])
                     let mismatched = Set(tracker.tiles(covering: r.mismatchedTiles))
                     wrongAfterCopy.formUnion(mismatched)
@@ -1112,6 +1116,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 var region = (known ?? (layer.isDisplay ? win?.frame : nil) ?? bb).intersection(bb)
                 if region.width < 64 || region.height < 64 { region = bb }
                 if region.height >= 96 || region.width >= 96, let r0 = detector.detect(old: old, new: new, rect: region), let r = ShiftDetector.trimmed(r0) {
+                    trimmedEdges.formUnion(Set(tracker.tiles(covering: [r0.rect.offset(r0.dx, r0.dy)])).subtracting(tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])))
                     let dest = tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])
                     let mismatched = Set(tracker.tiles(covering: r.mismatchedTiles))
                     wrongAfterCopy.formUnion(mismatched)
@@ -1125,6 +1130,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     }
                     statCopyRects += 1; copyRectsThisCapture += 1
                 }
+            }
+        }
+        if !trimmedEdges.isEmpty {
+            let edges = trimmedEdges.subtracting(explained).intersection(dirty)
+            if !edges.isEmpty {
+                dirty.removeAll { edges.contains($0) }
+                tracker.defer(Array(edges), now: now, delayNanos: 300_000_000, direct: true)
             }
         }
         if !explained.isEmpty {
@@ -1731,6 +1743,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
             guard !out.isEmpty else { self.queue.async { if block { self.blockInFlight = nil }; settled(self.layers[layerID]) }; return }
             let bytes = out.reduce(0) { $0 + $1.data.count }
+            // Changed pixels go on the stream from here, in order with copy-rects: the hop through `queue` let the next
+            // capture's copy-rect overtake them, so the viewer shifted its pixels first and then dropped or misplaced these
+            // tiles while the host counted them delivered (striped Finder icons through a scroll on mac-daddy, c9f678d).
+            let early = !refinement
+            if early { self.send(tile: .tiles(.init(header: hdr, refinement: false, staged: staged, tiles: out)), captureNanos: nanos, fast: true, refinementBytes: 0, block: block, layer: layerID) }
             self.queue.async {
                 // Encoded while the region moved on (a drag, a scroll): stale, never sent (the viewer would
                 // drop it too, but the bytes are better not spent).
@@ -1739,7 +1756,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     if l.isDisplay { let ts = l.tracker.tiles(covering: out.map(\.rect)); l.taint.sent(ts, tracker: l.tracker, windowAreas: [l.bounds]); l.taintScheduled.subtract(ts) }
                     self.statStaleDropped += out.count; self.tileTokens += Double(estimate); if block { self.blockInFlight = nil }; settled(self.layers[layerID]); return
                 }
-                self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: refinement, staged: staged, tiles: out)), captureNanos: nanos, fast: !refinement, refinementBytes: refinement ? bytes : 0, block: block, layer: layerID) }
+                if !early { self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: refinement, staged: staged, tiles: out)), captureNanos: nanos, fast: !refinement, refinementBytes: refinement ? bytes : 0, block: block, layer: layerID) } }
                 settled(self.layers[layerID])
                 self.tileTokens -= Double(bytes - estimate)   // true up the estimate
                 self.statTileBytes += bytes; self.statTileRects += out.count; self.secTileBytes += bytes
