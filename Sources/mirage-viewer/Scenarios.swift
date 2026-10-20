@@ -513,6 +513,13 @@ final class ScenarioRunner {
             let fps = ProcessInfo.processInfo.environment["MIRAGE_TEST_BENCH_FPS"].flatMap { Double($0) } ?? 2
             startRealShots(dir: dir, fps: fps)
         }
+        // Same place every run (the drags net +300 px each, and a window drifting off the display left the scroll point outside it).
+        let home = (max(0, (W - w.frame.width) / 3), max(Int(40 * ppp), (H - w.frame.height) / 2 - Int(60 * ppp)))
+        if abs(w.frame.x - home.0) > 8 || abs(w.frame.y - home.1) > 8 {
+            session.sendWindowCommand(.init(id: w.id, action: .move, x: home.0, y: home.1))
+            for _ in 0..<30 { try? await Task.sleep(for: .milliseconds(100)); if let f = scratchWindow()?.frame, abs(f.x - home.0) <= 8, abs(f.y - home.1) <= 8 { break } }
+            w = scratchWindow() ?? w
+        }
         session.watchWindowID = w.id
         note("Finder window \(w.id) at \(w.frame), layered \(w.isLayered); waiting 20 s for the first picture")
         try? await Task.sleep(for: .seconds(20))

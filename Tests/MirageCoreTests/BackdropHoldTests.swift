@@ -46,3 +46,27 @@ final class BackdropHoldTests: XCTestCase {
         XCTAssertTrue(t.isDirectPending(7)); XCTAssertFalse(t.isDirectPending(8))
     }
 }
+
+final class CopyFromWrongTests: XCTestCase {
+    /// A copy-rect whose source tile the viewer holds wrong (a pending direct change) leaves its destination wrong: direct, due now.
+    func testCopyFromAPendingDirectTileIsADirectChange() {
+        var t = TileTracker(width: 640, height: 640)      // 10 × 10 tiles
+        t.markDirect([25], now: 1_000_000_000)             // row 2, col 5: wrong on the viewer
+        t.markCopied([15], dx: 0, dy: -64, now: 1_100_000_000)   // tile 15 filled from tile 25 (a scroll up by one tile)
+        XCTAssertTrue(t.isDirectPending(15))
+        XCTAssertEqual(t.dueDirect(now: 1_100_000_000, limit: 10).sorted(), [15, 25])
+        // From a crisp source: crisp.
+        t.markCopied([5], dx: 0, dy: -64, now: 1_200_000_000)    // from tile 15's old content? no: 15 is pending now
+        XCTAssertTrue(t.isDirectPending(5), "copied from tile 15, which is wrong now")
+        t.markCopied([40], dx: 0, dy: -64, now: 1_300_000_000)   // from tile 50, crisp
+        XCTAssertTrue(t.isCrisp(40))
+    }
+    /// A copy from a backdrop-held tile stays held (lossy level, refined when idle), never due-never.
+    func testCopyFromAHeldTileStaysHeld() {
+        var t = TileTracker(width: 640, height: 640)
+        t.holdUntilIdle([25], now: 1_000_000_000)
+        t.markCopied([15], dx: 0, dy: -64, now: 1_100_000_000)
+        XCTAssertTrue(t.isHeld(15))
+        XCTAssertEqual(t.releaseHeld(now: 9_000_000_000), 2)
+    }
+}

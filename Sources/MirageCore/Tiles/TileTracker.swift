@@ -235,15 +235,22 @@ public struct TileTracker {
         for i in tiles {
             let src = rect(of: i).offset(-dx, -dy).intersection(bounds)
             let sources = src.isEmpty ? [] : self.tiles(covering: [src])
-            let soft = sources.filter { before[$0].pending && before[$0].viaVideo }
+            // Sources the viewer holds wrong (a pending direct change: held back, a correction) make the destination wrong too: a
+            // direct change due now (9755f02 marked them crisp, and each further scroll step spread a stacked Finder toolbar).
+            let wrong = sources.contains { before[$0].pending && before[$0].direct }
+            let soft = sources.filter { before[$0].pending && before[$0].viaVideo && !before[$0].direct }
             var c = cells[i]
             c.lastDirtyNanos = now; c.lastLosslessNanos = now; c.direct = false; c.held = false
-            if soft.isEmpty {
+            if wrong {
+                c.pending = true; c.direct = true; c.viaVideo = false
+                c.pendingSince = now; c.dueNanos = now
+            } else if soft.isEmpty {
                 c.pending = false; c.pendingSince = 0; c.viaVideo = false
             } else {
                 c.pending = true; c.viaVideo = true
+                c.held = soft.contains { before[$0].held }
                 c.pendingSince = soft.map { before[$0].pendingSince }.min() ?? now
-                c.dueNanos = soft.map { before[$0].dueNanos }.max() ?? (now &+ tuning.settleNanos)
+                c.dueNanos = c.held ? .max : (soft.map { before[$0].dueNanos }.filter { $0 != .max }.max() ?? (now &+ tuning.settleNanos))
             }
             cells[i] = c
         }
