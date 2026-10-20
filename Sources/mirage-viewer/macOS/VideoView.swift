@@ -302,9 +302,8 @@ final class VideoNSView: NSView {
         let ppp = MainActor.assumeIsolated { session.pixelsPerPoint }
         let sdx = Int((dx * ppp).rounded()), sdy = Int((dy * ppp).rounded())
         guard sdx != 0 || sdy != 0 else { return }
-        let rect = session.scrollRect(for: w, titleBarPx: Int(28 * ppp))
         let lp = w.isLayered ? (p.0 - w.frame.x, p.1 - w.frame.y) : p
-        guard rect.contains(lp.0, lp.1) else { return }
+        guard let rect = session.knownScrollRect(for: w), rect.contains(lp.0, lp.1) else { return }
         session.predict(kind: .scroll, windowID: w.id, rect: rect, dx: sdx, dy: sdy, inputSeq: seq)
     }
 

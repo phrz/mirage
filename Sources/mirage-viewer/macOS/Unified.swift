@@ -569,8 +569,7 @@ final class RemoteWindowView: NSView {
             let ppp = session.pixelsPerPoint
             let sdx = Int((dx * ppp).rounded()), sdy = Int((dy * ppp).rounded())
             guard sdx != 0 || sdy != 0 else { return }
-            let rect = session.scrollRect(for: w, titleBarPx: Int(28 * ppp))
-            guard rect.contains(p.local.0, p.local.1) else { return }
+            guard let rect = session.knownScrollRect(for: w), rect.contains(p.local.0, p.local.1) else { return }
             session.predict(kind: .scroll, windowID: id, rect: rect, dx: sdx, dy: sdy, inputSeq: seq)
         }
     }

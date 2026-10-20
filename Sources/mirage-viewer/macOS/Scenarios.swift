@@ -494,8 +494,17 @@ final class ScenarioRunner {
             guard let self, let ctx = self.session.context, let sc = self.session.scene(pxPerPoint: 2), let bg = sc.background else { return }
             n += 1
             for (name, r0) in self.shotRects {
-                // The Finder crop is the window's own frame at this moment (moving or not): never a neighbouring window.
-                let r = name == "finder" ? (self.scratchWindow()?.frame ?? r0) : r0
+                // The Finder crop is the window as the viewer draws it now (moving or not): never a neighbouring window. The host's
+                // frame lags a local drag; when they differ it is logged (frames that looked shifted at a drag's end).
+                var r = r0
+                if name == "finder", let win = self.scratchWindow() {
+                    let drawn = sc.items.compactMap { item -> PixelRect? in
+                        if case .layer(let c, let f, _, _) = item, c === self.session.layerViews[win.id]?.compositor { return f }
+                        return nil
+                    }.first
+                    r = drawn ?? win.frame
+                    if let d = drawn, d != win.frame { self.session.log("scenario realapps: shot \(n): drawn \(d.x),\(d.y) vs host \(win.frame.x),\(win.frame.y)") }
+                }
                 let crop = r.intersection(PixelRect(x: 0, y: 0, width: bg.width, height: bg.height))
                 guard crop.area > 0 else { continue }
                 UnifiedShots.write(scene: sc, crop: crop, context: ctx, to: dir.appendingPathComponent(String(format: "%@-%04d.png", name, n)))
@@ -567,9 +576,8 @@ final class ScenarioRunner {
             for _ in 0..<40 {
                 guard let win = scratchWindow() else { break }
                 let seq = session.send(.scroll(.init(x: nx, y: ny, dx: 0, dy: 30 * dir, precise: true, modifiers: 0)), scripted: true)
-                let rect = session.scrollRect(for: win, titleBarPx: Int(52 * ppp))
-                // Test knob MIRAGE_TEST_NO_PREDICT: no local scroll prediction (to tell prediction artifacts from canvas ones).
-                if ProcessInfo.processInfo.environment["MIRAGE_TEST_NO_PREDICT"] == nil {
+                // As real input does: only with the host's scroll rect. Test knob MIRAGE_TEST_NO_PREDICT: no local scroll prediction.
+                if ProcessInfo.processInfo.environment["MIRAGE_TEST_NO_PREDICT"] == nil, let rect = session.knownScrollRect(for: win) {
                     session.predict(kind: .scroll, windowID: win.id, rect: rect, dx: 0, dy: Int((30 * dir * ppp).rounded()), inputSeq: seq)
                 }
                 try? await Task.sleep(for: .milliseconds(33))

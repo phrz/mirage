@@ -1434,6 +1434,10 @@ final class ViewerSession: @unchecked Sendable {
 
     /// The rect a wheel event over `window` should shift (in the window's own coordinates when it is a
     /// layer): the host's learned scroll rect, else the content area below the title bar.
+    /// The host's scroll rect for the view under the pointer (its AX scroll area), or nil until the host knows it. Real input
+    /// predicts only with this: the guess below (the window under its title bar) included Finder's sidebar, and the first
+    /// scroll frames showed the whole window body displaced locally.
+    func knownScrollRect(for w: ControlMessage.WindowInfo) -> PixelRect? { w.scrollRect }
     func scrollRect(for w: ControlMessage.WindowInfo, titleBarPx: Int) -> PixelRect {
         if let r = w.scrollRect { return r }
         let f = w.isLayered ? PixelRect(x: 0, y: 0, width: w.frame.width, height: w.frame.height) : w.frame
