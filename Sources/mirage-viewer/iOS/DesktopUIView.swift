@@ -11,10 +11,12 @@ import MirageCore
 /// keyboard, both with typeahead. The picture keeps its size when the keyboard shows and lifts so the pointer stays
 /// above it.
 ///
-/// Zoom and pan are presentation only (`ZoomViewport`): the stream, and every message to the host, are the same at any
-/// zoom. A pinch zooms about its centre (and its fingers' travel pans), from fit up to 1:1 host pixels and beyond; a
-/// three-finger drag pans; a two-finger double tap toggles fit and 1:1 there. Zoomed, the view follows the pointer at
-/// the edges and, from 1.5×, the caret while typing.
+/// The stream is the host display at its native pixels (as the Mac viewer's native snap), drawn downscaled at fit with an
+/// area filter, so zoom up to 1:1 shows real host pixels, sharp. Zoom and pan are presentation only (`ZoomViewport`):
+/// the stream, and every message to the host, are the same at any zoom, orientation or keyboard state. A pinch zooms
+/// about its centre (and its fingers' travel pans), from fit up to 1:1 host pixels and beyond; a three-finger drag
+/// pans; a two-finger double tap toggles fit and 1:1 there. Zoomed, the view follows the pointer at the edges and,
+/// from 1.5×, the caret while typing.
 final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     override class var layerClass: AnyClass { CAMetalLayer.self }
     private var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
@@ -208,9 +210,14 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         viewportChanged()
     }
 
+    /// Native stream (the default, as the Mac viewer's native snap): the host's display at its own pixels, whatever this
+    /// screen's size or orientation. `-nativeStream 0` (launch argument or default) asks for the old fit-sized stream.
+    static var nativeStream: Bool { UserDefaults.standard.object(forKey: "nativeStream") as? Bool ?? true }
+
     /// Sent 300 ms after the first call, at the size of that moment: a rotation passes through in-between sizes (new
-    /// bounds before the new safe area), each of which would otherwise re-stream. Later calls in the window join it
-    /// (SwiftUI calls this on every model update, so restarting the wait could put the request off indefinitely).
+    /// bounds before the new safe area), each of which would otherwise re-stream a fit-sized stream. Later calls in the
+    /// window join it (SwiftUI calls this on every model update, so restarting the wait could put the request off
+    /// indefinitely). A native stream's request never changes, so it goes out once.
     func scheduleStreamRequest() {
         if let r = resizeWork, !r.isCancelled { return }
         let w = DispatchWorkItem { [weak self] in self?.resizeWork = nil; self?.sendStreamRequest() }
@@ -218,13 +225,20 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300), execute: w)
     }
 
-    /// The stream is the container's pixel size (× the pixel factor); the host fits its display into it. Neither the
-    /// keyboard nor zoom and pan change it: a zoomed picture is the same stream drawn larger.
-    func sendStreamRequest() {
-        guard let session, let model, bounds.width > 0, bounds.height > 0 else { return }
+    /// The stream size this view asks for. Native: a box no display exceeds, which the host resolves to its display's own
+    /// pixels (StreamScale.nativeRequest), so zoom up to 1:1 is sharp and fit is that stream drawn smaller (an area
+    /// filter, no shimmer); it depends on nothing here, so rotation, the keyboard, zoom and pan never re-stream. Fit (the
+    /// old stream): the container's pixel size × the pixel factor, which a rotation changes.
+    func wantedStreamSize() -> (Int, Int)? {
+        if Self.nativeStream { return StreamScale.nativeRequest }
+        guard let model, bounds.width > 0, bounds.height > 0 else { return nil }
         let c = containerRect, scale = screenScale
         let w = Int(c.width * scale * model.pixelFactor), h = Int(c.height * scale * model.pixelFactor)
-        guard w > 0, h > 0, (w, h) != lastRequested else { return }
+        return w > 0 && h > 0 ? (w, h) : nil
+    }
+
+    func sendStreamRequest() {
+        guard let session, let (w, h) = wantedStreamSize(), (w, h) != lastRequested else { return }
         lastRequested = (w, h)
         session.requestStream(width: w, height: h)
     }

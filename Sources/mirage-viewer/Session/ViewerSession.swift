@@ -144,6 +144,8 @@ final class ViewerSession: @unchecked Sendable {
         var t: Double, rttMs: Double, frameAgeMs: Double, fps: Double, kbps: Double, decodeMs: Double, lost: Int, skipped: Int, width: Int, height: Int
         var tileKbps: Double, tileRects: Int, copyRects: Int, targetKbps: Int, capacityKbps: Int, queueMs: Double, rung: Int, scale: Double
         var tier: String?
+        /// Every byte from the host so far (video, tiles, control): bytes in any interval of a run.
+        var totalBytes: Int?
     }
     private(set) var samples: [Sample] = []   // appended on the main actor; read by the scenario runner (benign race on a value array)
     private let startDate = Date()
@@ -1062,7 +1064,7 @@ final class ViewerSession: @unchecked Sendable {
                     samples.append(Sample(t: Date().timeIntervalSince(startDate), rttMs: rtt, frameAgeMs: age / 1e6, fps: Double(frames), kbps: Double(bytes) * 8 / 1000,
                                           decodeMs: s.decodeMs, lost: lost, skipped: dropped, width: w, height: h,
                                           tileKbps: s.tileKbps, tileRects: tileRects, copyRects: copies, targetKbps: rate.targetKbps, capacityKbps: rate.capacityKbps,
-                                          queueMs: rate.queueMs, rung: rate.rung, scale: rate.scale, tier: rate.tier?.name))
+                                          queueMs: rate.queueMs, rung: rate.rung, scale: rate.scale, tier: rate.tier?.name, totalBytes: self.totalBytes()))
                 }
                 if let url = model.statsLog {
                     let line = String(format: "%@ rtt %.0f age %.0f fps %.1f kbps %.0f tiles %.0f target %d cap %d queue %.0f rung %d decode %.1f lost %d skipped %d size %dx%d\n",
@@ -1639,6 +1641,8 @@ extension ViewerSession {
             var unified: UnifiedStats? = nil
             var transientSamples: [String]? = nil, transientGhosts: Int? = nil, dockGhostMs: [Double]? = nil
             var typeahead: TypeaheadStats? = nil
+            /// Every byte from the host in the run (video, tiles, control) and the run's length when written.
+            var totalBytes: Int? = nil, totalBytesAtSeconds: Double? = nil
         }
         struct TypeaheadStats: Codable { var shown: Int, confirmed: Int, mismatched: Int, expired: Int; var accuracy: Double?; var visibleMsMedian: Double?, visibleMsMax: Double?, echoMsMedian: Double?, echoMsP95: Double?; var misses: [String]? }
         struct UnifiedStats: Codable {
@@ -1697,6 +1701,7 @@ extension ViewerSession {
                                            visibleMsMedian: vis.isEmpty ? nil : median(vis), visibleMsMax: vis.max(), echoMsMedian: echo.isEmpty ? nil : median(echo), echoMsP95: echo.isEmpty ? nil : p95(echo),
                                            misses: typeaheadMisses().map { "'\($0.text)' predicted end \($0.predictedX),\($0.predictedY) host caret \($0.hostX),\($0.hostY) (glyph \($0.glyphWidth) px)" })
         }
+        out.totalBytes = totalBytes(); out.totalBytesAtSeconds = Date().timeIntervalSince(startDate)
         out.transientSamples = scenario?.transientSamples; out.transientGhosts = scenario?.transientGhosts; out.dockGhostMs = scenario?.dockGhostMs
         out.unified = MainActor.assumeIsolated { () -> UnifiedStats? in
             guard let u = unified else { return nil }

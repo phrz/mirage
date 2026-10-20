@@ -104,8 +104,12 @@ as a small overlay. Touch gestures:
 
 A two-finger gesture is a scroll once the fingers travel together 12 pt without spreading, and a zoom once they spread
 or close by 5 % first; it stays what it became until the fingers lift (so "two fingers after a pinch" pan the view
-rather than scroll). Three fingers are always the view pan. Zoom and pan are presentation only: the host sends the same
-stream at every zoom (a zoomed picture is that stream drawn larger), and no message goes out for them. Zoomed in, the
+rather than scroll). Three fingers are always the view pan. The stream is the host display at its own pixels (as the Mac
+viewer's native snap): fit shows it downscaled with an area filter (no shimmer on text), and zoom up to 1:1 shows real host
+pixels, sharp. Zoom and pan are presentation only: the host sends the same stream at every zoom, orientation and keyboard
+state, so no message goes out for them and a rotation never reconfigures the stream (`-nativeStream 0` asks for the old
+fit-sized stream instead). An app relaunched by iOS resumes its session with the saved token and says it holds no picture;
+the host then sends every layer's picture afresh in the same session (DESIGN §4a). Zoomed in, the
 view follows the pointer when it nears an edge, and from 1.5× it glides to keep the caret in view above the keyboard
 while typing. The keyboard never resizes the picture; it lifts it, or bounds how far a zoomed one pans.
 

@@ -49,13 +49,8 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         if pw < 64 || ph < 64 { pw = Double(display.width); ph = Double(display.height) }
         let mode = CGDisplayCopyDisplayMode(display.displayID)
         let scale = mode.map { Double($0.pixelWidth) / Double($0.width) } ?? 1
-        // Fit the display aspect into the requested box; even dimensions keep the encoder happy.
-        let aspect = pw / ph
-        var w = Double(max(req.width, 64)), h = Double(max(req.height, 64))
-        if w / h > aspect { w = h * aspect } else { h = w / aspect }
-        w = min(w, pw * scale); h = min(h, ph * scale)   // never upscale beyond native pixels
-        if req.snapNative == true, StreamScale.snapsToNative(requestedWidth: w, nativeWidth: pw * scale) { w = pw * scale; h = ph * scale }
-        let ew = Int(w) & ~1, eh = Int(h) & ~1
+        // Fit the display aspect into the requested box, never beyond native pixels; even dimensions keep the encoder happy.
+        let (ew, eh) = StreamScale.resolve(requested: (req.width, req.height), nativePixels: (pw * scale, ph * scale), snapNative: req.snapNative == true)
         let name = "display \(display.displayID) (\(display.width)x\(display.height) pt, \(Int(pw))x\(Int(ph)) px)"
         let info = ControlMessage.StreamInfo(width: ew, height: eh, displayID: display.displayID, displayWidth: display.width, displayHeight: display.height,
                                              displayScale: scale, displayName: name)

@@ -658,13 +658,31 @@ public final class Compositor {
         o.uv = float2(mix(q.src.x, q.src.z, c.x), mix(q.src.y, q.src.w, c.y));
         return o;
     }
+    // Minification by more than 1.25x (a native stream drawn at fit on a phone, a Mac viewer window much smaller than the
+    // host display): a single bilinear tap skips texels, so thin text strokes shimmer as the picture pans or zooms. The
+    // destination pixel's footprint in source texels (from the uv derivatives; every quad is axis-aligned) is averaged
+    // instead, with N×N bilinear taps no more than a texel apart (a box filter, stable under sub-pixel motion). At 1:1,
+    // magnification or mild minification it is the single tap it always was.
+    static float4 areaSample(texture2d<float> tex, sampler s, float2 uv) {
+        float2 size = float2(tex.get_width(), tex.get_height());
+        float2 fp = float2(abs(dfdx(uv.x)), abs(dfdy(uv.y))) * size;
+        if (fp.x <= 1.25 && fp.y <= 1.25) return tex.sample(s, uv);
+        int nx = clamp(int(ceil(fp.x - 0.01)), 1, 8), ny = clamp(int(ceil(fp.y - 0.01)), 1, 8);
+        float2 stepUV = (fp / float2(nx, ny)) / size;
+        float2 start = uv - (fp * 0.5) / size + stepUV * 0.5;
+        float4 sum = 0;
+        for (int j = 0; j < ny; j++) {
+            for (int i = 0; i < nx; i++) { sum += tex.sample(s, start + stepUV * float2(i, j)); }
+        }
+        return sum / float(nx * ny);
+    }
     fragment float4 quadFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]]) {
-        return tex.sample(s, in.uv);
+        return areaSample(tex, s, in.uv);
     }
     fragment float4 fillFragment(VOut in [[stage_in]], constant float4& color [[buffer(0)]]) { return color; }
     // Premultiplied texture scaled by alpha.x (layer quads with transparency, crossfades).
     fragment float4 blendFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]], constant float4& alpha [[buffer(0)]]) {
-        return tex.sample(s, in.uv) * alpha.x;
+        return areaSample(tex, s, in.uv) * alpha.x;
     }
     // Soft shadow of a rounded rect: `box` = rect in drawable pixels (x0,y0,x1,y1), `p` = (corner radius, blur px, opacity, 0).
     struct ShadowOut { float4 pos [[position]]; float2 px; };
