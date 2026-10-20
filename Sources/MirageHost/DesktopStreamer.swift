@@ -127,7 +127,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var lastBudget = RateController.Budget(tileKbps: 0, videoKbps: 0)
     private var refineTimer: DispatchSourceTimer?
     private var rateTimer: DispatchSourceTimer?
-    private struct PendingScroll { let x: Int, y: Int; let windowID: UInt32; let nanos: UInt64 }
+    /// The last wheel event's place, and the wheel delta (pixels) accumulated since a capture last took it: a tie-breaker for
+    /// the scroll detector on periodic content (magnitude only; the sign depends on natural scrolling).
+    private struct PendingScroll { let x: Int, y: Int; let windowID: UInt32; let nanos: UInt64; var dxPx = 0, dyPx = 0 }
     private let scrollLock = NSLock()
     private var pendingScroll: PendingScroll?
 
@@ -178,9 +180,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let rows = layers.values.sorted { $0.account.total > $1.account.total }.map { l -> String in
             let a = l.account
             let who = l.isDisplay ? "desktop" : "\(byID[l.id]?.app ?? "?") \(l.id)"
-            return String(format: "%@ %dx%d vis %d%%%@: %.0f KB = still %.0f + blocks %.0f + refine %.0f + direct %.0f + video %.0f + underlay %.0f + backdrop %.0f (upgrade %.0f of the refine), dirty %.0f tiles/s",
+            return String(format: "%@ %dx%d vis %d%%%@: %.0f KB = still %.0f + blocks %.0f + refine %.0f + direct %.0f + video %.0f + underlay %.0f + backdrop %.0f + strip %.0f + corrections %.0f (upgrade %.0f of the refine), dirty %.0f tiles/s",
                           who as NSString, l.width, l.height, Int(l.visibleFraction * 100), l.isDisplay || l.opaque ? "" : " transparent", Double(a.total) / 1000, Double(a.still) / 1000, Double(a.blocks) / 1000,
-                          Double(a.refine) / 1000, Double(a.direct) / 1000, Double(a.video) / 1000, Double(a.underlay) / 1000, Double(a.backdrop) / 1000, Double(a.upgrade) / 1000, Double(a.dirtyTiles) / 30)
+                          Double(a.refine) / 1000, Double(a.direct) / 1000, Double(a.video) / 1000, Double(a.underlay) / 1000, Double(a.backdrop) / 1000, Double(a.strip) / 1000, Double(a.correction) / 1000, Double(a.upgrade) / 1000, Double(a.dirtyTiles) / 30)
         }
         let total = layers.values.reduce(0) { $0 + $1.account.total }
         log(String(format: "layer bytes, last 30 s (%.0f kbps): ", Double(total) * 8 / 30 / 1000) + rows.joined(separator: " | "))
@@ -552,6 +554,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     let tiles = r.tiles.map(Int.init).filter { $0 >= 0 && $0 < l.tracker.tileCount && !l.occludedTiles.contains($0) }
                     self.statWindowAuditRefreshed += tiles.count
                     l.tracker.markDirect(tiles, now: Clock.nowNanos())
+                    l.correctionTiles.formUnion(tiles)
                     return
                 }
                 guard r.layer == 0, let d = self.display else { return }
@@ -569,7 +572,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let x = Int(s.x * Double(t.pixelWidth)), y = Int(s.y * Double(t.pixelHeight))
                 if let win = w.window(at: x, y) {
                     w.queryAXScrollArea(at: x, y, windowID: win.id)
-                    self.scrollLock.lock(); self.pendingScroll = PendingScroll(x: x, y: y, windowID: win.id, nanos: Clock.nowNanos()); self.scrollLock.unlock()
+                    let ppp = w.pxPerPoint, ddx = Int((s.dx * ppp).rounded()), ddy = Int((s.dy * ppp).rounded())
+                    self.scrollLock.lock()
+                    let prior = self.pendingScroll.flatMap { $0.windowID == win.id ? $0 : nil }
+                    self.pendingScroll = PendingScroll(x: x, y: y, windowID: win.id, nanos: Clock.nowNanos(), dxPx: (prior?.dxPx ?? 0) + ddx, dyPx: (prior?.dyPx ?? 0) + ddy)
+                    self.scrollLock.unlock()
                 }
             }
             self.queue.async { self.statInput += 1 }
@@ -1122,7 +1129,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 }
                 var region = (known ?? (layer.isDisplay ? win?.frame : nil) ?? bb).intersection(bb)
                 if region.width < 64 || region.height < 64 { region = bb }
-                if region.height >= 96 || region.width >= 96, let r0 = detector.detect(old: old, new: new, rect: region), let r = ShiftDetector.trimmed(r0) {
+                if region.height >= 96 || region.width >= 96, let r0 = detector.detect(old: old, new: new, rect: region, hint: scrollHere.map { ($0.dxPx, $0.dyPx) }), let r = ShiftDetector.trimmed(r0) {
                     trimmedEdges.formUnion(Set(tracker.tiles(covering: [r0.rect.offset(r0.dx, r0.dy)])).subtracting(tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])))
                     copyRegion.formUnion(tracker.tiles(covering: [r.rect.union(r.rect.offset(r.dx, r.dy))]))
                     let dest = tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])
@@ -1150,6 +1157,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if !explained.isEmpty {
             dirty.removeAll { explained.contains($0) }
             for c in copies { tracker.markCopied(c.tiles, dx: c.dx, dy: c.dy, now: now) }
+            for c in copies { for i in c.tiles where tracker.isDirectPending(i) { layer.correctionTiles.insert(i) } }   // copied from wrong pixels
             // Copy-rect gate: a copy-rect explained at least half of this frame's change; for 300 ms nothing here is motion.
             if (explained.count + edgesDeferred) * 2 >= dirtyBeforeCopies { layer.copyGateNanos = now }   // deferred edges are handled too
         }
@@ -1184,6 +1192,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             plan.video.removeAll { wrong.contains($0) }
             if plan.video.count != videoBefore { if plan.video.isEmpty { plan.videoRegion = .zero; plan.wholeFrame = false } else if !plan.wholeFrame { plan.videoRegion = tracker.boundingRect(plan.video) } }
             tracker.markDirect(Array(wrong), now: now)
+            layer.correctionTiles.formUnion(wrong)
             statCopyCorrections += wrong.count
         }
         // Motion bookkeeping for the refinement freeze: classified video, copy-rects, or the input stream.
@@ -1744,7 +1753,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Encodes copied rects on the tile queue and sends them (review L13: one body for tiles and blocks).
     /// `lossy`: every rect as lossy WebP at that quality (a scroll's exposed strip: lossy first on the stream, in order with
     /// its copy-rect; refined lossless once it settles).
-    private func encodeAndSend(_ jobs: [(PixelRect, Data)], estimate: Int, layer: Layer, refinement: Bool, block: Bool, nanos: UInt64, photoQuality: Float = 90, staged: Bool = false, lossy: Float? = nil) {
+    private func encodeAndSend(_ jobs: [(PixelRect, Data)], estimate: Int, layer: Layer, refinement: Bool, block: Bool, nanos: UInt64, photoQuality: Float = 90, staged: Bool = false, lossy: Float? = nil, correction: Bool = false) {
         let hdr = header(layer: layer.id, nanos: nanos)
         if staged { layer.stagedEncoding += 1; layer.lastStagedNanos = nanos; if layer.stagedOpenSince == nil { layer.stagedOpenSince = nanos } }
         // On `queue`: this message is on the tile stream (or dropped), so a commit sent after it follows it.
@@ -1794,7 +1803,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if refinement { self.statRefineBytes += bytes }
                 if let l = self.layers[layerID] {
                     l.sentBytes += bytes; if refinement { l.sentRefine += out.count } else { l.sentDirect += out.count }
-                    if photoQuality < 90 { l.account.underlay += bytes } else if !refinement { l.account.direct += bytes } else if block { l.account.blocks += bytes } else { l.account.refine += bytes }
+                    if lossy != nil { l.account.strip += bytes } else if correction { l.account.correction += bytes }
+                    else if photoQuality < 90 { l.account.underlay += bytes } else if !refinement { l.account.direct += bytes } else if block { l.account.blocks += bytes } else { l.account.refine += bytes }
                 }
                 if photoQuality < 90, let l = self.layers[layerID] { for t in out where t.format == .lossy { l.underlayLossy.formUnion(l.tracker.tiles(covering: [t.rect])) } }
                 if self.debugLayers { self.log("layer \(layerID): sent \(out.count) \(staged ? "staged " : "")\(refinement ? (block ? "block" : "refinement") : "direct") rects \(bytes) B: \(out.prefix(3).map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))") }
@@ -1811,7 +1821,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// Copies the tiles' pixels out and encodes them on the tile queue. Returns the byte estimate charged to the budget.
     @discardableResult
-    private func submitLossless(layer: Layer, tiles: [Int], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, tracker: TileTracker, tight: [Int: PixelRect]? = nil, photoQuality: Float = 90, staged: Bool = false, lossy: Float? = nil) -> Int {
+    private func submitLossless(layer: Layer, tiles: [Int], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, tracker: TileTracker, tight: [Int: PixelRect]? = nil, photoQuality: Float = 90, staged: Bool = false, lossy: Float? = nil, correction: Bool = false) -> Int {
         var rects = tracker.mergedRects(tiles)
         if let tight {
             // Shrink each merged rect to the union of its tiles' changed boxes (padded 2 px), when all are known.
@@ -1826,7 +1836,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
         }
         let (jobs, estimate) = copyOut(rects, from: f)
-        encodeAndSend(jobs, estimate: lossy == nil ? estimate : estimate / 12, layer: layer, refinement: refinement, block: false, nanos: nanos, photoQuality: photoQuality, staged: staged, lossy: lossy)
+        encodeAndSend(jobs, estimate: lossy == nil ? estimate : estimate / 12, layer: layer, refinement: refinement, block: false, nanos: nanos, photoQuality: photoQuality, staged: staged, lossy: lossy, correction: correction)
         return lossy == nil ? estimate : estimate / 12
     }
 
@@ -1984,6 +1994,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let perSecond = Double(lastBudget.tileKbps * 1000 / 8)
         for l in layers.values {
             guard let src = l.lastFrame else { continue }
+            if !l.correctionTiles.isEmpty { l.correctionTiles = l.correctionTiles.filter { l.tracker.isDirectPending($0) } }   // sent another way meanwhile
             let due = l.tracker.dueDirect(now: now, limit: 64).filter { !l.occludedTiles.contains($0) }
             guard !due.isEmpty else { continue }
             // From the reserve the refinement pass keeps for changed pixels: may go down to -30 % of a second's budget. A tile
@@ -1997,7 +2008,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let f = frameView(src)
             guard f.width == l.width, f.height == l.height else { continue }
             if l.isDisplay { displaySent(due) }
-            let bytes = submitLossless(layer: l, tiles: due, from: f, refinement: false, nanos: now, tracker: l.tracker)
+            let corrections = due.filter { l.correctionTiles.contains($0) }, changes = due.filter { !l.correctionTiles.contains($0) }
+            var bytes = 0
+            if !changes.isEmpty { bytes += submitLossless(layer: l, tiles: changes, from: f, refinement: false, nanos: now, tracker: l.tracker) }
+            if !corrections.isEmpty { bytes += submitLossless(layer: l, tiles: corrections, from: f, refinement: false, nanos: now, tracker: l.tracker, correction: true); l.correctionTiles.subtract(corrections) }
             tileTokens -= Double(bytes)
             l.tracker.sent(lossless: due, now: now)
             lastDirectNanos = now

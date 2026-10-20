@@ -83,7 +83,8 @@ public struct ShiftDetector {
     public var fallbackMinShift = 8
     public var fallbackExplained = 0.6
     public var samplesPerLine = 32
-    /// Per-channel tolerance when verifying; a tile matches if ≤ 1 % of its pixels exceed it.
+    /// Per-channel tolerance when verifying a photographic tile (others must be byte-exact); it matches if ≤ 2 % of its pixels
+    /// exceed it.
     public var tolerance: Int32 = 16
     /// Diagnostics sink (MIRAGE_DEBUG_SHIFT on the host).
     public var debug: ((String) -> Void)?
@@ -91,13 +92,18 @@ public struct ShiftDetector {
     public init() {}
 
     /// Tries a vertical shift first, then horizontal, of `rect`'s content from `old` to `new`.
-    public func detect(old: Frame, new: Frame, rect: PixelRect, tile: Int = 64) -> Result? {
+    /// `hint`: the shift the input suggests (the wheel delta in pixels along the axis), a tie-breaker between candidates that
+    /// verify equally well (periodic content: an icon grid repeats at its row pitch); exact verification decides first.
+    public func detect(old: Frame, new: Frame, rect: PixelRect, tile: Int = 64, hint: (dx: Int, dy: Int)? = nil) -> Result? {
         let r = rect.intersection(PixelRect(x: 0, y: 0, width: min(old.width, new.width), height: min(old.height, new.height)))
         guard r.width >= 32, r.height >= 32 else { return nil }
-        if let v = detectAxis(old: old, new: new, rect: r, vertical: true, tile: tile) { return v }
-        if let h = detectAxis(old: old, new: new, rect: r, vertical: false, tile: tile) { return h }
+        if let v = detectAxis(old: old, new: new, rect: r, vertical: true, tile: tile, hint: hint?.dy) { return v }
+        if let h = detectAxis(old: old, new: new, rect: r, vertical: false, tile: tile, hint: hint?.dx) { return h }
         return nil
     }
+    /// Profile-SAD candidates within this factor of the best are all verified (periodic content ties at several shifts).
+    public var tieMargin = 1.15
+    public var tieCandidates = 3
 
     /// Verifies a known shift (e.g. from a window frame change) instead of searching for one.
     public func verify(old: Frame, new: Frame, rect: PixelRect, dx: Int, dy: Int, tile: Int = 64) -> Result? {
@@ -165,7 +171,7 @@ public struct ShiftDetector {
         return out
     }
 
-    private func detectAxis(old: Frame, new: Frame, rect: PixelRect, vertical: Bool, tile: Int) -> Result? {
+    private func detectAxis(old: Frame, new: Frame, rect: PixelRect, vertical: Bool, tile: Int, hint: Int? = nil) -> Result? {
         let pOld = profile(old, rect: rect, vertical: vertical), pNew = profile(new, rect: rect, vertical: vertical)
         let lines = pNew.count
         guard lines >= minLines * 2 else { return nil }
@@ -211,14 +217,31 @@ public struct ShiftDetector {
             }
             return nil
         }
-        let dx = vertical ? 0 : best.shift, dy = vertical ? best.shift : 0
+        // Near-ties (periodic content: Finder's icon grid matches at every multiple of its row pitch): verify each, keep the one
+        // with the most exact tiles; the input's delta breaks a tie. Exact verification makes a wrong period harmless for
+        // correctness (only byte-identical tiles count as explained), so this choice only decides how much is corrected.
+        var candidates = [best.shift]
+        for c in sads.sorted(by: { $0.sad < $1.sad }) where candidates.count < tieCandidates && c.sad <= best.sad * tieMargin && !candidates.contains(where: { abs($0 - c.shift) <= 2 }) { candidates.append(c.shift) }
         let bounds = PixelRect(x: 0, y: 0, width: min(old.width, new.width), height: min(old.height, new.height))
-        let src = rect.intersection(bounds).intersection(bounds.offset(-dx, -dy)).intersection(rect.offset(-dx, -dy))
-        guard src.width >= 16, src.height >= 16 else { return nil }
-        let (mismatch, conf) = verifyTiles(old: old, new: new, src: src, dx: dx, dy: dy, tile: tile)
-        debug?("shift verify (\(dx),\(dy)) src \(src) conf \(conf) mismatched \(mismatch.count)")
-        guard conf >= minTileConfidence else { return nil }
-        return Result(dx: dx, dy: dy, rect: src, mismatchedTiles: mismatch, confidence: conf)
+        var chosen: Result? = nil
+        for shift in candidates {
+            let dx = vertical ? 0 : shift, dy = vertical ? shift : 0
+            let src = rect.intersection(bounds).intersection(bounds.offset(-dx, -dy)).intersection(rect.offset(-dx, -dy))
+            guard src.width >= 16, src.height >= 16 else { continue }
+            let (mismatch, conf) = verifyTiles(old: old, new: new, src: src, dx: dx, dy: dy, tile: tile)
+            debug?("shift verify (\(dx),\(dy)) src \(src) conf \(conf) mismatched \(mismatch.count)\(candidates.count > 1 ? " (one of \(candidates.count) near-ties)" : "")")
+            guard conf >= minTileConfidence else { continue }
+            let r = Result(dx: dx, dy: dy, rect: src, mismatchedTiles: mismatch, confidence: conf)
+            if let c = chosen {
+                // Most exact area first (byte-identical copies from a period away are correct but cover less); then the input's delta.
+                let area = Double(src.area) * conf, cArea = Double(c.rect.area) * c.confidence
+                let better = area > cArea * 1.02
+                let tie = abs(area - cArea) <= cArea * 0.02
+                let closer = hint.map { abs(abs(shift) - abs($0)) < abs(abs(vertical ? c.dy : c.dx) - abs($0)) } ?? false   // magnitude only
+                if better || tie && closer { chosen = r }
+            } else { chosen = r }
+        }
+        return chosen
     }
 
     /// Destination tiles that changed in place (new ≠ old at the same position), and how many of those the shift explains
@@ -243,7 +266,14 @@ public struct ShiftDetector {
         return (changed, explained)
     }
 
-    /// Compares new[src + (dx,dy)] against old[src] per frame-aligned tile of the destination, with tolerance.
+    /// Whether a tile must verify byte-exact: anything but photographic content (more than 1024 colours in a 64-px tile;
+    /// anti-aliased text and UI stay far below).
+    private func exactRequired(_ f: Frame, _ t: PixelRect) -> Bool {
+        TileCodec.colourCount(base: f.base.advanced(by: t.y * f.stride + t.x * 4), width: t.width, height: t.height, stride: f.stride, limit: 1024) <= 1024
+    }
+
+    /// Compares new[src + (dx,dy)] against old[src] per frame-aligned tile of the destination: byte-exact for UI and text,
+    /// with tolerance for photographic tiles.
     private func verifyTiles(old: Frame, new: Frame, src: PixelRect, dx: Int, dy: Int, tile: Int) -> ([PixelRect], Double) {
         let dst = src.offset(dx, dy)
         var mismatched: [PixelRect] = []
@@ -255,6 +285,13 @@ public struct ShiftDetector {
                 let t = PixelRect(x: col * tile, y: row * tile, width: tile, height: tile).intersection(dst)
                 guard !t.isEmpty else { continue }
                 total += 1
+                // Byte-exact first (memcmp per row); only a photographic tile may then pass within the tolerance. At native scale
+                // scrolled UI pixels are bit-identical, and a tolerance let a wrong-period copy of a near-identical label row pass
+                // (phrz's repeated Finder rows).
+                var exact = true
+                for y in t.y..<t.maxY where memcmp(new.base.advanced(by: y * new.stride + t.x * 4), old.base.advanced(by: (y - dy) * old.stride + (t.x - dx) * 4), t.width * 4) != 0 { exact = false; break }
+                if exact { ok += 1; continue }
+                if exactRequired(new, t) { mismatched.append(t); continue }
                 var bad = 0
                 let allowed = max(1, t.area / 50)
                 rows: for y in t.y..<t.maxY {

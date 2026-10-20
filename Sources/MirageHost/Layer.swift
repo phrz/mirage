@@ -73,8 +73,10 @@ final class Layer {
     var sentBytes = 0, sentRefine = 0, sentDirect = 0
     /// 30 s accounting by class (DESIGN §6 M3.1: what the steady traffic is): first-picture still, lossless blocks,
     /// per-tile refinement, direct changes, video, underlay (display only), and dirty tiles seen.
-    struct Account { var still = 0, blocks = 0, refine = 0, direct = 0, video = 0, underlay = 0, dirtyTiles = 0, upgrade = 0, backdrop = 0
-        var total: Int { still + blocks + refine + direct + video + underlay + backdrop } }
+    struct Account { var still = 0, blocks = 0, refine = 0, direct = 0, video = 0, underlay = 0, dirtyTiles = 0, upgrade = 0, backdrop = 0, strip = 0, correction = 0
+        var total: Int { still + blocks + refine + direct + video + underlay + backdrop + strip + correction } }
+    /// Tiles pending as corrections (a copy-rect's wrong destination, an audit mismatch): accounted apart from other changes.
+    var correctionTiles = Set<Int>()
     /// Window layers: when the window last moved on the host, and whether a backdrop change since then waits for its
     /// lossy level (TileTracker.holdUntilIdle); when the last held capture came.
     var movedNanos: UInt64 = 0

@@ -96,7 +96,8 @@ final class ShiftDetectorTests: XCTestCase {
     func testDetectsVerticalScrollAndExposedStripMismatch() {
         let w = 640, h = 512
         let old = makeFrame(width: w, height: h, seed: 7)
-        let new = makeFrame(width: w, height: h, seed: 7, yOffset: 40, noiseSeed: 99)   // content moved up by 40 px (scrolled down), noisy
+        // Content moved up by 40 px (scrolled down). At native scale scrolled pixels are identical (no downscale noise any more).
+        let new = makeFrame(width: w, height: h, seed: 7, yOffset: 40)
         let d = ShiftDetector()
         let r = old.withUnsafeBytes { o in new.withUnsafeBytes { n in
             d.detect(old: .init(base: o.baseAddress!, stride: w * 4, width: w, height: h),
@@ -109,6 +110,51 @@ final class ShiftDetectorTests: XCTestCase {
         XCTAssertEqual(r.rect, PixelRect(x: 0, y: 40, width: w, height: h - 40))
         XCTAssertGreaterThan(r.confidence, 0.95)
         XCTAssertTrue(r.mismatchedTiles.isEmpty, "\(r.mismatchedTiles)")
+    }
+
+    /// Low-colour (UI, text) tiles must verify byte-exact: ±2 noise on 256-colour content is not the same pixels.
+    func testNoisyLowColourContentDoesNotVerify() {
+        let w = 640, h = 512
+        let old = makeFrame(width: w, height: h, seed: 7)
+        let new = makeFrame(width: w, height: h, seed: 7, yOffset: 40, noiseSeed: 99)
+        let d = ShiftDetector()
+        let r = old.withUnsafeBytes { o in new.withUnsafeBytes { n in
+            d.verify(old: .init(base: o.baseAddress!, stride: w * 4, width: w, height: h),
+                     new: .init(base: n.baseAddress!, stride: w * 4, width: w, height: h),
+                     rect: PixelRect(x: 0, y: 0, width: w, height: h), dx: 0, dy: -40)
+        } }
+        XCTAssertNil(r, "no tile explained by an inexact copy")
+    }
+
+    /// Periodic content (an icon grid: every 120 px the same row, rows told apart only by a small label): the shift a period
+    /// away scores almost as well on the profile; exact verification picks the true one.
+    func testPeriodicGridPicksTheExactShift() {
+        let w = 640, h = 720, period = 120
+        func frame(_ off: Int) -> [UInt8] {
+            var px = [UInt8](repeating: 30, count: w * h * 4)
+            for y in 0..<h {
+                let sy = y + off, inRow = ((sy % period) + period) % period, rowIndex = (sy - inRow) / period
+                for x in 0..<w {
+                    let o = (y * w + x) * 4
+                    var v: UInt8 = 30
+                    if inRow >= 20, inRow < 80, x % 160 >= 40, x % 160 < 100 { v = 250 }            // icons
+                    if inRow >= 90, inRow < 100, x % 160 >= 30, x % 160 < 110 { v = 200 }           // label line
+                    if inRow >= 92, inRow < 98, x % 160 >= 70, x % 160 < 76, (rowIndex + x / 160) % 3 == 0 { v = 90 }   // a digit
+                    px[o] = v; px[o + 1] = v; px[o + 2] = v; px[o + 3] = 255
+                }
+            }
+            return px
+        }
+        let old = frame(0), new = frame(40)
+        let d = ShiftDetector()
+        let r = old.withUnsafeBytes { o in new.withUnsafeBytes { n in
+            d.detect(old: .init(base: o.baseAddress!, stride: w * 4, width: w, height: h),
+                     new: .init(base: n.baseAddress!, stride: w * 4, width: w, height: h),
+                     rect: PixelRect(x: 0, y: 0, width: w, height: h))
+        } }
+        guard let r else { return XCTFail("no shift") }
+        XCTAssertEqual(r.dy, -40)
+        XCTAssertTrue(r.mismatchedTiles.isEmpty, "\(r.mismatchedTiles.count) mismatched")
     }
 
     func testInPlaceChangeIsNotAShift() {

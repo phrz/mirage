@@ -587,7 +587,12 @@ refinement budget. What the host counts as delivered must be what the viewer sho
    middle and backdrop levels) is checked for staleness there (`changedSince`) and enqueued from that same block, so no
    copy-rect decided later can overtake it. (a80cbe1: direct tiles hopped unchecked; the next capture's copy-rect
    overtook them, and a scrolled Finder window's icons striped while the host counted them delivered.)
-2. **A copy-rect only claims what it got right.** Destination tiles that fail verification are direct changes due now
+2. **A copy-rect only claims what it got right.** Verification is byte-exact for every tile but photographic ones (more
+   than 1024 colours in a 64-px tile, which keep a tolerance): at native scale scrolled pixels are bit-identical, and a
+   tolerance let a wrong-period copy of Finder's near-identical label rows pass (the label row repeated at the scroll step).
+   On periodic content the profile ties at several shifts: each near-tie is verified, the one explaining the most exact
+   area wins, and the wheel delta (magnitude) breaks a tie; exactness makes a wrong period harmless to correctness.
+   Destination tiles that fail verification are direct changes due now
    (9755f02), also where the host saw no change; a destination copied from a tile the viewer holds wrong (a pending direct
    change) is wrong too (6f9cddb); leading/trailing rows and columns that mostly fail are left out of the copy-rect
    (63d5545: a translucent toolbar over a scroll view) and go with the exposed strip, lossy at half size.
