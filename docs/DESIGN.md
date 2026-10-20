@@ -110,6 +110,20 @@ remotectl       CLI on host: pair, status, revoke, metrics       (macOS)
   the password and the host's TLS leaf fingerprint as the channel identifier, then exchange
   long-term **Ed25519 device keys** inside a ChaChaPoly box keyed from the PAKE. The host
   burns the code after one wrong confirmation tag, so 6 digits allow exactly one online guess.
+  **Pairing UI (2026-10-20)**: `miraged serve` has a menu-bar item; "Pair a Device…" opens a
+  window with the 6-digit code (3 + 3), a QR code and a countdown ring. Code and QR rotate every
+  30 s while the window is open, each attempt takes the current one (both rotate at once: single
+  use), and the window closes on success or after 5 min (`PairingWindow`). The QR is a link,
+  `miragerd://pair?host=<tailnet name>&addr=<tailnet IP>&port=<port>&key=<SHA-256 of the host's
+  Ed25519 key, base64url>&secret=<128 random bits, base64url>&exp=<unix time>` (`PairingLink`):
+  the secret is a high-entropy CPace password run through the same exchange as the code
+  (`PairRequest.secret`), and the viewer refuses a host whose key does not hash to `key`. Both
+  ends confirm: the viewer shows "Pair with <host>?" with the key fingerprint before dialing (an
+  opened link never connects silently), and the host asks "<device> wants to pair with this Mac.
+  Allow / Deny" after the exchange verifies the device's identity and before it is authorized,
+  for a code and a link alike (`miraged pair` without the menu asks its terminal instead). iOS
+  scans the QR from the code field (VisionKit) or opens it from Camera (`miragerd` scheme on iOS
+  and macOS). A failed pairing ends the viewer's attempt instead of retrying a burned code.
 - **Session authentication**: every later connection is QUIC/TLS 1.3 with a self-signed host
   certificate that nobody pins. Instead both sides sign a transcript containing the TLS leaf
   fingerprint the client actually saw plus fresh nonces (host first, then client). A

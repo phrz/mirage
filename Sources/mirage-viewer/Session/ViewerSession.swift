@@ -64,6 +64,8 @@ final class ViewerSession: @unchecked Sendable {
     let host: String
     let port: UInt16
     let pairCode: String?
+    /// A scanned or opened pairing link (pairs with its secret and pins the host key it names).
+    let pairLink: PairingLink?
     let model: ViewerModel
     private var client: QUICClient?
     private var control: MessageStream?
@@ -184,8 +186,8 @@ final class ViewerSession: @unchecked Sendable {
     @MainActor weak var unified: UnifiedController?
     #endif
 
-    init(host: String, port: UInt16, pairCode: String?, model: ViewerModel) {
-        self.host = host; self.port = port; self.pairCode = pairCode; self.model = model
+    init(host: String, port: UInt16, pairCode: String?, pairLink: PairingLink? = nil, model: ViewerModel) {
+        self.host = host; self.port = port; self.pairCode = pairCode; self.pairLink = pairLink; self.model = model
         MainActor.assumeIsolated { model.hostName = host }
         if let context { layerViews[0] = LayerView(id: 0, context: context) }
         if let saved = ViewerCredentials.savedResume(host: host, port: port) {
@@ -327,11 +329,23 @@ final class ViewerSession: @unchecked Sendable {
             let control = try await client.openStream()
             self.control = control
             let session = ClientSession(identity: identity, store: store, alias: host, tlsFingerprint: fp, stream: control)
-            if let pairCode, !paired {
-                guard let code = PairingCode.normalize(pairCode) else { throw MirageError.pairingFailed("--pair needs 6 digits") }
-                let h = try await session.pair(code: code)
-                paired = true   // a code pairs once: reconnects authenticate with the identity
-                log("paired with \(h.name)")
+            if !paired, pairLink != nil || pairCode != nil {
+                do {
+                    let h: DeviceRecord
+                    if let link = pairLink { h = try await session.pair(link: link) }
+                    else {
+                        guard let code = PairingCode.normalize(pairCode ?? "") else { throw MirageError.pairingFailed("the code needs 6 digits") }
+                        h = try await session.pair(code: code)
+                    }
+                    paired = true   // a code pairs once: reconnects authenticate with the identity
+                    log("paired with \(h.name)")
+                } catch {
+                    // A code or link is single use: retrying it can only fail again. Stop and say why.
+                    stopped = true
+                    let why = "\(error)".replacingOccurrences(of: "authenticationFailed(\"host rejected: ", with: "").replacingOccurrences(of: "pairingFailed(\"", with: "").replacingOccurrences(of: "\")", with: "")
+                    await MainActor.run { model.error = "Pairing failed: \(why)"; model.status = "not paired"; model.reconnecting = nil }
+                    return "pairing failed: \(error)"
+                }
             }
             let welcome = try await session.authenticate(resumeToken: resumeToken)
             let resumed = welcome.resumed == true

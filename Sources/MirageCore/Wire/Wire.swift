@@ -225,7 +225,9 @@ public enum ControlMessage: Codable, Equatable {
     public struct PairRequest: Codable, Equatable {
         public var protocolVersion: Int
         public var deviceName: String
-        public init(protocolVersion: Int, deviceName: String) { self.protocolVersion = protocolVersion; self.deviceName = deviceName }
+        /// The password is a pairing link's secret (scanned QR or opened link), not the 6-digit code. nil = code (older viewers).
+        public var secret: Bool?
+        public init(protocolVersion: Int, deviceName: String, secret: Bool? = nil) { self.protocolVersion = protocolVersion; self.deviceName = deviceName; self.secret = secret }
     }
     public struct PairChallenge: Codable, Equatable {
         public var sid: Data

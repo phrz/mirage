@@ -107,12 +107,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         connectWindow = w
     }
 
-    @MainActor private func startViewer(host: String, pairCode: String?) {
+    /// A `miragerd://pair` link (a scanned QR code, or one clicked): never connects silently. "Pair with <host>?" with the key
+    /// fingerprint the link pins, then pairs with its secret and refuses a host with any other key.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let url = urls.first(where: { $0.scheme?.lowercased() == PairingLink.scheme }) else { return }
+        MainActor.assumeIsolated {
+            NSApp.activate(ignoringOtherApps: true)
+            guard let link = PairingLink(url: url) else { return info("That is not a valid Mirage pairing link.", "") }
+            guard !link.isExpired() else { return info("That pairing code has expired.", "Codes change every 30 seconds. Show a fresh one on the Mac (Pair a Device… in its menu bar) and scan it again.") }
+            guard session == nil else { return info("Mirage is already connected.", "Quit Mirage, then open the pairing link again.") }
+            let alert = NSAlert()
+            alert.messageText = "Pair with \(link.hostName)?"
+            alert.informativeText = "\(link.address):\(link.port)\nHost key \(PairingLink.fingerprintText(link.keyHash))\n\nThe Mac will ask to allow this device too."
+            alert.addButton(withTitle: "Pair")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            guard !link.isExpired() else { return info("That pairing code has expired.", "Show a fresh one on the Mac and scan it again.") }
+            connectWindow?.close(); connectWindow = nil
+            startViewer(host: link.address, pairCode: nil, pairLink: link)
+        }
+    }
+    @MainActor private func info(_ title: String, _ text: String) {
+        let a = NSAlert(); a.messageText = title; a.informativeText = text; a.runModal()
+    }
+
+    @MainActor private func startViewer(host: String, pairCode: String?, pairLink: PairingLink? = nil) {
         UserDefaults.standard.set(host, forKey: "lastHost")
         model = ViewerModel(bitrateKbps: options.bitrate, pixelFactor: options.pixelFactor)
         model.observeOnly = options.observe || options.scenario != nil
         model.statsLog = options.statsLog.map { URL(fileURLWithPath: $0) }
-        session = ViewerSession(host: host, port: options.port, pairCode: pairCode, model: model)
+        session = ViewerSession(host: host, port: pairLink?.port ?? options.port, pairCode: pairCode, pairLink: pairLink, model: model)
         if options.scenario != nil { session.inputAutoFlush = true }
         let content = ContentView(session: session, model: model)
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: options.window.0, height: options.window.1),

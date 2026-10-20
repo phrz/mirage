@@ -15,11 +15,17 @@ public struct ClientSession {
     }
 
     /// Runs CPace pairing with a 6-digit code and records the host.
-    public func pair(code: String) async throws -> DeviceRecord {
-        try await stream.send(.pairRequest(.init(protocolVersion: Mirage.protocolVersion, deviceName: identity.name)))
+    public func pair(code: String) async throws -> DeviceRecord { try await pair(password: code, secret: false, pinnedKeyHash: nil) }
+    /// Pairing from a scanned or opened link: its secret is the password, and the host must hold the key the link pins.
+    public func pair(link: PairingLink) async throws -> DeviceRecord { try await pair(password: link.password, secret: true, pinnedKeyHash: link.keyHash) }
+
+    /// CPace pairing with a password (a code, or a link secret), recording the host. `pinnedKeyHash`: the host's Ed25519 key
+    /// must hash to it, or nothing is recorded (a link names the host it was shown on).
+    public func pair(password: String, secret: Bool, pinnedKeyHash: Data?) async throws -> DeviceRecord {
+        try await stream.send(.pairRequest(.init(protocolVersion: Mirage.protocolVersion, deviceName: identity.name, secret: secret ? true : nil)))
         let ch = try await stream.expect("pairChallenge") { if case .pairChallenge(let c) = $0 { return c } else { return nil } }
         let channel = lv(tlsFingerprint) + lv(Data(ch.hostName.utf8))
-        let cpace = try CPace(password: code, channelID: channel, sid: ch.sid)
+        let cpace = try CPace(password: password, channelID: channel, sid: ch.sid)
         let mine = try cpace.makeShare()
         let isk = try cpace.sessionKey(own: mine, peer: ch.share, initiatorShare: mine.publicShare, responderShare: ch.share)
         let tagA = CPace.confirmationTag(isk: isk, role: "A", initiatorShare: mine.publicShare, responderShare: ch.share)
@@ -33,6 +39,9 @@ public struct ClientSession {
         let done = try await stream.expect("pairComplete") { if case .pairComplete(let c) = $0 { return c } else { return nil } }
         let host = try SealedBox.open(DeviceRecord.self, done.sealed, key: key)
         guard host.id == DeviceIdentity.id(forPublicKey: host.publicKey) else { throw MirageError.pairingFailed("malformed host identity") }
+        if let pin = pinnedKeyHash, PairingLink.keyHash(forPublicKey: host.publicKey) != pin {
+            throw MirageError.pairingFailed("\(host.name)'s key does not match the pairing code: not paired")
+        }
         try store.remember(host: .init(hostID: host.id, hostName: host.name, publicKey: host.publicKey, endpoint: alias, pairedAt: Date()), as: alias)
         return host
     }

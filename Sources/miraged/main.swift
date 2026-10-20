@@ -22,6 +22,7 @@ struct Serve: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Run the host (foreground).")
     @Option(name: .shortAndLong, help: "UDP port to listen on.") var port: UInt16 = Mirage.defaultPort
     @Option(help: "Host name shown to clients (default: this Mac's computer name).") var name: String?
+    @Flag(help: "No menu-bar item (pairing then only through `miraged pair`).") var noMenu = false
 
     func run() async throws {
         setvbuf(stdout, nil, _IOLBF, 0)
@@ -33,8 +34,9 @@ struct Serve: AsyncParsableCommand {
         let host = try QUICHost(port: port, tls: tls)
         log("mirage host \(identity.name) id=\(identity.id.prefix(12)) tls=\(tls.fingerprint.prefix(6).map { String(format: "%02x", $0) }.joined()) devices=\(try store.authorizedDevices().count)")
         // TCC: prompting registers this binary in System Settings → Privacy & Security so it can be ticked once.
-        let screen = HostPermissions.screenRecordingGranted() || HostPermissions.requestScreenRecording()
-        let ax = HostPermissions.accessibilityGranted(prompt: true)
+        let quiet = ProcessInfo.processInfo.environment["MIRAGE_TEST_OPEN_PAIRING"] != nil   // a UI test run: no permission prompts
+        let screen = HostPermissions.screenRecordingGranted() || (!quiet && HostPermissions.requestScreenRecording())
+        let ax = HostPermissions.accessibilityGranted(prompt: !quiet)
         log("permissions: screen recording \(screen ? "granted" : "MISSING (System Settings → Privacy & Security → Screen & System Audio Recording → enable miraged)")"
             + ", accessibility \(ax ? "granted" : "MISSING (System Settings → Privacy & Security → Accessibility → enable miraged)")")
         host.start(onStream: { conn, id, remote in
@@ -46,7 +48,12 @@ struct Serve: AsyncParsableCommand {
             default: break
             }
         })
-        try await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
+        if noMenu || ProcessInfo.processInfo.environment["MIRAGE_NO_MENU"] != nil {
+            try await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
+        } else {
+            // The menu-bar item ("Pair a Device…"): the main thread runs AppKit from here on; the host itself runs on its own queues.
+            await MainActor.run { HostMenu.run(ctx: ctx, port: port, log: { log($0) }) }
+        }
     }
 }
 
@@ -67,8 +74,14 @@ struct Pair: AsyncParsableCommand {
             On the other device:  mirage connect \(DeviceNames.current()) --pair \(code)
             Valid for \(timeout)s, one attempt. Waiting…
             """)
-        let deadline = Date().addingTimeInterval(TimeInterval(timeout) + 5)
+        let deadline = Date().addingTimeInterval(TimeInterval(timeout) + 65)
         while Date() < deadline {
+            // The host asks here before it authorizes the device (no menu-bar UI is involved in this path).
+            if let q = try store.takePairingConfirmRequest(attemptID: pending.attemptID) {
+                print("\n\(q.deviceName) wants to pair with this Mac (key \(q.deviceID.prefix(16))…). Allow? [y/N] ", terminator: "")
+                let answer = readLine()?.trimmingCharacters(in: .whitespaces).lowercased()
+                try store.setPairingDecision(attemptID: pending.attemptID, allow: answer == "y" || answer == "yes")
+            }
             if let r = try store.takePairingResult(attemptID: pending.attemptID) {
                 print(r.ok ? "✓ \(r.message)" : "✗ \(r.message)")
                 throw ExitCode(r.ok ? 0 : 1)

@@ -10,6 +10,8 @@ public struct HostContext: Sendable {
     /// Creates the platform streamer for an authenticated client that asks for the desktop. nil = refuse.
     public let makeStreamer: (@Sendable () -> DesktopStreamer)?
     public let connections = HostConnections()
+    /// The pairing window and the Allow/Deny question, set by the host's UI (DESIGN §3.1 pairing).
+    public let pairing = PairingSlot()
 
     public init(identity: DeviceIdentity, store: Store, tlsFingerprint: Data, log: @escaping @Sendable (String) -> Void,
                 makeStreamer: (@Sendable () -> DesktopStreamer)? = nil) {
@@ -223,20 +225,27 @@ public enum HostSession {
     // MARK: Pairing
 
     static func pair(_ req: ControlMessage.PairRequest, _ stream: MessageStream, remote: String, ctx: HostContext) async throws {
-        guard let pending = try ctx.store.consumePendingPairing() else {
-            ctx.log("[\(remote)] pairing attempt by \(req.deviceName) with no code pending")
-            try await stream.send(.reject(.init(reason: "no pairing in progress on host; run `miraged pair`")))
-            throw MirageError.pairingFailed("no pending code")
+        // The password: from the open "Pair a Device…" window (code or link secret, single use: taking it rotates both), else
+        // a code `miraged pair` left (code only).
+        let usesSecret = req.secret ?? false
+        var password: String? = nil
+        var attemptID: String? = nil
+        if let w = ctx.pairing.window, w.isOpen() { password = w.takePassword(secret: usesSecret) }
+        else if !usesSecret, let pending = try ctx.store.consumePendingPairing() { password = pending.code; attemptID = pending.attemptID }
+        guard let password else {
+            ctx.log("[\(remote)] pairing attempt by \(req.deviceName) (\(usesSecret ? "link" : "code")) with no pairing open")
+            try await stream.send(.reject(.init(reason: usesSecret ? "that pairing code has expired; show a fresh one on the Mac" : "no pairing in progress on host; choose Pair a Device… in its menu bar (or run `miraged pair`)")))
+            throw MirageError.pairingFailed("no pairing open")
         }
         func fail(_ why: String) async throws -> Never {
-            try? ctx.store.setPairingResult(attemptID: pending.attemptID, ok: false, message: why)
+            if let attemptID { try? ctx.store.setPairingResult(attemptID: attemptID, ok: false, message: why) }
             ctx.log("[\(remote)] pairing failed: \(why)")
             try await stream.send(.reject(.init(reason: why)))
             throw MirageError.pairingFailed(why)
         }
         let sid = CPace.newSessionID()
         let channel = lv(ctx.tlsFingerprint) + lv(Data(ctx.identity.name.utf8))
-        let cpace = try CPace(password: pending.code, channelID: channel, sid: sid)
+        let cpace = try CPace(password: password, channelID: channel, sid: sid)
         let mine = try cpace.makeShare()
         try await stream.send(.pairChallenge(.init(sid: sid, hostName: ctx.identity.name, share: mine.publicShare)))
 
@@ -255,11 +264,32 @@ public enum HostSession {
         guard device.id == DeviceIdentity.id(forPublicKey: device.publicKey), device.publicKey.count == 32 else {
             try await fail("malformed identity")
         }
+        // Asked on the host before anything is authorized, code and link alike: the menu-bar UI's Allow/Deny, else the terminal
+        // that ran `miraged pair`.
+        ctx.log("[\(remote)] \(device.name) (\(device.id.prefix(12))) wants to pair; asking on the host")
+        let allowed: Bool
+        if let confirm = ctx.pairing.confirm { allowed = await confirm(device) }
+        else if let attemptID { allowed = await askPairTerminal(ctx.store, attemptID: attemptID, device: device) }
+        else { allowed = false }
+        guard allowed else { try await fail("denied on the host") }
         device.pairedAt = Date()
         try ctx.store.authorize(device)
         try await stream.send(.pairComplete(.init(sealed: try SealedBox.seal(ctx.identity.record, key: key))))
-        try ctx.store.setPairingResult(attemptID: pending.attemptID, ok: true, message: "paired \(device.name) (\(device.id.prefix(12)))")
+        if let attemptID { try ctx.store.setPairingResult(attemptID: attemptID, ok: true, message: "paired \(device.name) (\(device.id.prefix(12)))") }
+        ctx.pairing.paired?(device)
         ctx.log("[\(remote)] paired \(device.name) (\(device.id.prefix(12)))")
+    }
+
+    /// `miraged pair`'s Allow/Deny: the request goes to its terminal through the store; no answer in 60 s is a deny.
+    static func askPairTerminal(_ store: Store, attemptID: String, device: DeviceRecord) async -> Bool {
+        try? store.setPairingConfirmRequest(.init(attemptID: attemptID, deviceName: device.name, deviceID: device.id))
+        let deadline = Date().addingTimeInterval(60)
+        while Date() < deadline {
+            if let d = try? store.takePairingDecision(attemptID: attemptID) { return d }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        _ = try? store.takePairingConfirmRequest(attemptID: attemptID)
+        return false
     }
 }
 

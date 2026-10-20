@@ -10,5 +10,19 @@
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
+	<!-- Pairing links (DESIGN §3.1 pairing): the QR code the host's "Pair a Device…" window shows; Camera's "Open in Mirage". -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.paulherz.mirage.pair</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>miragerd</string>
+			</array>
+		</dict>
+	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Mirage uses the camera to scan the pairing code your Mac shows.</string>
 </dict>
 </plist>

@@ -109,6 +109,27 @@ public final class Store: @unchecked Sendable {
         return r
     }
 
+    /// The Allow/Deny question for a pairing that `miraged pair` started (no menu-bar UI): the daemon writes the request
+    /// once the device's identity is verified, the `pair` command asks its terminal and writes the decision.
+    public struct PairingConfirmRequest: Codable {
+        public var attemptID: String
+        public var deviceName: String
+        public var deviceID: String
+    }
+    public func setPairingConfirmRequest(_ r: PairingConfirmRequest) throws { try write(r, "pair-confirm.json") }
+    public func takePairingConfirmRequest(attemptID: String) throws -> PairingConfirmRequest? {
+        guard let r = try read(PairingConfirmRequest.self, "pair-confirm.json"), r.attemptID == attemptID else { return nil }
+        remove("pair-confirm.json")
+        return r
+    }
+    private struct PairingDecision: Codable { var attemptID: String; var allow: Bool }
+    public func setPairingDecision(attemptID: String, allow: Bool) throws { try write(PairingDecision(attemptID: attemptID, allow: allow), "pair-decision.json") }
+    public func takePairingDecision(attemptID: String) throws -> Bool? {
+        guard let d = try read(PairingDecision.self, "pair-decision.json"), d.attemptID == attemptID else { return nil }
+        remove("pair-decision.json")
+        return d.allow
+    }
+
     // MARK: Client: known hosts
 
     public struct KnownHost: Codable, Equatable {
