@@ -87,6 +87,28 @@ keyboard types, with the same scroll prediction and typeahead. Launched from Fin
 Macs, with a host field and a 6-digit code field for pairing a new one. The command line
 (`mirage-viewer HOST [--pair CODE] …`) still works for scripts and headless measurement.
 
+On a phone or tablet the picture fills the safe area (in landscape, the full height; the control pill hides itself
+after 3 s there, and the small handle in the corner brings it back). Stats are off until the stats button shows them
+as a small overlay. Touch gestures:
+
+| Gesture | Does |
+|---|---|
+| one finger drag | moves the pointer (trackpad style, accelerated) |
+| tap / taps in a row | click / double-click |
+| long press, then drag | press and drag (title bars move the window at once) |
+| two-finger drag | scrolls the remote content (with momentum) |
+| two-finger tap | right-click |
+| pinch | zooms the view about the fingers' centre, from fit up to 1:1 host pixels and half as far again (at least 3×); while pinching, the fingers' travel pans |
+| three-finger drag | pans the view |
+| two-finger double tap | toggles fit and 1:1 host pixels at that point |
+
+A two-finger gesture is a scroll once the fingers travel together 12 pt without spreading, and a zoom once they spread
+or close by 5 % first; it stays what it became until the fingers lift (so "two fingers after a pinch" pan the view
+rather than scroll). Three fingers are always the view pan. Zoom and pan are presentation only: the host sends the same
+stream at every zoom (a zoomed picture is that stream drawn larger), and no message goes out for them. Zoomed in, the
+view follows the pointer when it nears an edge, and from 1.5× it glides to keep the caret in view above the keyboard
+while typing. The keyboard never resizes the picture; it lifts it, or bounds how far a zoomed one pans.
+
 ## Pair a device
 
 On the host (over SSH is fine):
@@ -188,6 +210,7 @@ Sources/MirageCore/Rate        RateController (one-way-delay/dispersion based ta
 Sources/MirageCore/Render      Compositor (one Metal canvas per layer, MetalFX), SceneRenderer (layers, cut-outs, shadows), Predictor,
                                UnifiedLayout (which host windows become native windows, where, whose children)
 Sources/MirageCore/Video       VideoToolbox HEVC decoder (macOS + iOS)
+Sources/MirageCore/Input       touch input for iOS clients: Mac key codes, trackpad pointer, scroll momentum, ZoomViewport
 Sources/MirageCore/Crypto      CPace PAKE, device identity, sealed box
 Sources/MirageCore/Transport   QUIC client/host (Network.framework), framed streams, TLS identity
 Sources/MirageCore/Session     host and client protocol flows; DesktopStreamer protocol the host plugs into
@@ -197,7 +220,7 @@ Sources/MirageHost             macOS: display + per-window SCStream capture (lay
                                `miraged probe-layers` (per-window capture measurements)
 Sources/mirage-viewer          the viewer: Session/ (platform-neutral session layer: connection, presentation and prediction
                                state, typeahead), macOS/ (AppKit window, CAMetalLayer, scripted scenarios, Unified mode, native
-                               chrome), iOS/ (UIKit Desktop mode: touch pointer, scroll, keyboards)
+                               chrome), iOS/ (UIKit Desktop mode: touch pointer, scroll, zoom and pan, keyboards)
 App/                           the universal app target (project.yml for xcodegen, the generated Mirage.xcodeproj)
 Sources/miraged, Sources/mirage  CLIs
 experiments/                   measurements that fixed the design (tilebench, seqbench, probes) and the test bench app

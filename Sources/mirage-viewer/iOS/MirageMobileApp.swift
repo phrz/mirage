@@ -46,7 +46,7 @@ final class AppState: ObservableObject {
         UserDefaults.standard.set(address, forKey: "lastHost")
         let defaults = UserDefaults.standard
         let m = ViewerModel(bitrateKbps: defaults.object(forKey: "bitrate") as? Int ?? 800, pixelFactor: defaults.object(forKey: "scale") as? Double ?? 1.0)
-        m.showStats = defaults.bool(forKey: "stats")
+        m.showStats = false   // behind the stats button; a phone has no room to spare for them by default
         let s = ViewerSession(host: host, port: port, pairCode: pairCode, model: m)
         model = m; session = s
         s.start()

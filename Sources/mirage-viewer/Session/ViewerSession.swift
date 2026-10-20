@@ -1199,6 +1199,13 @@ final class ViewerSession: @unchecked Sendable {
         }
         onChange?()
     }
+    /// Where typing lands now (display-layer pixels): just after the last predicted glyph, else the host's caret; nil
+    /// without an editable focus. The iOS viewer keeps it in view when zoomed.
+    func typingCaret() -> PixelRect? {
+        predictorLock.lock(); defer { predictorLock.unlock() }
+        if let g = typeahead.glyphs.last { return PixelRect(x: g.rect.maxX, y: g.rect.y, width: 1, height: g.rect.height) }
+        return typeahead.caret?.caret
+    }
     func typeaheadInvalidate(seq: UInt64) { predictorLock.lock(); typeahead.invalidate(after: seq); predictorLock.unlock() }
     /// A click is about to be sent (it moves the caret): predictions wait for the host's report after it.
     func typeaheadInvalidateBeforeClick() { typeaheadInvalidate(seq: lastInputSeqSent() + 1) }
