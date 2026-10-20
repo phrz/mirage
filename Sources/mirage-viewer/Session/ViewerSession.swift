@@ -1389,6 +1389,7 @@ final class ViewerSession: @unchecked Sendable {
     /// canvas at its shown frame, with a shadow) or as a cut-out of the display layer.
     func scene(pxPerPoint: Double) -> LayerScene? {
         guard let bg = compositor, bg.width > 0 else { return nil }
+        scenePxPerPoint = pxPerPoint
         let arranged = arrangedWindows()
         let plan = LayerScenePlan.plan(arranged, hasCanvas: { id in (self.layerViews[id]?.compositor.width ?? 0) > 0 }, display: PixelRect(x: 0, y: 0, width: bg.width, height: bg.height), shadowMargin: Int(48 * pxPerPoint))
         let items = plan.sceneItems(pxPerPoint: Float(pxPerPoint), canvas: { self.layerViews[$0]?.compositor })
@@ -1442,9 +1443,14 @@ final class ViewerSession: @unchecked Sendable {
         return Double(i.width) / Double(i.displayWidth)
     }
 
-    /// Topmost window under a stream-pixel point, as arranged locally.
+    /// Topmost window under a stream-pixel point, as arranged locally. Display-sized windows above the normal level are
+    /// passed over (the Dock's transparent full-screen window at level 20 covers every point on macOS 26+: a press on a
+    /// title bar found it instead of the window, so no title-bar drag or local raise ever started under it).
     func window(at x: Int, _ y: Int) -> ControlMessage.WindowInfo? {
-        arrangedWindows().first { $0.frame.contains(x, y) }
+        let display = compositor.map { $0.width * $0.height } ?? 0
+        return arrangedWindows().first { w in
+            w.frame.contains(x, y) && (w.isLayered || w.windowLevel == 0 || w.frame.area * 10 < display * 6)
+        }
     }
 
     /// The rect a wheel event over `window` should shift (in the window's own coordinates when it is a
@@ -1468,15 +1474,26 @@ final class ViewerSession: @unchecked Sendable {
     /// Local drag of a layered window (DESIGN §3.2): the window moves here, nothing is streamed for it,
     /// and the host is told the frame through a window command (throttled; the final one on release).
     private var lastMoveCommandNanos: UInt64 = 0
+    /// A local layer drag's frame at its start and where the host lets it go (the frame shown and sent stays inside).
+    private var layerDragLimits: [UInt32: (start: PixelRect, limits: WindowDragLimits?)] = [:]   // under predictorLock
+    /// Pixels per point of the last scene drawn (the views pass it each frame).
+    private var scenePxPerPoint = 2.0
+    /// Where macOS lets a window of the host display be dragged (its menu bar from the window list), in stream pixels.
+    func windowDragLimits() -> WindowDragLimits? {
+        guard let c = compositor, c.width > 0, c.height > 0 else { return nil }
+        return WindowDragLimits.host(display: PixelRect(x: 0, y: 0, width: c.width, height: c.height), windows: windowsSnapshot(), pxPerPoint: scenePxPerPoint)
+    }
     func beginLayerDrag(windowID: UInt32) {
         guard let f = arrangedWindows().first(where: { $0.id == windowID })?.frame else { return }
-        predictorLock.lock(); localFrames[windowID] = LocalFrame(frame: f, inputSeq: 0, releasedNanos: 0); predictorLock.unlock()
+        let limits = windowDragLimits()
+        predictorLock.lock(); localFrames[windowID] = LocalFrame(frame: f, inputSeq: 0, releasedNanos: 0); layerDragLimits[windowID] = (f, limits); predictorLock.unlock()
         sendWindowCommand(.init(id: windowID, action: .raise))
         localRaise(windowID: windowID, inputSeq: lastInputSeqSent())
     }
     func dragLayer(windowID: UInt32, to frame: PixelRect) {
         predictorLock.lock()
         guard localFrames[windowID] != nil else { predictorLock.unlock(); return }
+        let frame = layerDragLimits[windowID].flatMap { d in d.limits?.clamp(frame, from: d.start) } ?? frame
         localFrames[windowID]?.frame = frame
         predictorLock.unlock()
         let now = Clock.nowNanos()
@@ -1487,6 +1504,7 @@ final class ViewerSession: @unchecked Sendable {
         predictorLock.lock()
         guard var lf = localFrames[windowID] else { predictorLock.unlock(); return }
         lf.releasedNanos = Clock.nowNanos()
+        layerDragLimits[windowID] = nil
         predictorLock.unlock()
         let seq = sendWindowCommand(.init(id: windowID, action: .move, x: lf.frame.x, y: lf.frame.y))
         lf.inputSeq = seq
@@ -1559,7 +1577,8 @@ final class ViewerSession: @unchecked Sendable {
     private func lastInputSeqSent() -> UInt64 { inputQueue.sync { input.lastSequence } }
 
     func beginDrag(windowID: UInt32, frame: PixelRect, pointer: (Int, Int), inputSeq: UInt64) {
-        predictorLock.lock(); predictor.beginDrag(windowID: windowID, frame: frame, pointer: pointer, inputSeq: inputSeq, now: Clock.nowNanos()); predictorLock.unlock()
+        let limits = windowDragLimits()
+        predictorLock.lock(); predictor.beginDrag(windowID: windowID, frame: frame, pointer: pointer, inputSeq: inputSeq, now: Clock.nowNanos(), limits: limits); predictorLock.unlock()
     }
     func dragPointer(windowID: UInt32, pointer: (Int, Int), inputSeq: UInt64) {
         predictorLock.lock(); predictor.dragPointer(windowID: windowID, pointer: pointer, inputSeq: inputSeq, now: Clock.nowNanos()); predictorLock.unlock()

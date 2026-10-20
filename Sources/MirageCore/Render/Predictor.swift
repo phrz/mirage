@@ -52,15 +52,27 @@ public struct Predictor {
         var lastHostNanos: UInt64
         var createdNanos: UInt64
         var ended = false
+        /// Where the host's window manager lets the window go (nil: anywhere).
+        var limits: WindowDragLimits?
         func pointer(at seq: UInt64) -> (x: Int, y: Int) { pointers.last(where: { $0.seq <= seq }).map { ($0.x, $0.y) } ?? pointer0 }
-        var residual: (dx: Int, dy: Int) { (last.x - pointer0.x - hostDX, last.y - pointer0.y - hostDY) }
+        /// The window's offset from `frame0` for a pointer at `p`: the pointer's travel, held inside the limits (the host's
+        /// window stops at the menu bar however far the pointer goes, so the prediction and the confirmations stop there too).
+        func expected(_ p: (x: Int, y: Int)) -> (dx: Int, dy: Int) {
+            let dx = p.x - pointer0.x, dy = p.y - pointer0.y
+            guard let limits else { return (dx, dy) }
+            let f = limits.clamp(frame0.offset(dx, dy), from: frame0)
+            return (f.x - frame0.x, f.y - frame0.y)
+        }
+        /// What is drawn: the window at the pointer (inside the limits), relative to the host's confirmed frame.
+        var residual: (dx: Int, dy: Int) { let e = expected(last); return (e.dx - hostDX, e.dy - hostDY) }
         var confirmedFrame: PixelRect { frame0.offset(hostDX, hostDY) }
     }
     private var drags: [UInt32: DragState] = [:]
 
-    public mutating func beginDrag(windowID: UInt32, frame: PixelRect, pointer: (Int, Int), inputSeq: UInt64, now: UInt64) {
+    /// `limits`: where the host lets the window go (WindowDragLimits); the shown window never leaves them.
+    public mutating func beginDrag(windowID: UInt32, frame: PixelRect, pointer: (Int, Int), inputSeq: UInt64, now: UInt64, limits: WindowDragLimits? = nil) {
         drags[windowID] = DragState(frame0: frame, pointer0: (pointer.0, pointer.1), seq0: inputSeq, pointers: [(inputSeq, pointer.0, pointer.1)], last: (pointer.0, pointer.1),
-                                    confirmedSeq: inputSeq, lastHostNanos: now, createdNanos: now)
+                                    confirmedSeq: inputSeq, lastHostNanos: now, createdNanos: now, limits: limits)
         if windows[windowID] == nil { windows[windowID] = WindowState() }
     }
     public mutating func dragPointer(windowID: UInt32, pointer: (Int, Int), inputSeq: UInt64, now: UInt64) {
@@ -98,8 +110,7 @@ public struct Predictor {
             guard var d = drags[id], var w = windows[id] else { continue }
             d.hostDX += dx; d.hostDY += dy; d.lastHostNanos = now
             if inputSeq > d.confirmedSeq { d.confirmedSeq = inputSeq }
-            let p = d.pointer(at: inputSeq > 0 ? inputSeq : d.confirmedSeq)
-            let ex = p.x - d.pointer0.x, ey = p.y - d.pointer0.y
+            let (ex, ey) = d.expected(d.pointer(at: inputSeq > 0 ? inputSeq : d.confirmedSeq))
             // Agreement per axis: the host has moved toward where the pointer was at k and not past it
             // (a host that reports the two axes in separate updates lags on one of them; that is fine).
             func agrees(_ h: Int, _ e: Int) -> Bool { h == 0 || (h.signum() == e.signum() && abs(h) <= abs(e) + 8) }
@@ -148,8 +159,7 @@ public struct Predictor {
         // where the pointer was at k.
         for id in drags.keys {
             guard var d = drags[id], inputSeq > d.confirmedSeq, inputSeq >= d.seq0, d.confirmedFrame.union(d.confirmedFrame.offset(d.residual.dx, d.residual.dy)).intersects(rect) else { continue }
-            let p = d.pointer(at: inputSeq)
-            d.hostDX = p.x - d.pointer0.x; d.hostDY = p.y - d.pointer0.y
+            (d.hostDX, d.hostDY) = d.expected(d.pointer(at: inputSeq))
             d.confirmedSeq = inputSeq; d.lastHostNanos = now
             drags[id] = d
         }
@@ -225,4 +235,48 @@ public struct Predictor {
     public func isConfident(_ windowID: UInt32) -> Bool { windows[windowID]?.confident ?? true }
     public var hasPending: Bool { windows.values.contains { !$0.predictions.isEmpty } || drags.values.contains { $0.residual.dx != 0 || $0.residual.dy != 0 } }
     public mutating func forget(windowID: UInt32) { windows[windowID] = nil; drags[windowID] = nil }
+}
+
+/// Where macOS lets a window be dragged, so a client-side drag (the display layer's window-drag prediction, a window
+/// layer moved locally) never shows a place the host will not accept, and the move commands sent for a layer stay inside
+/// it too: the title bar's top never goes above the menu bar's bottom, the title bar stays on the display at the bottom,
+/// and at least `reach` (40 pt) of the window stays on the display at the left and the right, so its title bar stays
+/// reachable. All in stream pixels.
+public struct WindowDragLimits: Equatable, Sendable {
+    public var display: PixelRect
+    /// The lowest the menu bar reaches: a window's top may not be above it.
+    public var menuBarBottom: Int
+    /// A title bar's height: a window's top may not be lower than the display's bottom less this.
+    public var titleBar: Int
+    /// How much of the window stays on the display at the left and the right.
+    public var reach: Int
+
+    public init(display: PixelRect, menuBarBottom: Int, titleBar: Int, reach: Int) {
+        self.display = display; self.menuBarBottom = menuBarBottom; self.titleBar = titleBar; self.reach = reach
+    }
+
+    /// The host display's limits: its menu bar from the window list (the windows at the menu bar's levels, 24 and 25, along
+    /// the display's top edge), else a standard 24 pt one; a 28 pt title bar; 40 pt of reach.
+    public static func host(display: PixelRect, windows: [ControlMessage.WindowInfo], pxPerPoint ppp: Double) -> WindowDragLimits {
+        func pt(_ v: Double) -> Int { Int((v * ppp).rounded()) }
+        let bars = windows.filter { w in
+            (w.windowLevel == 24 || w.windowLevel == 25) && w.frame.y <= display.y + 2 && w.frame.maxY > display.y
+                && w.frame.intersects(display) && w.frame.height < pt(80)
+        }
+        let menuBar = bars.map(\.frame.maxY).max() ?? display.y + pt(24)
+        return WindowDragLimits(display: display, menuBarBottom: menuBar, titleBar: pt(28), reach: pt(40))
+    }
+
+    /// `f` moved to the nearest place inside the limits. On an axis where `start` (the frame when the drag began) is
+    /// already outside them, the drag may keep it there or bring it in, never push it further out (no jump at mouse-down).
+    public func clamp(_ f: PixelRect, from start: PixelRect? = nil) -> PixelRect {
+        let r = min(reach, max(1, f.width))
+        var minX = display.x + r - f.width, maxX = display.maxX - r
+        var minY = menuBarBottom, maxY = max(menuBarBottom, display.maxY - titleBar)
+        if let s = start {
+            minX = min(minX, s.x); maxX = max(maxX, s.x)
+            minY = min(minY, s.y); maxY = max(maxY, s.y)
+        }
+        return PixelRect(x: min(max(f.x, minX), maxX), y: min(max(f.y, minY), maxY), width: f.width, height: f.height)
+    }
 }

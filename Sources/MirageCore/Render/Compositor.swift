@@ -684,9 +684,16 @@ public final class Compositor {
     fragment float4 blendFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]], constant float4& alpha [[buffer(0)]]) {
         return areaSample(tex, s, in.uv) * alpha.x;
     }
-    // Soft shadow of a rounded rect: `box` = rect in drawable pixels (x0,y0,x1,y1), `p` = (corner radius, blur px, opacity, 0).
+    // Soft shadow of a rounded rect: `box` = rect in drawable pixels (x0,y0,x1,y1), `p` = (corner radius, blur px, opacity, 0),
+    // `mask` = the window itself (unshifted), which the shadow never darkens.
     struct ShadowOut { float4 pos [[position]]; float2 px; };
-    struct Shadow { float4 ndc; float4 box; float4 p; };
+    struct Shadow { float4 ndc; float4 box; float4 p; float4 mask; };
+    float roundedBoxDistance(float2 px, float4 box, float r) {
+        float2 ext = (box.zw - box.xy) * 0.5;
+        float2 centre = (box.xy + box.zw) * 0.5;
+        float2 q = abs(px - centre) - ext + r;
+        return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+    }
     vertex ShadowOut shadowVertex(uint vid [[vertex_id]], constant Shadow& sh [[buffer(0)]]) {
         float2 corners[4] = { float2(0,0), float2(1,0), float2(0,1), float2(1,1) };
         float2 c = corners[vid];
@@ -697,14 +704,14 @@ public final class Compositor {
         return o;
     }
     fragment float4 shadowFragment(ShadowOut in [[stage_in]], constant Shadow& sh [[buffer(0)]]) {
-        float2 ext = (sh.box.zw - sh.box.xy) * 0.5;
-        float2 centre = (sh.box.xy + sh.box.zw) * 0.5;
         float r = sh.p.x;
-        float2 q = abs(in.px - centre) - ext + r;
-        float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
+        // Outside the window only: its inside belongs to the window (or, for a clipped cut-out, to the display layer). The
+        // window, not the shadow's box, which sits lower by the offset: masking that box left the strip between the
+        // window's bottom edge and the box's bottom bare, a gap under the window between it and its shadow.
+        if (roundedBoxDistance(in.px, sh.mask, r) < 0.0) discard_fragment();
+        // Full strength inside the offset box (under the window's bottom edge), fading outside it.
+        float d = max(roundedBoxDistance(in.px, sh.box, r), 0.0);
         float sigma = max(sh.p.y, 1.0) * 0.45;
-        // Outside the box only: the inside belongs to the window (or, for a clipped cut-out, to the display layer).
-        if (d < 0.0) discard_fragment();
         float a = sh.p.z * exp(-d * d / (2.0 * sigma * sigma));
         return float4(0, 0, 0, a);
     }
@@ -739,6 +746,18 @@ public struct LayerScene {
         public static func key(pxPerPoint: Float) -> Shadow { Shadow(cornerRadius: 12 * pxPerPoint, blur: 36 * pxPerPoint, offsetY: 10 * pxPerPoint, opacity: 0.55) }
         public static func inactive(pxPerPoint: Float) -> Shadow { Shadow(cornerRadius: 12 * pxPerPoint, blur: 14 * pxPerPoint, offsetY: 3 * pxPerPoint, opacity: 0.35) }
         public static func menu(pxPerPoint: Float) -> Shadow { Shadow(cornerRadius: 8 * pxPerPoint, blur: 18 * pxPerPoint, offsetY: 5 * pxPerPoint, opacity: 0.4) }
+
+        /// Where the shadow of a window drawn at `window` (drawable pixels: x0, y0, x1, y1) goes, at `scale` drawable pixels
+        /// per display pixel: `box`, the window's shape lowered by the offset, is the shadow at full strength, fading over
+        /// `blur` outside it within `quad`; `mask`, the window itself, is never darkened. The mask is the window, not `box`:
+        /// the strip between the window's bottom edge and the lowered box's bottom edge is shadow (a mask from the lowered
+        /// box left it bare, a gap between a window's bottom and its shadow, plain to see when the window moved).
+        public func geometry(window: SIMD4<Float>, scale: Float) -> (box: SIMD4<Float>, quad: SIMD4<Float>, mask: SIMD4<Float>, radius: Float, blur: Float) {
+            let off = offsetY * scale, b = blur * scale
+            let box = SIMD4<Float>(window.x, window.y + off, window.z, window.w + off)
+            let quad = SIMD4<Float>(box.x - b, box.y - b, box.z + b, box.w + b)   // the vertex shader assumes box ± blur
+            return (box, quad, window, cornerRadius * scale, b)
+        }
     }
     public struct Displacement { public var layerID: UInt32; public var displacement: Predictor.Displacement
         public init(layerID: UInt32, displacement: Predictor.Displacement) { self.layerID = layerID; self.displacement = displacement } }
@@ -845,12 +864,9 @@ public enum SceneRenderer {
             }
         }
         func drawShadow(_ s: LayerScene.Shadow, box: SIMD4<Float>) {
-            let scale = (sx + sy) / 2
-            let shifted = SIMD4<Float>(box.x, box.y + s.offsetY * scale, box.z, box.w + s.offsetY * scale)
-            let b = s.blur * scale
-            let quad = SIMD4<Float>(shifted.x - b, shifted.y - b, shifted.z + b, shifted.w + b)
-            struct ShadowUniform { var ndc: SIMD4<Float>; var box: SIMD4<Float>; var p: SIMD4<Float> }
-            var u = ShadowUniform(ndc: ndc(quad), box: shifted, p: SIMD4(s.cornerRadius * scale, b, s.opacity, 0))
+            let g = s.geometry(window: box, scale: (sx + sy) / 2)
+            struct ShadowUniform { var ndc: SIMD4<Float>; var box: SIMD4<Float>; var p: SIMD4<Float>; var mask: SIMD4<Float> }
+            var u = ShadowUniform(ndc: ndc(g.quad), box: g.box, p: SIMD4(g.radius, g.blur, s.opacity, 0), mask: g.mask)
             re.setRenderPipelineState(context.shadowPipeline)
             re.setVertexBytes(&u, length: MemoryLayout<ShadowUniform>.stride, index: 0)
             re.setFragmentBytes(&u, length: MemoryLayout<ShadowUniform>.stride, index: 0)
