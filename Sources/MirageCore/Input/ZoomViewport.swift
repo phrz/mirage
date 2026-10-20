@@ -43,7 +43,8 @@ public struct ZoomViewport: Equatable {
     /// Where the picture is drawn (view points).
     public var pictureRect: CGRect {
         let f = fitSize
-        return CGRect(x: origin.x, y: origin.y, width: f.width * zoom, height: f.height * zoom)
+        let o = overscroll
+        return CGRect(x: origin.x + o.x, y: origin.y + o.y, width: f.width * zoom, height: f.height * zoom)
     }
 
     /// Zoom at which one host display pixel is one device pixel: `hostPixelWidth` is the host display's native width
@@ -114,6 +115,7 @@ public struct ZoomViewport: Equatable {
     /// Zooms to `z` (clamped to the range) keeping the picture point under `anchor` where it is.
     public mutating func setZoom(_ z: Double, about anchor: CGPoint) {
         let n = normalized(anchor)
+        pull = .zero
         zoom = min(maxZoom, max(minZoom, z))
         let p = pictureRect.size
         origin = CGPoint(x: anchor.x - n.x * p.width, y: anchor.y - n.y * p.height)
@@ -124,6 +126,42 @@ public struct ZoomViewport: Equatable {
     public mutating func pan(by d: CGPoint) {
         origin.x += d.x; origin.y += d.y
         clamp()
+    }
+
+    /// A direct-touch swipe's travel beyond where the picture can go (view points): shown as a small rubber-band offset
+    /// (`overscroll`, at most `rubberLimit`) that springs back once the finger lifts (`relax`). Presentation only.
+    public private(set) var pull: CGPoint = .zero
+    public static let rubberLimit = 24.0
+    public var overscroll: CGPoint { CGPoint(x: Self.rubber(pull.x), y: Self.rubber(pull.y)) }
+    static func rubber(_ x: Double) -> Double {
+        let l = rubberLimit
+        return (x < 0 ? -1 : 1) * l * (1 - exp(-abs(x) / l))
+    }
+
+    /// Moves the picture by a finger's travel, clamped as `pan(by:)`; what the clamp holds back stretches the rubber band
+    /// (and travel back the other way relaxes it first). At fit nothing moves: the picture only gives a little and returns.
+    public mutating func pan(by d: CGPoint, rubberBand: Bool) {
+        guard rubberBand else { pan(by: d); return }
+        // Travel back toward the edge undoes the stretch first.
+        func unstretch(_ d: Double, _ pull: Double) -> (rest: Double, pull: Double) {
+            guard pull != 0, d != 0, (d < 0) != (pull < 0) else { return (d, pull) }
+            let take = abs(d) >= abs(pull) ? -pull : d
+            return (d - take, pull + take)
+        }
+        let ux = unstretch(d.x, pull.x), uy = unstretch(d.y, pull.y)
+        let before = origin
+        pan(by: CGPoint(x: ux.rest, y: uy.rest))
+        pull = CGPoint(x: ux.pull + ux.rest - (origin.x - before.x), y: uy.pull + uy.rest - (origin.y - before.y))
+    }
+
+    /// One frame of the rubber band springing back (time constant `tau`). Returns true while it is still stretched.
+    @discardableResult
+    public mutating func relax(dt: Double, tau: Double = 0.08) -> Bool {
+        guard pull != .zero else { return false }
+        let k = exp(-max(0, dt) / tau)
+        pull = CGPoint(x: pull.x * k, y: pull.y * k)
+        if abs(pull.x) < 0.3, abs(pull.y) < 0.3 { pull = .zero }
+        return pull != .zero
     }
 
     /// Sets zoom and origin outright (an animation's frame), clamped.

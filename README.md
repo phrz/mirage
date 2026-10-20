@@ -81,27 +81,45 @@ self-signed TLS certificate on first start under `~/Library/Application Support/
 ## Viewer app (GUI)
 
 `scripts/make-viewer-app.sh` builds `MirageViewer.app` (the universal app's macOS slice, incremental); copy it to
-`~/Applications`. On iPhone and iPad the same app (TestFlight) runs Desktop mode: one finger moves a
-trackpad-style pointer, tap clicks, two fingers scroll, a long press drags, and the on-screen or a hardware
-keyboard types, with the same scroll prediction and typeahead. Launched from Finder or the Dock it opens a connect window listing your paired
+`~/Applications`. On iPhone and iPad the same app (TestFlight) runs Desktop mode: touches act where they land
+(a tap clicks there, a hold presses there and drags, two fingers scroll there; a trackpad-style pointer is the other
+touch mode), and the on-screen or a hardware keyboard types, with the same scroll prediction and typeahead. Launched from Finder or the Dock it opens a connect window listing your paired
 Macs, with a host field and a 6-digit code field for pairing a new one. The command line
 (`mirage-viewer HOST [--pair CODE] …`) still works for scripts and headless measurement.
 
 On a phone or tablet the picture fills the safe area (in landscape, the full height; the control pill hides itself
 after 3 s there, and the small handle in the corner brings it back). Stats are off until the stats button shows them
-as a small overlay. Touch gestures:
+as a small overlay. The hand button in the pill switches the touch mode (kept across launches). **Direct touch**
+(the default) acts where the fingers are; the pointer jumps there and nothing is position-agnostic:
+
+| Gesture | Does |
+|---|---|
+| tap / taps in a row | click there / double-click (at the first tap's point) |
+| hold 0.35 s, then drag | press there (a tinted ring round the pointer while the button is down) and drag; lift to release; held without moving, a long click |
+| one finger swipe | pans the view (with momentum; at fit it only rubber-bands); sends nothing |
+| two-finger drag | the pointer goes where the fingers came down and the content there scrolls (with momentum) |
+| two-finger tap | right-click at its centre |
+| pinch, three-finger drag, two-finger double tap | zoom, pan and fit ↔ 1:1, as below |
+
+**Trackpad**:
 
 | Gesture | Does |
 |---|---|
 | one finger drag | moves the pointer (trackpad style, accelerated) |
 | tap / taps in a row | click / double-click |
-| long press, then drag | press and drag (title bars move the window at once) |
-| two-finger drag | scrolls the remote content (with momentum) |
+| long press, then drag | press and drag |
+| two-finger drag | scrolls the remote content at the pointer (with momentum) |
 | two-finger tap | right-click |
 | pinch | zooms the view about the fingers' centre, from fit up to 1:1 host pixels and half as far again (at least 3×); while pinching, the fingers' travel pans |
 | three-finger drag | pans the view |
 | two-finger double tap | toggles fit and 1:1 host pixels at that point |
 
+In both, a drag on a title bar moves the window here at once (a window layer locally, its frame sent to the host;
+a window the display layer carries through the window-drag prediction), never further than macOS lets a window go:
+its title bar stays below the menu bar and at least 40 pt of it on the display.
+
+A tap, a hold and a swipe are told apart by travel and time: a finger that moves 10 pt before 0.35 s is a swipe, one
+that stays is a hold at 0.35 s, one that lifts first is a tap.
 A two-finger gesture is a scroll once the fingers travel together 12 pt without spreading, and a zoom once they spread
 or close by 5 % first; it stays what it became until the fingers lift (so "two fingers after a pinch" pan the view
 rather than scroll). Three fingers are always the view pan. The stream is the host display at its own pixels (as the Mac
@@ -109,8 +127,8 @@ viewer's native snap): fit shows it downscaled with an area filter (no shimmer o
 pixels, sharp. Zoom and pan are presentation only: the host sends the same stream at every zoom, orientation and keyboard
 state, so no message goes out for them and a rotation never reconfigures the stream (`-nativeStream 0` asks for the old
 fit-sized stream instead). An app relaunched by iOS resumes its session with the saved token and says it holds no picture;
-the host then sends every layer's picture afresh in the same session (DESIGN §4a). Zoomed in, the
-view follows the pointer when it nears an edge, and from 1.5× it glides to keep the caret in view above the keyboard
+the host then sends every layer's picture afresh in the same session (DESIGN §4a). Zoomed in, in trackpad mode,
+the view follows the pointer when it nears an edge, and from 1.5× it glides to keep the caret in view above the keyboard
 while typing. The keyboard never resizes the picture; it lifts it, or bounds how far a zoomed one pans.
 
 ## Pair a device

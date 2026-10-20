@@ -11,6 +11,8 @@ struct DesktopScreen: View {
     @ObservedObject var model: ViewerModel
     let onDisconnect: () -> Void
     @State private var keyboard = false
+    /// Direct touch (the default) or trackpad: how touches on the picture act (DesktopUIView), kept across launches.
+    @AppStorage(TouchMode.defaultsKey) private var touchMode = TouchMode.direct
     @State private var toolbarShown = true
     @State private var hideToolbar: Task<Void, Never>?
 
@@ -19,7 +21,7 @@ struct DesktopScreen: View {
             GeometryReader { geo in
                 let landscape = geo.size.width > geo.size.height
                 ZStack(alignment: .topLeading) {
-                    DesktopView(session: session, model: model, keyboard: $keyboard, safeInsets: UIEdgeInsets(top: geo.safeAreaInsets.top, left: geo.safeAreaInsets.leading, bottom: geo.safeAreaInsets.bottom, right: geo.safeAreaInsets.trailing))
+                    DesktopView(session: session, model: model, keyboard: $keyboard, touchMode: touchMode, safeInsets: UIEdgeInsets(top: geo.safeAreaInsets.top, left: geo.safeAreaInsets.leading, bottom: geo.safeAreaInsets.bottom, right: geo.safeAreaInsets.trailing))
                         .ignoresSafeArea()
                     if model.showStats {
                         StatsPanel(model: model).padding(.top, landscape ? 8 : 44).padding(.leading, 8)
@@ -77,6 +79,16 @@ struct DesktopScreen: View {
     private var controls: some View {
         HStack(spacing: 14) {
             Button { keyboard.toggle(); showToolbar() } label: { Image(systemName: keyboard ? "keyboard.chevron.compact.down" : "keyboard") }
+            Menu {
+                Picker("Touch", selection: $touchMode) {
+                    Label(TouchMode.direct.title, systemImage: "hand.tap").tag(TouchMode.direct)
+                    Label(TouchMode.trackpad.title, systemImage: "rectangle.and.hand.point.up.left").tag(TouchMode.trackpad)
+                }
+            } label: {
+                Image(systemName: touchMode == .direct ? "hand.tap" : "rectangle.and.hand.point.up.left")
+            }
+            .accessibilityLabel("Touch: \(touchMode.title)")
+            .onChange(of: touchMode) { showToolbar() }
             Button { model.showStats.toggle(); showToolbar() } label: { Image(systemName: "chart.bar.xaxis") }
             Button(role: .destructive) { onDisconnect() } label: { Image(systemName: "xmark") }
         }
@@ -141,6 +153,7 @@ struct DesktopView: UIViewRepresentable {
     let session: ViewerSession
     @ObservedObject var model: ViewerModel
     @Binding var keyboard: Bool
+    let touchMode: TouchMode
     let safeInsets: UIEdgeInsets
 
     func makeUIView(context: Context) -> DesktopUIView {
@@ -152,6 +165,7 @@ struct DesktopView: UIViewRepresentable {
     }
     func updateUIView(_ v: DesktopUIView, context: Context) {
         v.safeInsets = safeInsets
+        v.touchMode = touchMode
         v.setSoftKeyboard(keyboard)
         v.updateCursorLayer()
         v.scheduleStreamRequest()

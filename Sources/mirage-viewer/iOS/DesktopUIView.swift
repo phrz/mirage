@@ -4,12 +4,21 @@ import QuartzCore
 import CoreText
 import MirageCore
 
-/// Presents the session's scene on a CAMetalLayer and turns touches into Mac input, trackpad style: one finger moves
-/// the pointer (relative, accelerated), a tap clicks (two taps in a row double-click), two fingers scroll (into the
-/// session's scroll prediction, with momentum), a two-finger tap right-clicks, a long press holds the button for a
-/// drag (title-bar drags run the window-drag prediction). Typing goes through the on-screen keyboard or a hardware
-/// keyboard, both with typeahead. The picture keeps its size when the keyboard shows and lifts so the pointer stays
-/// above it.
+/// Presents the session's scene on a CAMetalLayer and turns touches into Mac input, in one of two modes (`TouchMode`,
+/// switched from the control pill and kept in UserDefaults):
+/// - Direct touch (the default; `DirectTouch` decides the gestures from the raw touches): everything happens where the
+///   finger is. A tap clicks there (taps in a row double-click); a finger held still for 0.35 s presses the button there
+///   (a tinted ring round the pointer while it is down), moving then drags and lifting releases; a one-finger swipe pans
+///   the view (presentation only, with momentum; at fit it only rubber-bands); two fingers scroll at the point where they
+///   came down (the pointer goes there first); a two-finger tap right-clicks at its centre. The pointer jumps to the
+///   touches; there is no relative motion and no edge follow.
+/// - Trackpad: one finger moves the pointer (relative, accelerated), a tap clicks (two taps in a row double-click), two
+///   fingers scroll at the pointer (with momentum), a two-finger tap right-clicks, a long press holds the button for a
+///   drag, and zoomed, the view follows the pointer at the edges.
+/// In both, title-bar drags move the window here at once: a window layer moves locally and the host is sent its frame
+/// (as the Mac viewer does), a window the display layer carries runs the window-drag prediction; both stay where macOS
+/// lets a window go (`WindowDragLimits`). Typing goes through the on-screen keyboard or a hardware keyboard, both with
+/// typeahead. The picture keeps its size when the keyboard shows and lifts so the pointer stays above it.
 ///
 /// The stream is the host display at its native pixels (as the Mac viewer's native snap), drawn downscaled at fit with an
 /// area filter, so zoom up to 1:1 shows real host pixels, sharp. Zoom and pan are presentation only (`ZoomViewport`):
@@ -40,6 +49,22 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private var pressLocation = CGPoint.zero
     private var pressing = false
     private var drag: (windowID: UInt32, frame: PixelRect)?
+    /// A press on a window layer's title bar (right of the traffic lights): a local drag once the pointer moves, else the
+    /// click goes on release (as the Mac viewer: the press itself never travels while it may be a drag).
+    private var layerDrag: (windowID: UInt32, frame: PixelRect, start: (Int, Int), moved: Bool)?
+    /// The tinted ring round the pointer while a direct-touch hold keeps the button down.
+    private let holdRing = CAShapeLayer()
+
+    /// Direct touch or trackpad; switching ends whatever gesture is in progress.
+    var touchMode = TouchMode.stored() { didSet { if touchMode != oldValue { touchModeChanged() } } }
+    private var direct = DirectTouch()
+    /// The trackpad mode's recognizers (off in direct mode, which reads the raw touches), and direct mode's
+    /// scroll-wheel-only one (an iPad's trackpad or mouse wheel scrolls at the pointer).
+    private var trackpadRecognizers: [UIGestureRecognizer] = []
+    private weak var wheelRecognizer: UIPanGestureRecognizer?
+    private var lastWheelTranslation = CGPoint.zero
+    /// A direct-touch swipe's coast after the finger lifts (view points per second).
+    private var viewMomentum = ScrollMomentum()
     /// On-screen keyboard: shown on request; sticky modifiers from its accessory bar apply to the next key.
     private var softKeyboard = false
     private var sticky: UInt64 = 0
@@ -78,7 +103,15 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         layer.addSublayer(cursorLayer)
         typeaheadLayer.zPosition = 5
         layer.addSublayer(typeaheadLayer)
+        holdRing.zPosition = 9
+        holdRing.fillColor = UIColor.systemBlue.withAlphaComponent(0.22).cgColor
+        holdRing.strokeColor = UIColor.systemBlue.withAlphaComponent(0.75).cgColor
+        holdRing.lineWidth = 2
+        holdRing.path = UIBezierPath(ovalIn: CGRect(x: -Self.ringRadius, y: -Self.ringRadius, width: 2 * Self.ringRadius, height: 2 * Self.ringRadius)).cgPath
+        holdRing.isHidden = true
+        layer.addSublayer(holdRing)
         installGestures()
+        applyTouchMode()
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardFrame(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(keyboardHidden(_:)), name: UIResponder.keyboardWillHideNotification, object: nil)
     }
@@ -109,6 +142,8 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     @objc private func tick(_ link: CADisplayLink) {
         let dt = link.targetTimestamp - link.timestamp
         if momentum.active { let d = momentum.step(dt: dt); scroll(viewDX: d.dx, viewDY: d.dy) }
+        if touchMode == .direct { perform(direct.tick(time: CACurrentMediaTime())) }
+        stepViewMomentum(dt: dt)
         syncViewport()
         stepZoomAnimation()
         followCaret(dt: dt)
@@ -175,8 +210,21 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         updateCursorLayer()
     }
 
-    /// Stops what moves the view by itself (a double tap's zoom, the caret glide) when a person takes over.
-    private func stopAutoMotion() { zoomAnimation = nil; caretGlide = nil }
+    /// Stops what moves the view by itself (a double tap's zoom, the caret glide, a swipe's coast) when a person takes over.
+    private func stopAutoMotion() { zoomAnimation = nil; caretGlide = nil; viewMomentum.stop() }
+
+    /// A direct-touch swipe's coast, and its rubber band springing back once no finger holds it.
+    private func stepViewMomentum(dt: Double) {
+        if viewMomentum.active {
+            let d = viewMomentum.step(dt: dt), before = viewport.origin
+            viewport.pan(by: CGPoint(x: d.dx, y: d.dy))
+            if viewport.origin == before { viewMomentum.stop() }   // at the edge: nothing left to coast
+            caretGlide = nil
+            viewportChanged()
+        }
+        let held = direct.phase == .panning || direct.phase == .multi(.viewPan)
+        if !held, viewport.pull != .zero { viewport.relax(dt: dt); viewportChanged() }
+    }
 
     private func animateZoom(to z: Double, about anchor: CGPoint, duration: Double = 0.25) {
         caretGlide = nil
@@ -254,6 +302,8 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 
     // MARK: Cursor
 
+    static let ringRadius: CGFloat = 22
+
     private static let fallbackCursor: CGImage? = {
         let r = UIGraphicsImageRenderer(size: CGSize(width: 18, height: 18))
         return r.image { ctx in
@@ -267,8 +317,10 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         if !pointerFromHost, let rc = model.remoteCursor { pointer.x = rc.x; pointer.y = rc.y; pointerFromHost = true }
         CATransaction.begin(); CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
-        guard session?.compositor?.width ?? 0 > 0 else { cursorLayer.isHidden = true; return }
+        guard session?.compositor?.width ?? 0 > 0 else { cursorLayer.isHidden = true; holdRing.isHidden = true; return }
         let pos = pointerInView
+        holdRing.position = pos
+        holdRing.isHidden = !(pressing && touchMode == .direct)
         cursorLayer.isHidden = false
         if let c = model.cursor, let img = c.image.cgImage {
             cursorLayer.contents = img
@@ -335,7 +387,112 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         let zoomTap = UITapGestureRecognizer(target: self, action: #selector(zoomTap(_:)))
         zoomTap.numberOfTouchesRequired = 2; zoomTap.numberOfTapsRequired = 2
         rightTap.require(toFail: zoomTap)   // a right click waits out the double tap (~0.3 s)
-        for g in [move, scroll, tap, rightTap, press, hover, pinch, viewPan, zoomTap] as [UIGestureRecognizer] { g.delegate = self; addGestureRecognizer(g) }
+        // Direct mode: no touches, only an iPad trackpad's or mouse's scroll events (scrolling at the pointer).
+        let wheel = UIPanGestureRecognizer(target: self, action: #selector(wheel(_:)))
+        wheel.allowedTouchTypes = []
+        wheel.allowedScrollTypesMask = .all
+        wheelRecognizer = wheel
+        trackpadRecognizers = [move, scroll, tap, rightTap, press, pinch, viewPan, zoomTap]
+        for g in [move, scroll, tap, rightTap, press, hover, pinch, viewPan, zoomTap, wheel] as [UIGestureRecognizer] { g.delegate = self; addGestureRecognizer(g) }
+    }
+
+    /// Turns the trackpad recognizers on or off for the mode (direct mode reads the raw touches itself).
+    private func applyTouchMode() {
+        for g in trackpadRecognizers { g.isEnabled = touchMode == .trackpad }
+        wheelRecognizer?.isEnabled = touchMode == .direct
+    }
+
+    private func touchModeChanged() {
+        perform(direct.cancel())
+        if pressing { pressEnded() }
+        momentum.stop(); viewMomentum.stop()
+        multi = .idle; multiActive.removeAll()
+        applyTouchMode()
+        updateCursorLayer()
+        session?.log("touch mode: \(touchMode.rawValue)")
+    }
+
+    // MARK: Direct touch
+
+    private func touchID(_ t: UITouch) -> Int { ObjectIdentifier(t).hashValue }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard touchMode == .direct else { super.touchesBegan(touches, with: event); return }
+        let now = CACurrentMediaTime()
+        for t in touches { perform(direct.began(touchID(t), at: t.location(in: self), time: now)) }
+    }
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard touchMode == .direct else { super.touchesMoved(touches, with: event); return }
+        let now = CACurrentMediaTime()
+        for t in touches { perform(direct.moved(touchID(t), to: t.location(in: self), time: now)) }
+    }
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard touchMode == .direct else { super.touchesEnded(touches, with: event); return }
+        let now = CACurrentMediaTime()
+        for t in touches { perform(direct.ended(touchID(t), at: t.location(in: self), time: now)) }
+    }
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard touchMode == .direct else { super.touchesCancelled(touches, with: event); return }
+        perform(direct.cancel())
+    }
+
+    /// Carries out what the direct-touch gestures decided. Every Mac action first puts the pointer where it applies.
+    private func perform(_ actions: [DirectTouch.Action]) {
+        for a in actions {
+            switch a {
+            case .click(let p, let n):
+                jumpPointer(to: p); click(count: n)
+            case .holdBegan(let p):
+                jumpPointer(to: p); pressBegan()
+            case .holdMoved(let p):
+                jumpPointer(to: p, send: false); pressMoved()
+            case .holdEnded(let p):
+                jumpPointer(to: p, send: false); pressEnded()
+            case .rightClick(let p):
+                jumpPointer(to: p); rightClick()
+            case .scrollBegan(let p):
+                momentum.stop(); stopAutoMotion(); jumpPointer(to: p)
+            case .scroll(let dx, let dy):
+                scroll(viewDX: dx, viewDY: dy)
+            case .scrollEnded(let vx, let vy):
+                momentum.start(vx: vx, vy: vy)
+            case .pinchBegan(let p):
+                momentum.stop(); stopAutoMotion(); pinchBase = viewport.zoom; pinchLast = p
+            case .pinch(let s, let p):
+                pinchStep(zoom: pinchBase * s, at: p)
+            case .pinchEnded:
+                break
+            case .pan(let dx, let dy):
+                momentum.stop(); stopAutoMotion()
+                viewport.pan(by: CGPoint(x: dx, y: dy), rubberBand: true)
+                viewportChanged()
+            case .panEnded(let vx, let vy):
+                if viewport.pull == .zero { viewMomentum.start(vx: vx, vy: vy) }
+            case .zoomToggle(let p):
+                toggleZoom(at: p)
+            }
+        }
+    }
+
+    /// Direct touch: the pointer jumps to a view point (clamped to the picture), and the host is told unless `send` is false.
+    private func jumpPointer(to p: CGPoint, send: Bool = true) {
+        let n = viewport.normalized(p)
+        pointer.x = min(1, max(0, Double(n.x))); pointer.y = min(1, max(0, Double(n.y)))
+        updateCursorLayer()
+        if send, !observeOnly { session?.sendMouseMove(x: pointer.x, y: pointer.y) }
+    }
+
+    /// Direct mode's iPad trackpad or mouse wheel: scrolls at the pointer (where the hover put it).
+    @objc private func wheel(_ g: UIPanGestureRecognizer) {
+        switch g.state {
+        case .began: momentum.stop(); lastWheelTranslation = .zero
+        case .changed:
+            let t = g.translation(in: self)
+            scroll(viewDX: t.x - lastWheelTranslation.x, viewDY: t.y - lastWheelTranslation.y)
+            lastWheelTranslation = t
+        case .ended: let v = g.velocity(in: self); momentum.start(vx: v.x, vy: v.y)
+        default: break
+        }
     }
 
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
@@ -421,6 +578,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 
     /// Pointer follow: zoomed (or lifted above the keyboard), the view pans when the pointer nears its edge.
     func followPointer() {
+        guard touchMode == .trackpad else { return }   // direct touch: the view moves only when a person moves it
         let before = viewport.origin
         viewport.follow(pointerInView, margin: keyboardHeight > 0 ? 48 : 40)
         if viewport.origin != before { caretGlide = nil; viewportChanged() }
@@ -457,21 +615,28 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 
     @objc private func tap(_ g: UITapGestureRecognizer) { tapForDemo() }
     func momentumStartForDemo(vy: Double) { momentum.start(vx: 0, vy: vy) }
+    /// Trackpad mode's tap: a click at the pointer (taps in a row at the same place double- and triple-click).
     func tapForDemo() {
-        momentum.stop()
-        guard !observeOnly, let session else { return }
-        session.typeaheadInvalidateBeforeClick()
         let now = CACurrentMediaTime()
         var count = 1
         if let t = lastTap, now - t.time < 0.45, abs(t.x - pointer.x) < 0.02, abs(t.y - pointer.y) < 0.02 { count = min(3, t.count + 1) }
         lastTap = (now, pointer.x, pointer.y, count)
+        click(count: count)
+    }
+
+    /// A left click at the pointer; a click in a window layer brings it to the front here at once.
+    private func click(count: Int) {
+        momentum.stop()
+        guard !observeOnly, let session else { return }
+        session.typeaheadInvalidateBeforeClick()
         let seq = button(0, down: true, clickCount: count)
         if let p = streamPixel(), let w = session.window(at: p.0, p.1), w.isLayered, w.windowLevel == 0, modifierFlags == 0 { session.localRaise(windowID: w.id, inputSeq: seq) }
         button(0, down: false, clickCount: count)
         clearSticky()
     }
 
-    @objc private func rightTap(_ g: UITapGestureRecognizer) {
+    @objc private func rightTap(_ g: UITapGestureRecognizer) { rightClick() }
+    private func rightClick() {
         momentum.stop()
         session?.typeaheadInvalidateBeforeClick()
         button(1, down: true); button(1, down: false)
@@ -479,37 +644,83 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     @objc private func longPress(_ g: UILongPressGestureRecognizer) {
-        guard !observeOnly, let session else { return }
         let loc = g.location(in: self)
         switch g.state {
         case .began:
-            momentum.stop()
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            session.typeaheadInvalidateBeforeClick()
-            pressing = true; pressLocation = loc; lastPanTime = 0
-            let seq = button(0, down: true)
-            // A press on a title bar the display layer carries: the drag moves the window's pixels here at once (DESIGN §3.5).
-            if let p = streamPixel(), let w = session.window(at: p.0, p.1), !w.isLayered {
-                let titleBar = Int(28 * session.pixelsPerPoint)
-                if p.1 < w.frame.y + titleBar { drag = (w.id, w.frame); session.beginDrag(windowID: w.id, frame: w.frame, pointer: p, inputSeq: seq) }
-            }
+            pressLocation = loc
+            pressBegan()
         case .changed:
+            guard pressing else { return }
             movePointer(by: CGPoint(x: loc.x - pressLocation.x, y: loc.y - pressLocation.y), now: CACurrentMediaTime())
             pressLocation = loc
-            if let d = drag, let p = streamPixel() {
-                let seq = session.send(.mouseMove(.init(x: pointer.x, y: pointer.y)))
-                session.dragPointer(windowID: d.windowID, pointer: p, inputSeq: seq)
-            } else {
-                session.sendMouseMove(x: pointer.x, y: pointer.y)
-            }
+            pressMoved()
         default:
-            guard pressing else { return }
-            pressing = false
-            button(0, down: false)
-            if let d = drag { session.endDrag(windowID: d.windowID) }
-            drag = nil
-            clearSticky()
+            pressEnded()
         }
+    }
+
+    /// The button goes down at the pointer (a long press, a direct-touch hold). On a title bar the drag that may follow
+    /// moves the window here at once: a window layer locally, its press held back until it is clearly a click (as the Mac
+    /// viewer does); a window the display layer carries through the window-drag prediction (DESIGN §3.5).
+    private func pressBegan() {
+        guard !observeOnly, let session else { return }
+        momentum.stop()
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        session.typeaheadInvalidateBeforeClick()
+        pressing = true; lastPanTime = 0
+        defer { updateCursorLayer() }   // the hold ring
+        guard let p = streamPixel(), let w = session.window(at: p.0, p.1) else { button(0, down: true); return }
+        let ppp = session.pixelsPerPoint
+        let titleBar = Int(28 * ppp), trafficLights = Int(80 * ppp)
+        if w.isLayered, w.windowLevel == 0, modifierFlags == 0, p.1 < w.frame.y + titleBar, p.0 > w.frame.x + trafficLights {
+            layerDrag = (w.id, w.frame, p, false)
+            return
+        }
+        let seq = button(0, down: true)
+        if !w.isLayered, p.1 < w.frame.y + titleBar { drag = (w.id, w.frame); session.beginDrag(windowID: w.id, frame: w.frame, pointer: p, inputSeq: seq) }
+        else if w.isLayered, w.windowLevel == 0, modifierFlags == 0 { session.localRaise(windowID: w.id, inputSeq: seq) }
+    }
+
+    /// The pointer moved (already updated) with the button down.
+    private func pressMoved() {
+        guard pressing, !observeOnly, let session else { return }
+        if var ld = layerDrag, let p = streamPixel() {
+            let dx = p.0 - ld.start.0, dy = p.1 - ld.start.1
+            if !ld.moved {
+                guard abs(dx) >= 3 || abs(dy) >= 3 else { return }
+                ld.moved = true; layerDrag = ld
+                session.beginLayerDrag(windowID: ld.windowID)
+            }
+            session.dragLayer(windowID: ld.windowID, to: ld.frame.offset(dx, dy))   // held where macOS lets a window go
+            return
+        }
+        if let d = drag, let p = streamPixel() {
+            let seq = session.send(.mouseMove(.init(x: pointer.x, y: pointer.y)))
+            session.dragPointer(windowID: d.windowID, pointer: p, inputSeq: seq)
+        } else {
+            session.sendMouseMove(x: pointer.x, y: pointer.y)
+        }
+    }
+
+    /// The button comes up at the pointer; a held-back title-bar press that never moved goes out as a click now.
+    private func pressEnded() {
+        guard pressing else { return }
+        pressing = false
+        defer { updateCursorLayer(); clearSticky() }
+        guard let session, !observeOnly else { layerDrag = nil; drag = nil; return }
+        if let ld = layerDrag {
+            layerDrag = nil
+            if ld.moved { session.endLayerDrag(windowID: ld.windowID) }
+            else {
+                let seq = button(0, down: true)
+                session.localRaise(windowID: ld.windowID, inputSeq: seq)
+                button(0, down: false)
+            }
+            return
+        }
+        button(0, down: false)
+        if let d = drag { session.endDrag(windowID: d.windowID) }
+        drag = nil
     }
 
     /// Two fingers travelling together scroll the remote content. Until the gesture is decided (they could still spread
@@ -755,6 +966,7 @@ extension DesktopUIView {
         await pause(3)
         guard let session, let comp = session.compositor, comp.width > 0 else { log("no picture"); return }
         let bench = session.windowsSnapshot().first { $0.title.contains("Mirage Test Bench") && !$0.title.contains("overlay") }
+        if touchMode == .direct { await runDirectDemo(bench: bench, log: log, describe: describe, hold: hold); return }
         let target = bench.map { (Double($0.frame.x + $0.frame.width / 2) / Double(comp.width), Double($0.frame.y + $0.frame.height / 3) / Double(comp.height)) } ?? (0.4, 0.4)
         log("moving the pointer to \(target); \(describe()); 1:1 is \(String(format: "%.2f", oneToOne))x, max \(String(format: "%.2f", viewport.maxZoom))x")
         // One finger: 40 small relative moves toward the target, as a pan would deliver them.
@@ -832,6 +1044,117 @@ extension DesktopUIView {
         await pause(3)
         log("portrait again: \(describe())")
         log("done; typeahead \(session.typeaheadCounts()), predictions \(model?.stats.predictions ?? (0, 0, 0, 0))")
+    }
+
+    /// Direct touch's demo (the default mode; `-touchMode trackpad` runs the one above): the same raw-touch path a finger
+    /// takes, through `DirectTouch`. Shots: direct-hold (the ring round the pointer while a hold keeps the button down),
+    /// direct-drag-clamped (the bench's title bar dragged far above the display, held at the menu bar), direct-drag-shadow
+    /// (the bench mid-drag, its shadow attached; a second bench, `--still --index 10`, behind it shows the shadow).
+    func runDirectDemo(bench: ControlMessage.WindowInfo?, log: (String) -> Void, describe: () -> String, hold: Double) async {
+        func pause(_ s: Double) async { try? await Task.sleep(for: .milliseconds(Int(s * 1000))) }
+        guard let session, let comp = session.compositor, comp.width > 0 else { return }
+        // The largest bench window (a `--still` one behind it has the same title).
+        let bench = session.windowsSnapshot().filter { $0.title.contains("Mirage Test Bench") && !$0.title.contains("overlay") }.max { $0.frame.area < $1.frame.area } ?? bench
+        func view(_ x: Int, _ y: Int) -> CGPoint { viewport.viewPoint(CGPoint(x: Double(x) / Double(comp.width), y: Double(y) / Double(comp.height))) }
+        func now() -> Double { CACurrentMediaTime() }
+        func down(_ id: Int, _ p: CGPoint) { perform(direct.began(id, at: p, time: now())) }
+        func move(_ id: Int, _ p: CGPoint) { perform(direct.moved(id, to: p, time: now())) }
+        func up(_ id: Int, _ p: CGPoint) { perform(direct.ended(id, at: p, time: now())) }
+        func benchFrame() -> PixelRect? { bench.flatMap { b in session.arrangedWindows().first { $0.id == b.id }?.frame } }
+        let ppp = session.pixelsPerPoint
+        let f0 = benchFrame() ?? PixelRect(x: comp.width / 4, y: comp.height / 4, width: comp.width / 2, height: comp.height / 2)
+        // A point of the bench at height `y` that no other window covers (the person's own windows may be in front of
+        // it: they are black in the picture but still take the clicks), from the right.
+        func benchX(atY y: Int) -> Int {
+            guard let id = bench?.id else { return f0.x + f0.width / 2 }
+            for x in stride(from: f0.maxX - Int(100 * ppp), to: f0.x + Int(100 * ppp), by: -Int(20 * ppp)) where session.window(at: x, y)?.id == id { return x }
+            return f0.x + f0.width / 2
+        }
+        let body = view(benchX(atY: f0.y + f0.height / 2), f0.y + f0.height / 2)
+        log("direct touch: picture \(comp.width)x\(comp.height) at \(String(format: "%.2f", ppp)) px/pt, bench \(f0), body at \(Int(body.x)),\(Int(body.y)); \(describe())")
+
+        log("tap (click) on the bench")
+        down(1, body); await pause(0.08); up(1, body)
+        log(String(format: "pointer %.3f,%.3f after the tap", pointer.x, pointer.y))
+        await pause(1)
+
+        let spot = CGPoint(x: body.x - 20, y: body.y + 30)
+        log("two-finger swipe at \(Int(spot.x)),\(Int(spot.y)) (the pointer goes there first)")
+        down(1, CGPoint(x: spot.x - 18, y: spot.y)); down(2, CGPoint(x: spot.x + 18, y: spot.y))
+        for i in 1...30 { let y = spot.y - Double(i) * 4; move(1, CGPoint(x: spot.x - 18, y: y)); move(2, CGPoint(x: spot.x + 18, y: y)); await pause(0.016) }
+        up(1, CGPoint(x: spot.x - 18, y: spot.y - 120)); up(2, CGPoint(x: spot.x + 18, y: spot.y - 120))
+        let n = viewport.normalized(spot)
+        log(String(format: "scrolled with the pointer at %.3f,%.3f (the swipe began at %.3f,%.3f)", pointer.x, pointer.y, n.x, n.y))
+        await pause(2.5)
+
+        log("hold on the bench's text")
+        let holdAt = CGPoint(x: body.x + 30, y: body.y + 10)
+        down(1, holdAt)
+        await pause(0.6)
+        log("shot direct-hold: holding \(direct.holding), ring shown \(!holdRing.isHidden) at \(Int(holdRing.position.x)),\(Int(holdRing.position.y))")
+        await pause(hold)
+        up(1, holdAt)
+        await pause(1)
+
+        // Title bar, right of the traffic lights: a local drag of the window layer.
+        let grabX = benchX(atY: f0.y + Int(14 * ppp))
+        let grab = view(grabX, f0.y + Int(14 * ppp))
+        log("hold the bench's title bar at \(Int(grab.x)),\(Int(grab.y)), then drag far above the display")
+        down(1, grab); await pause(0.6)
+        let under = streamPixel().flatMap { session.window(at: $0.0, $0.1) }
+        log("holding \(direct.holding), pressing \(pressing), layer drag \(layerDrag.map { "\($0.windowID)" } ?? "none"), under the finger \(under.map { "\($0.id) \($0.frame) layered \($0.isLayered) level \($0.windowLevel)" } ?? "nothing"), pointer px \(streamPixel().map { "\($0)" } ?? "?")")
+        var p = grab
+        for _ in 0..<40 { p.y -= 8; move(1, p); await pause(0.016) }
+        let limits = session.windowDragLimits()
+        log("shot direct-drag-clamped: ring at \(Int(holdRing.position.x)),\(Int(holdRing.position.y)) shown \(!holdRing.isHidden), bench at \(benchFrame().map { "\($0)" } ?? "?"), menu bar bottom \(limits?.menuBarBottom ?? -1), pointer y \(String(format: "%.3f", pointer.y))")
+        await pause(hold)
+        let mid = view(grabX + Int(400 * ppp), f0.y + Int(14 * ppp) - Int(80 * ppp))   // its bottom edge over the --still bench
+        let from = p
+        for i in 1...40 { move(1, CGPoint(x: from.x + (mid.x - from.x) * Double(i) / 40, y: from.y + (mid.y - from.y) * Double(i) / 40)); await pause(0.016) }
+        await pause(0.5)
+        log("shot direct-drag-shadow: bench at \(benchFrame().map { "\($0)" } ?? "?") mid-drag")
+        await pause(hold)
+        // Back where it was, then let go (the host is sent the final frame).
+        for i in 1...30 { move(1, CGPoint(x: mid.x + (grab.x - mid.x) * Double(i) / 30, y: mid.y + (grab.y - mid.y) * Double(i) / 30)); await pause(0.016) }
+        up(1, grab)
+        log("dropped: bench at \(benchFrame().map { "\($0)" } ?? "?")")
+        await pause(1.5)
+
+        log("one-finger swipe at fit: the view only rubber-bands")
+        let o0 = viewport.origin
+        down(1, body)
+        var maxPull = 0.0
+        for i in 1...20 { move(1, CGPoint(x: body.x + Double(i) * 6, y: body.y)); maxPull = max(maxPull, abs(viewport.overscroll.x)); await pause(0.016) }
+        up(1, CGPoint(x: body.x + 120, y: body.y))
+        await pause(0.8)
+        log(String(format: "fit swipe: picture moved %.1f pt, rubber band at most %.1f pt, now %.1f", viewport.origin.x - o0.x, maxPull, viewport.overscroll.x))
+
+        log("pinch out about the bench")
+        down(1, CGPoint(x: body.x - 30, y: body.y)); down(2, CGPoint(x: body.x + 30, y: body.y))
+        for i in 1...30 { let s = 30 + Double(i) * 2.5; move(1, CGPoint(x: body.x - s, y: body.y)); move(2, CGPoint(x: body.x + s, y: body.y)); await pause(0.016) }
+        up(1, CGPoint(x: body.x - 105, y: body.y)); up(2, CGPoint(x: body.x + 105, y: body.y))
+        await pause(0.5)
+        log("pinched: \(describe())")
+        let o1 = viewport.origin
+        log("one-finger swipe zoomed: pans the view, with momentum")
+        down(1, body)
+        for i in 1...12 { move(1, CGPoint(x: body.x - Double(i) * 8, y: body.y - Double(i) * 3)); await pause(0.016) }
+        up(1, CGPoint(x: body.x - 96, y: body.y - 36))
+        let o2 = viewport.origin
+        await pause(1.5)
+        log(String(format: "swipe moved the view by %.0f,%.0f pt, then coasted %.0f,%.0f more; ", o2.x - o1.x, o2.y - o1.y, viewport.origin.x - o2.x, viewport.origin.y - o2.y) + describe())
+
+        log("two-finger tap: right click at its centre")
+        down(1, CGPoint(x: body.x - 15, y: body.y)); down(2, CGPoint(x: body.x + 15, y: body.y)); await pause(0.08)
+        up(1, CGPoint(x: body.x - 15, y: body.y)); up(2, CGPoint(x: body.x + 15, y: body.y))
+        await pause(0.6)
+        log("two-finger double tap: back to fit")
+        for _ in 0..<2 {
+            down(1, CGPoint(x: body.x - 15, y: body.y)); down(2, CGPoint(x: body.x + 15, y: body.y)); await pause(0.06)
+            up(1, CGPoint(x: body.x - 15, y: body.y)); up(2, CGPoint(x: body.x + 15, y: body.y)); await pause(0.12)
+        }
+        await pause(1)
+        log("done: \(describe()); typeahead \(session.typeaheadCounts()), predictions \(model?.stats.predictions ?? (0, 0, 0, 0))")
     }
 
     /// A one-finger pan's relative move (at the slow-speed gain), with the pointer follow and the host message it sends.
