@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged with the keys Xcode generates from INFOPLIST_KEY_* (project.yml). -->
+	<!-- TLS (Network.framework QUIC) and CryptoKit for pairing and authentication only: exempt encryption. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+</dict>
+</plist>

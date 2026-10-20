@@ -3,3 +3,6 @@
 *.xcodeproj
 DerivedData/
 .DS_Store
+!App/Mirage.xcodeproj
+App/Mirage.xcodeproj/xcuserdata/
+App/Mirage.xcodeproj/project.xcworkspace/xcuserdata/

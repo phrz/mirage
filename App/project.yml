@@ -1,0 +1,64 @@
+# The universal viewer app: one multiplatform target, one bundle ID, macOS + iOS/iPadOS.
+# Generated project: `cd App && xcodegen` rewrites Mirage.xcodeproj (committed, so building needs no xcodegen).
+# It compiles the viewer sources directly: Session/ on both platforms, macOS/ (the AppKit shell, the same code the
+# SwiftPM `mirage-viewer` executable builds) on macOS, iOS/ (the UIKit shell) on iOS; MirageCore comes from the package.
+# macOS: scripts/make-viewer-app.sh builds this target's macOS slice. iOS: scripts/testflight.sh archives and uploads.
+name: Mirage
+options:
+  deploymentTarget:
+    iOS: "18.0"
+    macOS: "15.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+packages:
+  mirage:
+    path: ..
+settings:
+  base:
+    DEVELOPMENT_TEAM: M8MME6Q9DA
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.0"
+targets:
+  Mirage:
+    type: application
+    supportedDestinations: [iOS, macOS]
+    sources:
+      - path: ../Sources/mirage-viewer/Session
+      - path: ../Sources/mirage-viewer/macOS
+        destinationFilters: [macOS]
+      - path: ../Sources/mirage-viewer/iOS
+        destinationFilters: [iOS]
+      - path: ../Resources/AppIcon/Mirage.icon
+        buildPhase: resources
+      - path: Info.plist
+        buildPhase: none
+    dependencies:
+      - package: mirage
+        product: MirageCore
+    settings:
+      base:
+        PRODUCT_NAME: $(MIRAGE_DISPLAY_NAME)
+        EXECUTABLE_NAME: mirage-viewer   # what scripts and the README run: MirageViewer.app/Contents/MacOS/mirage-viewer
+        PRODUCT_MODULE_NAME: MirageViewer
+        PRODUCT_BUNDLE_IDENTIFIER: com.paulherz.mirage.viewer
+        MARKETING_VERSION: "0.1"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_FILE: Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: Mirage
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
+        MIRAGE_DISPLAY_NAME: Mirage
+        "MIRAGE_DISPLAY_NAME[sdk=macosx*]": Mirage Viewer
+        INFOPLIST_KEY_CFBundleDisplayName: $(MIRAGE_DISPLAY_NAME)
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
+        INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Paul Herz. MIT License."
+        "INFOPLIST_KEY_NSPrincipalClass[sdk=macosx*]": NSApplication
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UIStatusBarHidden: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Mirage connects to the Macs you pair with on your network or tailnet."

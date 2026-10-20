@@ -1,0 +1,493 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		02C30CF91CABAD7B585B8A85 /* FrameRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A039621C4424832989C4A1A /* FrameRecorder.swift */; };
+		0401C52935F2431E4B784216 /* DesktopScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61A964E5F86A904D06271A3C /* DesktopScreen.swift */; platformFilters = (ios, ); };
+		0A9D86C4DE67E4D1C82774EF /* ViewerSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36B08FB0AB333C5BF3D9169D /* ViewerSession.swift */; };
+		46D30AF3F39A48744DF90F90 /* MirageMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94041AC28A8D6CF3C18CA60D /* MirageMobileApp.swift */; platformFilters = (ios, ); };
+		4B51E2C9DAA080EF89B09D51 /* MirageCore in Frameworks */ = {isa = PBXBuildFile; productRef = A64D72A433235EF9BA968170 /* MirageCore */; };
+		5806200ECD467E6E29684245 /* Mirage.icon in Resources */ = {isa = PBXBuildFile; fileRef = D1D14F159E78A770D98B82A4 /* Mirage.icon */; };
+		5B03047D40613D9C3826A023 /* Platform.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5A091BBAF5F9D0F34BDF6C4 /* Platform.swift */; };
+		5E29C9104A30409B5C6EA9CB /* Unified.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96DFD8B7C81BC987F0A960F5 /* Unified.swift */; platformFilters = (macos, ); };
+		5FC9544B06B13331B5934BAF /* Chrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AE5FD5C36D96F3FE4880DF3 /* Chrome.swift */; platformFilters = (macos, ); };
+		9F81234815924FEF8EB01746 /* DesktopUIView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A012EA69D739F5F36CCBC5B /* DesktopUIView.swift */; platformFilters = (ios, ); };
+		A36B00FD87DA0282B315DE59 /* VideoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84838572B7559A918F1883CE /* VideoView.swift */; platformFilters = (macos, ); };
+		AE29317519B59DDEEE6F1938 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F051063B2CD19A89826AD87 /* main.swift */; platformFilters = (macos, ); };
+		C01EF64A342ECCC2D8D751D4 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07B010D4125FA8BF5A3CAC6A /* Keychain.swift */; };
+		FF8FFCE340676176152EC41A /* Scenarios.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB767911CB322E11A4CF8EE6 /* Scenarios.swift */; platformFilters = (macos, ); };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		07B010D4125FA8BF5A3CAC6A /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
+		1A012EA69D739F5F36CCBC5B /* DesktopUIView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopUIView.swift; sourceTree = "<group>"; };
+		1F1B24601B3BA9FBB7FA9EBA /* Mirage.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Mirage.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		36B08FB0AB333C5BF3D9169D /* ViewerSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerSession.swift; sourceTree = "<group>"; };
+		5AE5FD5C36D96F3FE4880DF3 /* Chrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Chrome.swift; sourceTree = "<group>"; };
+		61A964E5F86A904D06271A3C /* DesktopScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopScreen.swift; sourceTree = "<group>"; };
+		670E76E253BB3EF4D7177FA4 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		84838572B7559A918F1883CE /* VideoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoView.swift; sourceTree = "<group>"; };
+		8A039621C4424832989C4A1A /* FrameRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameRecorder.swift; sourceTree = "<group>"; };
+		8F051063B2CD19A89826AD87 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		94041AC28A8D6CF3C18CA60D /* MirageMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MirageMobileApp.swift; sourceTree = "<group>"; };
+		96DFD8B7C81BC987F0A960F5 /* Unified.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Unified.swift; sourceTree = "<group>"; };
+		B4C92F1C2636806E15C0F4E7 /* agent-aedd48cf68202d6f6 */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "agent-aedd48cf68202d6f6"; path = ..; sourceTree = SOURCE_ROOT; };
+		B5A091BBAF5F9D0F34BDF6C4 /* Platform.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Platform.swift; sourceTree = "<group>"; };
+		CB767911CB322E11A4CF8EE6 /* Scenarios.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Scenarios.swift; sourceTree = "<group>"; };
+		D1D14F159E78A770D98B82A4 /* Mirage.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = Mirage.icon; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		D685DA08310A8C12F6E29BB0 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4B51E2C9DAA080EF89B09D51 /* MirageCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		02EC2D7BFF27DF85B1CCD8F6 /* AppIcon */ = {
+			isa = PBXGroup;
+			children = (
+				D1D14F159E78A770D98B82A4 /* Mirage.icon */,
+			);
+			path = AppIcon;
+			sourceTree = "<group>";
+		};
+		042E4A4EEE5A6044B2D918AC /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				02EC2D7BFF27DF85B1CCD8F6 /* AppIcon */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		0C9EACDAB4ADA3BED510F620 /* macOS */ = {
+			isa = PBXGroup;
+			children = (
+				5AE5FD5C36D96F3FE4880DF3 /* Chrome.swift */,
+				8F051063B2CD19A89826AD87 /* main.swift */,
+				CB767911CB322E11A4CF8EE6 /* Scenarios.swift */,
+				96DFD8B7C81BC987F0A960F5 /* Unified.swift */,
+				84838572B7559A918F1883CE /* VideoView.swift */,
+			);
+			path = macOS;
+			sourceTree = "<group>";
+		};
+		1F4A280C3239CB8A32440D74 /* agent-aedd48cf68202d6f6 */ = {
+			isa = PBXGroup;
+			children = (
+				042E4A4EEE5A6044B2D918AC /* Resources */,
+				50BED010D00D4C146BE6C71D /* Sources */,
+			);
+			name = "agent-aedd48cf68202d6f6";
+			path = ..;
+			sourceTree = "<group>";
+		};
+		3E514C3C34FE85763C0BDEC4 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				1F1B24601B3BA9FBB7FA9EBA /* Mirage.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		50BED010D00D4C146BE6C71D /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				68FD21A25CC89502FC46C95F /* mirage-viewer */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		68FD21A25CC89502FC46C95F /* mirage-viewer */ = {
+			isa = PBXGroup;
+			children = (
+				9EC2814CBCAA9B4BEA2E7379 /* iOS */,
+				0C9EACDAB4ADA3BED510F620 /* macOS */,
+				96F1A13E936A034F2ABD5665 /* Session */,
+			);
+			path = "mirage-viewer";
+			sourceTree = "<group>";
+		};
+		96F1A13E936A034F2ABD5665 /* Session */ = {
+			isa = PBXGroup;
+			children = (
+				8A039621C4424832989C4A1A /* FrameRecorder.swift */,
+				07B010D4125FA8BF5A3CAC6A /* Keychain.swift */,
+				B5A091BBAF5F9D0F34BDF6C4 /* Platform.swift */,
+				36B08FB0AB333C5BF3D9169D /* ViewerSession.swift */,
+			);
+			path = Session;
+			sourceTree = "<group>";
+		};
+		9EC2814CBCAA9B4BEA2E7379 /* iOS */ = {
+			isa = PBXGroup;
+			children = (
+				61A964E5F86A904D06271A3C /* DesktopScreen.swift */,
+				1A012EA69D739F5F36CCBC5B /* DesktopUIView.swift */,
+				94041AC28A8D6CF3C18CA60D /* MirageMobileApp.swift */,
+			);
+			path = iOS;
+			sourceTree = "<group>";
+		};
+		CA1F54A8C4CAA0117425397F = {
+			isa = PBXGroup;
+			children = (
+				1F4A280C3239CB8A32440D74 /* agent-aedd48cf68202d6f6 */,
+				FD5E879AF466A9F9F342EACF /* Packages */,
+				670E76E253BB3EF4D7177FA4 /* Info.plist */,
+				3E514C3C34FE85763C0BDEC4 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		FD5E879AF466A9F9F342EACF /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				B4C92F1C2636806E15C0F4E7 /* agent-aedd48cf68202d6f6 */,
+			);
+			name = Packages;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		B48E88F0AED84BCCAF04F865 /* Mirage */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FE72F8760A20C3845CB01CE3 /* Build configuration list for PBXNativeTarget "Mirage" */;
+			buildPhases = (
+				454DA222E1FEEBC5F51C41C4 /* Sources */,
+				B357F57091F2F21E65636BD7 /* Resources */,
+				D685DA08310A8C12F6E29BB0 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Mirage;
+			packageProductDependencies = (
+				A64D72A433235EF9BA968170 /* MirageCore */,
+			);
+			productName = Mirage;
+			productReference = 1F1B24601B3BA9FBB7FA9EBA /* Mirage.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		64BB6AA7F87D7B7DEDE3C3FE /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					B48E88F0AED84BCCAF04F865 = {
+						DevelopmentTeam = M8MME6Q9DA;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = FA753B8BD8333853E63810A1 /* Build configuration list for PBXProject "Mirage" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = CA1F54A8C4CAA0117425397F;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				EEB22C01000A710F57525F97 /* XCLocalSwiftPackageReference ".." */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 3E514C3C34FE85763C0BDEC4 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				B48E88F0AED84BCCAF04F865 /* Mirage */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		B357F57091F2F21E65636BD7 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5806200ECD467E6E29684245 /* Mirage.icon in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		454DA222E1FEEBC5F51C41C4 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				5FC9544B06B13331B5934BAF /* Chrome.swift in Sources */,
+				0401C52935F2431E4B784216 /* DesktopScreen.swift in Sources */,
+				9F81234815924FEF8EB01746 /* DesktopUIView.swift in Sources */,
+				02C30CF91CABAD7B585B8A85 /* FrameRecorder.swift in Sources */,
+				C01EF64A342ECCC2D8D751D4 /* Keychain.swift in Sources */,
+				46D30AF3F39A48744DF90F90 /* MirageMobileApp.swift in Sources */,
+				5B03047D40613D9C3826A023 /* Platform.swift in Sources */,
+				FF8FFCE340676176152EC41A /* Scenarios.swift in Sources */,
+				5E29C9104A30409B5C6EA9CB /* Unified.swift in Sources */,
+				A36B00FD87DA0282B315DE59 /* VideoView.swift in Sources */,
+				0A9D86C4DE67E4D1C82774EF /* ViewerSession.swift in Sources */,
+				AE29317519B59DDEEE6F1938 /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		79C1EAB9F8AFBD873672F40F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = Mirage;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				EXECUTABLE_NAME = "mirage-viewer";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "$(MIRAGE_DISPLAY_NAME)";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Paul Herz. MIT License.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Mirage connects to the Macs you pair with on your network or tailnet.";
+				"INFOPLIST_KEY_NSPrincipalClass[sdk=macosx*]" = NSApplication;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UIStatusBarHidden = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				MIRAGE_DISPLAY_NAME = Mirage;
+				"MIRAGE_DISPLAY_NAME[sdk=macosx*]" = "Mirage Viewer";
+				PRODUCT_BUNDLE_IDENTIFIER = com.paulherz.mirage.viewer;
+				PRODUCT_MODULE_NAME = MirageViewer;
+				PRODUCT_NAME = "$(MIRAGE_DISPLAY_NAME)";
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		9D8C3F682E846E92C1216F90 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = M8MME6Q9DA;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		D4C2A33C80D68A03455FA199 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = M8MME6Q9DA;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		F892431146CEB0352DEBF2E2 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = Mirage;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				CURRENT_PROJECT_VERSION = 1;
+				EXECUTABLE_NAME = "mirage-viewer";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "$(MIRAGE_DISPLAY_NAME)";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Paul Herz. MIT License.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Mirage connects to the Macs you pair with on your network or tailnet.";
+				"INFOPLIST_KEY_NSPrincipalClass[sdk=macosx*]" = NSApplication;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UIStatusBarHidden = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 0.1;
+				MIRAGE_DISPLAY_NAME = Mirage;
+				"MIRAGE_DISPLAY_NAME[sdk=macosx*]" = "Mirage Viewer";
+				PRODUCT_BUNDLE_IDENTIFIER = com.paulherz.mirage.viewer;
+				PRODUCT_MODULE_NAME = MirageViewer;
+				PRODUCT_NAME = "$(MIRAGE_DISPLAY_NAME)";
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
+				SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD = NO;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		FA753B8BD8333853E63810A1 /* Build configuration list for PBXProject "Mirage" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				9D8C3F682E846E92C1216F90 /* Debug */,
+				D4C2A33C80D68A03455FA199 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		FE72F8760A20C3845CB01CE3 /* Build configuration list for PBXNativeTarget "Mirage" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				79C1EAB9F8AFBD873672F40F /* Debug */,
+				F892431146CEB0352DEBF2E2 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		EEB22C01000A710F57525F97 /* XCLocalSwiftPackageReference ".." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ..;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A64D72A433235EF9BA968170 /* MirageCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MirageCore;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = 64BB6AA7F87D7B7DEDE3C3FE /* Project object */;
+}

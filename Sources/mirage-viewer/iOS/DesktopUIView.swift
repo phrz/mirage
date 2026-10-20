@@ -1,0 +1,521 @@
+import UIKit
+import Metal
+import QuartzCore
+import CoreText
+import MirageCore
+
+/// Presents the session's scene on a CAMetalLayer and turns touches into Mac input, trackpad style: one finger moves
+/// the pointer (relative, accelerated), a tap clicks (two taps in a row double-click), two fingers scroll (into the
+/// session's scroll prediction, with momentum), a two-finger tap right-clicks, a long press holds the button for a
+/// drag (title-bar drags run the window-drag prediction). Typing goes through the on-screen keyboard or a hardware
+/// keyboard, both with typeahead. The picture keeps its size when the keyboard shows and lifts so the pointer stays
+/// above it.
+final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
+    override class var layerClass: AnyClass { CAMetalLayer.self }
+    private var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
+    private let cursorLayer = CALayer()
+    private let typeaheadLayer = CALayer()
+    private var glyphLayers: [UInt64: (text: CATextLayer, line: CALayer)] = [:]
+    var session: ViewerSession?
+    var model: ViewerModel?
+    private var displayLink: CADisplayLink?
+    private var lastRequested = (0, 0)
+    private var resizeWork: DispatchWorkItem?
+    private var forceRedraw = false
+    private var lastDisplacementCount = 0, lastArrangement = -1
+
+    private var pointer = TrackpadPointer()
+    private var pointerFromHost = false
+    private var lastPanTranslation = CGPoint.zero, lastPanTime: CFTimeInterval = 0
+    private var lastScrollTranslation = CGPoint.zero
+    private var momentum = ScrollMomentum()
+    private var lastTap: (time: CFTimeInterval, x: Double, y: Double, count: Int)?
+    private var pressLocation = CGPoint.zero
+    private var pressing = false
+    private var drag: (windowID: UInt32, frame: PixelRect)?
+    /// On-screen keyboard: shown on request; sticky modifiers from its accessory bar apply to the next key.
+    private var softKeyboard = false
+    private var sticky: UInt64 = 0
+    private var keyboardHeight: CGFloat = 0
+    /// Hardware keyboard: modifier flags held now.
+    private var hardwareFlags: UInt64 = 0
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .black
+        isMultipleTouchEnabled = true
+        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.framebufferOnly = true
+        metalLayer.isOpaque = true
+        cursorLayer.zPosition = 10
+        cursorLayer.contentsGravity = .resize
+        cursorLayer.isHidden = true
+        layer.addSublayer(cursorLayer)
+        typeaheadLayer.zPosition = 5
+        layer.addSublayer(typeaheadLayer)
+        installGestures()
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardFrame(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(keyboardHidden(_:)), name: UIResponder.keyboardWillHideNotification, object: nil)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func attach(_ session: ViewerSession) {
+        self.session = session
+        metalLayer.device = session.compositor?.device ?? session.context?.device
+        session.onChange = { [weak self] in DispatchQueue.main.async { self?.forceRedraw = true } }
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        displayLink?.invalidate(); displayLink = nil
+        guard window != nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(tick(_:)))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 60)
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+        DispatchQueue.main.async { self.becomeFirstResponder() }   // hardware keys arrive here; the soft keyboard stays hidden
+    }
+
+    // MARK: Presentation
+
+    @objc private func tick(_ link: CADisplayLink) {
+        if momentum.active { let d = momentum.step(dt: link.targetTimestamp - link.timestamp); scroll(viewDX: d.dx, viewDY: d.dy) }
+        guard let session, let comp = session.compositor, comp.width > 0, let context = session.context else { return }
+        guard let scene = session.scene(pxPerPoint: session.pixelsPerPoint) else { return }
+        let arrangement = session.arrangementGeneration
+        var layersDirty = false
+        for it in scene.items { if case .layer(let c, _, _, _) = it, c.needsRender { layersDirty = true; break } }
+        let changed = comp.needsRender || layersDirty || !scene.displacements.isEmpty || lastDisplacementCount != scene.displacements.count || arrangement != lastArrangement || session.hasPendingPredictions || forceRedraw
+        lastDisplacementCount = scene.displacements.count; lastArrangement = arrangement; forceRedraw = false
+        guard changed, let drawable = metalLayer.nextDrawable() else { return }
+        let scale = metalLayer.contentsScale
+        let r = videoRect
+        let dest = CGRect(x: r.minX * scale, y: r.minY * scale, width: r.width * scale, height: r.height * scale)
+        session.lastDest = dest
+        SceneRenderer.render(scene, context: context, to: drawable, dest: dest)
+        drawTypeahead()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let scale = window?.screen.scale ?? traitCollection.displayScale
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        metalLayer.contentsScale = scale
+        metalLayer.drawableSize = CGSize(width: max(1, bounds.width * scale), height: max(1, bounds.height * scale))
+        CATransaction.commit()
+        session?.compositor?.invalidate()
+        forceRedraw = true
+        updateCursorLayer()
+        scheduleStreamRequest()
+    }
+
+    private func scheduleStreamRequest() {
+        resizeWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in self?.sendStreamRequest() }
+        resizeWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300), execute: w)
+    }
+
+    /// The stream is the view's pixel size (× the pixel factor); the host scales its display into it.
+    func sendStreamRequest() {
+        guard let session, let model, bounds.width > 0, bounds.height > 0 else { return }
+        let scale = window?.screen.scale ?? traitCollection.displayScale
+        let w = Int(bounds.width * scale * model.pixelFactor), h = Int(bounds.height * scale * model.pixelFactor)
+        guard (w, h) != lastRequested else { return }
+        lastRequested = (w, h)
+        session.requestStream(width: w, height: h)
+    }
+
+    /// Where the picture is (letterboxed), in points, lifted above the on-screen keyboard as far as the pointer needs.
+    var videoRect: CGRect {
+        let b = bounds
+        guard b.width > 0, b.height > 0 else { return b }
+        var aspect: CGFloat = 16 / 9
+        if let comp = session?.compositor, comp.width > 0 { aspect = CGFloat(comp.width) / CGFloat(comp.height) }
+        var r: CGRect
+        if b.width / b.height > aspect { let w = b.height * aspect; r = CGRect(x: (b.width - w) / 2, y: 0, width: w, height: b.height) }
+        else { let h = b.width / aspect; r = CGRect(x: 0, y: (b.height - h) / 2, width: b.width, height: h) }
+        if keyboardHeight > 0 {
+            let pointerY = r.minY + CGFloat(pointer.y) * r.height
+            let visibleBottom = b.height - keyboardHeight - 48
+            r.origin.y -= min(max(0, pointerY - visibleBottom), keyboardHeight)
+        }
+        return r
+    }
+
+    private var pointerInView: CGPoint { let r = videoRect; return CGPoint(x: r.minX + CGFloat(pointer.x) * r.width, y: r.minY + CGFloat(pointer.y) * r.height) }
+    private func streamPixel() -> (Int, Int)? {
+        guard let comp = session?.compositor, comp.width > 0 else { return nil }
+        return (Int(pointer.x * Double(comp.width)), Int(pointer.y * Double(comp.height)))
+    }
+
+    // MARK: Cursor
+
+    private static let fallbackCursor: CGImage? = {
+        let r = UIGraphicsImageRenderer(size: CGSize(width: 18, height: 18))
+        return r.image { ctx in
+            UIColor.black.withAlphaComponent(0.6).setStroke(); UIColor.white.setFill()
+            let p = UIBezierPath(ovalIn: CGRect(x: 3, y: 3, width: 12, height: 12)); p.lineWidth = 2; p.fill(); p.stroke()
+        }.cgImage
+    }()
+
+    func updateCursorLayer() {
+        guard let model else { return }
+        if !pointerFromHost, let rc = model.remoteCursor { pointer.x = rc.x; pointer.y = rc.y; pointerFromHost = true }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        guard session?.compositor?.width ?? 0 > 0 else { cursorLayer.isHidden = true; return }
+        let pos = pointerInView
+        cursorLayer.isHidden = false
+        if let c = model.cursor, let img = c.image.cgImage {
+            cursorLayer.contents = img
+            cursorLayer.frame = CGRect(x: pos.x - c.hotspot.x, y: pos.y - c.hotspot.y, width: c.size.width, height: c.size.height)
+        } else {
+            cursorLayer.contents = Self.fallbackCursor
+            cursorLayer.frame = CGRect(x: pos.x - 9, y: pos.y - 9, width: 18, height: 18)
+        }
+    }
+
+    // MARK: Typeahead overlay (as the Mac viewer draws it: predicted glyphs at the predicted caret, underlined until confirmed)
+
+    private func drawTypeahead() {
+        guard let session, let comp = session.compositor, comp.width > 0 else { return }
+        let v = session.typeaheadSnapshot()
+        let r = videoRect, k = r.width / CGFloat(comp.width)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        let live = Set(v.glyphs.map(\.seq))
+        for (seq, l) in glyphLayers where !live.contains(seq) { l.text.removeFromSuperlayer(); l.line.removeFromSuperlayer(); glyphLayers[seq] = nil }
+        let pt = CGFloat(v.size) * CGFloat(session.pixelsPerPoint) * k
+        let font = v.font.flatMap { UIFont(name: $0, size: pt) } ?? UIFont.systemFont(ofSize: pt)
+        let color = v.color.map { UIColor(red: $0[0], green: $0[1], blue: $0[2], alpha: $0.count > 3 ? $0[3] : 1) } ?? .label
+        for g in v.glyphs {
+            let frame = CGRect(x: r.minX + CGFloat(g.rect.x) * k, y: r.minY + CGFloat(g.rect.y) * k, width: CGFloat(g.rect.width) * k + 2, height: CGFloat(g.rect.height) * k)
+            let l = glyphLayers[g.seq] ?? {
+                let t = CATextLayer(); t.contentsScale = metalLayer.contentsScale; t.alignmentMode = .left
+                let line = CALayer(); line.backgroundColor = UIColor.systemBlue.withAlphaComponent(0.8).cgColor
+                typeaheadLayer.addSublayer(t); typeaheadLayer.addSublayer(line)
+                glyphLayers[g.seq] = (t, line); return (t, line)
+            }()
+            l.text.font = CTFontCreateWithName(font.fontName as CFString, pt, nil)
+            l.text.fontSize = pt
+            l.text.foregroundColor = color.cgColor
+            l.text.string = g.text
+            let lineH = font.ascender - font.descender
+            l.text.frame = CGRect(x: frame.minX, y: frame.minY + (frame.height - lineH) / 2, width: frame.width, height: lineH + 2)
+            l.line.frame = CGRect(x: frame.minX, y: frame.maxY - max(1, k * 2), width: frame.width - 2, height: max(1, k * 2))
+            l.line.isHidden = g.confirmed
+        }
+    }
+
+    // MARK: Gestures
+
+    private var observeOnly: Bool { model?.observeOnly ?? false }
+
+    private func installGestures() {
+        let move = UIPanGestureRecognizer(target: self, action: #selector(movePan(_:)))
+        move.minimumNumberOfTouches = 1; move.maximumNumberOfTouches = 1
+        let scroll = UIPanGestureRecognizer(target: self, action: #selector(scrollPan(_:)))
+        scroll.minimumNumberOfTouches = 2; scroll.maximumNumberOfTouches = 2
+        scroll.allowedScrollTypesMask = .continuous   // an iPad trackpad's two-finger scroll too
+        let tap = UITapGestureRecognizer(target: self, action: #selector(tap(_:)))
+        let rightTap = UITapGestureRecognizer(target: self, action: #selector(rightTap(_:)))
+        rightTap.numberOfTouchesRequired = 2
+        let press = UILongPressGestureRecognizer(target: self, action: #selector(longPress(_:)))
+        press.minimumPressDuration = 0.35
+        let hover = UIHoverGestureRecognizer(target: self, action: #selector(hover(_:)))   // an iPad's mouse or trackpad pointer
+        for g in [move, scroll, tap, rightTap, press, hover] as [UIGestureRecognizer] { g.delegate = self; addGestureRecognizer(g) }
+    }
+
+    func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+        g is UIHoverGestureRecognizer || other is UIHoverGestureRecognizer
+    }
+
+    private func movePointer(by d: CGPoint, now: CFTimeInterval) {
+        let r = videoRect
+        let dt = lastPanTime > 0 ? now - lastPanTime : 0
+        lastPanTime = now
+        pointer.move(dx: d.x, dy: d.y, pictureWidth: r.width, pictureHeight: r.height, dt: dt)
+        updateCursorLayer()
+    }
+
+    @objc private func movePan(_ g: UIPanGestureRecognizer) {
+        switch g.state {
+        case .began: momentum.stop(); lastPanTranslation = .zero; lastPanTime = 0
+        case .changed:
+            let t = g.translation(in: self)
+            movePointer(by: CGPoint(x: t.x - lastPanTranslation.x, y: t.y - lastPanTranslation.y), now: CACurrentMediaTime())
+            lastPanTranslation = t
+            if !observeOnly { session?.sendMouseMove(x: pointer.x, y: pointer.y) }
+        default: lastPanTime = 0
+        }
+    }
+
+    @objc private func hover(_ g: UIHoverGestureRecognizer) {
+        guard g.state == .began || g.state == .changed else { return }
+        let r = videoRect, p = g.location(in: self)
+        guard r.width > 0 else { return }
+        pointer.x = min(1, max(0, Double((p.x - r.minX) / r.width))); pointer.y = min(1, max(0, Double((p.y - r.minY) / r.height)))
+        updateCursorLayer()
+        if !observeOnly { session?.sendMouseMove(x: pointer.x, y: pointer.y) }
+    }
+
+    private var modifierFlags: UInt64 { sticky | hardwareFlags }
+
+    @discardableResult
+    private func button(_ b: Int, down: Bool, clickCount: Int = 1) -> UInt64 {
+        guard !observeOnly, let session else { return 0 }
+        return session.send(.mouseButton(.init(button: b, down: down, x: pointer.x, y: pointer.y, clickCount: clickCount, modifiers: modifierFlags)))
+    }
+
+    @objc private func tap(_ g: UITapGestureRecognizer) {
+        momentum.stop()
+        guard !observeOnly, let session else { return }
+        session.typeaheadInvalidateBeforeClick()
+        let now = CACurrentMediaTime()
+        var count = 1
+        if let t = lastTap, now - t.time < 0.45, abs(t.x - pointer.x) < 0.02, abs(t.y - pointer.y) < 0.02 { count = min(3, t.count + 1) }
+        lastTap = (now, pointer.x, pointer.y, count)
+        let seq = button(0, down: true, clickCount: count)
+        if let p = streamPixel(), let w = session.window(at: p.0, p.1), w.isLayered, w.windowLevel == 0, modifierFlags == 0 { session.localRaise(windowID: w.id, inputSeq: seq) }
+        button(0, down: false, clickCount: count)
+        clearSticky()
+    }
+
+    @objc private func rightTap(_ g: UITapGestureRecognizer) {
+        momentum.stop()
+        session?.typeaheadInvalidateBeforeClick()
+        button(1, down: true); button(1, down: false)
+        clearSticky()
+    }
+
+    @objc private func longPress(_ g: UILongPressGestureRecognizer) {
+        guard !observeOnly, let session else { return }
+        let loc = g.location(in: self)
+        switch g.state {
+        case .began:
+            momentum.stop()
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            session.typeaheadInvalidateBeforeClick()
+            pressing = true; pressLocation = loc; lastPanTime = 0
+            let seq = button(0, down: true)
+            // A press on a title bar the display layer carries: the drag moves the window's pixels here at once (DESIGN §3.5).
+            if let p = streamPixel(), let w = session.window(at: p.0, p.1), !w.isLayered {
+                let titleBar = Int(28 * session.pixelsPerPoint)
+                if p.1 < w.frame.y + titleBar { drag = (w.id, w.frame); session.beginDrag(windowID: w.id, frame: w.frame, pointer: p, inputSeq: seq) }
+            }
+        case .changed:
+            movePointer(by: CGPoint(x: loc.x - pressLocation.x, y: loc.y - pressLocation.y), now: CACurrentMediaTime())
+            pressLocation = loc
+            if let d = drag, let p = streamPixel() {
+                let seq = session.send(.mouseMove(.init(x: pointer.x, y: pointer.y)))
+                session.dragPointer(windowID: d.windowID, pointer: p, inputSeq: seq)
+            } else {
+                session.sendMouseMove(x: pointer.x, y: pointer.y)
+            }
+        default:
+            guard pressing else { return }
+            pressing = false
+            button(0, down: false)
+            if let d = drag { session.endDrag(windowID: d.windowID) }
+            drag = nil
+            clearSticky()
+        }
+    }
+
+    @objc private func scrollPan(_ g: UIPanGestureRecognizer) {
+        switch g.state {
+        case .began: momentum.stop(); lastScrollTranslation = .zero
+        case .changed:
+            let t = g.translation(in: self)
+            scroll(viewDX: t.x - lastScrollTranslation.x, viewDY: t.y - lastScrollTranslation.y)
+            lastScrollTranslation = t
+        case .ended:
+            let v = g.velocity(in: self)
+            momentum.start(vx: v.x, vy: v.y)
+        default: break
+        }
+    }
+
+    /// A scroll of `viewDX`, `viewDY` points of finger travel at the pointer: natural scrolling (the content follows the
+    /// fingers), sent as precise deltas in host points, and predicted locally like the Mac viewer's trackpad scroll.
+    private func scroll(viewDX: Double, viewDY: Double) {
+        guard !observeOnly, let session, let comp = session.compositor, comp.width > 0 else { return }
+        let r = videoRect
+        guard r.width > 0 else { return }
+        let ppp = session.pixelsPerPoint
+        let k = Double(comp.width) / Double(r.width)   // stream pixels per view point
+        let dx = viewDX * k / ppp, dy = viewDY * k / ppp
+        guard dx != 0 || dy != 0 else { return }
+        let seq = session.send(.scroll(.init(x: pointer.x, y: pointer.y, dx: dx, dy: dy, precise: true, modifiers: modifierFlags)))
+        guard modifierFlags & (MacKeys.commandFlag | MacKeys.optionFlag | MacKeys.controlFlag) == 0, let p = streamPixel(), let w = session.window(at: p.0, p.1) else { return }
+        let sdx = Int((dx * ppp).rounded()), sdy = Int((dy * ppp).rounded())
+        guard sdx != 0 || sdy != 0 else { return }
+        let rect = session.scrollRect(for: w, titleBarPx: Int(28 * ppp))
+        let lp = w.isLayered ? (p.0 - w.frame.x, p.1 - w.frame.y) : p
+        guard rect.contains(lp.0, lp.1) else { return }
+        session.predict(kind: .scroll, windowID: w.id, rect: rect, dx: sdx, dy: sdy, inputSeq: seq)
+    }
+
+    // MARK: Keyboard
+
+    private lazy var noKeyboard = UIView(frame: .zero)
+    private lazy var accessoryBar = KeyAccessoryBar(owner: self)
+    override var canBecomeFirstResponder: Bool { true }
+    /// While the on-screen keyboard is off the view stays first responder (hardware keys arrive here) with an empty input view.
+    override var inputView: UIView? { softKeyboard ? nil : noKeyboard }
+    override var inputAccessoryView: UIView? { softKeyboard ? accessoryBar : nil }
+
+    func setSoftKeyboard(_ on: Bool) {
+        guard on != softKeyboard else { return }
+        softKeyboard = on
+        if !isFirstResponder { becomeFirstResponder() }
+        reloadInputViews()
+        if !on { keyboardHeight = 0; forceRedraw = true; updateCursorLayer() }
+    }
+
+    @objc private func keyboardFrame(_ n: Notification) {
+        guard softKeyboard, let f = n.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect, let window else { return }
+        let local = convert(f, from: window.screen.coordinateSpace)
+        keyboardHeight = max(0, bounds.maxY - local.minY)
+        forceRedraw = true; updateCursorLayer()
+    }
+    @objc private func keyboardHidden(_ n: Notification) { keyboardHeight = 0; forceRedraw = true; updateCursorLayer() }
+
+    // UITextInputTraits: the host does its own correction; nothing is changed on the way.
+    var autocorrectionType: UITextAutocorrectionType = .no
+    var autocapitalizationType: UITextAutocapitalizationType = .none
+    var spellCheckingType: UITextSpellCheckingType = .no
+    var smartQuotesType: UITextSmartQuotesType = .no
+    var smartDashesType: UITextSmartDashesType = .no
+    var smartInsertDeleteType: UITextSmartInsertDeleteType = .no
+    var keyboardType: UIKeyboardType = .asciiCapable
+    var keyboardAppearance: UIKeyboardAppearance = .dark
+
+    var hasText: Bool { true }   // backspace is always delivered
+    func insertText(_ text: String) { for ch in text { type(ch) } }
+    func deleteBackward() { key(MacKeys.delete, characters: "\u{7F}", flags: modifierFlags); clearSticky() }
+
+    /// A character from the on-screen keyboard: its US-layout key (shift if it takes it), and the character itself.
+    private func type(_ ch: Character) {
+        let k = MacKeys.key(for: ch)
+        let chars = ch == "\n" ? "\r" : String(ch)
+        key(k?.keyCode ?? 0, characters: chars, flags: modifierFlags | (k?.shift == true ? MacKeys.shiftFlag : 0))
+        clearSticky()
+    }
+
+    /// One key press (down, up), with the sticky modifiers pressed around it.
+    func key(_ code: UInt16, characters: String?, flags: UInt64) {
+        defer { clearSticky() }
+        guard !observeOnly, let session else { return }
+        let flags = flags | sticky
+        let mods: [(UInt64, UInt16)] = [(MacKeys.controlFlag, MacKeys.control), (MacKeys.optionFlag, MacKeys.option), (MacKeys.commandFlag, MacKeys.command)]
+        var held: UInt64 = 0
+        for (f, c) in mods where sticky & f != 0 { held |= f; session.send(.modifiers(.init(keyCode: c, modifiers: held))) }
+        let seq = session.send(.key(.init(keyCode: code, down: true, isRepeat: false, modifiers: flags, characters: characters)))
+        session.typeaheadKey(keyCode: code, characters: characters, modifiers: Self.keyModifiers(flags), seq: seq)
+        session.send(.key(.init(keyCode: code, down: false, isRepeat: false, modifiers: flags, characters: nil)))
+        for (f, c) in mods.reversed() where sticky & f != 0 { held &= ~f; session.send(.modifiers(.init(keyCode: c, modifiers: held))) }
+    }
+
+    static func keyModifiers(_ flags: UInt64) -> KeyModifiers {
+        var m: KeyModifiers = []
+        if flags & MacKeys.shiftFlag != 0 { m.insert(.shift) }
+        if flags & MacKeys.controlFlag != 0 { m.insert(.control) }
+        if flags & MacKeys.optionFlag != 0 { m.insert(.option) }
+        if flags & MacKeys.commandFlag != 0 { m.insert(.command) }
+        return m
+    }
+
+    func toggleSticky(_ flag: UInt64) { sticky ^= flag; accessoryBar.update(sticky: sticky) }
+    private func clearSticky() { if sticky != 0 { sticky = 0; accessoryBar.update(sticky: 0) } }
+
+    // Hardware keyboard: every key by its HID usage, modifiers as flag changes, as a Mac keyboard would send them.
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if !hardware(presses, down: true) { super.pressesBegan(presses, with: event) }
+    }
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if !hardware(presses, down: false) { super.pressesEnded(presses, with: event) }
+    }
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if !hardware(presses, down: false) { super.pressesCancelled(presses, with: event) }
+    }
+
+    private func hardware(_ presses: Set<UIPress>, down: Bool) -> Bool {
+        var handled = false
+        for p in presses {
+            guard let k = p.key, let code = MacKeys.keyCode(hidUsage: k.keyCode.rawValue) else { continue }
+            handled = true
+            guard !observeOnly, let session else { continue }
+            if MacKeys.isModifier(code) {
+                let bit: UInt64
+                switch code {
+                case MacKeys.shift, MacKeys.rightShift: bit = MacKeys.shiftFlag
+                case MacKeys.control, MacKeys.rightControl: bit = MacKeys.controlFlag
+                case MacKeys.option, MacKeys.rightOption: bit = MacKeys.optionFlag
+                case MacKeys.capsLock: bit = MacKeys.capsLockFlag
+                default: bit = MacKeys.commandFlag
+                }
+                if code == MacKeys.capsLock { if down { hardwareFlags ^= bit } } else if down { hardwareFlags |= bit } else { hardwareFlags &= ~bit }
+                session.send(.modifiers(.init(keyCode: code, modifiers: hardwareFlags)))
+                continue
+            }
+            var flags: UInt64 = 0
+            let m = k.modifierFlags
+            if m.contains(.shift) { flags |= MacKeys.shiftFlag }
+            if m.contains(.control) { flags |= MacKeys.controlFlag }
+            if m.contains(.alternate) { flags |= MacKeys.optionFlag }
+            if m.contains(.command) { flags |= MacKeys.commandFlag }
+            if m.contains(.alphaShift) { flags |= MacKeys.capsLockFlag }
+            let chars = MacKeys.characters(forSpecialKey: code) ?? (k.characters.isEmpty ? nil : k.characters)
+            let seq = session.send(.key(.init(keyCode: code, down: down, isRepeat: false, modifiers: flags, characters: down ? chars : nil)))
+            if down { session.typeaheadKey(keyCode: code, characters: chars, modifiers: Self.keyModifiers(flags), seq: seq) }
+        }
+        return handled
+    }
+}
+
+/// The on-screen keyboard's extra row: keys an iPhone keyboard lacks (Esc, Tab, arrows) and sticky ⌃ ⌥ ⌘ for the next key.
+final class KeyAccessoryBar: UIInputView {
+    private weak var owner: DesktopUIView?
+    private var modifierButtons: [(UInt64, UIButton)] = []
+
+    init(owner: DesktopUIView) {
+        self.owner = owner
+        super.init(frame: CGRect(x: 0, y: 0, width: 400, height: 44), inputViewStyle: .keyboard)
+        allowsSelfSizing = true
+        let stack = UIStackView()
+        stack.axis = .horizontal; stack.distribution = .fillEqually; stack.spacing = 6
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: layoutMarginsGuide.leadingAnchor), stack.trailingAnchor.constraint(equalTo: layoutMarginsGuide.trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 5), stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
+            heightAnchor.constraint(equalToConstant: 44),
+        ])
+        func make(_ title: String, _ action: @escaping () -> Void) -> UIButton {
+            var c = UIButton.Configuration.gray(); c.title = title; c.cornerStyle = .medium
+            c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { var a = $0; a.font = .systemFont(ofSize: 15, weight: .medium); return a }
+            let b = UIButton(configuration: c, primaryAction: UIAction { _ in action() })
+            stack.addArrangedSubview(b); return b
+        }
+        _ = make("esc") { [weak self] in self?.owner?.key(MacKeys.escape, characters: "\u{1B}", flags: 0) }
+        _ = make("tab") { [weak self] in self?.owner?.key(MacKeys.tab, characters: "\t", flags: 0) }
+        for (f, t) in [(MacKeys.controlFlag, "⌃"), (MacKeys.optionFlag, "⌥"), (MacKeys.commandFlag, "⌘")] {
+            modifierButtons.append((f, make(t) { [weak self] in self?.owner?.toggleSticky(f) }))
+        }
+        for (code, t) in [(MacKeys.left, "←"), (MacKeys.up, "↑"), (MacKeys.down, "↓"), (MacKeys.right, "→")] {
+            _ = make(t) { [weak self] in self?.owner?.key(code, characters: MacKeys.characters(forSpecialKey: code), flags: 0) }
+        }
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    func update(sticky: UInt64) {
+        for (f, b) in modifierButtons {
+            var c = sticky & f != 0 ? UIButton.Configuration.filled() : UIButton.Configuration.gray()
+            c.title = b.configuration?.title; c.cornerStyle = .medium
+            c.titleTextAttributesTransformer = b.configuration?.titleTextAttributesTransformer
+            b.configuration = c
+        }
+    }
+}

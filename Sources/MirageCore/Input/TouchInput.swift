@@ -97,6 +97,29 @@ public enum MacKeys {
         }
     }
 
+    /// The characters AppKit reports for a non-printing key (control characters, the NSEvent function-key range), so a
+    /// touch client's key events look like the Mac viewer's.
+    public static func characters(forSpecialKey k: UInt16) -> String? {
+        let fkeys: [UInt16] = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113]
+        if let i = fkeys.firstIndex(of: k) { return String(UnicodeScalar(UInt32(0xF704 + i))!) }
+        switch k {
+        case returnKey, 76: return "\r"
+        case tab: return "\t"
+        case escape: return "\u{1B}"
+        case delete: return "\u{7F}"
+        case up: return "\u{F700}"
+        case down: return "\u{F701}"
+        case left: return "\u{F702}"
+        case right: return "\u{F703}"
+        case 117: return "\u{F728}"
+        case 115: return "\u{F729}"
+        case 119: return "\u{F72B}"
+        case 116: return "\u{F72C}"
+        case 121: return "\u{F72D}"
+        default: return nil
+        }
+    }
+
     /// Whether a key code is a modifier key (sent as a flags change, not a key event).
     public static func isModifier(_ k: UInt16) -> Bool { [command, shift, capsLock, option, control, rightCommand, rightShift, rightOption, rightControl].contains(k) }
 }

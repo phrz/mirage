@@ -209,6 +209,7 @@ final class ViewerSession: @unchecked Sendable {
 
     private func setStatus(_ s: String) { Task { @MainActor in model.status = s } }
     private var stopped = false
+    private var paired = false
 
     /// Connects, and reconnects forever with exponential backoff (1, 2, 4, 8, then 15 s) until the
     /// window is closed. The last picture stays on screen meanwhile; the stream is re-requested on
@@ -317,9 +318,10 @@ final class ViewerSession: @unchecked Sendable {
             let control = try await client.openStream()
             self.control = control
             let session = ClientSession(identity: identity, store: store, alias: host, tlsFingerprint: fp, stream: control)
-            if let pairCode {
+            if let pairCode, !paired {
                 guard let code = PairingCode.normalize(pairCode) else { throw MirageError.pairingFailed("--pair needs 6 digits") }
                 let h = try await session.pair(code: code)
+                paired = true   // a code pairs once: reconnects authenticate with the identity
                 log("paired with \(h.name)")
             }
             let welcome = try await session.authenticate(resumeToken: resumeToken)

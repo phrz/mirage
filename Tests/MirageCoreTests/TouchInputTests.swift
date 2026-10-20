@@ -28,6 +28,10 @@ final class TouchInputTests: XCTestCase {
         XCTAssertTrue(MacKeys.isModifier(MacKeys.keyCode(hidUsage: 225)!))
         XCTAssertFalse(MacKeys.isModifier(0))
         XCTAssertNil(MacKeys.keyCode(hidUsage: 1000))
+        XCTAssertEqual(MacKeys.characters(forSpecialKey: MacKeys.up), "\u{F700}")
+        XCTAssertEqual(MacKeys.characters(forSpecialKey: 122), "\u{F704}")   // F1
+        XCTAssertEqual(MacKeys.characters(forSpecialKey: MacKeys.delete), "\u{7F}")
+        XCTAssertNil(MacKeys.characters(forSpecialKey: 0))
     }
 
     func testPointerMovesRelativelyAndClamps() {
