@@ -576,6 +576,31 @@ The §4a bar, implemented on loopback (measurements in §6 "M2.5 (loopback)"):
   bench's `--motion` window as the moving picture) and asserts the §4a rows; its last section lists
   the `dnctl`/`pfctl` profiles and the bus-trace replay for the conditions it cannot create itself.
 
+### 3.3d Picture correctness invariants (2026-10-20, from phrz's Finder and Dock runs on mac-daddy)
+
+Wrong pixels (a stacked toolbar, a vacated tooltip fragment, striped icons) are worse than soft ones and never wait for
+refinement budget. What the host counts as delivered must be what the viewer shows:
+
+1. **Ordering.** Every message that changes a layer's pixels on the viewer (tiles, copy-rects, levels, commits, resets)
+   goes on the tile stream in capture order from `tileQueue`. A message encoded on `tileQueue` is sent from there as soon
+   as it is encoded (direct tiles, a window's still); one that hops through the streamer's queue first (refinement, the
+   middle and backdrop levels) is checked for staleness there (`changedSince`) and enqueued from that same block, so no
+   copy-rect decided later can overtake it. (a80cbe1: direct tiles hopped unchecked; the next capture's copy-rect
+   overtook them, and a scrolled Finder window's icons striped while the host counted them delivered.)
+2. **A copy-rect only claims what it got right.** Destination tiles that fail verification are direct changes due now
+   (9755f02), also where the host saw no change; a destination copied from a tile the viewer holds wrong (a pending direct
+   change) is wrong too (6f9cddb); leading/trailing rows and columns that mostly fail are left out of the copy-rect
+   (63d5545: a translucent toolbar over a scroll view) and go once, 300 ms after they last changed (a80cbe1).
+   Video rides datagrams and cannot be ordered with the stream: the viewer skips a video tile where pixels from a newer
+   capture already landed, and the host sends no video for a layer while its copy-rects flow (the 300 ms copy gate); the
+   tiles wait as direct changes instead (280 stale video tiles per Finder scroll on mac-daddy before this).
+   A copy-rect's new content (changed tiles inside its region that it does not explain: the exposed strip) goes with it,
+   whatever the per-tile rate limit or the budget: held back, the next copy-rect copied the not-yet-updated rows on and the
+   viewer showed them smeared.
+3. **A tight box only where the viewer holds the previous frame.** A tile still owing an update goes whole (2df0793).
+4. **Backstop.** The picture audit compares fingerprints of tiles the host believes delivered with the viewer's canvas,
+   for the desktop and every shown window layer (c9f678d), newest changes first; mismatches are resent as direct changes.
+
 ### 3.4 Rate control and adaptation
 
 - Client sends receive timestamps for every packet; host runs a GCC/BBR-style **delivery-rate

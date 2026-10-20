@@ -589,7 +589,11 @@ final class ViewerSession: @unchecked Sendable {
         if v.tileCaptureSeq.count != cols * rows { v.tileCaptureSeq = Array(repeating: 0, count: cols * rows) }
         let c0 = max(0, rect.x / 64), c1 = min(cols - 1, (rect.maxX - 1) / 64), r0 = max(0, rect.y / 64), r1 = min(rows - 1, (rect.maxY - 1) / 64)
         guard c1 >= c0, r1 >= r0 else { return true }
-        for r in r0...r1 { for cc in c0...c1 where v.tileCaptureSeq[r * cols + cc] > captureSeq { staleDiscards += 1; return false } }
+        for r in r0...r1 { for cc in c0...c1 where v.tileCaptureSeq[r * cols + cc] > captureSeq {
+            staleDiscards += 1
+            if Self.debugPresent { log("stale discard L\(v.id) \(rect.x),\(rect.y) \(rect.width)x\(rect.height) capture \(captureSeq) < \(v.tileCaptureSeq[r * cols + cc]) at tile \(cc),\(r)") }
+            return false
+        } }
         markCapture(v, rect, captureSeq: captureSeq)
         return true
     }
@@ -663,7 +667,7 @@ final class ViewerSession: @unchecked Sendable {
             let fillParts = t.staged && v.id == 0 ? visibleFillTiles(touching: staged.map(\.rect)) : []
             if v.id == 0 { markDesktopClean(shown.map(\.rect) + fillParts) }
             var n = 0
-            if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) seq \(seq): shown \(shown.map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)\($0.format == .lossy ? "L" : "")" }.joined(separator: " ")) staged \(staged.map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))\(t.refinement ? " (refinement)" : "")") }
+            if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) seq \(seq) capture \(t.header.captureSeq): shown \(shown.map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)\($0.format == .lossy ? "L" : "")" }.joined(separator: " ")) staged \(staged.map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))\(t.refinement ? " (refinement)" : "")") }
             if !shown.isEmpty { n += v.compositor.applyTiles(shown, crossfade: t.refinement && !t.staged) }
             if !staged.isEmpty { n += v.compositor.applyTiles(staged, staged: true, alsoShow: fillParts); v.stagedLossless += staged.filter { $0.format != .lossy }.map(\.rect) }
             if !t.staged, !shown.isEmpty {
@@ -705,6 +709,7 @@ final class ViewerSession: @unchecked Sendable {
         case .copyRect(let c):
             guard let v = layerView(c.header.windowID) else { sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: c.header.captureNanos, receivedNanos: now, bytes: bytes))); return }
             v.compositor.applyCopyRect(c.rect, dx: c.dx, dy: c.dy)
+            if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) seq \(seq): copy \(c.rect.x),\(c.rect.y) \(c.rect.width)x\(c.rect.height) by \(c.dx),\(c.dy) capture \(c.header.captureSeq)") }
             markCapture(v, c.rect.union(c.rect.offset(c.dx, c.dy)), captureSeq: c.header.captureSeq)
             statsLock.lock(); sCopyRects += 1; statsLock.unlock()
             if !watchRect.isEmpty, watchWindowID != 0 && isWatchedLayered() ? v.id == watchWindowID : displayRect(c.rect.union(c.rect.offset(c.dx, c.dy)), layer: v.id).intersects(watchRect) { lastWatchedCopyNanos = now; watchedCopyRects += 1 }
@@ -766,6 +771,7 @@ final class ViewerSession: @unchecked Sendable {
     private(set) var auditCompared = 0, auditMismatched = 0
     static let testDropEvery = ProcessInfo.processInfo.environment["MIRAGE_TEST_DROP_DESKTOP"].flatMap { Int($0) } ?? 0
     private var testDropCount = 0
+    private(set) var staleVideoTiles = 0
     private(set) var testDropped = 0
     private func audit(_ a: ControlMessage.TileAuditMessage) {
         guard let v = layerView(a.layer), v.compositor.width > 0, a.prints.count == a.tiles.count * 16 else { return }
@@ -947,6 +953,9 @@ final class ViewerSession: @unchecked Sendable {
                         let tr = PixelRect(x: region.x + c * 64, y: region.y + r * 64, width: 64, height: 64).intersection(region)
                         if v.id == 0, !viewerGuard.allows(tr, now: now) { mask[c, r] = false; guardDrops += 1 }
                         else if v.id == 0, preExclusion(tr, captureSeq: frame.captureSeq) { mask[c, r] = false; preExclusionDrops += 1 }
+                        // Video rides datagrams, copy-rects and tiles the stream: a frame from an older capture than what already
+                        // landed here (a scroll's copy-rect that overtook it) would put pre-scroll pixels back (striped Finder icons).
+                        else if wouldBeStale(v, tr, captureSeq: frame.captureSeq) { mask[c, r] = false; staleVideoTiles += 1 }
                         else { written.append(tr) }
                     } }
                     compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive))
@@ -1591,7 +1600,7 @@ extension ViewerSession {
             var keepalivesSent: UInt64?
             var motionFps: [Double]?, motionFrames: [Int]?, motionCopyRects: [Int]?
             var motionMoves: [Int]?, moveFps: [Double]?, burstKB: [Double]?, settleKB: [Double]?, confirmMs: [Double]?, layered: Bool?, layersHeld: Int?, windowCommandsSent: Int?
-            var staleTilesDiscarded: Int?, staleTilesCommitted: Int?
+            var staleTilesDiscarded: Int?, staleTilesCommitted: Int?, staleVideoTiles: Int?
             var layers: [LayerDiag]?
             var staleSamples: Int?, staleBenchPixels: Int?, staleAt: [String]?
             var guardDrops: Int?, unknownDesktopTiles: Int?, fillSamples: Int?, unknownVisibleTiles: Int?, preExclusionDrops: Int?
@@ -1644,7 +1653,7 @@ extension ViewerSession {
                       motionFps: scenario?.motionFps, motionFrames: scenario?.motionFrames, motionCopyRects: scenario?.motionCopyRects,
                       motionMoves: scenario?.motionMoves, moveFps: scenario?.moveFps, burstKB: scenario?.burstKB, settleKB: scenario?.settleKB, confirmMs: scenario?.confirmMs,
                       layered: scenario?.layered, layersHeld: layerViews.count - 1, windowCommandsSent: windowCommandsSent,
-                      staleTilesDiscarded: staleDiscards, staleTilesCommitted: staleCommits,
+                      staleTilesDiscarded: staleDiscards, staleTilesCommitted: staleCommits, staleVideoTiles: staleVideoTiles,
                       layers: videoQueue.sync { layerDiagnostics() },
                       staleSamples: scenario?.staleSamples, staleBenchPixels: scenario?.stalePurple, staleAt: scenario?.staleAt,
                       guardDrops: videoQueue.sync { guardDrops }, unknownDesktopTiles: unknownDesktop.count, fillSamples: scenario?.fillSamples, unknownVisibleTiles: unknownVisibleCount(), preExclusionDrops: videoQueue.sync { preExclusionDrops },

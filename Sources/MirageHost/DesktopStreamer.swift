@@ -74,7 +74,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var statWindowAudited = 0, statWindowAuditRefreshed = 0
     private func sendWindowAudits(now: UInt64) {
         guard !screenLocked else { return }
-        for l in layers.values where !l.isDisplay && l.announced && l.exposed && l.fresh == .done {
+        // Only layers on screen now: a closed or minimized window's layer is kept a while (absent, no capturer) and the viewer
+        // may hold nothing for it any more (after a resume: "32 of 32 window tiles differ" every 5 s for a closed window).
+        for l in layers.values where !l.isDisplay && l.announced && l.exposed && l.fresh == .done && l.absentSince == 0 && l.capturer != nil && plannedFrames[l.id] != nil {
             guard let src = l.lastFrame else { continue }
             CVPixelBufferLockBaseAddress(src, .readOnly); defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
             let f = frameView(src)
@@ -1071,6 +1073,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Rows and columns a copy-rect left out (ShiftDetector.trimmed): a translucent toolbar over scrolling content changes
         // every frame; it goes once, 300 ms after it last changed, not at every capture (2 MB per scroll phase on c9f678d).
         var trimmedEdges = Set<Int>()
+        // Everything a copy-rect touches: changed tiles there that it does not explain are the scroll's new content (the exposed
+        // strip). They go with the copy-rect, whatever the rate limit or budget: held back, the next copy-rect copied the
+        // not-yet-updated rows on and the viewer showed them smeared (one label row repeated 7 times in a Finder scroll).
+        var copyRegion = Set<Int>()
         var copies: [(tiles: [Int], dx: Int, dy: Int)] = []
         let dirtyBeforeCopies = dirty.count
         var copyRectsThisCapture = 0
@@ -1086,6 +1092,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     }
                     guard let r0 = r, let r = ShiftDetector.trimmed(r0) else { continue }
                     trimmedEdges.formUnion(Set(tracker.tiles(covering: [r0.rect.offset(r0.dx, r0.dy)])).subtracting(tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])))
+                    copyRegion.formUnion(tracker.tiles(covering: [r.rect.union(r.rect.offset(r.dx, r.dy))]))
                     let dest = tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])
                     let mismatched = Set(tracker.tiles(covering: r.mismatchedTiles))
                     wrongAfterCopy.formUnion(mismatched)
@@ -1117,6 +1124,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if region.width < 64 || region.height < 64 { region = bb }
                 if region.height >= 96 || region.width >= 96, let r0 = detector.detect(old: old, new: new, rect: region), let r = ShiftDetector.trimmed(r0) {
                     trimmedEdges.formUnion(Set(tracker.tiles(covering: [r0.rect.offset(r0.dx, r0.dy)])).subtracting(tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])))
+                    copyRegion.formUnion(tracker.tiles(covering: [r.rect.union(r.rect.offset(r.dx, r.dy))]))
                     let dest = tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])
                     let mismatched = Set(tracker.tiles(covering: r.mismatchedTiles))
                     wrongAfterCopy.formUnion(mismatched)
@@ -1132,8 +1140,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 }
             }
         }
+        var edgesDeferred = 0
         if !trimmedEdges.isEmpty {
             let edges = trimmedEdges.subtracting(explained).intersection(dirty)
+            edgesDeferred = edges.count
             if !edges.isEmpty {
                 dirty.removeAll { edges.contains($0) }
                 tracker.defer(Array(edges), now: now, delayNanos: 300_000_000, direct: true)
@@ -1143,7 +1153,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             dirty.removeAll { explained.contains($0) }
             for c in copies { tracker.markCopied(c.tiles, dx: c.dx, dy: c.dy, now: now) }
             // Copy-rect gate: a copy-rect explained at least half of this frame's change; for 300 ms nothing here is motion.
-            if explained.count * 2 >= dirtyBeforeCopies { layer.copyGateNanos = now }
+            if (explained.count + edgesDeferred) * 2 >= dirtyBeforeCopies { layer.copyGateNanos = now }   // deferred edges are handled too
         }
         // Occluded on the host (covered by a window in front, or off the display): tracked, not sent. They
         // become due when uncovered (reconcileLayers expedites them) and are then sent from the frame of that moment.
@@ -1161,6 +1171,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // earlier change left stays wrong while the tile counts as sent (a vacated Dock tooltip "…aude" for ~12 s on mac-daddy).
         for i in Array(tightBoxes.keys) where !tracker.isCrisp(i) { tightBoxes[i] = nil }
         var plan = tracker.classify(dirty: dirty, now: now, copyGate: Clock.elapsed(since: layer.copyGateNanos, now: now) < 300_000_000 && layer.copyGateNanos > 0)
+        var withCopy: [Int] = []
+        if !copyRegion.isEmpty {
+            // The scroll's new content: rate-limited ones (classify held them back) go now too.
+            let held = dirty.filter { copyRegion.contains($0) && tracker.isDirectPending($0) && !layer.occludedTiles.contains($0) }
+            if !held.isEmpty { tracker.sent(lossless: held, now: now); plan.lossless.append(contentsOf: held) }
+            withCopy = plan.lossless.filter { copyRegion.contains($0) }
+        }
         if !wrongAfterCopy.isEmpty {
             // Wrong pixels never wait for video or refinement: due now as direct changes (sendDueDirect, borrowing after 150 ms).
             let wrong = wrongAfterCopy.subtracting(layer.occludedTiles)
@@ -1212,7 +1229,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // looking at. Priority 2: other changed pixels, budget permitting. Refinement yields to real
             // change (three tiles or more), not to a caret blink or a menu-bar clock.
             if plan.lossless.count >= 3 { lastDirectNanos = now }
-            let (near, far) = splitByLocus(plan.lossless, layer: layer, tracker: tracker)
+            var (near, far) = splitByLocus(plan.lossless, layer: layer, tracker: tracker)
+            if !withCopy.isEmpty { let w = Set(withCopy); near.append(contentsOf: far.filter { w.contains($0) }); far.removeAll { w.contains($0) } }
             if !near.isEmpty {
                 if layer.isDisplay { displaySent(near) }
                 let bytes = submitLossless(layer: layer, tiles: near, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
@@ -1225,7 +1243,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if layer.isDisplay { displaySent(plan.lossless) }
                 let bytes = submitLossless(layer: layer, tiles: plan.lossless, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
                 tileTokens -= Double(bytes)
-            } else if plan.lossless.count >= 12, rc?.policy.videoEnabled ?? true, layer.encoder != nil || ensureEncoder(layer) {
+            } else if plan.lossless.count >= 12, rc?.policy.videoEnabled ?? true, !(layer.copyGateNanos > 0 && Clock.elapsed(since: layer.copyGateNanos, now: now) < 300_000_000),
+                      layer.encoder != nil || ensureEncoder(layer) {
+                // (Not while copy-rects carry this layer: video and copy-rects travel separately, and a frame overtaken by the
+                // next copy-rect lands its pixels where the content has already moved. Those tiles wait as direct changes.)
                 // The tile budget is spent and this is a lot of fresh content (a scroll's exposed strip at
                 // native scale is megapixels per second): show it through video now, refine it later.
                 plan.video.append(contentsOf: plan.lossless)
@@ -1827,8 +1848,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard let self else { return }
             let data = d.withUnsafeBytes { TileCodec.encodeLossy(base: $0.baseAddress!, width: rect.width, height: rect.height, stride: rect.width * 4, outWidth: ow, outHeight: oh, quality: 60) }
             guard let data else { self.queue.async { self.blockInFlight = nil }; return }
+            // On the stream from here, in order with the layer's copy-rects (DESIGN §3.3 ordering invariant).
+            self.send(tile: .tiles(.init(header: hdr, refinement: false, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: true, layer: layerID)
             self.queue.async {
-                self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: false, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: true, layer: layerID) }
                 self.tileTokens -= Double(data.count - estimate)
                 self.statTileBytes += data.count; self.statTileRects += 1; self.secTileBytes += data.count
                 if let l = self.layers[layerID] { l.exposed = true; l.account.still += data.count }

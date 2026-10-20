@@ -564,7 +564,10 @@ final class ScenarioRunner {
                 guard let win = scratchWindow() else { break }
                 let seq = session.send(.scroll(.init(x: nx, y: ny, dx: 0, dy: 30 * dir, precise: true, modifiers: 0)), scripted: true)
                 let rect = session.scrollRect(for: win, titleBarPx: Int(52 * ppp))
-                session.predict(kind: .scroll, windowID: win.id, rect: rect, dx: 0, dy: Int((30 * dir * ppp).rounded()), inputSeq: seq)
+                // Test knob MIRAGE_TEST_NO_PREDICT: no local scroll prediction (to tell prediction artifacts from canvas ones).
+                if ProcessInfo.processInfo.environment["MIRAGE_TEST_NO_PREDICT"] == nil {
+                    session.predict(kind: .scroll, windowID: win.id, rect: rect, dx: 0, dy: Int((30 * dir * ppp).rounded()), inputSeq: seq)
+                }
                 try? await Task.sleep(for: .milliseconds(33))
             }
             await measureCrisp(burstEnd: Clock.nowNanos())
