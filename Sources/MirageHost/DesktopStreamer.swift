@@ -145,9 +145,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let rows = layers.values.sorted { $0.account.total > $1.account.total }.map { l -> String in
             let a = l.account
             let who = l.isDisplay ? "desktop" : "\(byID[l.id]?.app ?? "?") \(l.id)"
-            return String(format: "%@ %dx%d vis %d%%%@: %.0f KB = still %.0f + blocks %.0f + refine %.0f + direct %.0f + video %.0f + underlay %.0f (upgrade %.0f of the refine), dirty %.0f tiles/s",
+            return String(format: "%@ %dx%d vis %d%%%@: %.0f KB = still %.0f + blocks %.0f + refine %.0f + direct %.0f + video %.0f + underlay %.0f + backdrop %.0f (upgrade %.0f of the refine), dirty %.0f tiles/s",
                           who as NSString, l.width, l.height, Int(l.visibleFraction * 100), l.isDisplay || l.opaque ? "" : " transparent", Double(a.total) / 1000, Double(a.still) / 1000, Double(a.blocks) / 1000,
-                          Double(a.refine) / 1000, Double(a.direct) / 1000, Double(a.video) / 1000, Double(a.underlay) / 1000, Double(a.upgrade) / 1000, Double(a.dirtyTiles) / 30)
+                          Double(a.refine) / 1000, Double(a.direct) / 1000, Double(a.video) / 1000, Double(a.underlay) / 1000, Double(a.backdrop) / 1000, Double(a.upgrade) / 1000, Double(a.dirtyTiles) / 30)
         }
         let total = layers.values.reduce(0) { $0 + $1.account.total }
         log(String(format: "layer bytes, last 30 s (%.0f kbps): ", Double(total) * 8 / 30 / 1000) + rows.joined(separator: " | "))
@@ -161,8 +161,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if !caps.isEmpty { log("window captures, last 30 s: " + caps.joined(separator: " | ")) }
         if statDirtyMissed > 0 { log("display: \(statDirtyMissed) changed tiles outside ScreenCaptureKit's dirty rects in the last 30 s (found by the full diff)") }
         statDirtyMissed = 0
-        if statAudited > 0 { log("picture audit, last 30 s: \(statAudited) desktop tiles fingerprinted, \(statAuditRefreshed) asked for again by the viewer; \(statDirectDue) held-back changed tiles sent when due") }
-        statDirectDue = 0
+        if statAudited > 0 { log("picture audit, last 30 s: \(statAudited) desktop tiles fingerprinted, \(statAuditRefreshed) asked for again by the viewer; \(statDirectDue) held-back changed tiles sent when due (longest wait \(statDirectWaitMaxNanos / 1_000_000) ms)") }
+        if statBackdropLevels > 0 { log("moved-window backdrops, last 30 s: \(statBackdropTiles) tiles held, \(statBackdropLevels) lossy levels \(statBackdropBytes / 1000) KB, \(statBackdropReleased) tiles released to lossless refinement when idle") }
+        statDirectDue = 0; statDirectWaitMaxNanos = 0; statBackdropTiles = 0; statBackdropLevels = 0; statBackdropBytes = 0; statBackdropReleased = 0
         statAudited = 0; statAuditRefreshed = 0
         for l in layers.values { l.account = Layer.Account() }
     }
@@ -558,6 +559,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let origin = (c.x != nil && c.y != nil) ? { let p = windows.originInPoints(x: c.x!, y: c.y!); return CGPoint(x: p.x.rounded(), y: p.y.rounded()) }() : nil
         let size = (c.width != nil && c.height != nil) ? CGSize(width: Double(c.width!) / windows.pxPerPoint, height: Double(c.height!) / windows.pxPerPoint) : nil
         if c.action == .move || c.action == .raise { lastMotionNanos = Clock.nowNanos() }
+        if c.action == .move { layers[c.id]?.movedNanos = Clock.nowNanos() }
         if let seq = c.inputSeq { injector?.noteApplied(seq: seq) }
         ax.apply(c, target: .init(id: w.id, pid: w.pid, title: w.title, bounds: bounds), origin: origin, size: size) { [weak self] ok in
             guard let self else { return }
@@ -770,6 +772,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         for w in planned {
             if let l = layers[w.id] {
                 l.absentSince = 0
+                if l.frame.x != w.frame.x || l.frame.y != w.frame.y { l.movedNanos = now }
                 l.frame = w.frame
                 // Resized only when its size in points changed by a point or more: pixel rounding of a moving window's
                 // frame at a fractional scale is not a resize (each one re-announced and re-sent the whole layer).
@@ -1004,6 +1007,20 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         layer.frames += 1
         layer.account.dirtyTiles += dirty.count
         if dirty.isEmpty { layer.lastFrame = pb; layer.tracker = tracker; refine(now: now); return }
+        // A window moving (or 300 ms after it moved) whose pixels changed widely: its translucent parts (Liquid Glass
+        // toolbars and sidebars) show the blurred desktop behind it, which a move changes everywhere. Nothing goes now:
+        // the tiles are held, the window settles, one lossy whole-layer level shows it (sendBackdropLevels), and lossless
+        // refinement waits for idle. Lossless per move resent ~386 tiles, 374–487 KB per Finder drag at 800 kbps.
+        if Self.backdropHold, !layer.isDisplay, layer.movedNanos > 0, layer.backdropDirty || Clock.elapsed(since: layer.movedNanos, now: now) < Self.backdropSettleNanos,
+           dirty.count >= max(12, (tracker.tileCount - layer.occludedTiles.count) / 20) {
+            tracker.holdUntilIdle(dirty, now: now)
+            layer.backdropDirty = true; layer.backdropHeldNanos = now
+            statBackdropTiles += dirty.count
+            layer.account.dirtyTiles += dirty.count
+            layer.tracker = tracker; layer.lastFrame = pb
+            refine(now: now)
+            return
+        }
         if debugLayers, dirty.count >= 4 { log("layer \(layer.id) capture \(captureSeq): \(dirty.count) dirty tiles, bb \(tracker.boundingRect(dirty))" + (dirty.count <= 8 ? " boxes " + dirty.map { "\(tightBoxes[$0].map { "\($0.x),\($0.y) \($0.width)x\($0.height)" } ?? "?")" }.joined(separator: " | ") : "")) }
 
         // Copy-rects: window drags (display layer, for windows it still carries) from the window list,
@@ -1330,7 +1347,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let rect = PixelRect(x: c * side, y: r * side, width: min(side, tracker.width - c * side), height: min(side, tracker.height - r * side))
             guard !rect.isEmpty else { continue }
             let tiles = tracker.tiles(covering: [rect])
-            if !tiles.allSatisfy({ tracker.isCrisp($0) || l.occludedTiles.contains($0) }) { blocks.append(rect) }
+            if !tiles.allSatisfy({ tracker.isCrisp($0) || tracker.isHeld($0) || l.occludedTiles.contains($0) }) { blocks.append(rect) }
         } }
         var cx = tracker.width / 2, cy = tracker.height / 2
         if let p = locus(in: l) { cx = p.x; cy = p.y }
@@ -1364,14 +1381,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// A window layer's middle level: the whole layer as one lossy WebP at full size (q90 class), sized to ~0.6 s of
     /// the tile rate, crossfaded in over the whole layer in one step on the viewer.
-    private func submitIntermediate(_ layer: Layer, from f: ShiftDetector.Frame, nanos: UInt64) -> Int {
+    /// `backdrop`: a moved window's backdrop level (sendBackdropLevels): not a block (nothing waits for its ack), at most
+    /// ~50 KB, and retried if it went stale before it left.
+    private func submitIntermediate(_ layer: Layer, from f: ShiftDetector.Frame, nanos: UInt64, backdrop: Bool = false) -> Int {
         let rect = layer.bounds
-        let targetBytes = max(20_000.0, Double(lastBudget.tileKbps * 1000 / 8) * 0.6)
+        let rate = Double(lastBudget.tileKbps * 1000 / 8) * 0.6
+        let targetBytes = backdrop ? min(50_000, max(20_000, rate)) : max(20_000.0, rate)
         var d = Data(count: rect.width * rect.height * 4)
         d.withUnsafeMutableBytes { dst in for y in 0..<rect.height { memcpy(dst.baseAddress!.advanced(by: y * rect.width * 4), f.base.advanced(by: y * f.stride), rect.width * 4) } }
         let hdr = header(layer: layer.id, nanos: nanos)
         let layerID = layer.id
-        blockInFlight = (layer.id, nil, nanos)
+        if !backdrop { blockInFlight = (layer.id, nil, nanos) }
         tileQueue.async { [weak self] in
             guard let self else { return }
             let (data, q, ow, oh) = d.withUnsafeBytes { p -> (Data?, Float, Int, Int) in
@@ -1388,15 +1408,20 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let ow = max(32, Int(Double(rect.width) * scale)), oh = max(32, Int(Double(rect.height) * scale))
                 return (TileCodec.encodeLossy(base: base, width: rect.width, height: rect.height, stride: rect.width * 4, outWidth: ow, outHeight: oh, quality: 80), 80, ow, oh)
             }
-            guard let data else { self.queue.async { self.blockInFlight = nil }; return }
+            guard let data else { self.queue.async { if backdrop { self.layers[layerID]?.backdropDirty = true } else { self.blockInFlight = nil } }; return }
             self.queue.async {
-                // Stale before it left (the window changed meanwhile): not sent; the lossless level follows.
-                if let l = self.layers[layerID], l.tracker.changedSince(nanos: nanos, in: [rect]) { self.blockInFlight = nil; return }
-                self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: true, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: true, layer: layerID) }
+                // Stale before it left (the window changed meanwhile): not sent; the lossless level follows (a backdrop
+                // level is tried again once the window is quiet).
+                if let l = self.layers[layerID], l.tracker.changedSince(nanos: nanos, in: [rect]) {
+                    if backdrop { l.backdropDirty = true; self.tileTokens += targetBytes } else { self.blockInFlight = nil }
+                    return
+                }
+                self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: true, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: !backdrop, layer: layerID) }
                 self.tileTokens -= Double(data.count) - targetBytes
                 self.statTileBytes += data.count; self.statTileRects += 1; self.secTileBytes += data.count
-                if let l = self.layers[layerID] { l.account.still += data.count }
-                self.log("layer \(layerID): middle level \(ow)x\(oh) q\(Int(q)) \(data.count) bytes for a \(rect.width)x\(rect.height) window (target \(Int(targetBytes)))")
+                if let l = self.layers[layerID] { if backdrop { l.account.backdrop += data.count } else { l.account.still += data.count } }
+                if backdrop { self.statBackdropLevels += 1; self.statBackdropBytes += data.count }
+                if !backdrop || self.debugLayers { self.log("layer \(layerID): \(backdrop ? "backdrop" : "middle") level \(ow)x\(oh) q\(Int(q)) \(data.count) bytes for a \(rect.width)x\(rect.height) window (target \(Int(targetBytes)))") }
             }
         }
         return Int(targetBytes)
@@ -1781,6 +1806,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         presentLevels(now: now)
         refillTiles(now: now)
         sendDueDirect(now: now)
+        sendBackdropLevels(now: now)
+        // Refinement starts nothing while held-back changed pixels are due (they go first, within ~300 ms).
+        if layers.values.contains(where: { $0.tracker.oldestDueDirect(now: now) != nil && !$0.occludedTiles.isSuperset(of: $0.tracker.dueDirect(now: now, limit: 64)) }) { return }
         // Priority 4: refinement runs on leftover budget only. It yields for 150 ms after any changed
         // pixels went out, keeps 30 % of the tile budget in reserve for them, and never has more than
         // ~300 ms of the link in flight (so it cannot build the queue the next keystroke would wait in).
@@ -1843,15 +1871,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// motion, waits for the first picture and serves every window's backlog before the desktop: the tiles a moving
     /// Dock tooltip had just left stayed stale until another tooltip repainted them (phrz's ghost labels, traced on
     /// mac-daddy with real Dock hovers: each label update covered its new place, the place it left was rate-limited).
-    private var statDirectDue = 0
+    private var statDirectDue = 0, statDirectWaitMaxNanos: UInt64 = 0
     private func sendDueDirect(now: UInt64) {
         let perSecond = Double(lastBudget.tileKbps * 1000 / 8)
         for l in layers.values {
             guard let src = l.lastFrame else { continue }
             let due = l.tracker.dueDirect(now: now, limit: 64).filter { !l.occludedTiles.contains($0) }
             guard !due.isEmpty else { continue }
-            // From the reserve the refinement pass keeps for changed pixels: may go down to -30 % of a second's budget.
-            guard tileTokens > -perSecond * 0.3 else { return }
+            // From the reserve the refinement pass keeps for changed pixels: may go down to -30 % of a second's budget. A tile
+            // due for 150 ms or more borrows further, up to a second's budget of debt: a hover's own tiles (or refinement)
+            // spending the budget held a vacated tooltip tile back ~6 s on mac-daddy; it must land within ~300 ms.
+            let waited = l.tracker.oldestDueDirect(now: now).map { Clock.elapsed(since: $0, now: now) } ?? 0
+            guard tileTokens > -perSecond * 0.3 || waited >= Self.directBorrowAfterNanos && tileTokens > -perSecond else { continue }
+            statDirectWaitMaxNanos = max(statDirectWaitMaxNanos, waited)
             CVPixelBufferLockBaseAddress(src, .readOnly)
             defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
             let f = frameView(src)
@@ -1862,6 +1894,38 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             l.tracker.sent(lossless: due, now: now)
             lastDirectNanos = now
             statDirectDue += due.count
+        }
+    }
+
+    /// Moved windows whose backdrop changed (captured() holds those tiles): once the window has been still 300 ms and no
+    /// held capture came for 150 ms, one lossy whole-layer level (~50 KB) shows the new picture, presented on arrival.
+    /// The held tiles are refined lossless only when the session is idle: no window moved for 5 s and no motion or
+    /// input for 2 s (a few drags in a row cost a level each, not a lossless resend each).
+    static let backdropSettleNanos: UInt64 = 300_000_000
+    /// Test knob MIRAGE_TEST_NO_BACKDROP: moves resend the backdrop as before (A/B).
+    static let backdropHold = ProcessInfo.processInfo.environment["MIRAGE_TEST_NO_BACKDROP"] == nil
+    static let backdropIdleNanos: UInt64 = 5_000_000_000
+    static let directBorrowAfterNanos: UInt64 = 150_000_000
+    private var statBackdropTiles = 0, statBackdropLevels = 0, statBackdropBytes = 0, statBackdropReleased = 0
+    private func sendBackdropLevels(now: UInt64) {
+        let perSecond = Double(lastBudget.tileKbps * 1000 / 8)
+        for l in layers.values where !l.isDisplay {
+            if l.backdropDirty {
+                guard Clock.elapsed(since: l.movedNanos, now: now) >= Self.backdropSettleNanos,
+                      Clock.elapsed(since: l.backdropHeldNanos, now: now) >= 150_000_000,
+                      tileTokens > -perSecond * 0.3, l.announced, let src = l.lastFrame else { continue }
+                CVPixelBufferLockBaseAddress(src, .readOnly)
+                defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
+                let f = frameView(src)
+                guard f.width == l.width, f.height == l.height else { continue }
+                l.backdropDirty = false
+                tileTokens -= Double(submitIntermediate(l, from: f, nanos: now, backdrop: true))
+                lastDirectNanos = now
+            } else if Clock.elapsed(since: l.movedNanos, now: now) >= Self.backdropIdleNanos, Clock.elapsed(since: lastMotionNanos, now: now) >= 2_000_000_000, l.tracker.heldCount > 0 {
+                let n = l.tracker.releaseHeld(now: now)
+                statBackdropReleased += n
+                if debugLayers { log("layer \(l.id): idle; \(n) backdrop tiles released to lossless refinement") }
+            }
         }
     }
 
@@ -1876,11 +1940,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         // A backlog of more than 40 % of a layer (after a drag or a full-screen change) is refined
         // as large locus-first blocks, one in flight, not as a march of a thousand tiles.
-        for l in layers where l.tracker.pendingTotal * 10 > l.tracker.tileCount * 4 && l.lastFrame != nil {
+        for l in layers where l.tracker.pendingUnheld * 10 > l.tracker.tileCount * 4 && l.lastFrame != nil {
             let blocks = planBlocks(l)
             if !blocks.isEmpty {
                 l.fresh = .blocks(remaining: blocks)
-                log("layer \(l.id) refinement backlog \(l.tracker.pendingTotal) tiles: \(blocks.count) large blocks, locus first")
+                log("layer \(l.id) refinement backlog \(l.tracker.pendingUnheld) tiles: \(blocks.count) large blocks, locus first")
                 freshStep(l, now: now); return true
             }
         }

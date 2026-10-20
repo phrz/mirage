@@ -254,6 +254,16 @@ final class App: NSObject, NSApplicationDelegate {
         tv.string = text
         scroll.documentView = tv
         content.addSubview(scroll); content.addSubview(field); content.addSubview(band)
+        if CommandLine.arguments.contains("--glass") {
+            // `--glass`: Finder on macOS 26/27 without Finder: a translucent behind-window sidebar (Liquid Glass-like) whose
+            // blur of whatever is behind the window changes everywhere when the window moves.
+            let side: CGFloat = 300
+            scroll.frame = NSRect(x: side, y: scroll.frame.minY, width: size.width - side, height: scroll.frame.height)
+            let fx = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: side, height: size.height - captionHeight - fieldHeight))
+            fx.material = .sidebar; fx.blendingMode = .behindWindow; fx.state = .active; fx.autoresizingMask = [.height]
+            content.addSubview(fx)
+            w.isOpaque = false; w.backgroundColor = .clear
+        }
         if isMotion {
             let mv = MotionView(frame: NSRect(x: (size.width - 640) / 2, y: (size.height - 480) / 2 - 60, width: 640, height: 480))
             content.addSubview(mv)

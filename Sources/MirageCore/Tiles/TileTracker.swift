@@ -38,6 +38,9 @@ public struct TileTracker {
         /// Pending as a direct change (changed pixels the rate limit or the budget held back, a correction): it is
         /// presented as soon as it lands, never staged with a refinement level (DESIGN §3.3).
         var direct = false
+        /// Shown lossy (a moved window's backdrop level) and refined lossless only once the session is idle: not due,
+        /// not owed by a presentation level, not part of a backlog (`holdUntilIdle`, `releaseHeld`).
+        var held = false
     }
     private var cells: [Cell]
 
@@ -90,6 +93,7 @@ public struct TileTracker {
             if now &- c.lastDirtyNanos > tuning.historyNanos { c.hits = 0 }
             c.hits = min(c.hits &+ 1, 16)
             c.lastDirtyNanos = now
+            c.held = false
             cells[i] = c
         }
         var videoSet = Set<Int>()
@@ -141,19 +145,43 @@ public struct TileTracker {
     public mutating func markVideo(_ tiles: [Int], now: UInt64) {
         for i in tiles {
             var c = cells[i]
-            c.pending = true; c.viaVideo = true; c.direct = false
+            c.pending = true; c.viaVideo = true; c.direct = false; c.held = false
             c.pendingSince = now
             c.dueNanos = now &+ tuning.settleNanos
             cells[i] = c
         }
     }
 
+    /// A moved window's backdrop change (Liquid Glass: translucent toolbars and sidebars show a blur of whatever is behind
+    /// the window, so a move changes them everywhere): the tiles changed, are presented by one lossy whole-layer level, and
+    /// are refined lossless only once the session is idle (`releaseHeld`). Lossless per move was ~400 KB on mac-daddy.
+    public mutating func holdUntilIdle(_ tiles: [Int], now: UInt64) {
+        for i in tiles {
+            var c = cells[i]
+            if now &- c.lastDirtyNanos > tuning.historyNanos { c.hits = 0 }
+            c.lastDirtyNanos = now
+            c.pending = true; c.viaVideo = true; c.direct = false; c.held = true
+            if c.pendingSince == 0 { c.pendingSince = now }
+            c.dueNanos = .max
+            cells[i] = c
+        }
+    }
+    /// Held tiles become due refinement now (the session went idle). Returns how many.
+    @discardableResult
+    public mutating func releaseHeld(now: UInt64) -> Int {
+        var n = 0
+        for i in cells.indices where cells[i].held { cells[i].held = false; cells[i].pendingSince = now; cells[i].dueNanos = now; n += 1 }
+        return n
+    }
+    public func isHeld(_ i: Int) -> Bool { cells[i].held }
+    public var heldCount: Int { cells.reduce(0) { $0 + ($1.held ? 1 : 0) } }
+
     /// Pending tiles inside `rect` (and in `only`, if given) become due now (a fovea moved over them, a
     /// covered part of a window was uncovered).
     @discardableResult
     public mutating func expedite(in rect: PixelRect, now: UInt64, only: Set<Int>? = nil) -> Int {
         var n = 0
-        for i in tiles(covering: [rect]) where cells[i].pending && cells[i].dueNanos > now && (only?.contains(i) ?? true) { cells[i].dueNanos = now; n += 1 }
+        for i in tiles(covering: [rect]) where cells[i].pending && !cells[i].held && cells[i].dueNanos > now && (only?.contains(i) ?? true) { cells[i].dueNanos = now; n += 1 }
         return n
     }
 
@@ -162,7 +190,7 @@ public struct TileTracker {
     public mutating func `defer`(_ tiles: [Int], now: UInt64, delayNanos: UInt64 = 50_000_000, direct: Bool? = nil) {
         for i in tiles {
             var c = cells[i]
-            c.pending = true
+            c.pending = true; c.held = false
             if let direct { c.direct = direct }
             if c.pendingSince == 0 { c.pendingSince = now }
             c.dueNanos = now &+ delayNanos
@@ -174,7 +202,7 @@ public struct TileTracker {
     public mutating func markDirect(_ tiles: [Int], now: UInt64) {
         for i in tiles {
             var c = cells[i]
-            c.pending = true; c.direct = true
+            c.pending = true; c.direct = true; c.held = false
             if c.pendingSince == 0 { c.pendingSince = now }
             c.dueNanos = now
             cells[i] = c
@@ -186,7 +214,7 @@ public struct TileTracker {
     /// since `stableBefore` (a region that keeps changing is dropped from the pending level, not waited for).
     public func refinementOutstanding(excluding: Set<Int>, stableBefore: UInt64) -> Int {
         var n = 0
-        for i in 0..<cells.count where cells[i].pending && !cells[i].direct && cells[i].lastDirtyNanos <= stableBefore && !excluding.contains(i) { n += 1 }
+        for i in 0..<cells.count where cells[i].pending && !cells[i].direct && !cells[i].held && cells[i].lastDirtyNanos <= stableBefore && !excluding.contains(i) { n += 1 }
         return n
     }
 
@@ -209,7 +237,7 @@ public struct TileTracker {
             let sources = src.isEmpty ? [] : self.tiles(covering: [src])
             let soft = sources.filter { before[$0].pending && before[$0].viaVideo }
             var c = cells[i]
-            c.lastDirtyNanos = now; c.lastLosslessNanos = now; c.direct = false
+            c.lastDirtyNanos = now; c.lastLosslessNanos = now; c.direct = false; c.held = false
             if soft.isEmpty {
                 c.pending = false; c.pendingSince = 0; c.viaVideo = false
             } else {
@@ -224,6 +252,8 @@ public struct TileTracker {
     /// Tiles that became video-quality and still need refinement (for stats).
     public var pendingRefinement: Int { cells.reduce(0) { $0 + ($1.pending && $1.viaVideo ? 1 : 0) } }
     public var pendingTotal: Int { cells.reduce(0) { $0 + ($1.pending ? 1 : 0) } }
+    /// Pending and not held for idle (what a refinement backlog is made of).
+    public var pendingUnheld: Int { cells.reduce(0) { $0 + ($1.pending && !$1.held ? 1 : 0) } }
 
     /// Pending tiles whose due time has passed, oldest-pending first and viewport-centre first
     /// among equals (within 100 ms). The caller sends as many as the byte budget allows and
@@ -246,11 +276,17 @@ public struct TileTracker {
         out.sort { $0.1 != $1.1 ? $0.1 < $1.1 : $0.0 < $1.0 }
         return out.prefix(limit).map { $0.0 }
     }
+    /// When the longest-waiting due direct tile has been due since (nil: none due).
+    public func oldestDueDirect(now: UInt64) -> UInt64? {
+        var oldest: UInt64? = nil
+        for c in cells where c.pending && c.direct && !c.viaVideo && c.dueNanos <= now { oldest = min(oldest ?? c.dueNanos, c.dueNanos) }
+        return oldest
+    }
 
     public mutating func sent(lossless tiles: [Int], now: UInt64) {
         for i in tiles {
             var c = cells[i]
-            c.lastLosslessNanos = now; c.pending = false; c.pendingSince = 0; c.viaVideo = false; c.direct = false
+            c.lastLosslessNanos = now; c.pending = false; c.pendingSince = 0; c.viaVideo = false; c.direct = false; c.held = false
             cells[i] = c
         }
     }

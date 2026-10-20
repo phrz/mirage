@@ -73,8 +73,13 @@ final class Layer {
     var sentBytes = 0, sentRefine = 0, sentDirect = 0
     /// 30 s accounting by class (DESIGN §6 M3.1: what the steady traffic is): first-picture still, lossless blocks,
     /// per-tile refinement, direct changes, video, underlay (display only), and dirty tiles seen.
-    struct Account { var still = 0, blocks = 0, refine = 0, direct = 0, video = 0, underlay = 0, dirtyTiles = 0, upgrade = 0
-        var total: Int { still + blocks + refine + direct + video + underlay } }
+    struct Account { var still = 0, blocks = 0, refine = 0, direct = 0, video = 0, underlay = 0, dirtyTiles = 0, upgrade = 0, backdrop = 0
+        var total: Int { still + blocks + refine + direct + video + underlay + backdrop } }
+    /// Window layers: when the window last moved on the host, and whether a backdrop change since then waits for its
+    /// lossy level (TileTracker.holdUntilIdle); when the last held capture came.
+    var movedNanos: UInt64 = 0
+    var backdropDirty = false
+    var backdropHeldNanos: UInt64 = 0
     var account = Account()
 
     // Video.
@@ -146,6 +151,7 @@ final class Layer {
         announced = false; exposed = false
         fresh = .done
         stagedOpenSince = nil
+        backdropDirty = false
     }
 
     var hasVideoPending: Bool { !pendingVideoTiles.isEmpty || wantKeyframe }
