@@ -80,6 +80,8 @@ final class Layer {
     var movedNanos: UInt64 = 0
     var backdropDirty = false
     var backdropHeldNanos: UInt64 = 0
+    /// Window picture audit: where its slow sweep continues.
+    var auditCursor = 0
     var account = Account()
 
     // Video.

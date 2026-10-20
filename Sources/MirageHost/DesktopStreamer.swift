@@ -69,6 +69,35 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         statAudited += tiles.count
         sendControlCounted(.tileAudit(.init(layer: 0, captureSeq: captureSeq, tiles: tiles.map(UInt32.init), prints: prints)))
     }
+    /// The same audit for window layers (the backstop that was missing when copy-rects left a scrolled Finder window's
+    /// toolbar stacked for 13 s, 2df0793): opaque, visible, crisp tiles quiet for 2 s, newest changes first, plus a slow sweep.
+    private var statWindowAudited = 0, statWindowAuditRefreshed = 0
+    private func sendWindowAudits(now: UInt64) {
+        guard !screenLocked else { return }
+        for l in layers.values where !l.isDisplay && l.announced && l.exposed && l.fresh == .done {
+            guard let src = l.lastFrame else { continue }
+            CVPixelBufferLockBaseAddress(src, .readOnly); defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
+            let f = frameView(src)
+            guard f.width == l.width, f.height == l.height else { continue }
+            let t = l.tracker
+            func auditable(_ i: Int) -> Bool {
+                t.isCrisp(i) && l.opaqueTiles.contains(i) && !l.occludedTiles.contains(i) && Clock.elapsed(since: t.lastDirty(i), now: now) > 2_000_000_000
+            }
+            var tiles = (0..<t.tileCount).filter { auditable($0) && Clock.elapsed(since: t.lastDirty($0), now: now) < 120_000_000_000 }
+                .sorted { t.lastDirty($0) > t.lastDirty($1) }.prefix(150).map { $0 }
+            var swept = 0, k = 0
+            while swept < 32, k < t.tileCount {
+                let i = (l.auditCursor + k) % t.tileCount; k += 1
+                if auditable(i), !tiles.contains(i) { tiles.append(i); swept += 1 }
+            }
+            l.auditCursor = (l.auditCursor + k) % max(1, t.tileCount)
+            guard !tiles.isEmpty else { continue }
+            var prints = Data(capacity: tiles.count * 16)
+            for i in tiles { prints.append(contentsOf: TileAudit.fingerprint(f, t.rect(of: i))) }
+            statWindowAudited += tiles.count
+            sendControlCounted(.tileAudit(.init(layer: l.id, captureSeq: captureSeq, tiles: tiles.map(UInt32.init), prints: prints)))
+        }
+    }
     /// Window-command targets of windows that left the list (minimized from the viewer), for the restore.
     private var lastTargets: [UInt32: (target: AXWindows.Target, nanos: UInt64)] = [:]
     private var request: ControlMessage.StreamRequest?
@@ -163,6 +192,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if !caps.isEmpty { log("window captures, last 30 s: " + caps.joined(separator: " | ")) }
         if statDirtyMissed > 0 { log("display: \(statDirtyMissed) changed tiles outside ScreenCaptureKit's dirty rects in the last 30 s (found by the full diff)") }
         statDirtyMissed = 0
+        if statWindowAudited > 0 { log("window picture audit, last 30 s: \(statWindowAudited) window tiles fingerprinted, \(statWindowAuditRefreshed) asked for again by the viewer") }
+        statWindowAudited = 0; statWindowAuditRefreshed = 0
         if statAudited > 0 { log("picture audit, last 30 s: \(statAudited) desktop tiles fingerprinted, \(statAuditRefreshed) asked for again by the viewer; \(statDirectDue) held-back changed tiles sent when due (longest wait \(statDirectWaitMaxNanos / 1_000_000) ms), \(statCopyCorrections) of them copy-rect corrections") }
         if statBackdropLevels > 0 { log("moved-window backdrops, last 30 s: \(statBackdropTiles) tiles held, \(statBackdropLevels) lossy levels \(statBackdropBytes / 1000) KB, \(statBackdropReleased) tiles released to lossless refinement when idle") }
         statDirectDue = 0; statDirectWaitMaxNanos = 0; statCopyCorrections = 0; statBackdropTiles = 0; statBackdropLevels = 0; statBackdropBytes = 0; statBackdropReleased = 0
@@ -514,6 +545,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         if case .refreshTiles(let r) = input {
             queue.async {
+                if r.layer != 0, let l = self.layers[r.layer] {
+                    // A window layer's tiles the viewer holds wrong: direct changes, due now.
+                    let tiles = r.tiles.map(Int.init).filter { $0 >= 0 && $0 < l.tracker.tileCount && !l.occludedTiles.contains($0) }
+                    self.statWindowAuditRefreshed += tiles.count
+                    l.tracker.markDirect(tiles, now: Clock.nowNanos())
+                    return
+                }
                 guard r.layer == 0, let d = self.display else { return }
                 let tiles = r.tiles.map(Int.init).filter { $0 >= 0 && $0 < d.tracker.tileCount }
                 self.statAuditRefreshed += tiles.count
@@ -2369,7 +2407,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             self.secSkippedBudget = 0
             self.secVideoBytes = 0; self.secTileBytes = 0; self.secVideoFrames = 0
             if InputInjector.consoleLocked() != self.screenLocked, let cur = self.windows?.current { self.reconcileLayers(cur, now: tnow); self.publishWindows(now: tnow, full: false) }
-            if Clock.elapsed(since: self.lastAuditNanos, now: tnow) >= 5_000_000_000 { self.lastAuditNanos = tnow; self.sendAudit(now: tnow) }
+            if Clock.elapsed(since: self.lastAuditNanos, now: tnow) >= 5_000_000_000 { self.lastAuditNanos = tnow; self.sendAudit(now: tnow); self.sendWindowAudits(now: tnow) }
             let front: (app: String, id: UInt32, title: String) = self.windows?.frontmost() ?? (app: "", id: 0, title: "")
             let status = ControlMessage.HostStatus(consoleLocked: self.screenLocked || InputInjector.consoleLocked(), frontmostApp: front.app, frontmostWindowID: front.id, frontmostWindowTitle: front.title, inputSink: InputInjector.sinkPath != nil, viewers: Self.liveCount())
             // On change, and every 10 s regardless (sparse when idle; the viewer's keepalive is its own datagram).

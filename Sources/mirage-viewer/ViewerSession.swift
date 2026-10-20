@@ -768,7 +768,7 @@ final class ViewerSession: @unchecked Sendable {
     private var testDropCount = 0
     private(set) var testDropped = 0
     private func audit(_ a: ControlMessage.TileAuditMessage) {
-        guard a.layer == 0, let v = displayView, v.compositor.width > 0, a.prints.count == a.tiles.count * 16 else { return }
+        guard let v = layerView(a.layer), v.compositor.width > 0, a.prints.count == a.tiles.count * 16 else { return }
         let c = v.compositor
         let t = TileTracker(width: c.width, height: c.height)
         var idx: [Int] = [], rects: [PixelRect] = []
@@ -794,8 +794,8 @@ final class ViewerSession: @unchecked Sendable {
             self.videoQueue.async {
                 self.auditCompared += datas.count; self.auditMismatched += bad.count
                 if !bad.isEmpty {
-                    self.log("picture audit: \(bad.count) of \(datas.count) desktop tiles differ from the host's; asking for them again")
-                    self.sender?.send(.refreshTiles(.init(layer: 0, tiles: bad)))
+                    self.log("picture audit: \(bad.count) of \(datas.count) \(a.layer == 0 ? "desktop" : "window \(a.layer)") tiles differ from the host's; asking for them again")
+                    self.sender?.send(.refreshTiles(.init(layer: a.layer, tiles: bad)))
                 }
             }
         }
