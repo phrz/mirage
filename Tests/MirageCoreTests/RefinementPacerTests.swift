@@ -78,8 +78,8 @@ final class RefinementPacerTests: XCTestCase {
         XCTAssertTrue(p.isIdle)
         _ = p.start(layer: 0, estimate: 50_000, now: 0)
         XCTAssertTrue(p.canStartBlock(tileBytesPerSecond: 10_000) == false)
-        XCTAssertEqual(p.expire(now: 2_000_000_000, srttNanos: 200_000_000), 0)
-        XCTAssertEqual(p.expire(now: 2_700_000_000, srttNanos: 200_000_000), 1, "3 RTT + 2 s without an ack")
+        XCTAssertEqual(p.expire(now: 9_000_000_000, srttNanos: 200_000_000), 0, "a slow ack is queued, not lost")
+        XCTAssertEqual(p.expire(now: 10_100_000_000, srttNanos: 200_000_000), 1, "10 s without an ack")
         XCTAssertTrue(p.isIdle)
     }
 

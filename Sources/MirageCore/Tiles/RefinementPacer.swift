@@ -16,8 +16,10 @@ public struct RefinementPacer {
     /// Unacked block bytes allowed, in seconds of the tile budget (and a block's own size: half of that).
     public static let blockWindowSeconds = 0.5
     public static let blockSeconds = 0.25
-    /// A block whose ack never comes (a viewer that dropped the message) stops counting after ~3 RTT + 2 s.
-    public static func blockTimeoutNanos(srttNanos: Double) -> UInt64 { UInt64(3 * srttNanos) + 2_000_000_000 }
+    /// A block whose ack never comes (a viewer that dropped the message) stops counting after 10 s (or 3 RTT + 2 s if
+    /// longer). Acks come on a reliable stream; a slow one is queued behind changed pixels, and forgetting it then let
+    /// more blocks pile into the same queue (mac-daddy realapps, 2026-10-20: ten timeouts in 17 s at 3 RTT + 2 s).
+    public static func blockTimeoutNanos(srttNanos: Double) -> UInt64 { max(10_000_000_000, UInt64(3 * srttNanos) + 2_000_000_000) }
 
     public struct Block: Equatable {
         public let id: Int
