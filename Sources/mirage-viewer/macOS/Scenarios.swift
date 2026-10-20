@@ -504,6 +504,10 @@ final class ScenarioRunner {
                     }.first
                     r = drawn ?? win.frame
                     if let d = drawn, d != win.frame { self.session.log("scenario realapps: shot \(n): drawn \(d.x),\(d.y) vs host \(win.frame.x),\(win.frame.y)") }
+                    // The prediction's displayed lead over the host (the neutral band's size), per shot.
+                    if let lead = sc.displacements.first(where: { $0.layerID == win.id })?.displacement, lead.dy != 0 || lead.dx != 0 {
+                        self.session.log("scenario realapps: shot \(n): prediction lead \(lead.dx),\(lead.dy) of a \(lead.rect.width)x\(lead.rect.height) scroll view")
+                    }
                 }
                 let crop = r.intersection(PixelRect(x: 0, y: 0, width: bg.width, height: bg.height))
                 guard crop.area > 0 else { continue }

@@ -101,3 +101,22 @@ final class TexturedEvidenceTests: XCTestCase {
         XCTAssertNil(r, "98 % flat tiles match, the only evidence does not")
     }
 }
+
+final class RubberBandTests: XCTestCase {
+    func testScrollLeadResistsAndNeverExceedsTheLimit() {
+        XCTAssertEqual(Predictor.rubberBand(0, limit: 200), 0)
+        XCTAssertEqual(Predictor.rubberBand(20, limit: 200), 19, "about 1:1 for a small lead")
+        let a = Predictor.rubberBand(200, limit: 200), b = Predictor.rubberBand(2000, limit: 200)
+        XCTAssertEqual(a, 126)
+        XCTAssertGreaterThan(b, a); XCTAssertLessThanOrEqual(b, 200, "at most a third of the view")
+        XCTAssertEqual(Predictor.rubberBand(-200, limit: 200), -a)
+    }
+    func testDisplacementOfALongScrollIsBounded() {
+        var p = Predictor()
+        let rect = PixelRect(x: 0, y: 0, width: 1500, height: 720)
+        for k in 0..<12 { p.predict(kind: .scroll, windowID: 7, rect: rect, dx: 0, dy: -60, inputSeq: UInt64(k + 1), now: UInt64(k) * 33_000_000) }
+        let d = p.displacements().first!
+        XCTAssertLessThanOrEqual(abs(d.dy), 240, "12 × 60 px ahead shows at most a third of the 720-px view")
+        XCTAssertGreaterThan(abs(d.dy), 200)
+    }
+}

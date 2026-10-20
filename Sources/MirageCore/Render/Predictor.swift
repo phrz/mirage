@@ -205,10 +205,21 @@ public struct Predictor {
             // Scroll: sum of remainders over the (latest) scroll rect. Drag: sum over the window frame.
             let kind = w.predictions.last!.kind
             let rect = w.predictions.last!.rect
-            let dx = w.predictions.reduce(0) { $0 + $1.remX }, dy = w.predictions.reduce(0) { $0 + $1.remY }
+            var dx = w.predictions.reduce(0) { $0 + $1.remX }, dy = w.predictions.reduce(0) { $0 + $1.remY }
+            if kind == .scroll { dx = Self.rubberBand(dx, limit: rect.width / 3); dy = Self.rubberBand(dy, limit: rect.height / 3) }
             if dx != 0 || dy != 0 { out.append(Displacement(kind: kind, windowID: id, rect: rect, dx: dx, dy: dy)) }
         }
         return out.sorted { $0.windowID < $1.windowID }
+    }
+
+    /// A scroll's displayed lead over the host, L·(1 − e^(−x/L)) with L = `limit` (a third of the scroll view): about 1:1 for a
+    /// small lead, increasingly resisting, never more than L (scroll never waits, and the neutral band never fills the view: at
+    /// ~250 ms RTT a Finder scroll ran 240–480 px ahead and most of the icon view showed as band).
+    public static func rubberBand(_ x: Int, limit l: Int) -> Int {
+        guard l > 0, x != 0 else { return x }
+        let L = Double(l)
+        let shown = L * (1 - exp(-Double(abs(x)) / L))
+        return (x < 0 ? -1 : 1) * max(1, Int(shown.rounded()))
     }
 
     public func isConfident(_ windowID: UInt32) -> Bool { windows[windowID]?.confident ?? true }
