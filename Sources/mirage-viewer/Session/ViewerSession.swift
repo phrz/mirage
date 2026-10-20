@@ -695,6 +695,9 @@ final class ViewerSession: @unchecked Sendable {
                 _ = dropped   // the canvas keeps what it had there; a dropped write contaminates nothing
             }
             let fresh = candidates.filter { isFresh(v, $0.rect, captureSeq: t.header.captureSeq) }
+            // A lossy desktop refinement is that tile's final quality (photographic rects end at q90 on links ≤ 2 Mbps): it counts
+            // as final for the lossless measurements, like a lossless tile. (A window's lossy refinement is its middle level.)
+            let finalLossy = v.id == 0 && t.refinement
             for tile in fresh where wouldBeStale(v, tile.rect, captureSeq: t.header.captureSeq) { staleCommits += 1 }   // must never happen
             // Staged tiles build the layer's next level off-screen (DESIGN §3.3); where one lands on desktop the scene
             // draws as fill (nothing clean known there, not under a window layer), that part is shown at once too: any
@@ -709,7 +712,7 @@ final class ViewerSession: @unchecked Sendable {
             var n = 0
             if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) seq \(seq) capture \(t.header.captureSeq): shown \(shown.map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)\($0.format == .lossy ? "L" : "")" }.joined(separator: " ")) staged \(staged.map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))\(t.refinement ? " (refinement)" : "")") }
             if !shown.isEmpty { n += v.compositor.applyTiles(shown, crossfade: t.refinement && !t.staged) }
-            if !staged.isEmpty { n += v.compositor.applyTiles(staged, staged: true, alsoShow: fillParts); v.stagedLossless += staged.filter { $0.format != .lossy }.map(\.rect) }
+            if !staged.isEmpty { n += v.compositor.applyTiles(staged, staged: true, alsoShow: fillParts); v.stagedLossless += staged.filter { $0.format != .lossy || finalLossy }.map(\.rect) }
             if !t.staged, !shown.isEmpty {
                 let area = shown.reduce(0) { $0 + $1.rect.area }, whole = area * 10 >= max(1, v.compositor.width * v.compositor.height) * 9
                 if shown.contains(where: { $0.format == .lossy }) && whole { v.step(t.refinement ? "fade" : "still", now: now) }
@@ -722,7 +725,7 @@ final class ViewerSession: @unchecked Sendable {
             if c.width > 0 {
                 let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
                 if v.losslessAt.count != cols * rows { v.losslessAt = Array(repeating: 0, count: cols * rows) }
-                for tile in shown where tile.format != .lossy {
+                for tile in shown where tile.format != .lossy || finalLossy {
                     let c0 = max(0, tile.rect.x / 64), c1 = min(cols - 1, (tile.rect.maxX - 1) / 64), r0 = max(0, tile.rect.y / 64), r1 = min(rows - 1, (tile.rect.maxY - 1) / 64)
                     if c1 >= c0, r1 >= r0 { for r in r0...r1 { for cc in c0...c1 { v.losslessAt[r * cols + cc] = now } } }
                 }
@@ -1154,6 +1157,27 @@ final class ViewerSession: @unchecked Sendable {
         guard earliest != .max else { return }
         legibleUnderPointerMs = Double(earliest - streamStartNanos) / 1e6
         log(String(format: "legible under the pointer %.0f ms after the stream started", legibleUnderPointerMs!))
+    }
+
+    /// Test measurement: of the desktop layer's tiles touching `rects`, how many have been shown lossless since the stream
+    /// started, and when the last of those landed (ms after the start).
+    func desktopLosslessCoverage(_ rects: [PixelRect]) -> (lossless: Int, total: Int, lastMs: Double) {
+        var n = 0, total = 0, last: UInt64 = 0
+        videoQueue.sync {
+            guard let v = layerViews[0], v.compositor.width > 0, !v.losslessAt.isEmpty, streamStartNanos > 0 else { return }
+            let cols = (v.compositor.width + 63) / 64, rows = (v.compositor.height + 63) / 64
+            var seen = Set<Int>()
+            for pr in rects {
+                let c0 = max(0, pr.x / 64), c1 = min(cols - 1, (pr.maxX - 1) / 64), r0 = max(0, pr.y / 64), r1 = min(rows - 1, (pr.maxY - 1) / 64)
+                guard c1 >= c0, r1 >= r0 else { continue }
+                for r in r0...r1 { for c in c0...c1 where seen.insert(r * cols + c).inserted {
+                    total += 1
+                    let t = v.losslessAt[r * cols + c]
+                    if t > streamStartNanos { n += 1; last = max(last, t) }
+                } }
+            }
+        }
+        return (n, total, last > streamStartNanos ? Double(last - streamStartNanos) / 1e6 : 0)
     }
 
     func sendMouseMove(x: Double, y: Double) {
