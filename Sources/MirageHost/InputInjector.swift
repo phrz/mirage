@@ -9,8 +9,13 @@ final class InputInjector {
     private var displayBounds: CGRect
     private var buttonsDown: Set<Int> = []
     private var lastPos: CGPoint
-    /// Precise scrolls: one axis per gesture, whole points (ScrollShaper).
+    /// Precise scrolls: one axis per gesture, whole points (ScrollShaper). Every precise scroll goes through it, finger
+    /// travel and momentum alike (a touch client's momentum is more precise scroll messages; nothing carries a phase),
+    /// in input-sink mode too.
     private var scrollShaper = ScrollShaper()
+    /// The last gesture whose axis was logged, and the raw travel of the current one (for that line).
+    private var loggedScrollGesture = -1
+    private var scrollRaw = (dx: 0.0, dy: 0.0, gesture: -1)
     /// (input seq, injection clock) of recent inputs, so captures can be stamped with the last input they reflect.
     private var injected: [(seq: UInt64, nanos: UInt64)] = []
     private let seqLock = NSLock()
@@ -122,8 +127,15 @@ final class InputInjector {
             if injected.count > 512 { injected.removeFirst(injected.count - 512) }
             seqLock.unlock()
         }
+        // Shaped before the sink, so an input-sink run records what would be posted (a `postedScroll` line after the
+        // scroll it came from; none while the gesture is undecided or for travel off its axis).
+        var shaped: (dx: Int, dy: Int)? = nil
+        if case .scroll(let s) = msg, s.precise { shaped = shapeScroll(s) }
         if let sink {
             if let d = try? JSONEncoder().encode(msg) { sink.write(d); sink.write(Data("\n".utf8)) }
+            if case .scroll(let s) = msg, s.precise, let shaped {
+                sink.write(Data("{\"postedScroll\":{\"seq\":\(s.seq ?? 0),\"dx\":\(shaped.dx),\"dy\":\(shaped.dy)}}\n".utf8))
+            }
             return
         }
         switch msg {
@@ -144,7 +156,7 @@ final class InputInjector {
             let units: CGScrollEventUnit = s.precise ? .pixel : .line
             var dx = Int32(s.dx.rounded()), dy = Int32(s.dy.rounded())
             if s.precise {
-                guard let d = scrollShaper.shape(dx: s.dx, dy: s.dy, nanos: Clock.nowNanos()) else { return }
+                guard let d = shaped else { return }
                 dx = Int32(d.dx); dy = Int32(d.dy)
             }
             guard let e = CGEvent(scrollWheelEvent2Source: source, units: units, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else { return }
@@ -178,6 +190,20 @@ final class InputInjector {
     func record(_ msg: ControlMessage) {
         guard let sink, let d = try? JSONEncoder().encode(msg) else { return }
         sink.write(d); sink.write(Data("\n".utf8))
+    }
+
+    /// One precise scroll through the shaper; the axis each gesture took is logged once (the streamer's scroll
+    /// diagnostics print the wheel delta as the viewer sent it, before this).
+    private func shapeScroll(_ s: ControlMessage.Scroll) -> (dx: Int, dy: Int)? {
+        let d = scrollShaper.shape(dx: s.dx, dy: s.dy, nanos: Clock.nowNanos())
+        let g = scrollShaper.lock.gesture
+        if scrollRaw.gesture != g { scrollRaw = (0, 0, g) }
+        scrollRaw.dx += s.dx; scrollRaw.dy += s.dy
+        if let a = scrollShaper.axis, loggedScrollGesture != g {
+            loggedScrollGesture = g
+            hostLog(String(format: "scroll gesture: %@ after %.0f,%.0f pt of travel", "\(a)", scrollRaw.dx, scrollRaw.dy))
+        }
+        return d
     }
 
     private func noteMotion() { locusLock.lock(); _motionHintNanos = Clock.nowNanos(); locusLock.unlock() }

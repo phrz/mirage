@@ -45,6 +45,11 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private var lastPanTranslation = CGPoint.zero, lastPanTime: CFTimeInterval = 0
     private var lastScrollTranslation = CGPoint.zero
     private var momentum = ScrollMomentum()
+    /// One axis per scroll gesture (vertical, horizontal or, for a clearly diagonal one, free), as a Mac trackpad: what is
+    /// sent, its momentum and the local prediction all keep to it.
+    private var axisLock = ScrollAxisLock()
+    /// Scroll messages sent (the demo reads it): how many, and how many moved each axis.
+    private var scrollsSent = (count: 0, dx: 0, dy: 0)
     private var lastTap: (time: CFTimeInterval, x: Double, y: Double, count: Int)?
     private var pressLocation = CGPoint.zero
     private var pressing = false
@@ -80,6 +85,8 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     /// (zoom) or travel together (scroll); three fingers pan the view.
     private enum MultiTouch { case idle, undecided, scroll, zoom, viewPan }
     private var multi = MultiTouch.idle
+    /// Trackpad mode's scroll-or-pinch decision (the same rule as direct touch's).
+    private var twoFinger: TwoFingerClassifier?
     private var multiActive = Set<ObjectIdentifier>()
     private weak var pinchRecognizer: UIPinchGestureRecognizer?
     private var pinchBase = 1.0, pinchLast = CGPoint.zero
@@ -451,11 +458,11 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
             case .rightClick(let p):
                 jumpPointer(to: p); rightClick()
             case .scrollBegan(let p):
-                momentum.stop(); stopAutoMotion(); jumpPointer(to: p)
+                momentum.stop(); stopAutoMotion(); jumpPointer(to: p); axisLock.begin()
             case .scroll(let dx, let dy):
                 scroll(viewDX: dx, viewDY: dy)
             case .scrollEnded(let vx, let vy):
-                momentum.start(vx: vx, vy: vy)
+                scrollEnded(vx: vx, vy: vy)
             case .pinchBegan(let p):
                 momentum.stop(); stopAutoMotion(); pinchBase = viewport.zoom; pinchLast = p
             case .pinch(let s, let p):
@@ -485,12 +492,12 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     /// Direct mode's iPad trackpad or mouse wheel: scrolls at the pointer (where the hover put it).
     @objc private func wheel(_ g: UIPanGestureRecognizer) {
         switch g.state {
-        case .began: momentum.stop(); lastWheelTranslation = .zero
+        case .began: momentum.stop(); lastWheelTranslation = .zero; axisLock.begin()
         case .changed:
             let t = g.translation(in: self)
             scroll(viewDX: t.x - lastWheelTranslation.x, viewDY: t.y - lastWheelTranslation.y)
             lastWheelTranslation = t
-        case .ended: let v = g.velocity(in: self); momentum.start(vx: v.x, vy: v.y)
+        case .ended: let v = g.velocity(in: self); scrollEnded(vx: v.x, vy: v.y)
         default: break
         }
     }
@@ -514,20 +521,35 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
     private func multiEnded(_ g: UIGestureRecognizer) {
         multiActive.remove(ObjectIdentifier(g))
-        if multiActive.isEmpty { multi = .idle }
+        if multiActive.isEmpty { multi = .idle; twoFinger = nil }
     }
 
-    /// Pinch: once the fingers have spread or closed by 5 % (before travelling together far enough to be a scroll), the
-    /// gesture is a zoom about the fingers' centre until they lift, and the centre's travel pans (two fingers after a pinch).
+    /// Trackpad mode, two fingers undecided: the same scroll-or-pinch rule as direct touch (`TwoFingerClassifier`: a
+    /// scroll unless they clearly pinch), fed from whichever recognizer saw them move. The decision holds until they lift.
+    private func classifyTwoFingers(_ g: UIGestureRecognizer) {
+        guard multi == .undecided, g.numberOfTouches == 2 else { return }
+        let a = g.location(ofTouch: 0, in: self), b = g.location(ofTouch: 1, in: self)
+        guard var k = twoFinger else { twoFinger = TwoFingerClassifier(a, b); return }
+        let d = k.update(a, b, time: CACurrentMediaTime())
+        twoFinger = k
+        switch d {
+        case .undecided: break
+        case .scroll: multi = .scroll
+        case .pinch:
+            multi = .zoom; momentum.stop()
+            // The zoom follows the fingers from here: no jump for the travel it took to decide.
+            if let p = pinchRecognizer { pinchBase = viewport.zoom / Double(p.scale); pinchLast = p.location(in: self) }
+        }
+    }
+
+    /// Pinch: once the fingers clearly pinch (`classifyTwoFingers`), the gesture is a zoom about the fingers' centre until
+    /// they lift, and the centre's travel pans (two fingers after a pinch).
     @objc private func pinch(_ g: UIPinchGestureRecognizer) {
         let loc = g.location(in: self)
         switch g.state {
-        case .began: multiBegan(g)
+        case .began: multiBegan(g); classifyTwoFingers(g)
         case .changed:
-            if multi == .undecided, abs(log(Double(g.scale))) > 0.05 {
-                multi = .zoom; momentum.stop()
-                pinchBase = viewport.zoom / Double(g.scale); pinchLast = loc
-            }
+            classifyTwoFingers(g)
             guard multi == .zoom else { return }
             guard g.numberOfTouches >= 2 else { pinchLast = loc; return }   // a finger lifted: the centre jumps, do not pan
             pinchStep(zoom: pinchBase * Double(g.scale), at: loc)
@@ -545,8 +567,11 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     /// Three fingers: pan the view (presentation only; nothing is sent).
     @objc private func viewPan(_ g: UIPanGestureRecognizer) {
         switch g.state {
-        case .began: multiBegan(g); multi = .viewPan; momentum.stop(); lastViewPan = g.translation(in: self)
+        case .began:
+            multiBegan(g); lastViewPan = g.translation(in: self)
+            if multi == .undecided { multi = .viewPan; momentum.stop() }   // a decided scroll or pinch holds until the fingers lift
         case .changed:
+            guard multi == .viewPan else { return }
             let t = g.translation(in: self)
             panView(by: CGPoint(x: t.x - lastViewPan.x, y: t.y - lastViewPan.y))
             lastViewPan = t
@@ -614,7 +639,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     }
 
     @objc private func tap(_ g: UITapGestureRecognizer) { tapForDemo() }
-    func momentumStartForDemo(vy: Double) { momentum.start(vx: 0, vy: vy) }
+    func momentumStartForDemo(vy: Double) { scrollEnded(vx: 0, vy: vy) }
     /// Trackpad mode's tap: a click at the pointer (taps in a row at the same place double- and triple-click).
     func tapForDemo() {
         let now = CACurrentMediaTime()
@@ -723,31 +748,42 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         drag = nil
     }
 
-    /// Two fingers travelling together scroll the remote content. Until the gesture is decided (they could still spread
-    /// into a pinch) nothing is sent; once it is a scroll, the travel so far goes out at once.
+    /// Two fingers scroll the remote content unless they clearly pinch. Until the gesture is decided nothing is sent; once
+    /// it is a scroll, the travel so far goes out at once.
     @objc private func scrollPan(_ g: UIPanGestureRecognizer) {
         switch g.state {
-        case .began: multiBegan(g); momentum.stop(); lastScrollTranslation = .zero
+        case .began: multiBegan(g); momentum.stop(); lastScrollTranslation = .zero; axisLock.begin(); classifyTwoFingers(g)
         case .changed:
-            if g.numberOfTouches >= 3 { multi = .viewPan }
+            if g.numberOfTouches >= 3, multi == .undecided { multi = .viewPan }
+            classifyTwoFingers(g)
             let t = g.translation(in: self)
-            if multi == .undecided {
-                let spread = abs(log(Double(pinchRecognizer?.scale ?? 1)))
-                if (t.x * t.x + t.y * t.y).squareRoot() > 12, spread < 0.05 { multi = .scroll }
-            }
             guard multi == .scroll else { return }
             scroll(viewDX: t.x - lastScrollTranslation.x, viewDY: t.y - lastScrollTranslation.y)
             lastScrollTranslation = t
         case .ended:
-            if multi == .scroll { let v = g.velocity(in: self); momentum.start(vx: v.x, vy: v.y) }
+            if multi == .scroll { let v = g.velocity(in: self); scrollEnded(vx: v.x, vy: v.y) }
             multiEnded(g)
         default: multiEnded(g)
         }
     }
 
-    /// A scroll of `viewDX`, `viewDY` points of finger travel at the pointer: natural scrolling (the content follows the
-    /// fingers), sent as precise deltas in host points, and predicted locally like the Mac viewer's trackpad scroll.
+    /// The fingers lifted: travel the axis lock still held goes out, and the momentum keeps to the gesture's axis.
+    private func scrollEnded(vx: Double, vy: Double) {
+        let e = axisLock.end(vx: vx, vy: vy, time: CACurrentMediaTime())
+        if let f = e.flush { send(scrollViewDX: f.dx, viewDY: f.dy) }
+        momentum.start(vx: e.velocity.vx, vy: e.velocity.vy)
+    }
+
+    /// A scroll of `viewDX`, `viewDY` points of finger travel (or momentum) at the pointer, kept to the gesture's axis
+    /// (`axisLock`; the first ~10 pt decide it, a 250 ms pause starts a new gesture).
     func scroll(viewDX: Double, viewDY: Double) {
+        guard let d = axisLock.filter(dx: viewDX, dy: viewDY, time: CACurrentMediaTime()) else { return }
+        send(scrollViewDX: d.dx, viewDY: d.dy)
+    }
+
+    /// Natural scrolling (the content follows the fingers), sent as precise deltas in host points, and predicted locally
+    /// like the Mac viewer's trackpad scroll, along the same axis as what is sent.
+    private func send(scrollViewDX viewDX: Double, viewDY: Double) {
         guard !observeOnly, let session, let comp = session.compositor, comp.width > 0 else { return }
         let r = videoRect
         guard r.width > 0 else { return }
@@ -755,6 +791,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         let k = Double(comp.width) / Double(r.width)   // stream pixels per view point
         let dx = viewDX * k / ppp, dy = viewDY * k / ppp
         guard dx != 0 || dy != 0 else { return }
+        scrollsSent.count += 1; scrollsSent.dx += dx != 0 ? 1 : 0; scrollsSent.dy += dy != 0 ? 1 : 0
         let seq = session.send(.scroll(.init(x: pointer.x, y: pointer.y, dx: dx, dy: dy, precise: true, modifiers: modifierFlags)))
         guard modifierFlags & (MacKeys.commandFlag | MacKeys.optionFlag | MacKeys.controlFlag) == 0, let p = streamPixel(), let w = session.window(at: p.0, p.1) else { return }
         let sdx = Int((dx * ppp).rounded()), sdy = Int((dy * ppp).rounded())
@@ -1086,6 +1123,33 @@ extension DesktopUIView {
         let n = viewport.normalized(spot)
         log(String(format: "scrolled with the pointer at %.3f,%.3f (the swipe began at %.3f,%.3f)", pointer.x, pointer.y, n.x, n.y))
         await pause(2.5)
+
+        // phrz's scrolls (2026-10-20): the fingers drift apart and sideways and are not quite parallel. It must scroll
+        // (not zoom), vertically only, momentum included.
+        func twoFingerTrace(_ name: String, from c: CGPoint, spread s0: Double, spreadEnd s1: Double, travel: Double, degrees: Double, steps: Int) async {
+            let z0 = viewport.zoom
+            scrollsSent = (0, 0, 0)
+            let ux = sin(degrees * .pi / 180), uy = -cos(degrees * .pi / 180)   // 0°: straight up the screen
+            func fingers(_ i: Int) -> (CGPoint, CGPoint) {
+                let f = Double(i) / Double(steps), e = f * f * (3 - 2 * f)   // eased, as a finger accelerates and settles
+                let s = s0 + (s1 - s0) * f, m = CGPoint(x: c.x + ux * travel * e, y: c.y + uy * travel * e)
+                let lag = 3 * sin(f * .pi)   // the second finger trails a little
+                return (CGPoint(x: m.x - s / 2, y: m.y), CGPoint(x: m.x + s / 2 - lag * ux, y: m.y - lag * uy))
+            }
+            let (a0, b0) = fingers(0)
+            down(1, a0); down(2, b0)
+            for i in 1...steps { let (a, b) = fingers(i); move(1, a); move(2, b); await pause(0.016) }
+            let (a, b) = fingers(steps)
+            up(1, a); up(2, b)
+            await pause(1.5)   // the momentum
+            log(String(format: "%@: zoom %.2f → %.2f, axis %@, %d scroll messages sent, %d moved x, %d moved y", name, z0, viewport.zoom, "\(axisLock.axis.map { "\($0)" } ?? "none")", scrollsSent.count, scrollsSent.dx, scrollsSent.dy))
+        }
+        await twoFingerTrace("natural scroll (spread 44 → 50 pt, 14° sideways)", from: spot, spread: 44, spreadEnd: 50, travel: 150, degrees: 14, steps: 18)
+        await pause(1)
+        await twoFingerTrace("natural scroll (spread 60 → 54 pt, 18° sideways, down)", from: CGPoint(x: spot.x, y: spot.y - 120), spread: 60, spreadEnd: 54, travel: -150, degrees: -18, steps: 14)
+        await pause(1)
+        await twoFingerTrace("diagonal scroll (45°)", from: spot, spread: 44, spreadEnd: 46, travel: 120, degrees: 45, steps: 18)
+        await pause(1.5)
 
         log("hold on the bench's text")
         let holdAt = CGPoint(x: body.x + 30, y: body.y + 10)

@@ -92,17 +92,20 @@ final class DirectTouchTests: XCTestCase {
         XCTAssertEqual(d.phase, .idle)
     }
 
+    /// Spreading the fingers clearly (40 pt and 18 % of where they started, much more than their centre travels) zooms;
+    /// 10 % is no pinch any more (phrz's scrolls drift that much).
     func testSpreadingFingersZoomInsteadOfScrolling() {
         var d = DirectTouch()
         _ = d.began(1, at: pt(100, 100), time: 0)
         _ = d.began(2, at: pt(200, 100), time: 0)
-        let a = d.moved(2, to: pt(210, 100), time: 0.02)   // spread 100 → 110: ln 1.1 > 0.05, centre moved 5 pt
-        XCTAssertEqual(a.first, .pinchBegan(at: pt(150, 100)))
-        guard case .pinch(let s, let c)? = a.last else { return XCTFail("\(a)") }
-        XCTAssertEqual(s, 1.1, accuracy: 1e-9); XCTAssertEqual(c, pt(155, 100))
-        XCTAssertEqual(d.moved(1, to: pt(90, 100), time: 0.04), [.pinch(scale: 1.2, at: pt(150, 100))])
-        XCTAssertEqual(d.ended(1, at: pt(90, 100), time: 0.1), [.pinchEnded])
-        _ = d.ended(2, at: pt(210, 100), time: 0.12)
+        XCTAssertEqual(d.moved(2, to: pt(210, 100), time: 0.02), [], "10 %: undecided (it was a pinch at 5 %)")
+        XCTAssertEqual(d.moved(2, to: pt(230, 100), time: 0.04), [], "30 pt: still not enough")
+        let a = d.moved(1, to: pt(85, 100), time: 0.06)   // 145 pt apart: +45 pt, 45 %, the centre moved 7.5 pt
+        XCTAssertEqual(a, [.pinchBegan(at: pt(157.5, 100))], "the zoom starts where it was recognised")
+        guard case .pinch(let s, let c)? = d.moved(1, to: pt(70, 100), time: 0.08).first else { return XCTFail() }
+        XCTAssertEqual(s, 160.0 / 145, accuracy: 1e-9); XCTAssertEqual(c, pt(150, 100))
+        XCTAssertEqual(d.ended(1, at: pt(70, 100), time: 0.1), [.pinchEnded])
+        _ = d.ended(2, at: pt(230, 100), time: 0.12)
         XCTAssertEqual(d.tick(time: 1), [], "a pinch is no two-finger tap")
     }
 

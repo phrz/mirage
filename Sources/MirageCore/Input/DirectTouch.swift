@@ -19,8 +19,8 @@ public enum TouchMode: String, CaseIterable, Sendable {
 /// - a finger held still for `holdDelay` presses the button there; moving then drags, lifting releases (held and lifted
 ///   without moving: a long click);
 /// - a finger that moves past `slop` before that pans the view (presentation only), with momentum after it lifts;
-/// - two fingers travelling together scroll at the point where they came down (the pointer goes there first), with
-///   momentum; spreading or closing them zooms (`pinchThreshold`, decided before the scroll's `multiSlop`);
+/// - two fingers scroll at the point where they came down (the pointer goes there first), with momentum, unless they
+///   clearly pinch, which zooms (`TwoFingerClassifier`: scrolling is the strong default); either holds until they lift;
 /// - a two-finger tap right-clicks at its centre, after `twoFingerTapWait` in case a second one makes it a double tap
 ///   (which toggles the zoom instead);
 /// - three fingers pan the view.
@@ -48,10 +48,8 @@ public struct DirectTouch {
     public var holdDelay = 0.35
     /// Travel (points) under which a finger is still a tap or a hold.
     public var slop = 10.0
-    /// Travel of two fingers' centre that makes them a scroll.
-    public var multiSlop = 12.0
-    /// |ln(spread / spread at start)| that makes two fingers a pinch.
-    public var pinchThreshold = 0.05
+    /// Scroll or pinch (its thresholds are settable here).
+    public var twoFinger = TwoFingerClassifier()
     public var doubleClickInterval = 0.45, doubleClickSlop = 24.0
     /// Two fingers down for longer than this are no tap; a second two-finger tap within `twoFingerTapWait` is a double tap.
     public var twoFingerTapMax = 0.4, twoFingerTapWait = 0.3
@@ -70,6 +68,9 @@ public struct DirectTouch {
     private var touches: [Int: CGPoint] = [:]
     private var order: [Int] = []
     private var multiStart = (centroid: CGPoint.zero, spread: 1.0, time: 0.0)
+    /// The fingers' distance when the pinch was recognised: the zoom follows them from there (no jump for the travel it
+    /// took to decide).
+    private var pinchSpread = 1.0
     private var multiIDs: [Int] = []
     private var lastCentroid = CGPoint.zero, lastPan = CGPoint.zero
     private var maxTouches = 0
@@ -94,8 +95,7 @@ public struct DirectTouch {
             if case .panning = phase { out.append(.panEnded(vx: 0, vy: 0)) }
             startMulti(time: t)
         case .multi(let m):
-            if touches.count >= 3, m == .undecided || m == .scroll {
-                if m == .scroll { out.append(.scrollEnded(vx: 0, vy: 0)) }
+            if touches.count >= 3, m == .undecided {   // a decided scroll or pinch holds until the fingers lift
                 phase = .multi(.viewPan); multiIDs = order; lastCentroid = centroid(multiIDs); samples = [(t, lastCentroid)]
             } else if m == .viewPan {
                 multiIDs = order; lastCentroid = centroid(multiIDs)   // the centre jumps with a new finger: re-base
@@ -126,13 +126,15 @@ public struct DirectTouch {
             let c = centroid(multiIDs)
             switch m {
             case .undecided:
-                let spread = log(max(1, self.spread(multiIDs)) / multiStart.spread)
-                if abs(spread) > pinchThreshold {
+                guard let a = touches[multiIDs[0]], let b = touches[multiIDs[1]] else { break }
+                switch twoFinger.update(a, b, time: t) {
+                case .undecided: break
+                case .pinch:
                     flushRight(&out)
                     phase = .multi(.zoom)
-                    out.append(.pinchBegan(at: multiStart.centroid))
-                    out.append(.pinch(scale: exp(spread), at: c))
-                } else if Self.distance(c, multiStart.centroid) > multiSlop {
+                    pinchSpread = max(1, self.spread(multiIDs))
+                    out.append(.pinchBegan(at: c))
+                case .scroll:
                     flushRight(&out)
                     phase = .multi(.scroll)
                     out.append(.scrollBegan(at: multiStart.centroid))
@@ -142,7 +144,7 @@ public struct DirectTouch {
             case .scroll:
                 out.append(.scroll(dx: c.x - lastCentroid.x, dy: c.y - lastCentroid.y)); addSample(t, c)
             case .zoom:
-                out.append(.pinch(scale: max(1, self.spread(multiIDs)) / multiStart.spread, at: c))
+                out.append(.pinch(scale: max(1, self.spread(multiIDs)) / pinchSpread, at: c))
             case .viewPan:
                 out.append(.pan(dx: c.x - lastCentroid.x, dy: c.y - lastCentroid.y)); addSample(t, c)
             }
@@ -248,6 +250,7 @@ public struct DirectTouch {
         }
         let c = centroid(multiIDs)
         multiStart = (c, max(1, spread(multiIDs)), t)
+        if multiIDs.count == 2, let a = touches[multiIDs[0]], let b = touches[multiIDs[1]] { twoFinger.restart(a, b) }
         lastCentroid = c
         samples = [(t, c)]
     }
