@@ -539,9 +539,11 @@ final class ScenarioRunner {
         for b in 0..<3 {
             guard realGuards(), let win = scratchWindow() else { return }
             let old = win.frame
-            shotRects["finder"] = PixelRect(x: old.x - 400, y: old.y - 300, width: old.width + 800, height: old.height + 600)
             let b0 = session.totalBytes(), f0 = session.layerBytes(win.id), d0 = session.layerBytes(0)
             let dx = b % 2 == 0 ? 6 : -6, dy = b % 2 == 0 ? 3 : -3
+            // The window's old and new places plus 64 px: nothing else of the desktop (an ±400 px crop took in the menu bar).
+            let span = old.union(old.offset(dx * 50, dy * 50))
+            shotRects["finder"] = PixelRect(x: span.x - 64, y: span.y - 64, width: span.width + 128, height: span.height + 128)
             if win.isLayered {
                 session.beginLayerDrag(windowID: win.id)
                 for k in 1...50 { session.dragLayer(windowID: win.id, to: old.offset(dx * k, dy * k)); try? await Task.sleep(for: .milliseconds(16)) }
