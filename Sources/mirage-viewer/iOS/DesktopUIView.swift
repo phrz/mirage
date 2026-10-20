@@ -734,7 +734,7 @@ extension DesktopUIView {
     /// person's touches do, on a fixed timeline, so a simulator run can be watched and screenshotted without a touch
     /// injector. Aimed at the "Mirage Test Bench" window when the host lists one (run the host in input-sink mode:
     /// nothing is injected). Each `demo: shot NAME` log line is followed by `-demoHold` seconds (default 6) of stillness
-    /// for a screenshot: portrait-fit, portrait-zoomed-keyboard, landscape.
+    /// for a screenshot: portrait-fit, portrait-zoomed-keyboard, one-to-one, landscape.
     func runDemo() async {
         // Also appended to tmp/demo.log in the app's container: a simulator's relayed stderr can lag by many seconds, too
         // late to time screenshots by (`xcrun simctl get_app_container … data`).
@@ -814,8 +814,8 @@ extension DesktopUIView {
         toggleZoom(at: pointerInView); await pause(1)
         log("two-finger double tap at the pointer: fit, \(describe())")
         toggleZoom(at: pointerInView); await pause(1)
-        log("two-finger double tap: 1:1, \(describe())")
-        await pause(1.5)
+        log("shot one-to-one: two-finger double tap: 1:1, \(describe())")
+        await pause(hold)
         toggleZoom(at: pointerInView); await pause(1)
         log("two-finger double tap: fit, \(describe())")
 
