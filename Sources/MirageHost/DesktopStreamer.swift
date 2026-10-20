@@ -1157,6 +1157,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     // detection ran over the window body, sidebar included. The AX scroll area under the pointer, else the changed
                     // tiles' bounding box.)
                     statCopyRects += 1; copyRectsThisCapture += 1
+                    // A window scrolling: its other changes are the translucent toolbar and bottom bar re-blurring the content that
+                    // moves under them (mac-daddy diagnostics: every mismatch in the top and bottom rows, none inside; the rest of
+                    // the bytes were those bars resent lossless at every capture). They go lossy with the strip too.
+                    if !layer.isDisplay { copyRegion.formUnion(0..<tracker.tileCount) }
                 } else if scrollHere != nil {
                     // A wheel scroll no copy-rect verified (byte-exact) for: its changes in the scroll region go lossy like an
                     // exposed strip, not lossless tile by tile.

@@ -144,7 +144,16 @@ final class WindowTracker {
     /// The topmost normal-level window (level 0) under a point: what a wheel event scrolls. Overlays and shields above it
     /// (transparent, other levels) took the attribution, so a scrolled window's captures never knew a wheel event hit them.
     func appWindow(at x: Int, _ y: Int) -> ControlMessage.WindowInfo? {
-        current?.windows.first { $0.windowLevel == 0 && $0.frame.contains(x, y) }
+        guard let c = current else { return nil }
+        // Front to back: an app window takes it; the Dock, a menu, a popover (smaller windows at other levels) keep it (nil:
+        // not the window beneath); only a large window at another level (an overlay or shield over most of the display) is
+        // passed through.
+        let large = Int(displayBounds.width * displayBounds.height * pxPerPoint * pxPerPoint) / 2   // stream pixels
+        for w in c.windows where w.frame.contains(x, y) {
+            if w.windowLevel == 0 { return w }
+            if w.frame.area < large { return nil }
+        }
+        return nil
     }
 
     /// Scroll rect in display coordinates, if known.
