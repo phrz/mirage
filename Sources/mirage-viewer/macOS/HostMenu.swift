@@ -16,6 +16,9 @@ final class HostMenu: NSObject, NSMenuDelegate {
     private var hostName: String?
     private var status: LocalControl.Status?
     private var retry: Timer?
+    /// Set by the app: open the connect window (a viewer), and quit the app.
+    var onConnectWindow: (() -> Void)?
+    var onQuit: (() -> Void)?
 
     override init() {
         store = try? Store()
@@ -61,6 +64,11 @@ final class HostMenu: NSObject, NSMenuDelegate {
 
     /// The login-item agent in this bundle (Contents/Library/LaunchAgents).
     static let agent = SMAppService.agent(plistName: "com.paulherz.mirage.host.plist")
+    /// The app itself as a login item: while this Mac accepts connections, Mirage starts at login as a menu-bar accessory
+    /// (no Dock icon, no window), so Pair a Device… and Allow / Deny are always at hand.
+    static let mainApp = SMAppService.mainApp
+    /// This Mac accepts connections (or will once Login Items approves the host).
+    static var hosting: Bool { [.enabled, .requiresApproval].contains(agent.status) }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         try? client?.send(.status)
@@ -71,9 +79,12 @@ final class HostMenu: NSObject, NSMenuDelegate {
         }
         let agent = Self.agent.status
         let allow = item("Allow Connections to This Mac", #selector(toggleAllow))
-        allow.state = agent == .enabled ? .on : .off
+        allow.state = agent == .enabled ? .on : agent == .requiresApproval ? .mixed : .off
         switch agent {
-        case .requiresApproval: _ = item("Approve Mirage in Login Items…", #selector(openLoginItems))
+        case .requiresApproval:
+            // Registered, but macOS holds it until it is approved: nothing runs until then.
+            label("⚠︎ Waiting for approval in Login Items")
+            _ = item("Open Login Items Settings…", #selector(openLoginItems))
         case .enabled where !isConnected: label("Starting the host…")
         case .notFound: label("The host is missing from this copy of Mirage")
         default: break
@@ -86,6 +97,11 @@ final class HostMenu: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         _ = item("Pair a Device…", isConnected ? #selector(pairDevice) : nil)
         if isConnected, let devices = status?.devices, !devices.isEmpty {
+            defer {
+                menu.addItem(.separator())
+                _ = item("Connect to a Mac…", #selector(connectWindow))
+                _ = item("Quit Mirage…", #selector(quit))
+            }
             let sub = NSMenu()
             for d in devices.sorted(by: { $0.pairedAt < $1.pairedAt }) {
                 let i = NSMenuItem(title: "Revoke \(d.name)…", action: #selector(revoke(_:)), keyEquivalent: ""); i.target = self; i.representedObject = d
@@ -94,20 +110,32 @@ final class HostMenu: NSObject, NSMenuDelegate {
             let devicesItem = NSMenuItem(title: devices.count == 1 ? "1 Paired Device" : "\(devices.count) Paired Devices", action: nil, keyEquivalent: "")
             devicesItem.submenu = sub
             menu.addItem(devicesItem)
+            return
         }
+        menu.addItem(.separator())
+        _ = item("Connect to a Mac…", #selector(connectWindow))
+        _ = item("Quit Mirage…", #selector(quit))
     }
+    @objc private func connectWindow() { onConnectWindow?() }
+    @objc private func quit() { onQuit?() }
 
     @objc private func toggleAllow() {
         do {
-            if Self.agent.status == .enabled { try Self.agent.unregister(); client?.disconnect() }
+            if Self.hosting { try Self.stopHosting(); client?.disconnect() }
             else {
                 try Self.agent.register()
-                if Self.agent.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+                try? Self.mainApp.register()   // Mirage at login, as a menu-bar accessory
+                if Self.agent.status == .requiresApproval || Self.mainApp.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.connect() }
             }
         } catch {
             let a = NSAlert(); a.messageText = "Mirage could not change whether this Mac accepts connections."; a.informativeText = "\(error.localizedDescription)"; a.runModal()
         }
+    }
+    /// Connections off: the host agent and Mirage-at-login both go.
+    static func stopHosting() throws {
+        try agent.unregister()
+        if mainApp.status != .notRegistered { try? mainApp.unregister() }
     }
     @objc private func openLoginItems() { SMAppService.openSystemSettingsLoginItems() }
     @objc private func openScreenRecording() { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!) }

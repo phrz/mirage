@@ -132,7 +132,14 @@ remotectl       CLI on host: pair, status, revoke, metrics       (macOS)
   requirement (identifier + team), so they survive rebuilds and the move into the bundle
   (observed: the bundled binary on the MacBook found both grants already). The CLI stays:
   `/Applications/Mirage.app/Contents/MacOS/miraged serve | devices | revoke | pair`.
-  `scripts/migrate-host-to-app.sh` moves a host once; `scripts/deploy-host.sh` deploys the app. Code and QR rotate every
+  `scripts/migrate-host-to-app.sh` moves a host once; `scripts/deploy-host.sh` deploys the app.
+  While connections are allowed the app is a login item too (`SMAppService.mainApp`, the
+  Tailscale pattern): it starts at login as a menu-bar accessory (no Dock icon, no window),
+  becomes a regular app while a viewer or the connect window is open ("Connect to a Mac…", or a
+  click on its icon), and goes back to the menu bar when they close. Quitting asks whether to
+  keep allowing connections; the host keeps running headless unless the answer is Stop. A host
+  waiting for Login Items approval (`SMAppService.Status.requiresApproval`) shows as such in the
+  menu ("Waiting for approval in Login Items", with a button to that pane). Code and QR rotate every
   30 s while the window is open, each attempt takes the current one (both rotate at once: single
   use), and the window closes on success or after 5 min (`PairingWindow`). The QR is a link,
   `miragerd://pair?host=<tailnet name>&addr=<tailnet IP>&port=<port>&key=<SHA-256 of the host's

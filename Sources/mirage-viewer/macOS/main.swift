@@ -41,6 +41,9 @@ struct Options {
         if let i = args.firstIndex(of: "--observe") { o.observe = true; args.remove(at: i) }
         if let i = args.firstIndex(of: "--unified") { o.unified = true; args.remove(at: i) }
         if let i = args.firstIndex(of: "--probe-input") { o.probeInput = true; args.remove(at: i) }
+        // The host companion's flags (HostMenu, applicationWillFinishLaunching), and the -NSDocumentRevisionsDebugMode style
+        // pairs macOS may pass: not a host name.
+        args.removeAll { $0 == "--background" || $0 == "--allow-connections" }
         if let v = value("--window") { let p = v.split(separator: "x").compactMap { Int($0) }; if p.count == 2 { o.window = (p[0], p[1]) } }
         if args.isEmpty { return o }   // launched from Finder/Dock: show the connect window
         if args.contains("-h") || args.contains("--help") {
@@ -82,14 +85,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// This Mac as a host: the menu-bar item that drives the local `miraged` (Pair a Device…, Allow / Deny).
     var hostMenu: HostMenu?
 
+    /// Started at login (Mirage is a login item while this Mac accepts connections) or by the scripts: menu-bar only.
+    private var launchedInBackground = false
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        let e = NSAppleEventManager.shared().currentAppleEvent
+        let loginItem = e?.eventID == kAEOpenApplication && e?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+        launchedInBackground = options.host.isEmpty && (loginItem || CommandLine.arguments.contains("--allow-connections") || CommandLine.arguments.contains("--background"))
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMenu()
+        if options.scenario == nil, ProcessInfo.processInfo.environment["MIRAGE_NO_HOST_MENU"] == nil {
+            let m = HostMenu()
+            m.onConnectWindow = { [weak self] in MainActor.assumeIsolated { self?.openViewer() } }
+            m.onQuit = { [weak self] in self?.requestQuit() }
+            hostMenu = m
+        }
+        if launchedInBackground {
+            // A menu-bar accessory: no Dock icon, no window, until a viewer opens.
+            NSApp.setActivationPolicy(.accessory)
+            return
+        }
         NSApp.setActivationPolicy(.regular)
-        if options.scenario == nil, ProcessInfo.processInfo.environment["MIRAGE_NO_HOST_MENU"] == nil { hostMenu = HostMenu() }
         if ProcessInfo.processInfo.environment["MIRAGE_NO_ACTIVATE"] == nil { NSApp.activate(ignoringOtherApps: true) }
         MainActor.assumeIsolated {
             if options.host.isEmpty { showConnectWindow() } else { startViewer(host: options.host, pairCode: options.pair) }
         }
+    }
+
+    /// While this Mac accepts connections the app stays as a menu-bar accessory without windows; a viewer makes it regular.
+    private var hostingCompanion: Bool { hostMenu != nil && HostMenu.hosting }
+
+    /// "Connect to a Mac…" (or a Dock click): the connect window, or the running viewer.
+    @MainActor func openViewer() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        if let w = window, session != nil { w.makeKeyAndOrderFront(nil); return }
+        if let c = connectWindow { c.makeKeyAndOrderFront(nil); return }
+        showConnectWindow()
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag { MainActor.assumeIsolated { openViewer() } }
+        return true
+    }
+
+    /// No windows left while hosting: back to the menu bar.
+    private func becomeAccessoryIfIdle() {
+        guard hostingCompanion else { return }
+        DispatchQueue.main.async {
+            let visible = NSApp.windows.contains { $0.isVisible && !($0 is NSPanel) && $0.styleMask.contains(.titled) }
+            if !visible { NSApp.setActivationPolicy(.accessory) }
+        }
+    }
+
+    /// Quit (the app menu or the menu-bar item): while hosting, ask whether this Mac keeps accepting connections. The host
+    /// runs headless either way; only "Stop" turns it off.
+    func requestQuit() {
+        guard hostingCompanion else { session?.stop(); NSApp.terminate(nil); return }
+        NSApp.activate(ignoringOtherApps: true)
+        let a = NSAlert()
+        a.messageText = "Keep allowing connections to this Mac?"
+        a.informativeText = "Paired devices can connect while Mirage is not running. Mirage opens again at your next login."
+        a.addButton(withTitle: "Keep Allowing")
+        a.addButton(withTitle: "Stop Allowing")
+        a.addButton(withTitle: "Cancel")
+        switch a.runModal() {
+        case .alertFirstButtonReturn: break
+        case .alertSecondButtonReturn: try? HostMenu.stopHosting()
+        default: return
+        }
+        session?.stop(); NSApp.terminate(nil)
     }
 
     /// The GUI entry point: paired hosts, a host field, an optional pairing code.
@@ -105,6 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         w.title = "Mirage"
         w.contentView = NSHostingView(rootView: view)
         w.isReleasedWhenClosed = false
+        w.delegate = self
         w.center()
         w.makeKeyAndOrderFront(nil)
         connectWindow = w
@@ -204,11 +270,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func toggleUnified(_ sender: Any?) { MainActor.assumeIsolated { setUnified(!(model?.unified ?? false)) } }
 
     func windowWillClose(_ notification: Notification) {
+        if (notification.object as? NSWindow) === connectWindow { connectWindow = nil; becomeAccessoryIfIdle(); return }
         guard (notification.object as? NSWindow) === window else { return }
-        session?.stop(); NSApp.terminate(nil)
+        session?.stop()
+        // Hosting: the viewer closes, the app stays in the menu bar. Otherwise closing the viewer quits, as before.
+        if hostingCompanion { session = nil; window = nil; becomeAccessoryIfIdle() } else { NSApp.terminate(nil) }
     }
-    /// Not in Unified mode: the Desktop window is hidden there, and remote windows come and go with the host's.
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { MainActor.assumeIsolated { !(model?.unified ?? false) && unified?.active != true } }
+    /// Not in Unified mode: the Desktop window is hidden there, and remote windows come and go with the host's. Never while
+    /// hosting (the menu-bar item stays).
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { MainActor.assumeIsolated { !hostingCompanion && !(model?.unified ?? false) && unified?.active != true } }
 
     private func installMenu() {
         let main = NSMenu()
@@ -242,7 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.windowsMenu = windowMenu
         NSApp.mainMenu = main
     }
-    @objc func quit(_ sender: Any?) { session?.stop(); NSApp.terminate(nil) }
+    @objc func quit(_ sender: Any?) { requestQuit() }
 }
 
 /// First window of the app: pick a paired host or enter a new one (with its 6-digit code).
