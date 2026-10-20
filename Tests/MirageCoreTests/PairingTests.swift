@@ -163,3 +163,18 @@ final class PairingFlowTests: XCTestCase {
         var names: [String] { lock.lock(); defer { lock.unlock() }; return n }
     }
 }
+
+final class ScrollShaperTests: XCTestCase {
+    func testOneAxisPerGestureWholePointsAndANewGestureAfterAPause() {
+        var s = ScrollShaper()
+        // An iPhone pan: mostly vertical with a sideways part, fractional.
+        XCTAssertEqual(s.shape(dx: 19.5, dy: -57.25, nanos: 1_000_000_000).map { [$0.dx, $0.dy] }, [0, -57])
+        XCTAssertEqual(s.axis, .vertical)
+        XCTAssertEqual(s.shape(dx: 8, dy: -31.5, nanos: 1_016_000_000).map { [$0.dx, $0.dy] }, [0, -31], "the remainder carries: -0.25 - 31.5")
+        XCTAssertEqual(s.shape(dx: 40, dy: -0.75, nanos: 1_032_000_000).map { [$0.dx, $0.dy] }, [0, -1], "sideways stays locked out in this gesture")
+        XCTAssertNil(s.shape(dx: 0, dy: -0.4, nanos: 1_048_000_000), "under a point: carried, nothing posted")
+        // A pause: a new gesture, decided again.
+        XCTAssertEqual(s.shape(dx: 30, dy: 5, nanos: 2_000_000_000).map { [$0.dx, $0.dy] }, [30, 0])
+        XCTAssertEqual(s.axis, .horizontal)
+    }
+}

@@ -374,6 +374,28 @@ final class ScenarioRunner {
                 try? await Task.sleep(for: .milliseconds(800))
                 dir = -dir
             }
+        case "swipe":
+            // Trackpad / touch scrolling as the iPhone sends it: 60 Hz, fractional point deltas that start fast and decay
+            // (momentum), with a sideways part (phrz's Finder scrolls went lossy: the sideways part rubber-banded the view).
+            let (x, y) = safePoint(w, ppp: ppp)
+            let (nx, ny) = normalized(x, y)
+            session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
+            var dir = -1.0
+            while Date() < end {
+                guard guardsStillHold() else { break }
+                var v = 38.0
+                for k in 0..<75 {   // 1.25 s: a flick and its momentum
+                    let dy = v * dir, dx = (k % 3 == 0 ? 7.5 : 2.25) * (k % 2 == 0 ? 1 : -1)
+                    guard let win = bench() else { break }
+                    let seq = session.send(.scroll(.init(x: nx, y: ny, dx: dx, dy: dy, precise: true, modifiers: 0)), scripted: true)
+                    session.predict(kind: .scroll, windowID: win.id, rect: session.scrollRect(for: win, titleBarPx: Int(28 * ppp)), dx: 0, dy: Int((dy * ppp).rounded()), inputSeq: seq)
+                    v = max(0.4, v * 0.94)
+                    try? await Task.sleep(for: .milliseconds(16))
+                }
+                await measureCrisp(burstEnd: Clock.nowNanos())
+                try? await Task.sleep(for: .milliseconds(800))
+                dir = -dir
+            }
         case "drag":
             var dir = 1
             session.watchWindowID = w.id
@@ -594,6 +616,29 @@ final class ScenarioRunner {
         try? await Task.sleep(for: .seconds(2))
         let cr1 = session.samples.reduce(0) { $0 + $1.copyRects }
         note("scroll: \(cr1 - cr0) copy-rects, \(String(format: "%.0f", Double(session.totalBytes() - c0) / 1000)) KB")
+        // 1b. Swipe: trackpad / touch scrolling as the iPhone sends it (60 Hz, fractional, decaying, with a sideways part).
+        let s0 = session.totalBytes()
+        for b in 0..<2 {
+            guard realGuards(), let win = scratchWindow() else { return }
+            moveTo(inside.0, inside.1)
+            let (nx, ny) = normalized(inside.0, inside.1)
+            var v = 38.0
+            let sdir = b == 0 ? -1.0 : 1.0
+            for k in 0..<75 {
+                let dy = v * sdir, dx = (k % 3 == 0 ? 7.5 : 2.25) * (k % 2 == 0 ? 1 : -1)
+                let seq = session.send(.scroll(.init(x: nx, y: ny, dx: dx, dy: dy, precise: true, modifiers: 0)), scripted: true)
+                if ProcessInfo.processInfo.environment["MIRAGE_TEST_NO_PREDICT"] == nil, let rect = session.knownScrollRect(for: win) {
+                    session.predict(kind: .scroll, windowID: win.id, rect: rect, dx: 0, dy: Int((dy * ppp).rounded()), inputSeq: seq)
+                }
+                v = max(0.4, v * 0.94)
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            await measureCrisp(burstEnd: Clock.nowNanos())
+            try? await Task.sleep(for: .milliseconds(800))
+        }
+        try? await Task.sleep(for: .seconds(2))
+        let cr2 = session.samples.reduce(0) { $0 + $1.copyRects }
+        note("swipe: \(cr2 - cr1) copy-rects, \(String(format: "%.0f", Double(session.totalBytes() - s0) / 1000)) KB")
         // 3. Dock hover: the pointer sweeps along the Dock band twice (no clicks), then rests above it for 10 s.
         guard realGuards() else { return }
         let y = H - Int(35 * ppp)

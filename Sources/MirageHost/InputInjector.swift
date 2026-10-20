@@ -9,6 +9,8 @@ final class InputInjector {
     private var displayBounds: CGRect
     private var buttonsDown: Set<Int> = []
     private var lastPos: CGPoint
+    /// Precise scrolls: one axis per gesture, whole points (ScrollShaper).
+    private var scrollShaper = ScrollShaper()
     /// (input seq, injection clock) of recent inputs, so captures can be stamped with the last input they reflect.
     private var injected: [(seq: UInt64, nanos: UInt64)] = []
     private let seqLock = NSLock()
@@ -140,11 +142,16 @@ final class InputInjector {
         case .scroll(let s):
             let p = point(s.x, s.y); lastPos = p
             let units: CGScrollEventUnit = s.precise ? .pixel : .line
-            guard let e = CGEvent(scrollWheelEvent2Source: source, units: units, wheelCount: 2, wheel1: Int32(s.dy.rounded()), wheel2: Int32(s.dx.rounded()), wheel3: 0) else { return }
+            var dx = Int32(s.dx.rounded()), dy = Int32(s.dy.rounded())
+            if s.precise {
+                guard let d = scrollShaper.shape(dx: s.dx, dy: s.dy, nanos: Clock.nowNanos()) else { return }
+                dx = Int32(d.dx); dy = Int32(d.dy)
+            }
+            guard let e = CGEvent(scrollWheelEvent2Source: source, units: units, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) else { return }
             if s.precise {
                 e.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
-                e.setDoubleValueField(.scrollWheelEventPointDeltaAxis1, value: s.dy)
-                e.setDoubleValueField(.scrollWheelEventPointDeltaAxis2, value: s.dx)
+                e.setDoubleValueField(.scrollWheelEventPointDeltaAxis1, value: Double(dy))
+                e.setDoubleValueField(.scrollWheelEventPointDeltaAxis2, value: Double(dx))
             }
             e.location = p
             e.flags = CGEventFlags(rawValue: s.modifiers)

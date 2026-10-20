@@ -51,7 +51,8 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         let scale = mode.map { Double($0.pixelWidth) / Double($0.width) } ?? 1
         // Fit the display aspect into the requested box, never beyond native pixels; even dimensions keep the encoder happy.
         let (ew, eh) = StreamScale.resolve(requested: (req.width, req.height), nativePixels: (pw * scale, ph * scale), snapNative: req.snapNative == true)
-        let name = "display \(display.displayID) (\(display.width)x\(display.height) pt, \(Int(pw))x\(Int(ph)) px)"
+        // (CGDisplayPixelsWide reports points on current macOS; the mode's scale gives the backing pixels.)
+        let name = "display \(display.displayID) (\(display.width)x\(display.height) pt, \(Int(pw * scale))x\(Int(ph * scale)) px)"
         let info = ControlMessage.StreamInfo(width: ew, height: eh, displayID: display.displayID, displayWidth: display.width, displayHeight: display.height,
                                              displayScale: scale, displayName: name)
         return Target(display: display, info: info, pixelWidth: ew, pixelHeight: eh)
