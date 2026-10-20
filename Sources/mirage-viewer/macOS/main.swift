@@ -79,10 +79,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var unified: UnifiedController?
     var chrome: NativeChromeController?
     private var modeItem: NSMenuItem?
+    /// This Mac as a host: the menu-bar item that drives the local `miraged` (Pair a Device…, Allow / Deny).
+    var hostMenu: HostMenu?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMenu()
         NSApp.setActivationPolicy(.regular)
+        if options.scenario == nil, ProcessInfo.processInfo.environment["MIRAGE_NO_HOST_MENU"] == nil { hostMenu = HostMenu() }
         if ProcessInfo.processInfo.environment["MIRAGE_NO_ACTIVATE"] == nil { NSApp.activate(ignoringOtherApps: true) }
         MainActor.assumeIsolated {
             if options.host.isEmpty { showConnectWindow() } else { startViewer(host: options.host, pairCode: options.pair) }

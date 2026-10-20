@@ -132,20 +132,20 @@ public final class PairingWindow: @unchecked Sendable {
     }
 }
 
-/// The host's pairing hooks, set by whatever UI the host has (the menu-bar item in `miraged serve`): the open window, and
-/// the Allow/Deny question asked before a device is authorized (code or link alike). Without a question hook, a pairing
-/// started by `miraged pair` asks that terminal (Store's confirm handshake); a window without a hook cannot exist.
+/// The host's pairing hooks, set by the local control server (the Mirage app drives it): the open window, and the
+/// Allow/Deny question asked before a device is authorized (code or link alike). The question answers nil when no app is
+/// there to ask: a pairing `miraged pair` started then asks that terminal (Store's confirm handshake), anything else is denied.
 public final class PairingSlot: @unchecked Sendable {
     private let lock = NSLock()
     private var _window: PairingWindow?
-    private var _confirm: (@Sendable (DeviceRecord) async -> Bool)?
+    private var _confirm: (@Sendable (DeviceRecord) async -> Bool?)?
     private var _paired: (@Sendable (DeviceRecord) -> Void)?
     public init() {}
     public var window: PairingWindow? {
         get { lock.lock(); defer { lock.unlock() }; return _window }
         set { lock.lock(); _window = newValue; lock.unlock() }
     }
-    public var confirm: (@Sendable (DeviceRecord) async -> Bool)? {
+    public var confirm: (@Sendable (DeviceRecord) async -> Bool?)? {
         get { lock.lock(); defer { lock.unlock() }; return _confirm }
         set { lock.lock(); _confirm = newValue; lock.unlock() }
     }

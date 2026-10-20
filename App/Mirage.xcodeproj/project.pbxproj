@@ -19,12 +19,14 @@
 		9C8C86E9B0B43EF2040EEF1E /* DesktopScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59942C8471DEE8FACC7C60A6 /* DesktopScreen.swift */; platformFilters = (ios, ); };
 		AE70D0898558C65B7F6D9A78 /* VideoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0D40802ED1D018B7D94046B /* VideoView.swift */; platformFilters = (macos, ); };
 		C4DE1008FBECEE2276DF4255 /* Unified.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593D553163B75E9D6D807360 /* Unified.swift */; platformFilters = (macos, ); };
+		D4955D8CADDBC6C1A94F4118 /* HostMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DEE1C387469669B68D1F6D9 /* HostMenu.swift */; platformFilters = (macos, ); };
 		E114511A2FB50BA7601F0F43 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5646FA52FFFCC715643009 /* Keychain.swift */; };
 		E179BADF39B60A6D17B7BB75 /* Chrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7BD24766B550945C4E385B /* Chrome.swift */; platformFilters = (macos, ); };
 		ECB3983ACC10C20F61032EB2 /* FrameRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA8357B3AEC263F39103FAC9 /* FrameRecorder.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		0DEE1C387469669B68D1F6D9 /* HostMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HostMenu.swift; sourceTree = "<group>"; };
 		0E1152201D0785134F2ADEBA /* ViewerSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerSession.swift; sourceTree = "<group>"; };
 		11A92A44688F29579B43412B /* Scenarios.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Scenarios.swift; sourceTree = "<group>"; };
 		1F1B24601B3BA9FBB7FA9EBA /* Mirage.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Mirage.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -60,6 +62,7 @@
 			isa = PBXGroup;
 			children = (
 				5A7BD24766B550945C4E385B /* Chrome.swift */,
+				0DEE1C387469669B68D1F6D9 /* HostMenu.swift */,
 				830F2869DAB069200150F308 /* main.swift */,
 				11A92A44688F29579B43412B /* Scenarios.swift */,
 				593D553163B75E9D6D807360 /* Unified.swift */,
@@ -240,6 +243,7 @@
 				9C8C86E9B0B43EF2040EEF1E /* DesktopScreen.swift in Sources */,
 				8B9E3396DF922F97557183F6 /* DesktopUIView.swift in Sources */,
 				ECB3983ACC10C20F61032EB2 /* FrameRecorder.swift in Sources */,
+				D4955D8CADDBC6C1A94F4118 /* HostMenu.swift in Sources */,
 				E114511A2FB50BA7601F0F43 /* Keychain.swift in Sources */,
 				58C40680A08B27AB9A4F2620 /* MirageMobileApp.swift in Sources */,
 				0DDE0B47E12B085CF9C24D74 /* PairingScan.swift in Sources */,

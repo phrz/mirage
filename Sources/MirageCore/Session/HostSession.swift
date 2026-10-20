@@ -264,13 +264,13 @@ public enum HostSession {
         guard device.id == DeviceIdentity.id(forPublicKey: device.publicKey), device.publicKey.count == 32 else {
             try await fail("malformed identity")
         }
-        // Asked on the host before anything is authorized, code and link alike: the menu-bar UI's Allow/Deny, else the terminal
-        // that ran `miraged pair`.
+        // Asked on the host before anything is authorized, code and link alike: the Mirage app's Allow/Deny (local control),
+        // else the terminal that ran `miraged pair`, else denied.
         ctx.log("[\(remote)] \(device.name) (\(device.id.prefix(12))) wants to pair; asking on the host")
-        let allowed: Bool
-        if let confirm = ctx.pairing.confirm { allowed = await confirm(device) }
-        else if let attemptID { allowed = await askPairTerminal(ctx.store, attemptID: attemptID, device: device) }
-        else { allowed = false }
+        var answer: Bool? = nil
+        if let confirm = ctx.pairing.confirm { answer = await confirm(device) }
+        if answer == nil, let attemptID { answer = await askPairTerminal(ctx.store, attemptID: attemptID, device: device) }
+        let allowed = answer ?? false
         guard allowed else { try await fail("denied on the host") }
         device.pairedAt = Date()
         try ctx.store.authorize(device)

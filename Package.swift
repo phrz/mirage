@@ -65,7 +65,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MirageCoreTests",
-            dependencies: ["MirageCore"],
+            dependencies: ["MirageCore", "MirageHost"],   // MirageHost: the local control server
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
     ]

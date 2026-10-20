@@ -110,8 +110,14 @@ remotectl       CLI on host: pair, status, revoke, metrics       (macOS)
   the password and the host's TLS leaf fingerprint as the channel identifier, then exchange
   long-term **Ed25519 device keys** inside a ChaChaPoly box keyed from the PAKE. The host
   burns the code after one wrong confirmation tag, so 6 digits allow exactly one online guess.
-  **Pairing UI (2026-10-20)**: `miraged serve` has a menu-bar item; "Pair a Device…" opens a
-  window with the 6-digit code (3 + 3), a QR code and a countdown ring. Code and QR rotate every
+  **Pairing UI (2026-10-20)**: the Mirage app's menu-bar item on the host Mac; "Pair a Device…"
+  opens a window with the 6-digit code (3 + 3), a QR code and a countdown ring. `miraged` stays
+  headless: the app drives it over the **local control socket** (`LocalControl`:
+  `~/Library/Application Support/Mirage/control.sock`, the directory 0700, the socket 0600, the
+  peer's uid checked; one JSON object per line, versioned; requests `hello`, `openPairing`,
+  `closePairing`, `decide`, `status`; events `hello`, `pairing` on every rotation, `confirm`,
+  `paired`, `pairingClosed`, `status`). The same path and user hold when `miraged` runs as the
+  app's login-item helper (SMAppService). Code and QR rotate every
   30 s while the window is open, each attempt takes the current one (both rotate at once: single
   use), and the window closes on success or after 5 min (`PairingWindow`). The QR is a link,
   `miragerd://pair?host=<tailnet name>&addr=<tailnet IP>&port=<port>&key=<SHA-256 of the host's
@@ -121,7 +127,7 @@ remotectl       CLI on host: pair, status, revoke, metrics       (macOS)
   ends confirm: the viewer shows "Pair with <host>?" with the key fingerprint before dialing (an
   opened link never connects silently), and the host asks "<device> wants to pair with this Mac.
   Allow / Deny" after the exchange verifies the device's identity and before it is authorized,
-  for a code and a link alike (`miraged pair` without the menu asks its terminal instead). iOS
+  for a code and a link alike (with no app connected, `miraged pair` asks its terminal instead). iOS
   scans the QR from the code field (VisionKit) or opens it from Camera (`miragerd` scheme on iOS
   and macOS). A failed pairing ends the viewer's attempt instead of retrying a burned code.
 - **Session authentication**: every later connection is QUIC/TLS 1.3 with a self-signed host
