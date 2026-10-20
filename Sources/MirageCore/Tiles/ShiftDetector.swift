@@ -101,6 +101,8 @@ public struct ShiftDetector {
         if let h = detectAxis(old: old, new: new, rect: r, vertical: false, tile: tile, hint: hint?.dx) { return h }
         return nil
     }
+    /// Share of a copy's tiles that must be textured (more than 4 colours) for its verification to count.
+    public var minTexturedShare = 0.2
     /// Profile-SAD candidates within this factor of the best are all verified (periodic content ties at several shifts).
     public var tieMargin = 1.15
     public var tieCandidates = 3
@@ -295,6 +297,21 @@ public struct ShiftDetector {
         return (f, mean, mx, fm, fp)
     }
 
+    /// Whether a tile carries evidence of a shift: not (nearly) one colour. At least 1 % of its pixels (8 at least) differ from
+    /// its first pixel, two-colour glyphs included; a flat background is not evidence (it matches at any shift).
+    static func textured(_ f: Frame, _ t: PixelRect) -> Bool {
+        let first = f.base.advanced(by: t.y * f.stride + t.x * 4).loadUnaligned(as: UInt32.self) & 0x00FF_FFFF
+        let need = max(8, t.area / 100)
+        var n = 0
+        for y in t.y..<t.maxY {
+            let row = f.base.advanced(by: y * f.stride + t.x * 4)
+            for x in 0..<t.width where row.loadUnaligned(fromByteOffset: x * 4, as: UInt32.self) & 0x00FF_FFFF != first {
+                n += 1; if n >= need { return true }
+            }
+        }
+        return false
+    }
+
     /// Whether a tile must verify byte-exact: anything but photographic content (more than 1024 colours in a 64-px tile;
     /// anti-aliased text and UI stay far below).
     private func exactRequired(_ f: Frame, _ t: PixelRect) -> Bool {
@@ -306,7 +323,9 @@ public struct ShiftDetector {
     private func verifyTiles(old: Frame, new: Frame, src: PixelRect, dx: Int, dy: Int, tile: Int) -> ([PixelRect], Double) {
         let dst = src.offset(dx, dy)
         var mismatched: [PixelRect] = []
-        var total = 0, ok = 0
+        // Flat tiles match at any shift: they are not evidence. Confidence counts textured tiles only, and a shift needs enough
+        // of them (a whole-window copy "verified" by a sidebar's flat background shifted the window body on the viewer).
+        var total = 0, ok = 0, textured = 0, texturedOK = 0
         let c0 = dst.x / tile, c1 = (dst.maxX - 1) / tile, r0 = dst.y / tile, r1 = (dst.maxY - 1) / tile
         let tol = tolerance
         for row in r0...r1 {
@@ -314,12 +333,14 @@ public struct ShiftDetector {
                 let t = PixelRect(x: col * tile, y: row * tile, width: tile, height: tile).intersection(dst)
                 guard !t.isEmpty else { continue }
                 total += 1
+                let isTextured = Self.textured(new, t)
+                if isTextured { textured += 1 }
                 // Byte-exact first (memcmp per row); only a photographic tile may then pass within the tolerance. At native scale
                 // scrolled UI pixels are bit-identical, and a tolerance let a wrong-period copy of a near-identical label row pass
                 // (phrz's repeated Finder rows).
                 var exact = true
                 for y in t.y..<t.maxY where memcmp(new.base.advanced(by: y * new.stride + t.x * 4), old.base.advanced(by: (y - dy) * old.stride + (t.x - dx) * 4), t.width * 4) != 0 { exact = false; break }
-                if exact { ok += 1; continue }
+                if exact { ok += 1; if isTextured { texturedOK += 1 }; continue }
                 if exactRequired(new, t) { mismatched.append(t); continue }
                 var bad = 0
                 let allowed = max(1, t.area / 50)
@@ -334,9 +355,10 @@ public struct ShiftDetector {
                         }
                     }
                 }
-                if bad <= allowed { ok += 1 } else { mismatched.append(t) }
+                if bad <= allowed { ok += 1; if isTextured { texturedOK += 1 } } else { mismatched.append(t) }
             }
         }
-        return (mismatched, total == 0 ? 0 : Double(ok) / Double(total))
+        guard total > 0, Double(textured) >= minTexturedShare * Double(total), textured >= 2 else { return (mismatched, 0) }
+        return (mismatched, Double(texturedOK) / Double(textured))
     }
 }

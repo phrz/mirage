@@ -141,6 +141,11 @@ final class WindowTracker {
     func window(at x: Int, _ y: Int) -> ControlMessage.WindowInfo? {
         current?.windows.first { $0.frame.contains(x, y) }
     }
+    /// The topmost normal-level window (level 0) under a point: what a wheel event scrolls. Overlays and shields above it
+    /// (transparent, other levels) took the attribution, so a scrolled window's captures never knew a wheel event hit them.
+    func appWindow(at x: Int, _ y: Int) -> ControlMessage.WindowInfo? {
+        current?.windows.first { $0.windowLevel == 0 && $0.frame.contains(x, y) }
+    }
 
     /// Scroll rect in display coordinates, if known.
     func scrollRect(for id: UInt32) -> PixelRect? {

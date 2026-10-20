@@ -590,6 +590,10 @@ refinement budget. What the host counts as delivered must be what the viewer sho
 2. **A copy-rect only claims what it got right.** Verification is byte-exact for every tile but photographic ones (more
    than 1024 colours in a 64-px tile, which keep a tolerance): at native scale scrolled pixels are bit-identical, and a
    tolerance let a wrong-period copy of Finder's near-identical label rows pass (the label row repeated at the scroll step).
+   Only textured tiles are evidence (flat ones match at any shift): a copy needs at least 20 % textured tiles and its
+   confidence counts them alone. The region is the scroll view under the pointer (the AX scroll area of the topmost
+   normal-level window, which a wheel event is attributed to), else the changed tiles' bounding box; it is never learned
+   from earlier copy-rects (one bad copy taught the whole window and the window body, sidebar included, moved on the viewer).
    On periodic content the profile ties at several shifts: each near-tie is verified, the one explaining the most exact
    area wins, and the wheel delta (magnitude) breaks a tie; exactness makes a wrong period harmless to correctness.
    Destination tiles that fail verification are direct changes due now

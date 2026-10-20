@@ -83,3 +83,21 @@ final class CopyTrimTests: XCTestCase {
         XCTAssertNil(ShiftDetector.trimmed(.init(dx: 0, dy: 10, rect: PixelRect(x: 0, y: 0, width: 64, height: 128), mismatchedTiles: [PixelRect(x: 0, y: 10, width: 64, height: 54), PixelRect(x: 0, y: 64, width: 64, height: 64)], confidence: 0)))
     }
 }
+
+final class TexturedEvidenceTests: XCTestCase {
+    /// A whole-window copy over a flat sidebar background must not verify on the flat tiles: they match at any shift.
+    func testFlatTilesAreNotEvidence() {
+        let w = 640, h = 640
+        var a = [UInt8](repeating: 40, count: w * h * 4)
+        for i in stride(from: 3, to: a.count, by: 4) { a[i] = 255 }
+        // One textured block that does not match any shift (different content in the new frame).
+        var b = a
+        for y in 300..<330 { for x in 300..<400 { a[(y * w + x) * 4] = UInt8((x * 7 + y) & 0xff); b[(y * w + x) * 4] = UInt8((x * 3 + y * 5) & 0xff) } }
+        let r = a.withUnsafeBytes { pa in b.withUnsafeBytes { pb in
+            ShiftDetector().verify(old: .init(base: pa.baseAddress!, stride: w * 4, width: w, height: h),
+                                   new: .init(base: pb.baseAddress!, stride: w * 4, width: w, height: h),
+                                   rect: PixelRect(x: 0, y: 0, width: w, height: h), dx: 0, dy: -64)
+        } }
+        XCTAssertNil(r, "98 % flat tiles match, the only evidence does not")
+    }
+}

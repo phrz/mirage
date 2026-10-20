@@ -575,7 +575,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             self.injector?.handle(input)
             if case .scroll(let s) = input, let t = self.target, let w = self.windows {
                 let x = Int(s.x * Double(t.pixelWidth)), y = Int(s.y * Double(t.pixelHeight))
-                if let win = w.window(at: x, y) {
+                if let win = w.appWindow(at: x, y) {
                     w.queryAXScrollArea(at: x, y, windowID: win.id)
                     let ppp = w.pxPerPoint, ddx = Int((s.dx * ppp).rounded()), ddy = Int((s.dy * ppp).rounded())
                     self.scrollLock.lock()
@@ -1130,7 +1130,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 var known: PixelRect? = nil
                 var win: ControlMessage.WindowInfo? = nil
                 if layer.isDisplay {
-                    win = scrollHere.flatMap { s in windows.window(at: s.x, s.y) } ?? windows.window(at: bb.x + bb.width / 2, bb.y + bb.height / 2)
+                    win = scrollHere.flatMap { s in windows.appWindow(at: s.x, s.y) } ?? windows.appWindow(at: bb.x + bb.width / 2, bb.y + bb.height / 2)
                     known = win.flatMap { windows.scrollRect(for: $0.id) }
                 } else {
                     known = windows.scrollRect(for: layer.id).map { layer.local($0) }
@@ -1153,11 +1153,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     explained.formUnion(dest.filter { !mismatched.contains($0) }); copies.append((dest.filter { !mismatched.contains($0) }, r.dx, r.dy))
                     sendTileMessage(.copyRect(.init(header: header(layer: layer.id, nanos: nanos), rect: r.rect, dx: r.dx, dy: r.dy)), captureNanos: nanos)
                     if debugLayers { log("layer \(layer.id) copy-rect \(r.rect) by (\(r.dx), \(r.dy)) confidence \(r.confidence)") }
-                    if known == nil {
-                        let learnedRect = r.rect.union(r.rect.offset(r.dx, r.dy))
-                        if layer.isDisplay { if let win { windows.learn(scrollRect: learnedRect, for: win.id) } }
-                        else { windows.learn(scrollRect: learnedRect.offset(layer.frame.x, layer.frame.y), for: layer.id) }
-                    }
+                    // (No scroll rect is learned from copy-rects any more: one bad copy taught the whole window, and every later
+                    // detection ran over the window body, sidebar included. The AX scroll area under the pointer, else the changed
+                    // tiles' bounding box.)
                     statCopyRects += 1; copyRectsThisCapture += 1
                 } else if scrollHere != nil {
                     // A wheel scroll no copy-rect verified (byte-exact) for: its changes in the scroll region go lossy like an
