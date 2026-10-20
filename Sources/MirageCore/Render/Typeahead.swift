@@ -50,39 +50,52 @@ public struct Typeahead {
         let tol = max(3, last.rect.width / 3)
         if abs(last.rect.maxX - cr.x) <= tol && abs(last.rect.y - cr.y) <= max(2, cr.height / 3) {
             for i in glyphs.indices where !glyphs[i].confirmed && glyphs[i].seq <= c.inputSeq { glyphs[i].confirmed = true; confirmed += 1 }
+            // Everything shown is confirmed: the next glyph starts at the host's caret, not at an accumulated estimate.
+            if !glyphs.contains(where: { !$0.confirmed }) { tailX = nil }
         } else {
             mismatched += covered.count
             if misses.count < 64 { misses.append(Miss(text: covered.map(\.text).joined(), predictedX: last.rect.maxX, predictedY: last.rect.y, hostX: cr.x, hostY: cr.y, glyphWidth: last.rect.width)) }
-            glyphs = []; trusted = false; silentStreak = 0; silent = []
+            glyphs = []; trusted = false; silentStreak = 0; silent = []; tailX = nil
         }
     }
 
     /// A printable keystroke the viewer sends; `advancePx` is the glyph's width in display pixels (measured by the
     /// viewer in the host's font). Returns the glyph to draw, or nil.
     @discardableResult
-    public mutating func typed(_ text: String, advancePx: Int, seq: UInt64, now: UInt64) -> Glyph? {
-        guard let c = caret, var cr = c.caret, !c.selection, c.inputSeq >= resyncAfter, advancePx > 0,
+    public mutating func typed(_ text: String, advancePx: Int, seq: UInt64, now: UInt64) -> Glyph? { typed(text, advance: Double(advancePx), seq: seq, now: now) }
+    /// The unconfirmed run's end in fractional pixels (glyph advances are fractional: rounding each to whole pixels drifted
+    /// 13 px over a run on mac-daddy); it restarts from the host's caret whenever everything shown is confirmed.
+    private var tailX: Double?
+    @discardableResult
+    public mutating func typed(_ text: String, advance: Double, seq: UInt64, now: UInt64) -> Glyph? {
+        guard let c = caret, var cr = c.caret, !c.selection, c.inputSeq >= resyncAfter, advance > 0,
               Clock.elapsed(since: caretNanos, now: now) < 30_000_000_000 else { return nil }
-        if let tail = glyphs.last(where: { !$0.confirmed }) ?? glyphs.last { cr.x = tail.rect.maxX; cr.y = tail.rect.y; cr.height = tail.rect.height }
-        else if let s = silent.last { cr.x = s.x }
-        let g = Glyph(seq: seq, text: c.secure ? "•" : text, rect: PixelRect(x: cr.x, y: cr.y, width: advancePx, height: max(1, cr.height)), confirmed: false, bornNanos: now)
+        let start: Double
+        if let tail = glyphs.last(where: { !$0.confirmed }) { start = tailX ?? Double(tail.rect.maxX); cr.y = tail.rect.y; cr.height = tail.rect.height }
+        else if let s = silent.last { start = tailX ?? Double(s.x) }
+        else { start = Double(cr.x) }
+        let end = start + advance
+        tailX = end
+        let x0 = Int(start.rounded()), x1 = Int(end.rounded())
+        let advancePx = max(1, x1 - x0)
+        let g = Glyph(seq: seq, text: c.secure ? "•" : text, rect: PixelRect(x: x0, y: cr.y, width: advancePx, height: max(1, cr.height)), confirmed: false, bornNanos: now)
         // Off the field's right edge: the app wraps or scrolls; not predictable.
         if let f = c.field, g.rect.maxX > f.maxX { invalidate(after: seq); return nil }
-        guard trusted else { silent.append((seq, g.rect.maxX)); return nil }
+        guard trusted else { silent.append((seq, x1)); return nil }
         glyphs.append(g); shown += 1
         return g
     }
 
     /// Backspace: the newest unconfirmed glyph goes; with none, the host is waited for.
     public mutating func backspace(seq: UInt64) {
-        if let i = glyphs.lastIndex(where: { !$0.confirmed }) { glyphs.remove(at: i); return }
+        if let i = glyphs.lastIndex(where: { !$0.confirmed }) { let g = glyphs.remove(at: i); tailX = glyphs.contains(where: { !$0.confirmed }) ? Double(g.rect.x) : nil; return }
         invalidate(after: seq)
     }
 
     /// A key or click that moves the caret unpredictably: predictions go, and none until the host reports after `seq`.
     public mutating func invalidate(after seq: UInt64) {
         glyphs.removeAll { !$0.confirmed }
-        silent = []
+        silent = []; tailX = nil
         resyncAfter = max(resyncAfter, seq)
     }
 

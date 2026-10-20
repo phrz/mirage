@@ -166,8 +166,9 @@ final class ViewerSession: @unchecked Sendable {
     private(set) var legibleUnderPointerMs: Double? = nil
     private var refinementLogged = 0
     static let debugTiles = ProcessInfo.processInfo.environment["MIRAGE_DEBUG_TILES"] != nil
-    /// Native-scale snap (StreamScale): flag while it is measured (MIRAGE_NATIVE_SNAP=1 or --native-snap).
-    static var snapNative = ProcessInfo.processInfo.environment["MIRAGE_NATIVE_SNAP"] == "1" || CommandLine.arguments.contains("--native-snap")
+    /// Native-scale snap (StreamScale): always on since the mac-daddy A/B (2026-10-20): scroll 0 → 225 copy-rects and its
+    /// predictions 0 → 234 confirmed, crisp 5.0 → 2.5 s, terminal 8 → 389 copy-rects and 580 → 401 kbps, first 30 s lighter.
+    static let snapNative = true
     static let debugPresent = ProcessInfo.processInfo.environment["MIRAGE_DEBUG_PRESENT"] != nil
     func resetWatched() { videoQueue.async { self.watchedTileBytes = 0; self.watchedTileCount = 0; self.watchedDirectBytes = 0; self.watchedVideoFrames = 0; self.watchedCopyRects = 0 } }
     func windowsSnapshot() -> [ControlMessage.WindowInfo] { predictorLock.lock(); defer { predictorLock.unlock() }; return windows }
@@ -1167,7 +1168,7 @@ final class ViewerSession: @unchecked Sendable {
               let ch = characters, ch.count == 1, let scalar = ch.unicodeScalars.first, scalar.value >= 0x20, scalar.value != 0x7f,
               !(0xF700...0xF8FF).contains(scalar.value) else { typeahead.invalidate(after: seq); return }
         guard let adv = advancePx(ch, caret: typeahead.caret) else { return }
-        if typeahead.typed(ch, advancePx: adv, seq: seq, now: now) != nil {
+        if typeahead.typed(ch, advance: adv, seq: seq, now: now) != nil {
             typeaheadKeyNanos[seq] = now
             if typeaheadKeyNanos.count > 256 { typeaheadKeyNanos = typeaheadKeyNanos.filter { $0.key + 128 > seq } }
         }
@@ -1177,12 +1178,12 @@ final class ViewerSession: @unchecked Sendable {
     /// A click is about to be sent (it moves the caret): predictions wait for the host's report after it.
     func typeaheadInvalidateBeforeClick() { typeaheadInvalidate(seq: lastInputSeqSent() + 1) }
     /// The glyph's advance in display pixels, in the host's font (the same font ships on both Macs; else the system font).
-    private func advancePx(_ ch: String, caret: ControlMessage.CaretInfo?) -> Int? {
+    private func advancePx(_ ch: String, caret: ControlMessage.CaretInfo?) -> Double? {
         guard let c = caret else { return nil }
         let size = c.size ?? 13
         let font = c.font.flatMap { NSFont(name: $0, size: size) } ?? NSFont.systemFont(ofSize: size)
         let w = (c.secure ? "•" : ch as NSString).size(withAttributes: [.font: font]).width
-        return max(1, Int((w * hostPxPerPoint).rounded()))
+        return max(0.5, Double(w) * hostPxPerPoint)
     }
     /// What the overlay draws (and the first time each glyph is drawn, for the time-to-visible metric).
     struct TypeaheadView { var glyphs: [Typeahead.Glyph]; var font: String?; var size: Double; var color: [Double]? }

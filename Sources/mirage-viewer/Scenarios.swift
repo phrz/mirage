@@ -226,6 +226,14 @@ final class ScenarioRunner {
             return
         }
         if name == "realapps" { await realApps(); return }
+        if name == "closescratch" {
+            // Cleanup after realapps: the Finder windows on ~/MirageScratch closed through Accessibility (AXPress on close).
+            for _ in 0..<100 where session.windowsSnapshot().isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
+            guard realGuards() else { return }
+            for w in session.windowsSnapshot() where w.app == "Finder" && w.title == "MirageScratch" { session.sendWindowCommand(.init(id: w.id, action: .close)); note("closed Finder window \(w.id)") }
+            try? await Task.sleep(for: .seconds(2))
+            return
+        }
         // Wait for the stream and the window list.
         for _ in 0..<250 where bench() == nil || (session.compositor?.width ?? 0) == 0 { try? await Task.sleep(for: .milliseconds(100)) }
         guard let w = bench() else { session.log("scenario: no Mirage Test Bench window on the host"); return }

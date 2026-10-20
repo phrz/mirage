@@ -59,3 +59,17 @@ final class TypeaheadTests: XCTestCase {
         XCTAssertTrue(t.glyphs.isEmpty); XCTAssertEqual(t.expired, 1)
     }
 }
+
+final class TypeaheadAdvanceTests: XCTestCase {
+    func testFractionalAdvancesDoNotDriftAndRestartAtTheHostCaret() {
+        var t = Typeahead()
+        func caret(_ x: Int, _ seq: UInt64) -> ControlMessage.CaretInfo { .init(caret: PixelRect(x: x, y: 100, width: 0, height: 30), field: PixelRect(x: 0, y: 0, width: 4000, height: 200), pid: 1, font: nil, size: 14, color: nil, selection: false, secure: false, inputSeq: seq) }
+        t.host(caret(100, 0), now: 0)
+        var last: Typeahead.Glyph?
+        for k in 1...10 { last = t.typed("x", advance: 16.86, seq: UInt64(k), now: UInt64(k)) }
+        XCTAssertEqual(last?.rect.maxX, 269, "100 + 10 × 16.86 = 268.6: no 1.4 px of rounding drift")
+        // All confirmed: the next glyph starts where the host says the caret is.
+        t.host(caret(268, 10), now: 20)
+        XCTAssertEqual(t.typed("y", advance: 16.86, seq: 11, now: 21)?.rect.x, 268)
+    }
+}
