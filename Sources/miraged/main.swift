@@ -22,8 +22,14 @@ struct Serve: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Run the host (foreground).")
     @Option(name: .shortAndLong, help: "UDP port to listen on.") var port: UInt16 = Mirage.defaultPort
     @Option(help: "Host name shown to clients (default: this Mac's computer name).") var name: String?
+    @Option(help: "Append stdout and stderr to this file (~ expands): the app's login-item agent cannot name ~ in its plist.") var logFile: String?
 
     func run() async throws {
+        if let logFile {
+            let path = (logFile as NSString).expandingTildeInPath
+            try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+            freopen(path, "a", stdout); freopen(path, "a", stderr)
+        }
         setvbuf(stdout, nil, _IOLBF, 0)
         let store = try Store()
         let identity = try store.identity(role: "host", name: name ?? DeviceNames.current())
@@ -132,7 +138,7 @@ var plistURL: URL {
 }
 
 struct Install: ParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Install a LaunchAgent so the host runs at login.")
+    static let configuration = CommandConfiguration(abstract: "Install a standalone LaunchAgent so the host runs at login (superseded by Mirage.app's \"Allow Connections to This Mac\"; same label, so use one or the other).")
     @Option(name: .shortAndLong) var port: UInt16 = Mirage.defaultPort
     func run() throws {
         let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().path

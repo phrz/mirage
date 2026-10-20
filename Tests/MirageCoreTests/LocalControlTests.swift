@@ -22,9 +22,10 @@ final class LocalControlTests: XCTestCase {
         private let lock = NSLock(); private var list: [LocalControl.Event] = []
         func add(_ e: LocalControl.Event) { lock.lock(); list.append(e); lock.unlock() }
         var all: [LocalControl.Event] { lock.lock(); defer { lock.unlock() }; return list }
-        func wait(_ what: String, timeout: TimeInterval = 5, _ match: (LocalControl.Event) -> Bool) async throws -> LocalControl.Event {
+        var count: Int { all.count }
+        func wait(_ what: String, after: Int = 0, timeout: TimeInterval = 5, _ match: (LocalControl.Event) -> Bool) async throws -> LocalControl.Event {
             let end = Date().addingTimeInterval(timeout)
-            while Date() < end { if let e = all.first(where: match) { return e }; try await Task.sleep(for: .milliseconds(20)) }
+            while Date() < end { if let e = all.dropFirst(after).first(where: match) { return e }; try await Task.sleep(for: .milliseconds(20)) }
             throw MirageError.transport("no \(what) event: \(all)")
         }
     }
@@ -91,6 +92,16 @@ final class LocalControlTests: XCTestCase {
         XCTAssertEqual(try hostStore.authorizedDevices().map(\.name), ["test-phone"])
         _ = try await events.wait("paired") { if case .paired(let n) = $0 { return n == "test-phone" }; return false }
         _ = try await events.wait("pairingClosed") { if case .pairingClosed = $0 { return true }; return false }
+
+        // The menu's device list and Revoke.
+        try app.send(.status)
+        let listed = try await events.wait("status with the phone") { if case .status(let s) = $0 { return s.devices?.map(\.name) == ["test-phone"] }; return false }
+        guard case .status(let st1) = listed, let phone = st1.devices?.first else { return XCTFail() }
+        XCTAssertNotNil(st1.screenRecording); XCTAssertEqual(st1.connected, [])
+        let before = events.count
+        try app.send(.revoke(deviceID: phone.id))
+        _ = try await events.wait("status after revoke", after: before) { if case .status(let s) = $0 { return s.devices == [] }; return false }
+        XCTAssertTrue(try hostStore.authorizedDevices().isEmpty)
         app.disconnect()
     }
 }

@@ -117,7 +117,22 @@ remotectl       CLI on host: pair, status, revoke, metrics       (macOS)
   peer's uid checked; one JSON object per line, versioned; requests `hello`, `openPairing`,
   `closePairing`, `decide`, `status`; events `hello`, `pairing` on every rotation, `confirm`,
   `paired`, `pairingClosed`, `status`). The same path and user hold when `miraged` runs as the
-  app's login-item helper (SMAppService). Code and QR rotate every
+  app's login-item helper (SMAppService).
+  **The host inside Mirage.app (2026-10-20)**: `miraged` ships in the app bundle
+  (`Contents/MacOS/miraged`, built by the app target's Embed host phase, `scripts/embed-host.sh`)
+  with its LaunchAgent plist (`Contents/Library/LaunchAgents/com.paulherz.mirage.host.plist`:
+  `BundleProgram`, `serve --log-file ~/Library/Logs/mirage-host.log`, KeepAlive, the same label
+  as the old standalone agent). The app's menu-bar item turns it on and off ("Allow Connections
+  to This Mac": `SMAppService.agent` register/unregister), pairs ("Pair a Device…"), lists and
+  revokes paired devices, shows who is streaming, and shows "Mirage needs Screen Recording /
+  Accessibility" with buttons to those Settings panes until the host process itself sees both
+  grants. Identity, pairings and resume state stay in `~/Library/Application Support/Mirage`, so
+  a migrated host keeps every pairing. `miraged` is signed with the Apple Development identity
+  under the stable identifier `com.paulherz.mirage.host`: TCC's grants follow its designated
+  requirement (identifier + team), so they survive rebuilds and the move into the bundle
+  (observed: the bundled binary on the MacBook found both grants already). The CLI stays:
+  `/Applications/Mirage.app/Contents/MacOS/miraged serve | devices | revoke | pair`.
+  `scripts/migrate-host-to-app.sh` moves a host once; `scripts/deploy-host.sh` deploys the app. Code and QR rotate every
   30 s while the window is open, each attempt takes the current one (both rotate at once: single
   use), and the window closes on success or after 5 min (`PairingWindow`). The QR is a link,
   `miragerd://pair?host=<tailnet name>&addr=<tailnet IP>&port=<port>&key=<SHA-256 of the host's

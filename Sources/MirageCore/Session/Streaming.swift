@@ -163,6 +163,9 @@ public actor HostConnections {
     public private(set) var shedCount = 0
 
     public init() {}
+    /// Devices with a stream right now (the host's status for the Mirage app's menu).
+    public func streamingDeviceIDs() -> [String] { connections.values.compactMap { $0.streamer != nil ? $0.deviceID : nil } }
+
     public func connection(_ id: UUID) -> HostConnection {
         if let c = connections[id] { return c }
         let c = HostConnection(id: id); connections[id] = c; return c

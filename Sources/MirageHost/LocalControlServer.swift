@@ -93,18 +93,37 @@ public final class LocalControlServer: @unchecked Sendable {
         switch r {
         case .hello:
             send(.hello(version: LocalControl.version, hostName: ctx.identity.name, hostID: ctx.identity.id), to: c)
-            send(.status(status()), to: c)
+            sendStatus(to: c)
             if let w = ctx.pairing.window, w.isOpen() { shownIssue = nil; tick() }
         case .openPairing: openPairing()
         case .closePairing: closePairing("closed in the app")
         case .decide(let id, let allow):
             if let k = pendingConfirms.removeValue(forKey: id) { k.resume(returning: allow) }
-        case .status: send(.status(status()), to: c)
+        case .status: sendStatus(to: c)
+        case .revoke(let id):
+            // Future connections and resumes are refused (both authenticate against the store); a stream in progress ends
+            // with its connection.
+            let removed = (try? ctx.store.revoke(idPrefix: id)) ?? []
+            for d in removed { log("revoked \(d.name) (\(d.id.prefix(12))) from the Mirage app") }
+            sendStatus(to: c)
         }
     }
 
-    private func status() -> LocalControl.Status {
-        .init(hostName: ctx.identity.name, pairedDevices: (try? ctx.store.authorizedDevices().count) ?? 0, pairingOpen: ctx.pairing.window?.isOpen() ?? false)
+    /// The status, with who is streaming (an actor call) and the host's own grants.
+    private func sendStatus(to c: Client) {
+        let devices = (try? ctx.store.authorizedDevices()) ?? []
+        let base = LocalControl.Status(hostName: ctx.identity.name, pairedDevices: devices.count, pairingOpen: ctx.pairing.window?.isOpen() ?? false,
+                                       devices: devices.map { .init(id: $0.id, name: $0.name, pairedAt: $0.pairedAt) },
+                                       screenRecording: HostPermissions.screenRecordingGranted(), accessibility: HostPermissions.accessibilityGranted(prompt: false))
+        let conns = ctx.connections
+        Task {
+            let ids = await conns.streamingDeviceIDs()
+            self.queue.async {
+                var s = base
+                s.connected = ids.map { id in devices.first { $0.id == id }?.name ?? String(id.prefix(12)) }
+                if self.clients[c.fd] === c { self.send(.status(s), to: c) }
+            }
+        }
     }
 
     private func openPairing() {

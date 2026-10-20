@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The host inside Mirage.app (DESIGN §3.1): registered by the app with SMAppService ("Allow Connections to This
+	     Mac"), run by launchd from the bundle. Same label as the old ~/Library/LaunchAgents agent it replaces. -->
+	<key>Label</key>
+	<string>com.paulherz.mirage.host</string>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/miraged</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>miraged</string>
+		<string>serve</string>
+		<string>--log-file</string>
+		<string>~/Library/Logs/mirage-host.log</string>
+	</array>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>com.paulherz.mirage</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+</dict>
+</plist>

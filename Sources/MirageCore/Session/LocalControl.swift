@@ -18,6 +18,8 @@ public enum LocalControl {
         /// The answer to a `confirm` event.
         case decide(requestID: String, allow: Bool)
         case status
+        /// Removes a paired device (its id, as in `Status.devices`).
+        case revoke(deviceID: String)
     }
 
     /// The host's events.
@@ -53,7 +55,22 @@ public enum LocalControl {
         public var hostName: String
         public var pairedDevices: Int
         public var pairingOpen: Bool
-        public init(hostName: String, pairedDevices: Int, pairingOpen: Bool) { self.hostName = hostName; self.pairedDevices = pairedDevices; self.pairingOpen = pairingOpen }
+        /// The paired devices, and the names of those streaming now.
+        public var devices: [Device]?
+        public var connected: [String]?
+        /// The host process's own TCC grants (what to ask the person for).
+        public var screenRecording: Bool?
+        public var accessibility: Bool?
+        public init(hostName: String, pairedDevices: Int, pairingOpen: Bool, devices: [Device]? = nil, connected: [String]? = nil, screenRecording: Bool? = nil, accessibility: Bool? = nil) {
+            self.hostName = hostName; self.pairedDevices = pairedDevices; self.pairingOpen = pairingOpen
+            self.devices = devices; self.connected = connected; self.screenRecording = screenRecording; self.accessibility = accessibility
+        }
+    }
+    public struct Device: Codable, Equatable {
+        public var id: String
+        public var name: String
+        public var pairedAt: Date
+        public init(id: String, name: String, pairedAt: Date) { self.id = id; self.name = name; self.pairedAt = pairedAt }
     }
 
     /// One line of the wire format.

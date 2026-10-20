@@ -1,11 +1,13 @@
 import AppKit
 import CoreImage
+import ServiceManagement
 import MirageCore
 
-/// The Mirage app's menu-bar item for this Mac as a host (DESIGN §3.1 pairing): it talks to the local `miraged` over the
-/// control socket (LocalControl) — "Pair a Device…" opens a window with the rotating 6-digit code, a QR code and a
-/// countdown ring; a device that completes the exchange is asked about here (Allow / Deny) before the host authorizes it.
-/// `miraged` stays headless.
+/// The Mirage app's menu-bar item for this Mac as a host (DESIGN §3.1): "Allow Connections to This Mac" registers the host
+/// inside the bundle (Contents/MacOS/miraged) as a login-item agent with SMAppService; the rest talks to that host over the
+/// local control socket (LocalControl) — "Pair a Device…" (the rotating code and QR), Allow / Deny for a device that
+/// finished the exchange, the paired devices with Revoke, who is streaming, and the Screen Recording and Accessibility
+/// grants the host still needs. `miraged` stays headless.
 final class HostMenu: NSObject, NSMenuDelegate {
     private let store: Store?
     private var client: LocalControlClient?
@@ -24,6 +26,8 @@ final class HostMenu: NSObject, NSMenuDelegate {
         let menu = NSMenu(); menu.delegate = self
         item.menu = menu
         statusItem = item
+        // `--allow-connections` (the migration and deploy scripts): turn the host on without a click.
+        if CommandLine.arguments.contains("--allow-connections"), Self.agent.status != .enabled { toggleAllow() }
         connect()
         // Test knob MIRAGE_TEST_OPEN_PAIRING: the pairing window opens at launch (screenshots without clicking the menu bar).
         if ProcessInfo.processInfo.environment["MIRAGE_TEST_OPEN_PAIRING"] != nil { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.pairDevice() } }
@@ -55,20 +59,68 @@ final class HostMenu: NSObject, NSMenuDelegate {
 
     // MARK: Menu
 
+    /// The login-item agent in this bundle (Contents/Library/LaunchAgents).
+    static let agent = SMAppService.agent(plistName: "com.paulherz.mirage.host.plist")
+
     func menuNeedsUpdate(_ menu: NSMenu) {
         try? client?.send(.status)
         menu.removeAllItems()
         func label(_ s: String) { let i = NSMenuItem(title: s, action: nil, keyEquivalent: ""); i.isEnabled = false; menu.addItem(i) }
-        if isConnected {
-            label("Connections allowed to \(hostName ?? "this Mac")")
-            if let s = status { label(s.pairedDevices == 1 ? "1 paired device" : "\(s.pairedDevices) paired devices") }
-        } else {
-            label("This Mac is not accepting connections")
+        func item(_ title: String, _ action: Selector?, _ object: Any? = nil) -> NSMenuItem {
+            let i = NSMenuItem(title: title, action: action, keyEquivalent: ""); i.target = self; i.representedObject = object; menu.addItem(i); return i
+        }
+        let agent = Self.agent.status
+        let allow = item("Allow Connections to This Mac", #selector(toggleAllow))
+        allow.state = agent == .enabled ? .on : .off
+        switch agent {
+        case .requiresApproval: _ = item("Approve Mirage in Login Items…", #selector(openLoginItems))
+        case .enabled where !isConnected: label("Starting the host…")
+        case .notFound: label("The host is missing from this copy of Mirage")
+        default: break
+        }
+        if isConnected, let s = status {
+            if s.screenRecording == false { _ = item("⚠︎ Mirage needs Screen Recording — Open Settings…", #selector(openScreenRecording)) }
+            if s.accessibility == false { _ = item("⚠︎ Mirage needs Accessibility — Open Settings…", #selector(openAccessibility)) }
+            if let c = s.connected, !c.isEmpty { label("Connected: \(c.joined(separator: ", "))") }
         }
         menu.addItem(.separator())
-        let pair = NSMenuItem(title: "Pair a Device…", action: isConnected ? #selector(pairDevice) : nil, keyEquivalent: "")
-        pair.target = self
-        menu.addItem(pair)
+        _ = item("Pair a Device…", isConnected ? #selector(pairDevice) : nil)
+        if isConnected, let devices = status?.devices, !devices.isEmpty {
+            let sub = NSMenu()
+            for d in devices.sorted(by: { $0.pairedAt < $1.pairedAt }) {
+                let i = NSMenuItem(title: "Revoke \(d.name)…", action: #selector(revoke(_:)), keyEquivalent: ""); i.target = self; i.representedObject = d
+                sub.addItem(i)
+            }
+            let devicesItem = NSMenuItem(title: devices.count == 1 ? "1 Paired Device" : "\(devices.count) Paired Devices", action: nil, keyEquivalent: "")
+            devicesItem.submenu = sub
+            menu.addItem(devicesItem)
+        }
+    }
+
+    @objc private func toggleAllow() {
+        do {
+            if Self.agent.status == .enabled { try Self.agent.unregister(); client?.disconnect() }
+            else {
+                try Self.agent.register()
+                if Self.agent.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.connect() }
+            }
+        } catch {
+            let a = NSAlert(); a.messageText = "Mirage could not change whether this Mac accepts connections."; a.informativeText = "\(error.localizedDescription)"; a.runModal()
+        }
+    }
+    @objc private func openLoginItems() { SMAppService.openSystemSettingsLoginItems() }
+    @objc private func openScreenRecording() { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!) }
+    @objc private func openAccessibility() { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!) }
+
+    @objc private func revoke(_ sender: NSMenuItem) {
+        guard let d = sender.representedObject as? LocalControl.Device else { return }
+        let a = NSAlert()
+        a.messageText = "Revoke \(d.name)?"
+        a.informativeText = "It can no longer connect to this Mac until it is paired again."
+        a.addButton(withTitle: "Revoke"); a.addButton(withTitle: "Cancel")
+        guard a.runModal() == .alertFirstButtonReturn else { return }
+        try? client?.send(.revoke(deviceID: d.id))
     }
 
     @objc func pairDevice() {

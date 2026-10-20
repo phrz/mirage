@@ -35,6 +35,11 @@ targets:
     dependencies:
       - package: mirage
         product: MirageCore
+    postBuildScripts:
+      # macOS: the host inside the app (Contents/MacOS/miraged + Contents/Library/LaunchAgents), signed for stable TCC grants.
+      - name: Embed host
+        script: "\"$PROJECT_DIR/../scripts/embed-host.sh\""
+        basedOnDependencyAnalysis: false
     settings:
       base:
         PRODUCT_NAME: $(MIRAGE_DISPLAY_NAME)
@@ -61,4 +66,5 @@ targets:
         INFOPLIST_KEY_UIStatusBarHidden: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        ENABLE_USER_SCRIPT_SANDBOXING: NO   # the Embed host phase runs swift build in the package
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Mirage connects to the Macs you pair with on your network or tailnet."
