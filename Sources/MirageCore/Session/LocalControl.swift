@@ -61,6 +61,8 @@ public enum LocalControl {
         /// The host process's own TCC grants (what to ask the person for).
         public var screenRecording: Bool?
         public var accessibility: Bool?
+        /// The host is restarting itself to apply newly granted permissions.
+        public var restarting: Bool?
         public init(hostName: String, pairedDevices: Int, pairingOpen: Bool, devices: [Device]? = nil, connected: [String]? = nil, screenRecording: Bool? = nil, accessibility: Bool? = nil) {
             self.hostName = hostName; self.pairedDevices = pairedDevices; self.pairingOpen = pairingOpen
             self.devices = devices; self.connected = connected; self.screenRecording = screenRecording; self.accessibility = accessibility

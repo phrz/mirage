@@ -16,6 +16,14 @@ public final class LocalControlServer: @unchecked Sendable {
     private var ticker: DispatchSourceTimer?
     private var shownIssue: Date?
     private var pendingConfirms: [String: CheckedContinuation<Bool?, Never>] = [:]
+    private var restarting = false
+    /// Tells the app the host is about to restart (to apply newly granted permissions).
+    public func announceRestart() {
+        queue.sync {
+            restarting = true
+            for c in clients.values { sendStatus(to: c) }
+        }
+    }
     /// The tailnet name and address, looked up once per pairing window (it runs the Tailscale CLI).
     private var net: (name: String?, address: String?) = (nil, nil)
 
@@ -120,6 +128,7 @@ public final class LocalControlServer: @unchecked Sendable {
             let ids = await conns.streamingDeviceIDs()
             self.queue.async {
                 var s = base
+                s.restarting = self.restarting ? true : nil
                 s.connected = ids.map { id in devices.first { $0.id == id }?.name ?? String(id.prefix(12)) }
                 if self.clients[c.fd] === c { self.send(.status(s), to: c) }
             }

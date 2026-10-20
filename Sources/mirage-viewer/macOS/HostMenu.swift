@@ -29,8 +29,12 @@ final class HostMenu: NSObject, NSMenuDelegate {
         let menu = NSMenu(); menu.delegate = self
         item.menu = menu
         statusItem = item
+        AppLog.write("Mirage \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? "?") at \(Bundle.main.bundlePath), args \(CommandLine.arguments.dropFirst().joined(separator: " ")); \(AppLog.services())")
         // `--allow-connections` (the migration and deploy scripts): turn the host on without a click.
-        if CommandLine.arguments.contains("--allow-connections"), Self.agent.status != .enabled { toggleAllow() }
+        if CommandLine.arguments.contains("--allow-connections") {
+            if Self.agent.status != .enabled { AppLog.write("--allow-connections: registering"); toggleAllow() }
+            else { AppLog.write("--allow-connections: already enabled") }
+        }
         connect()
         // Test knob MIRAGE_TEST_OPEN_PAIRING: the pairing window opens at launch (screenshots without clicking the menu bar).
         if ProcessInfo.processInfo.environment["MIRAGE_TEST_OPEN_PAIRING"] != nil { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.pairDevice() } }
@@ -46,7 +50,8 @@ final class HostMenu: NSObject, NSMenuDelegate {
         let c = LocalControlClient(store: store)
         c.onEvent = { [weak self] e in DispatchQueue.main.async { self?.handle(e) } }
         c.onClose = { [weak self] in DispatchQueue.main.async { self?.hostName = nil; self?.status = nil; self?.panel?.hostGone() } }
-        do { try c.connect(client: "Mirage") ; client = c } catch { client = nil }
+        let was = client?.isConnected == true
+        do { try c.connect(client: "Mirage") ; client = c; if !was { AppLog.write("connected to the host's control socket") } } catch { client = nil }
     }
 
     private func handle(_ e: LocalControl.Event) {
@@ -89,7 +94,8 @@ final class HostMenu: NSObject, NSMenuDelegate {
         case .notFound: label("The host is missing from this copy of Mirage")
         default: break
         }
-        if isConnected, let s = status {
+        if isConnected, let s = status, s.restarting == true { label("Restarting to apply permissions…") }
+        else if isConnected, let s = status {
             if s.screenRecording == false { _ = item("⚠︎ Mirage needs Screen Recording — Open Settings…", #selector(openScreenRecording)) }
             if s.accessibility == false { _ = item("⚠︎ Mirage needs Accessibility — Open Settings…", #selector(openAccessibility)) }
             if let c = s.connected, !c.isEmpty { label("Connected: \(c.joined(separator: ", "))") }
@@ -121,21 +127,25 @@ final class HostMenu: NSObject, NSMenuDelegate {
 
     @objc private func toggleAllow() {
         do {
-            if Self.hosting { try Self.stopHosting(); client?.disconnect() }
+            if Self.hosting { try Self.stopHosting(); client?.disconnect(); AppLog.write("connections off: \(AppLog.services())") }
             else {
+                AppLog.write("registering: before \(AppLog.services())")
                 try Self.agent.register()
-                try? Self.mainApp.register()   // Mirage at login, as a menu-bar accessory
+                do { try Self.mainApp.register() } catch { AppLog.write("app login item: register failed: \(error)") }   // Mirage at login, as a menu-bar accessory
+                AppLog.write("registered: \(AppLog.services())")
                 if Self.agent.status == .requiresApproval || Self.mainApp.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.connect() }
             }
         } catch {
+            AppLog.write("allow connections: \(error) (\(AppLog.services()))")
             let a = NSAlert(); a.messageText = "Mirage could not change whether this Mac accepts connections."; a.informativeText = "\(error.localizedDescription)"; a.runModal()
         }
     }
     /// Connections off: the host agent and Mirage-at-login both go.
     static func stopHosting() throws {
-        try agent.unregister()
-        if mainApp.status != .notRegistered { try? mainApp.unregister() }
+        do { try agent.unregister() } catch { AppLog.write("host agent: unregister failed: \(error)"); throw error }
+        if mainApp.status != .notRegistered { do { try mainApp.unregister() } catch { AppLog.write("app login item: unregister failed: \(error)") } }
+        AppLog.write("stopped hosting: \(AppLog.services())")
     }
     @objc private func openLoginItems() { SMAppService.openSystemSettingsLoginItems() }
     @objc private func openScreenRecording() { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!) }
@@ -171,6 +181,30 @@ final class HostMenu: NSObject, NSMenuDelegate {
         let allow = alert.runModal() == .alertFirstButtonReturn
         try? client?.send(.decide(requestID: c.requestID, allow: allow))
     }
+}
+
+/// The app's own log (~/Library/Logs/mirage-app.log): launch mode, SMAppService registration and status, the host link.
+/// A silent failure (the first `--allow-connections` on mac-daddy registered nothing and said nothing) shows here.
+enum AppLog {
+    private static let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/mirage-app.log")
+    private static let lock = NSLock()
+    static func write(_ s: String) {
+        let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let line = Data("\(f.string(from: Date())) \(s)\n".utf8)
+        lock.lock(); defer { lock.unlock() }
+        if let h = try? FileHandle(forWritingTo: url) { h.seekToEndOfFile(); h.write(line); try? h.close() }
+        else { try? line.write(to: url) }
+    }
+    static func describe(_ s: SMAppService.Status) -> String {
+        switch s {
+        case .notRegistered: return "notRegistered"
+        case .enabled: return "enabled"
+        case .requiresApproval: return "requiresApproval"
+        case .notFound: return "notFound"
+        @unknown default: return "unknown(\(s.rawValue))"
+        }
+    }
+    static func services() -> String { "agent \(describe(HostMenu.agent.status)), app \(describe(HostMenu.mainApp.status))" }
 }
 
 /// The pairing window: code (3 + 3, large), QR code, a ring counting down to the next rotation; closes on success, on

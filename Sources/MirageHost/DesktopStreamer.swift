@@ -2584,7 +2584,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
 /// TCC state the host needs; prompting adds `miraged` to the System Settings lists.
 public enum HostPermissions {
-    public static func screenRecordingGranted() -> Bool { CGPreflightScreenCaptureAccess() }
+    /// The last ScreenCaptureKit probe succeeded (CGPreflightScreenCaptureAccess can stay stale inside a running process).
+    nonisolated(unsafe) public static var screenProbeOK = false
+    public static func screenRecordingGranted() -> Bool { CGPreflightScreenCaptureAccess() || screenProbeOK }
+    /// Whether screen capture works now: preflight, else asking ScreenCaptureKit for the shareable content (it throws
+    /// without the grant).
+    public static func probeScreenRecording() async -> Bool {
+        if CGPreflightScreenCaptureAccess() { return true }
+        let ok = (try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)) != nil
+        screenProbeOK = ok
+        return ok
+    }
     public static func requestScreenRecording() -> Bool { CGRequestScreenCaptureAccess() }
     public static func accessibilityGranted(prompt: Bool) -> Bool {
         AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue(): prompt] as CFDictionary)

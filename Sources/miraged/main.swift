@@ -57,8 +57,34 @@ struct Serve: AsyncParsableCommand {
         // The Mirage app on this Mac drives pairing through the local control socket (Pair a Device…, Allow / Deny).
         let control = LocalControlServer(ctx: ctx, port: port, log: { log($0) })
         do { try control.start() } catch { log("local control unavailable: \(error)") }
+        if !(screen && ax) { watchPermissions(screen: screen, ax: ax, control: control) }
         try await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
         _ = control
+    }
+}
+
+/// While Screen Recording or Accessibility is missing, re-checks every 2 s (Accessibility is live; Screen Recording by a
+/// ScreenCaptureKit probe). When a grant arrives, a host run by launchd restarts itself once (exit; KeepAlive brings it
+/// back) so every grant is in force, and the Mirage app says "Restarting to apply permissions…" meanwhile. phrz's grants on
+/// mac-daddy took effect only after `launchctl kickstart`. Never restarts periodically: each start asks for Screen
+/// Recording, and a loop would keep prompting.
+func watchPermissions(screen: Bool, ax: Bool, control: LocalControlServer) {
+    let underLaunchd = ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == "com.paulherz.mirage.host" || getppid() == 1
+    Task.detached {
+        var s = screen, a = ax
+        while true {
+            try? await Task.sleep(for: .seconds(2))
+            let s2 = await HostPermissions.probeScreenRecording(), a2 = HostPermissions.accessibilityGranted(prompt: false)
+            guard s2 != s || a2 != a else { continue }
+            log("permissions now: screen recording \(s2 ? "granted" : "missing"), accessibility \(a2 ? "granted" : "missing")")
+            s = s2; a = a2
+            if underLaunchd {
+                log("restarting to apply the new permissions")
+                control.announceRestart()
+                try? await Task.sleep(for: .milliseconds(1500))
+                exit(0)
+            } else if s && a { log("restart miraged to be sure they apply"); return }
+        }
     }
 }
 
