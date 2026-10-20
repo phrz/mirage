@@ -13,10 +13,15 @@ public struct TLSIdentity {
 
     public static func loadOrCreate(store: Store) throws -> TLSIdentity {
         let p12 = store.url("host-tls.p12")
-        if !FileManager.default.fileExists(atPath: p12.path) {
+        if FileManager.default.fileExists(atPath: p12.path) { return try load(p12: p12) }
+        // About one generated key in 150 makes a PKCS#12 that SecPKCS12Import accepts but pairs into no identity (the same
+        // file fails every time: the flaky pairing tests, "SecPKCS12Import failed: 0"). A fresh one is generated instead.
+        var lastError: Error? = nil
+        for _ in 0..<5 {
             try generate(into: store)
+            do { return try load(p12: p12) } catch { lastError = error; try? FileManager.default.removeItem(at: p12) }
         }
-        return try load(p12: p12)
+        throw lastError ?? MirageError.storage("TLS identity generation failed")
     }
 
     static func load(p12: URL) throws -> TLSIdentity {
@@ -27,10 +32,8 @@ public struct TLSIdentity {
             kSecImportToMemoryOnly: true,
         ]
         let status = SecPKCS12Import(data as CFData, options as CFDictionary, &items)
-        guard status == errSecSuccess,
-              let first = (items as? [[CFString: Any]])?.first,
-              let anyIdentity = first[kSecImportItemIdentity] else {
-            throw MirageError.storage("SecPKCS12Import failed: \(status)")
+        guard status == errSecSuccess, let first = (items as? [[CFString: Any]])?.first, let anyIdentity = first[kSecImportItemIdentity] else {
+            throw MirageError.storage("SecPKCS12Import failed: \(status)\(status == errSecSuccess ? " (no identity in the items)" : "")")
         }
         let identity = anyIdentity as! SecIdentity
         var cert: SecCertificate?
