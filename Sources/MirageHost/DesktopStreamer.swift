@@ -54,7 +54,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         // Tiles that changed in the last two minutes (where a lost write would be), then a slow sweep of the rest.
         var tiles: [Int] = []
-        for i in 0..<t.tileCount where auditable(i) && Clock.elapsed(since: t.lastDirty(i), now: now) < 120_000_000_000 && tiles.count < 400 { tiles.append(i) }
+        // Most recently changed first (row order reached the Dock's rows last once more than 400 tiles had changed).
+        tiles = (0..<t.tileCount).filter { auditable($0) && Clock.elapsed(since: t.lastDirty($0), now: now) < 120_000_000_000 }
+            .sorted { t.lastDirty($0) > t.lastDirty($1) }.prefix(400).map { $0 }
         var swept = 0, k = 0
         while swept < 96, k < t.tileCount {
             let i = (auditCursor + k) % t.tileCount; k += 1
@@ -1104,6 +1106,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
         }
 
+        // A tight box is the change against the host's previous frame: it is enough only where the viewer holds that frame. A tile
+        // still owing an update (held back by the rate limit, shown through video, a correction) goes whole, or what the
+        // earlier change left stays wrong while the tile counts as sent (a vacated Dock tooltip "…aude" for ~12 s on mac-daddy).
+        for i in Array(tightBoxes.keys) where !tracker.isCrisp(i) { tightBoxes[i] = nil }
         var plan = tracker.classify(dirty: dirty, now: now, copyGate: Clock.elapsed(since: layer.copyGateNanos, now: now) < 300_000_000 && layer.copyGateNanos > 0)
         if !wrongAfterCopy.isEmpty {
             // Wrong pixels never wait for video or refinement: due now as direct changes (sendDueDirect, borrowing after 150 ms).
