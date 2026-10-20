@@ -392,13 +392,21 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
     }
 
-    /// (Re)builds everything that depends on the native stream size.
-    private func configure(for t: ScreenCapturer.Target, req: ControlMessage.StreamRequest) throws {
+    /// (Re)builds everything that depends on the native stream size, and starts every layer over with a fresh picture.
+    /// `keepController`: the size is unchanged (a resumed viewer that holds no picture), so the rate controller, its tier
+    /// and the ladder rung carry on as they were.
+    private func configure(for t: ScreenCapturer.Target, req: ControlMessage.StreamRequest, trigger: FreshPictureTrigger = .streamStart, keepController: Bool = false) throws {
         let w = t.pixelWidth, h = t.pixelHeight
         let now = Clock.nowNanos()
-        var controller = RateController(initialKbps: min(req.bitrateKbps, 800), maxKbps: req.bitrateKbps, nativePixels: w * h)
-        if let old = rc { controller = RateController(initialKbps: old.targetKbps, maxKbps: req.bitrateKbps, nativePixels: w * h) }
-        rc = controller
+        if keepController, var kept = rc {
+            kept.maxKbps = req.bitrateKbps
+            rc = kept
+        } else {
+            var controller = RateController(initialKbps: min(req.bitrateKbps, 800), maxKbps: req.bitrateKbps, nativePixels: w * h)
+            if let old = rc { controller = RateController(initialKbps: old.targetKbps, maxKbps: req.bitrateKbps, nativePixels: w * h) }
+            rc = controller
+        }
+        let controller = rc!
         // Every layer starts over: the display at the new size, the windows at the new scale (their
         // capturers are rebuilt by the next window-list reconcile).
         for (id, l) in layers where id != 0 { let cap = l.capturer; l.capturer = nil; Task { await cap?.stop() } }
@@ -413,7 +421,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         windows?.setDisplay(t.display.displayID, streamWidth: w)
         blockInFlight = nil
         sendTileMessage(.reset(layer: 0, width: w, height: h), captureNanos: now)
-        beginFreshPicture(.streamStart)
+        beginFreshPicture(trigger)
         if let s = windows?.sample(captureSeq: captureSeq, now: now, force: true) { reconcileLayers(s.sample, now: now) }
     }
 
@@ -731,9 +739,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.target = t
                     self.request = req
                     cap.onStop = { [weak self] err in self?.log("capture stopped: \(err.map { "\($0)" } ?? "ok")") }
-                    if old?.pixelWidth != t.pixelWidth || old?.pixelHeight != t.pixelHeight || self.display?.encoder == nil {
-                        try self.configure(for: t, req: req)
-                        self.log("resumed after \(gapMs) ms at a new size \(t.pixelWidth)x\(t.pixelHeight): fresh picture")
+                    let plan = ResumePicture.plan(sizeChanged: old?.pixelWidth != t.pixelWidth || old?.pixelHeight != t.pixelHeight,
+                                                  viewerHoldsPicture: req.holdsPicture, hasEncoder: self.display?.encoder != nil)
+                    if case .fresh(let trigger) = plan {
+                        // A new size, or a viewer that holds nothing (an app relaunched with its saved token): every layer
+                        // starts over. Same size: the controller, tier and rung carry on (no reconnect penalty).
+                        try self.configure(for: t, req: req, trigger: trigger, keepController: plan.keepsController)
+                        self.log("resumed after \(gapMs) ms (\(trigger.rawValue)) at \(t.pixelWidth)x\(t.pixelHeight): fresh picture of every layer; rung \(self.rc?.rung ?? -1), tier \(self.rc?.tier.name ?? "?"), target \(self.rc?.targetKbps ?? 0) kbps")
                     } else {
                         self.rc?.maxKbps = req.bitrateKbps
                         if let d = self.display { d.wantKeyframe = true; d.keyframeArmed = false; d.ackedLTR = [] }

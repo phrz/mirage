@@ -411,7 +411,7 @@ final class ViewerSession: @unchecked Sendable {
     private func noteHostPacket(_ now: UInt64) { statsLock.lock(); lastHostPacketNanos = now; statsLock.unlock() }
     /// The picture changed: freeze metric and resume-to-picture time.
     private func notePictureChange(_ now: UInt64) {
-        statsLock.lock(); let connectedAt = connectedAtNanos, resumedAt = lastResumeNanos; statsLock.unlock()
+        statsLock.lock(); let connectedAt = connectedAtNanos, resumedAt = lastResumeNanos; pictureHeld = true; statsLock.unlock()
         if connectedAt > 0 {
             // Gaps count across reconnects: the person sees one frozen picture either way.
             let base = lastPictureNanos > 0 ? lastPictureNanos : connectedAt
@@ -457,14 +457,22 @@ final class ViewerSession: @unchecked Sendable {
 
     func requestStream(width: Int, height: Int) {
         Task { @MainActor in
-            let req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: model.bitrateKbps, maxFPS: 30, snapNative: Self.snapNative ? true : nil)
+            var req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: model.bitrateKbps, maxFPS: 30, snapNative: Self.snapNative ? true : nil)
             if req == lastRequest { return }
             guard let sender else { pendingRequest = req; log("stream request \(width)x\(height) queued until connected"); return }
             lastRequest = req; lastRequestSent = req
-            log("stream request \(width)x\(height) cap \(req.bitrateKbps) kbps")
+            // Said at send time (not part of what is compared): a resumed session sends a fresh picture of every layer to
+            // a viewer that holds none (an app relaunched with its saved resume token), and brings a kept one current.
+            let held = holdsPicture
+            req.holdsPicture = held
+            log("stream request \(width)x\(height) cap \(req.bitrateKbps) kbps\(held ? "" : ", no picture held")")
             sender.send(.streamRequest(req))
         }
     }
+
+    /// Whether any layer has shown pixels from the host in this process (a relaunched app starts with none).
+    var holdsPicture: Bool { statsLock.lock(); defer { statsLock.unlock() }; return pictureHeld }
+    private var pictureHeld = false
 
     @MainActor func adjustBitrate(by delta: Int) {
         model.bitrateKbps = max(100, min(20_000, model.bitrateKbps + delta))

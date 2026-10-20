@@ -282,8 +282,13 @@ public enum ControlMessage: Codable, Equatable {
         /// which every scroll and window move is a whole-pixel shift (exact copy-rects, layers captured without rescaling);
         /// the viewer scales the picture into its window.
         public var snapNative: Bool?
-        public init(width: Int, height: Int, bitrateKbps: Int = 800, maxFPS: Int = 30, displayID: UInt32? = nil, snapNative: Bool? = nil) {
+        /// Whether the viewer holds a picture of this session (any layer's pixels). A resumed session brings a kept
+        /// picture current with a masked keyframe and diffs; `false` (an app relaunched with a saved resume token holds
+        /// nothing) makes the host send every layer's picture afresh instead (ResumePicture). nil (older viewers): held.
+        public var holdsPicture: Bool?
+        public init(width: Int, height: Int, bitrateKbps: Int = 800, maxFPS: Int = 30, displayID: UInt32? = nil, snapNative: Bool? = nil, holdsPicture: Bool? = nil) {
             self.width = width; self.height = height; self.bitrateKbps = bitrateKbps; self.maxFPS = maxFPS; self.displayID = displayID; self.snapNative = snapNative
+            self.holdsPicture = holdsPicture
         }
     }
     public struct StreamInfo: Codable, Equatable {

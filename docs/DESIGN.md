@@ -481,7 +481,11 @@ The §4a bar, implemented on loopback (measurements in §6 "M2.5 (loopback)"):
   dead), the viewer re-sends its stream request, and `resume` restarts capture with the first frame
   forced fully dirty so the diff against the last frame finds whatever changed during the gap, sends
   a keyframe masked to the tiles the viewer does not hold crisp, re-publishes the window list and
-  cursor, and keeps the ladder rung. The viewer keeps its canvas and predictor across the gap; a
+  cursor, and keeps the ladder rung. A viewer that holds no picture says so in that stream request
+  (`holdsPicture: false`: an iOS app relaunched with its keychain-saved token starts with empty canvases;
+  the masked keyframe and unchanged diffs left it grey until the stream size changed): `resume` then
+  starts every layer over with a fresh picture (`ResumePicture`, trigger "viewer holds no picture") while
+  the controller, tier, rung and all sequences carry on. The viewer keeps its canvas and predictor across the gap; a
   same-size `reset` (a genuinely new session, e.g. a restarted host) keeps the pixels too, until the
   first keyframe replaces them (review M11), and resets the assembler (M4). A killed host has no
   state to resume: the viewer gets a fresh stream, no re-pairing.
