@@ -127,7 +127,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var lastInputSeq: UInt64 = 0
     private var tileTokens: Double = 0
     private var tileMsgSeq: UInt32 = 0
-    private var tileSent: [UInt32: (nanos: UInt64, bytes: Int, refinement: Int, block: Bool, layer: UInt32, rects: [PixelRect])] = [:]
+    private var tileSent: [UInt32: (nanos: UInt64, bytes: Int, refinement: Int, block: Int?, layer: UInt32, rects: [PixelRect])] = [:]
     private var lastBudget = RateController.Budget(tileKbps: 0, videoKbps: 0)
     private var refineTimer: DispatchSourceTimer?
     private var rateTimer: DispatchSourceTimer?
@@ -419,7 +419,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         try rebuildEncoder(d)
         tokens = bucketCapacity(); tileTokens = Double(lastBudget.tileKbps * 1000 / 8) * 0.5
         windows?.setDisplay(t.display.displayID, streamWidth: w)
-        blockInFlight = nil
+        pacer.reset()
         sendTileMessage(.reset(layer: 0, width: w, height: h), captureNanos: now)
         beginFreshPicture(trigger)
         if let s = windows?.sample(captureSeq: captureSeq, now: now, force: true) { reconcileLayers(s.sample, now: now) }
@@ -535,7 +535,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard let sent = self.tileSent.removeValue(forKey: tileAck.msgSeq) else { return }
             let now = Clock.nowNanos()
             self.refinementInFlight = max(0, self.refinementInFlight - sent.refinement)
-            if sent.block, self.blockInFlight?.msgSeq == tileAck.msgSeq { self.blockInFlight = nil; self.refine(now: now) }
+            if sent.block != nil, self.pacer.acked(msgSeq: tileAck.msgSeq) { self.refine(now: now) }
             self.rc?.delaySample(sentNanos: sent.nanos, receivedNanos: tileAck.receivedNanos, bytes: sent.bytes, now: now)
             // Prune by age (a big refinement block legitimately outlives dozens of interactive acks).
             for (k, v) in self.tileSent where Clock.elapsed(since: v.nanos, now: now) > 20_000_000_000 { self.tileSent[k] = nil; self.refinementInFlight = max(0, self.refinementInFlight - v.refinement) }
@@ -677,7 +677,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     resent += tiles.count
                 }
                 if resent > 0 { self.log("suspend: \(resent) tiles of unacked tile messages queued for resend") }
-                self.tileSent = [:]; self.refinementInFlight = 0; self.blockInFlight = nil
+                self.tileSent = [:]; self.refinementInFlight = 0; self.pacer.reset()
                 for l in self.layers.values { l.stagedOpenSince = nil }   // the viewer drops staged levels on the resume reset
                 for l in self.layers.values {
                     switch l.fresh {
@@ -983,7 +983,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
     }
 
-    /// Layers in the order refinement serves them (DESIGN §3.3): the focused (frontmost normal-level) window, then
+    /// Layers in the order refinement serves them (DESIGN §3.3): the window under the pointer, the focused (frontmost normal-level) window, then
     /// the other visible windows by visible area, then the hidden ones, then the display (its visible part before
     /// its underlay: planBlocks).
     private func layersByPriority() -> [Layer] {
@@ -991,7 +991,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if screenLocked { return [d] }
         let list = windows?.current?.windows ?? []
         var ordered: [Layer] = []
-        if let w = list.first(where: { $0.windowLevel == 0 && (layers[$0.id]?.visibleFraction ?? 0) > 0.001 }), let l = layers[w.id] { ordered.append(l) }
+        // The window under the pointer first (what the person is looking at), then the focused one.
+        if let p = injector?.locus, let w = windows?.appWindow(at: Int(p.x * Double(d.width)), Int(p.y * Double(d.height))),
+           let l = layers[w.id], l.visibleFraction > 0.001 { ordered.append(l) }
+        if let w = list.first(where: { $0.windowLevel == 0 && (layers[$0.id]?.visibleFraction ?? 0) > 0.001 }), let l = layers[w.id], !ordered.contains(where: { $0 === l }) { ordered.append(l) }
         let visible = list.compactMap { w in layers[w.id].map { (w, $0) } }.filter { _, l in l.visibleFraction > 0.001 && !ordered.contains { $0 === l } }
         ordered += visible.sorted { a, b in Double(a.0.frame.area) * a.1.visibleFraction > Double(b.0.frame.area) * b.1.visibleFraction }.map(\.1)
         for w in list { if let l = layers[w.id], !ordered.contains(where: { $0 === l }) { ordered.append(l) } }
@@ -1285,14 +1288,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if !plan.lossless.isEmpty {
             // Priority 1: changed pixels near the input locus (pointer or caret) always go, now, on the
             // interactive stream, whatever the budget; they are small and they are what the person is
-            // looking at. Priority 2: other changed pixels, budget permitting. Refinement yields to real
-            // change (three tiles or more), not to a caret blink or a menu-bar clock.
-            if plan.lossless.count >= 3 { lastDirectNanos = now }
+            // looking at. Priority 2: other changed pixels, budget permitting. Refinement yields to change that
+            // uses the link (RefinementPacer), not to a caret blink, a menu-bar clock or a few animating windows.
             let (near, far) = splitByLocus(plan.lossless, layer: layer, tracker: tracker)
             if !near.isEmpty {
                 if layer.isDisplay { displaySent(near) }
                 let bytes = submitLossless(layer: layer, tiles: near, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
                 tileTokens -= Double(bytes)
+                pacer.noteDirect(bytes: bytes, now: now)
                 plan.lossless = far
             }
         }
@@ -1301,6 +1304,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if layer.isDisplay { displaySent(plan.lossless) }
                 let bytes = submitLossless(layer: layer, tiles: plan.lossless, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
                 tileTokens -= Double(bytes)
+                pacer.noteDirect(bytes: bytes, now: now)
             } else if plan.lossless.count >= 12, rc?.policy.videoEnabled ?? true, !(layer.copyGateNanos > 0 && Clock.elapsed(since: layer.copyGateNanos, now: now) < 300_000_000),
                       layer.encoder != nil || ensureEncoder(layer) {
                 // (Not while copy-rects carry this layer: video and copy-rects travel separately, and a frame overtaken by the
@@ -1410,7 +1414,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let p = layer.local(x: Int(l.x * Double(d.width)), y: Int(l.y * Double(d.height)))
         return (p.0, p.1)
     }
-    private var lastDirectNanos: UInt64 = 0
     /// Sustained motion (classified video, copy-rects, or a drag/scroll/press on the input stream) in
     /// the last 300 ms: refinement sends nothing and its queue is frozen; video has the whole target.
     private var lastMotionNanos: UInt64 = 0
@@ -1487,8 +1490,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// locus (or the centre).
     private func planBlocks(_ l: Layer) -> [PixelRect] {
         let tracker = l.tracker
-        let perSecond = Double(lastBudget.tileKbps * 1000 / 8) * 0.3
-        let blockArea = max(240.0 * 135.0, min(Double(tracker.width * tracker.height), perSecond / 0.3))
+        let blockArea = RefinementPacer.blockArea(tileBytesPerSecond: Double(lastBudget.tileKbps * 1000 / 8), layerArea: tracker.width * tracker.height)
         let side = max(64, (Int(blockArea.squareRoot()) + 63) / 64 * 64)
         let cols = max(1, (tracker.width + side - 1) / side), rows = max(1, (tracker.height + side - 1) / side)
         var blocks: [PixelRect] = []
@@ -1540,7 +1542,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         d.withUnsafeMutableBytes { dst in for y in 0..<rect.height { memcpy(dst.baseAddress!.advanced(by: y * rect.width * 4), f.base.advanced(by: y * f.stride), rect.width * 4) } }
         let hdr = header(layer: layer.id, nanos: nanos)
         let layerID = layer.id
-        if !backdrop { blockInFlight = (layer.id, nil, nanos) }
+        let block: Int? = backdrop ? nil : pacer.start(layer: layer.id, estimate: Int(targetBytes), now: nanos)
         tileQueue.async { [weak self] in
             guard let self else { return }
             let (data, q, ow, oh) = d.withUnsafeBytes { p -> (Data?, Float, Int, Int) in
@@ -1557,15 +1559,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let ow = max(32, Int(Double(rect.width) * scale)), oh = max(32, Int(Double(rect.height) * scale))
                 return (TileCodec.encodeLossy(base: base, width: rect.width, height: rect.height, stride: rect.width * 4, outWidth: ow, outHeight: oh, quality: 80), 80, ow, oh)
             }
-            guard let data else { self.queue.async { if backdrop { self.layers[layerID]?.backdropDirty = true } else { self.blockInFlight = nil } }; return }
+            guard let data else { self.queue.async { if backdrop { self.layers[layerID]?.backdropDirty = true } else if let block { self.pacer.dropped(id: block) } }; return }
             self.queue.async {
                 // Stale before it left (the window changed meanwhile): not sent; the lossless level follows (a backdrop
                 // level is tried again once the window is quiet).
                 if let l = self.layers[layerID], l.tracker.changedSince(nanos: nanos, in: [rect]) {
-                    if backdrop { l.backdropDirty = true; self.tileTokens += targetBytes } else { self.blockInFlight = nil }
+                    if backdrop { l.backdropDirty = true; self.tileTokens += targetBytes } else if let block { self.pacer.dropped(id: block) }
                     return
                 }
-                self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: true, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: !backdrop, layer: layerID) }
+                self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: true, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: block, layer: layerID) }
                 self.tileTokens -= Double(data.count) - targetBytes
                 self.statTileBytes += data.count; self.statTileRects += 1; self.secTileBytes += data.count
                 if let l = self.layers[layerID] { if backdrop { l.account.backdrop += data.count } else { l.account.still += data.count } }
@@ -1617,18 +1619,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
     }
 
-    /// One large refinement item (a block or a window still) in flight at a time across all layers.
-    private var blockInFlight: (layer: UInt32, msgSeq: UInt32?, sentNanos: UInt64)? = nil
+    /// Large refinement items (blocks, window stills and middle levels) in flight across all layers, and when refinement
+    /// yields to changed pixels (RefinementPacer).
+    private var pacer = RefinementPacer()
 
-    /// Sends the next large lossless block of a layer (one in flight), within budget. Returns whether anything is pending for it.
+    /// Sends the next large lossless block of a layer (pipelined: RefinementPacer), within budget.
     private func freshStep(_ l: Layer, now: UInt64) {
-        if let b = blockInFlight {
-            // A block whose ack never comes (a viewer that dropped the message, a stale ack) must not
-            // freeze the picture: after ~3 RTT + 2 s treat it as done and move on.
-            guard Clock.elapsed(since: b.sentNanos, now: now) > UInt64(3 * srttNanos) + 2_000_000_000 else { return }
-            log("fresh picture: block ack timed out after \((Clock.elapsed(since: b.sentNanos, now: now)) / 1_000_000) ms; continuing")
-            blockInFlight = nil
-        }
+        // A block whose ack never comes (a viewer that dropped the message, a stale ack) must not freeze the picture:
+        // after ~3 RTT + 2 s it stops counting.
+        if pacer.expire(now: now, srttNanos: srttNanos) > 0 { log("fresh picture: block ack timed out; continuing") }
+        guard pacer.canStartBlock(tileBytesPerSecond: Double(lastBudget.tileKbps * 1000 / 8)) else { return }
         guard let src = l.lastFrame else { return }
         refillTiles(now: now)
         // One block in flight and budget-limited: it does not yield to motion (that would starve the
@@ -1796,7 +1796,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Encodes copied rects on the tile queue and sends them (review L13: one body for tiles and blocks).
     /// `lossy`: every rect as lossy WebP at that quality (a scroll's exposed strip: lossy first on the stream, in order with
     /// its copy-rect; refined lossless once it settles).
-    private func encodeAndSend(_ jobs: [(PixelRect, Data)], estimate: Int, layer: Layer, refinement: Bool, block: Bool, nanos: UInt64, photoQuality: Float = 90, staged: Bool = false, lossy: Float? = nil, correction: Bool = false) {
+    private func encodeAndSend(_ jobs: [(PixelRect, Data)], estimate: Int, layer: Layer, refinement: Bool, block: Int?, nanos: UInt64, photoQuality: Float = 90, staged: Bool = false, lossy: Float? = nil, correction: Bool = false) {
         let hdr = header(layer: layer.id, nanos: nanos)
         if staged { layer.stagedEncoding += 1; layer.lastStagedNanos = nanos; if layer.stagedOpenSince == nil { layer.stagedOpenSince = nanos } }
         // On `queue`: this message is on the tile stream (or dropped), so a commit sent after it follows it.
@@ -1824,7 +1824,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 }
                 if let (fmt, data) = encoded { out.append(.init(rect: r, format: fmt, data: data)) }
             }
-            guard !out.isEmpty else { self.queue.async { if block { self.blockInFlight = nil }; settled(self.layers[layerID]) }; return }
+            guard !out.isEmpty else { self.queue.async { if let block { self.pacer.dropped(id: block) }; settled(self.layers[layerID]) }; return }
             let bytes = out.reduce(0) { $0 + $1.data.count }
             // Changed pixels go on the stream from here, in order with copy-rects: the hop through `queue` let the next
             // capture's copy-rect overtake them, so the viewer shifted its pixels first and then dropped or misplaced these
@@ -1837,7 +1837,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if refinement, let l = self.layers[layerID], l.tracker.changedSince(nanos: nanos, in: out.map(\.rect)) {
                     // Not sent: whatever the viewer held there stays, so the desktop tiles count as possibly holding a window.
                     if l.isDisplay { let ts = l.tracker.tiles(covering: out.map(\.rect)); l.taint.sent(ts, tracker: l.tracker, windowAreas: [l.bounds]); l.taintScheduled.subtract(ts) }
-                    self.statStaleDropped += out.count; self.tileTokens += Double(estimate); if block { self.blockInFlight = nil }; settled(self.layers[layerID]); return
+                    self.statStaleDropped += out.count; self.tileTokens += Double(estimate); if let block { self.pacer.dropped(id: block) }; settled(self.layers[layerID]); return
                 }
                 if !early { self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: refinement, staged: staged, tiles: out)), captureNanos: nanos, fast: !refinement, refinementBytes: refinement ? bytes : 0, block: block, layer: layerID) } }
                 settled(self.layers[layerID])
@@ -1847,10 +1847,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if let l = self.layers[layerID] {
                     l.sentBytes += bytes; if refinement { l.sentRefine += out.count } else { l.sentDirect += out.count }
                     if lossy != nil { l.account.strip += bytes } else if correction { l.account.correction += bytes }
-                    else if photoQuality < 90 { l.account.underlay += bytes } else if !refinement { l.account.direct += bytes } else if block { l.account.blocks += bytes } else { l.account.refine += bytes }
+                    else if photoQuality < 90 { l.account.underlay += bytes } else if !refinement { l.account.direct += bytes } else if block != nil { l.account.blocks += bytes } else { l.account.refine += bytes }
                 }
                 if photoQuality < 90, let l = self.layers[layerID] { for t in out where t.format == .lossy { l.underlayLossy.formUnion(l.tracker.tiles(covering: [t.rect])) } }
-                if self.debugLayers { self.log("layer \(layerID): sent \(out.count) \(staged ? "staged " : "")\(refinement ? (block ? "block" : "refinement") : "direct") rects \(bytes) B: \(out.prefix(3).map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))") }
+                if self.debugLayers { self.log("layer \(layerID): sent \(out.count) \(staged ? "staged " : "")\(refinement ? (block != nil ? "block" : "refinement") : "direct") rects \(bytes) B: \(out.prefix(3).map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))") }
             }
         }
     }
@@ -1879,7 +1879,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
         }
         let (jobs, estimate) = copyOut(rects, from: f)
-        encodeAndSend(jobs, estimate: lossy == nil ? estimate : estimate / 12, layer: layer, refinement: refinement, block: false, nanos: nanos, photoQuality: photoQuality, staged: staged, lossy: lossy, correction: correction)
+        encodeAndSend(jobs, estimate: lossy == nil ? estimate : estimate / 12, layer: layer, refinement: refinement, block: nil, nanos: nanos, photoQuality: photoQuality, staged: staged, lossy: lossy, correction: correction)
         return lossy == nil ? estimate : estimate / 12
     }
 
@@ -1887,8 +1887,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     @discardableResult
     private func submitRects(_ layer: Layer, _ rects: [PixelRect], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, photoQuality: Float = 90, staged: Bool = false) -> Int {
         let (jobs, estimate) = copyOut(rects, from: f)
-        blockInFlight = (layer.id, nil, nanos)
-        encodeAndSend(jobs, estimate: estimate, layer: layer, refinement: refinement, block: true, nanos: nanos, photoQuality: photoQuality, staged: staged)
+        let block = pacer.start(layer: layer.id, estimate: estimate, now: nanos)
+        encodeAndSend(jobs, estimate: estimate, layer: layer, refinement: refinement, block: block, nanos: nanos, photoQuality: photoQuality, staged: staged)
         return estimate
     }
 
@@ -1906,13 +1906,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let hdr = header(layer: layer.id, nanos: nanos)
         let estimate = Int(targetBytes)
         let layerID = layer.id
-        blockInFlight = (layer.id, nil, nanos)
+        let block = pacer.start(layer: layer.id, estimate: estimate, now: nanos)
         tileQueue.async { [weak self] in
             guard let self else { return }
             let data = d.withUnsafeBytes { TileCodec.encodeLossy(base: $0.baseAddress!, width: rect.width, height: rect.height, stride: rect.width * 4, outWidth: ow, outHeight: oh, quality: 60) }
-            guard let data else { self.queue.async { self.blockInFlight = nil }; return }
+            guard let data else { self.queue.async { self.pacer.dropped(id: block) }; return }
             // On the stream from here, in order with the layer's copy-rects (DESIGN §3.3 ordering invariant).
-            self.send(tile: .tiles(.init(header: hdr, refinement: false, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: true, layer: layerID)
+            self.send(tile: .tiles(.init(header: hdr, refinement: false, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: block, layer: layerID)
             self.queue.async {
                 self.tileTokens -= Double(data.count - estimate)
                 self.statTileBytes += data.count; self.statTileRects += 1; self.secTileBytes += data.count
@@ -1931,7 +1931,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         tileQueue.async { [weak self] in self?.send(tile: m, captureNanos: captureNanos, fast: true, refinementBytes: 0, layer: layer) }
     }
     /// On tileQueue.
-    private func send(tile m: TileMessage, captureNanos: UInt64, fast: Bool, refinementBytes: Int, block: Bool = false, layer: UInt32) {
+    private func send(tile m: TileMessage, captureNanos: UInt64, fast: Bool, refinementBytes: Int, block: Int? = nil, layer: UInt32) {
         guard let out = output else { return }
         tileMsgSeq &+= 1
         let seq = tileMsgSeq
@@ -1945,7 +1945,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         queue.async {
             self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes, block, layer, rects); self.refinementInFlight += refinementBytes
-            if block, self.blockInFlight?.layer == layer { self.blockInFlight = (layer, seq, Clock.nowNanos()) }
+            if let block { self.pacer.sent(id: block, msgSeq: seq, bytes: d.count, now: Clock.nowNanos()) }
             if refinementBytes == 0 { self.secInteractiveBytes += d.count }
         }
     }
@@ -1970,10 +1970,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // (No gate on due direct tiles here: they borrow past the budget after 150 ms, and the debt holds refinement back by
         // itself. Blocking refinement while any were due starved it through a whole Dock hover: a scrolled Finder window's
         // stale bottom rows stayed ~10 s on mac-daddy.)
-        // Priority 4: refinement runs on leftover budget only. It yields for 150 ms after any changed
-        // pixels went out, keeps 30 % of the tile budget in reserve for them, and never has more than
-        // ~300 ms of the link in flight (so it cannot build the queue the next keystroke would wait in).
-        guard Clock.elapsed(since: lastDirectNanos, now: now) > 150_000_000 else { return }
+        // Priority 4: refinement runs on leftover budget only. It yields while changed pixels use the link (RefinementPacer),
+        // keeps 30 % of the tile budget in reserve for them, and keeps ~0.3 s (tiles) or ~0.5 s (blocks) of the link in
+        // flight at most (so it cannot build the queue the next keystroke would wait in).
+        guard !pacer.yields(now: now, tileBytesPerSecond: Double(lastBudget.tileKbps * 1000 / 8)) else { return }
         // Sustained motion: refinement sends nothing and its queue is frozen (the blocks too). Video has
         // the whole target meanwhile; refinement resumes 300 ms after the motion stops, locus first.
         guard !motionSustained(now) else { return }
@@ -1985,6 +1985,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Every window's still before any window's lossless blocks: with many large windows (a real desktop)
         // one window's blocks would otherwise hold every other window's first picture back for tens of seconds.
         if let l = ordered.first(where: { if case .still = $0.fresh { return true }; return false }) { freshStep(l, now: now); return }
+        // Then the desktop's menu bar and Dock: on screen whatever the windows do, they waited at the first picture's lowest
+        // rung behind every window's levels and the desktop's centre-first blocks (~45 s after a connect on an iPhone).
+        if let d = display, !unifiedView, chromeStep(d, now: now) { return }
         // Then every window's middle level (where it gets one), in the same order.
         if let l = ordered.first(where: { if case .intermediate = $0.fresh { return true }; return false }) { freshStep(l, now: now); return }
         // Then what people can see before what they cannot: window layers (blocks, backlog, per-tile refinement,
@@ -2021,6 +2024,33 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                            r.dx, r.dy, r.confidence, r.mismatchedTiles.count, top, bottom, right, inner, med(fr) * 100, med(means), maxes.max() ?? 0, better, fr.count)
         } else { line += " | no copy-rect" }
         log(line)
+    }
+
+    /// The menu bar and Dock tiles the viewer does not hold crisp (visible, settled for 300 ms), sent lossless and shown on
+    /// arrival (not staged: they replace the lowest-rung picture at once), one block's worth at a time. True while any are
+    /// waiting (nothing behind them goes meanwhile).
+    private func chromeStep(_ d: Layer, now: UInt64) -> Bool {
+        guard let bands = windows?.chromeRects(width: d.width, height: d.height), !bands.isEmpty, let src = d.lastFrame else { return false }
+        let t = d.tracker
+        let soft = t.tiles(covering: bands).filter {
+            !t.isCrisp($0) && !t.isDirectPending($0) && !t.isHeld($0) && !d.occludedTiles.contains($0) && !d.underLayer.contains($0)
+                && Clock.elapsed(since: t.lastDirty($0), now: now) > 300_000_000
+        }
+        guard !soft.isEmpty else { return false }
+        let perSecond = Double(lastBudget.tileKbps * 1000 / 8)
+        if pacer.expire(now: now, srttNanos: srttNanos) > 0 { log("chrome: block ack timed out; continuing") }
+        guard pacer.canStartBlock(tileBytesPerSecond: perSecond), tileTokens > 0 else { return true }
+        let area = RefinementPacer.blockArea(tileBytesPerSecond: perSecond, layerArea: d.width * d.height)
+        var take: [Int] = [], sum = 0.0
+        for i in soft { take.append(i); sum += Double(t.rect(of: i).area); if sum >= area { break } }
+        CVPixelBufferLockBaseAddress(src, .readOnly); defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
+        let f = frameView(src)
+        guard f.width == d.width, f.height == d.height else { return false }
+        displaySent(take)
+        tileTokens -= Double(submitRects(d, t.mergedRects(take), from: f, refinement: true, nanos: now, staged: false))
+        d.tracker.sent(lossless: take, now: now)
+        if debugLayers { log("chrome: \(take.count) tiles lossless, \(soft.count - take.count) left") }
+        return true
     }
 
     /// The q75 underlay of areas a move uncovered, refined to the normal quality: after everything else, from its
@@ -2082,7 +2112,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if !corrections.isEmpty { bytes += submitLossless(layer: l, tiles: corrections, from: f, refinement: false, nanos: now, tracker: l.tracker, correction: true); l.correctionTiles.subtract(corrections) }
             tileTokens -= Double(bytes)
             l.tracker.sent(lossless: due, now: now)
-            lastDirectNanos = now
+            pacer.noteDirect(bytes: bytes, now: now)
             statDirectDue += due.count
         }
     }
@@ -2109,8 +2139,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let f = frameView(src)
                 guard f.width == l.width, f.height == l.height else { continue }
                 l.backdropDirty = false
-                tileTokens -= Double(submitIntermediate(l, from: f, nanos: now, backdrop: true))
-                lastDirectNanos = now
+                let bytes = submitIntermediate(l, from: f, nanos: now, backdrop: true)
+                tileTokens -= Double(bytes)
+                pacer.noteDirect(bytes: bytes, now: now)
             } else if Clock.elapsed(since: l.movedNanos, now: now) >= Self.backdropIdleNanos, Clock.elapsed(since: lastMotionNanos, now: now) >= 2_000_000_000, l.tracker.heldCount > 0 {
                 let n = l.tracker.releaseHeld(now: now)
                 statBackdropReleased += n

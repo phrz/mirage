@@ -34,14 +34,42 @@ final class WindowTracker {
     private var lastSeen: [UInt32: UInt64] = [:]
     var minSampleInterval: UInt64 = 25_000_000
 
+    private var displayID: CGDirectDisplayID
     init(displayID: CGDirectDisplayID, streamWidth: Int) {
+        self.displayID = displayID
         displayBounds = CGDisplayBounds(displayID)
         pxPerPoint = Double(streamWidth) / Double(displayBounds.width)
     }
     func setDisplay(_ id: CGDirectDisplayID, streamWidth: Int) {
+        displayID = id
         displayBounds = CGDisplayBounds(id)
         pxPerPoint = Double(streamWidth) / Double(displayBounds.width)
-        lock.lock(); learned = [:]; axRects = [:]; lock.unlock()
+        lock.lock(); learned = [:]; axRects = [:]; chromeInsets = nil; lock.unlock()
+    }
+
+    /// The menu bar and Dock insets in points (top, bottom, left, right), from NSScreen on the main queue every 2 s.
+    private var chromeInsets: (top: Double, bottom: Double, left: Double, right: Double)?
+    private var chromeAskedNanos: UInt64 = 0
+    /// The desktop's always-visible chrome (menu bar, Dock) in stream pixels (DesktopChrome). Until NSScreen has answered:
+    /// a 24-pt menu bar.
+    func chromeRects(width: Int, height: Int) -> [PixelRect] {
+        let now = Clock.nowNanos()
+        lock.lock()
+        let insets = chromeInsets ?? (24, 0, 0, 0)
+        let ask = now &- chromeAskedNanos > 2_000_000_000
+        if ask { chromeAskedNanos = now }
+        let id = displayID, ppp = pxPerPoint
+        lock.unlock()
+        if ask {
+            DispatchQueue.main.async { [weak self] in
+                guard let screen = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id }) else { return }
+                let f = screen.frame, v = screen.visibleFrame   // bottom-left origin, y up
+                let i = (top: Double(max(0, f.maxY - v.maxY)), bottom: Double(max(0, v.minY - f.minY)), left: Double(max(0, v.minX - f.minX)), right: Double(max(0, f.maxX - v.maxX)))
+                guard let self else { return }
+                self.lock.lock(); self.chromeInsets = i; self.lock.unlock()
+            }
+        }
+        return DesktopChrome.bands(width: width, height: height, pxPerPoint: ppp, top: insets.top, bottom: insets.bottom, left: insets.left, right: insets.right)
     }
 
     func toPixels(_ r: CGRect) -> PixelRect {

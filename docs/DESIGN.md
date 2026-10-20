@@ -228,8 +228,12 @@ and their children, and is captured without shadows; the viewer draws a macOS-st
 bar, overflow windows) stays in the display layer and the client draws it as a *cut-out* of that layer at
 its frame, in z-order, so menus still sit above windows. A new layer is announced (`reset` with its pixel
 size), gets one lossy WebP still (~0.15 s of the tile budget, upscaled on the client) and then lossless
-blocks, locus layer first, one in flight across all layers; the display layer keeps its tiny-keyframe
-ladder. Each layer has its own tile tracker, last frame, scroll detection, per-tile capture sequences on
+blocks, the layer under the pointer first, then the focused one, pipelined across all layers (a new block starts
+while the unacked ones total under ~0.5 s of the tile budget: one at a time, each waiting for its ack, held
+refinement to ~40 % of the target at a 220 ms RTT); the display layer keeps its tiny-keyframe ladder. Right
+after the window stills, the desktop's menu bar and Dock (the screen's frame minus its visibleFrame) go
+lossless and are shown on arrival, not staged: they are on screen whatever the windows do, and waited ~45 s
+at the lowest rung behind every window's levels and the desktop's centre-first blocks on an iPhone connect. Each layer has its own tile tracker, last frame, scroll detection, per-tile capture sequences on
 the viewer and, when it moves, its own HEVC canvas and encoder (at most four live, released after 10 s
 idle); the rate controller, pacer, in-flight cap and tile budget stay shared. Tiles of a layer fully
 covered on the host are tracked but not sent until uncovered. Measured facts that shaped it
@@ -473,14 +477,16 @@ tiers the fovea covers the screen and the mode is inert.
   from the refinement queue goes out until the viewer has acked that base; the ladder then climbs
   rung by rung, each step a whole-frame keyframe sent as soon as the previous one is acked and the
   target affords the next rung (masked-out crisp tiles are flattened to their mean colour first);
-  then lossless lands in large centre-first blocks sized to ~1 s of a 30 % refinement budget, one
-  in flight. Progressive steps and refinement blocks crossfade in over 150 ms on the client.
+  then lossless lands in large centre-first blocks sized to ~0.25 s of the tile budget, pipelined
+  (≤ ~0.5 s of it unacked). Progressive steps and refinement blocks crossfade in over 150 ms on the client.
   64-px tiles are strictly for changes. Extreme is video-minimal on the tiny rung (5 fps), not
   video-off.
 - **Scheduler, every tier.** (1) changed pixels within ~200 px of the last input event go at once
   on a second, interactive QUIC stream regardless of budget; (2) other changed pixels on budget;
   (3) copy-rects on the interactive stream; (4) refinement only on leftover budget, yielding
-  150 ms after real change (three tiles or more, not a caret blink), ≤ 300 ms of link in flight.
+  150 ms while changed pixels use the link (over a quarter of the tile budget in the last 150 ms;
+  yielding after any three tiles let a few animating windows hold refinement at 0 kbps for minutes
+  on an idle link), ≤ 300 ms of link in flight for tiles, ≤ ~0.5 s for blocks (RefinementPacer).
   The client drops a tile older than the capture it already holds, so a refinement queued before
   an interactive update of the same tile cannot overwrite it.
 - **Foveated two-layer mode** on Constrained/Extreme: a fovea of about a third of the screen
