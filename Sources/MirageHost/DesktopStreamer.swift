@@ -196,9 +196,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         statDirtyMissed = 0
         if statWindowAudited > 0 { log("window picture audit, last 30 s: \(statWindowAudited) window tiles fingerprinted, \(statWindowAuditRefreshed) asked for again by the viewer") }
         statWindowAudited = 0; statWindowAuditRefreshed = 0
-        if statAudited > 0 { log("picture audit, last 30 s: \(statAudited) desktop tiles fingerprinted, \(statAuditRefreshed) asked for again by the viewer; \(statDirectDue) held-back changed tiles sent when due (longest wait \(statDirectWaitMaxNanos / 1_000_000) ms), \(statCopyCorrections) of them copy-rect corrections") }
+        if statAudited > 0 { log("picture audit, last 30 s: \(statAudited) desktop tiles fingerprinted, \(statAuditRefreshed) asked for again by the viewer; \(statDirectDue) held-back changed tiles sent when due (longest wait \(statDirectWaitMaxNanos / 1_000_000) ms), \(statCopyCorrections) of them copy-rect corrections; \(statStripLossy) exposed-strip tiles sent lossy with their copy-rect") }
         if statBackdropLevels > 0 { log("moved-window backdrops, last 30 s: \(statBackdropTiles) tiles held, \(statBackdropLevels) lossy levels \(statBackdropBytes / 1000) KB, \(statBackdropReleased) tiles released to lossless refinement when idle") }
-        statDirectDue = 0; statDirectWaitMaxNanos = 0; statCopyCorrections = 0; statBackdropTiles = 0; statBackdropLevels = 0; statBackdropBytes = 0; statBackdropReleased = 0
+        statDirectDue = 0; statDirectWaitMaxNanos = 0; statCopyCorrections = 0; statStripLossy = 0; statBackdropTiles = 0; statBackdropLevels = 0; statBackdropBytes = 0; statBackdropReleased = 0
         statAudited = 0; statAuditRefreshed = 0
         for l in layers.values { l.account = Layer.Account() }
     }
@@ -1229,8 +1229,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // looking at. Priority 2: other changed pixels, budget permitting. Refinement yields to real
             // change (three tiles or more), not to a caret blink or a menu-bar clock.
             if plan.lossless.count >= 3 { lastDirectNanos = now }
-            var (near, far) = splitByLocus(plan.lossless, layer: layer, tracker: tracker)
-            if !withCopy.isEmpty { let w = Set(withCopy); near.append(contentsOf: far.filter { w.contains($0) }); far.removeAll { w.contains($0) } }
+            if !withCopy.isEmpty {
+                // The exposed strip: lossy now, on the stream right behind its copy-rect, refined lossless once it settles.
+                let w = Set(withCopy)
+                plan.lossless.removeAll { w.contains($0) }
+                if layer.isDisplay { displaySent(withCopy) }
+                tileTokens -= Double(submitLossless(layer: layer, tiles: withCopy, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: 70))
+                tracker.markVideo(withCopy, now: now)
+                statStripLossy += withCopy.count
+            }
+            let (near, far) = splitByLocus(plan.lossless, layer: layer, tracker: tracker)
             if !near.isEmpty {
                 if layer.isDisplay { displaySent(near) }
                 let bytes = submitLossless(layer: layer, tiles: near, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
@@ -1736,7 +1744,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     /// Encodes copied rects on the tile queue and sends them (review L13: one body for tiles and blocks).
-    private func encodeAndSend(_ jobs: [(PixelRect, Data)], estimate: Int, layer: Layer, refinement: Bool, block: Bool, nanos: UInt64, photoQuality: Float = 90, staged: Bool = false) {
+    /// `lossy`: every rect as lossy WebP at that quality (a scroll's exposed strip: lossy first on the stream, in order with
+    /// its copy-rect; refined lossless once it settles).
+    private func encodeAndSend(_ jobs: [(PixelRect, Data)], estimate: Int, layer: Layer, refinement: Bool, block: Bool, nanos: UInt64, photoQuality: Float = 90, staged: Bool = false, lossy: Float? = nil) {
         let hdr = header(layer: layer.id, nanos: nanos)
         if staged { layer.stagedEncoding += 1; layer.lastStagedNanos = nanos; if layer.stagedOpenSince == nil { layer.stagedOpenSince = nanos } }
         // On `queue`: this message is on the tile stream (or dropped), so a commit sent after it follows it.
@@ -1752,6 +1762,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let encoded: (TileCodec.Format, Data)? = d.withUnsafeBytes { p -> (TileCodec.Format, Data)? in
                     let base = p.baseAddress!
                     if !alpha, let solid = TileCodec.solidColour(base: base, width: r.width, height: r.height, stride: r.width * 4) { return (.solid, solid) }
+                    if let q = lossy, let data = TileCodec.encodeLossy(base: base, width: r.width, height: r.height, stride: r.width * 4, outWidth: r.width, outHeight: r.height, quality: q, alpha: alpha) { return (.lossy, data) }
                     let photographic = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4, limit: 4096) > 4096
                     // Review #22: on constrained links a photographic rect (a wallpaper, a photo) ends at visually
                     // lossless (lossy WebP q90 at full size, ~4x under near-lossless on a 2x desktop picture), not at
@@ -1801,7 +1812,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// Copies the tiles' pixels out and encodes them on the tile queue. Returns the byte estimate charged to the budget.
     @discardableResult
-    private func submitLossless(layer: Layer, tiles: [Int], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, tracker: TileTracker, tight: [Int: PixelRect]? = nil, photoQuality: Float = 90, staged: Bool = false) -> Int {
+    private func submitLossless(layer: Layer, tiles: [Int], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, tracker: TileTracker, tight: [Int: PixelRect]? = nil, photoQuality: Float = 90, staged: Bool = false, lossy: Float? = nil) -> Int {
         var rects = tracker.mergedRects(tiles)
         if let tight {
             // Shrink each merged rect to the union of its tiles' changed boxes (padded 2 px), when all are known.
@@ -1816,8 +1827,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
         }
         let (jobs, estimate) = copyOut(rects, from: f)
-        encodeAndSend(jobs, estimate: estimate, layer: layer, refinement: refinement, block: false, nanos: nanos, photoQuality: photoQuality, staged: staged)
-        return estimate
+        encodeAndSend(jobs, estimate: lossy == nil ? estimate : estimate / 4, layer: layer, refinement: refinement, block: false, nanos: nanos, photoQuality: photoQuality, staged: staged, lossy: lossy)
+        return lossy == nil ? estimate : estimate / 4
     }
 
     /// Encodes arbitrary rects (large lossless blocks) on the tile queue, one block in flight. Returns the byte estimate charged.
@@ -1969,7 +1980,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// motion, waits for the first picture and serves every window's backlog before the desktop: the tiles a moving
     /// Dock tooltip had just left stayed stale until another tooltip repainted them (phrz's ghost labels, traced on
     /// mac-daddy with real Dock hovers: each label update covered its new place, the place it left was rate-limited).
-    private var statDirectDue = 0, statDirectWaitMaxNanos: UInt64 = 0, statCopyCorrections = 0
+    private var statDirectDue = 0, statDirectWaitMaxNanos: UInt64 = 0, statCopyCorrections = 0, statStripLossy = 0
     private func sendDueDirect(now: UInt64) {
         let perSecond = Double(lastBudget.tileKbps * 1000 / 8)
         for l in layers.values {

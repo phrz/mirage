@@ -596,7 +596,8 @@ refinement budget. What the host counts as delivered must be what the viewer sho
    tiles wait as direct changes instead (280 stale video tiles per Finder scroll on mac-daddy before this).
    A copy-rect's new content (changed tiles inside its region that it does not explain: the exposed strip) goes with it,
    whatever the per-tile rate limit or the budget: held back, the next copy-rect copied the not-yet-updated rows on and the
-   viewer showed them smeared.
+   viewer showed them smeared. It goes as lossy WebP (q70) on the stream, right behind its copy-rect, and is refined
+   lossless once it settles: lossless it cost 3.7 Mbps for 5 s of Finder scrolling at native scale on an 800 kbps link.
 3. **A tight box only where the viewer holds the previous frame.** A tile still owing an update goes whole (2df0793).
 4. **Backstop.** The picture audit compares fingerprints of tiles the host believes delivered with the viewer's canvas,
    for the desktop and every shown window layer (c9f678d), newest changes first; mismatches are resent as direct changes.

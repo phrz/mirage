@@ -541,9 +541,9 @@ final class ScenarioRunner {
             let old = win.frame
             let b0 = session.totalBytes(), f0 = session.layerBytes(win.id), d0 = session.layerBytes(0)
             let dx = b % 2 == 0 ? 6 : -6, dy = b % 2 == 0 ? 3 : -3
-            // The window's old and new places plus 64 px: nothing else of the desktop (an ±400 px crop took in the menu bar).
+            // The window's old and new places only (a margin took in other windows; an ±400 px crop took in the menu bar).
             let span = old.union(old.offset(dx * 50, dy * 50))
-            shotRects["finder"] = PixelRect(x: span.x - 64, y: span.y - 64, width: span.width + 128, height: span.height + 128)
+            shotRects["finder"] = span
             if win.isLayered {
                 session.beginLayerDrag(windowID: win.id)
                 for k in 1...50 { session.dragLayer(windowID: win.id, to: old.offset(dx * k, dy * k)); try? await Task.sleep(for: .milliseconds(16)) }
@@ -553,7 +553,9 @@ final class ScenarioRunner {
             note(String(format: "move %d: %.1f KB in 4.8 s (Finder layer %.1f KB, desktop %.1f KB)", b + 1, Double(session.totalBytes() - b0) / 1000, Double(session.layerBytes(win.id) - f0) / 1000, Double(session.layerBytes(0) - d0) / 1000))
         }
         // 1. Scroll: 3 bursts of 40 wheel events, down then up.
-        shotRects["finder"] = PixelRect(x: w.frame.x - 64, y: w.frame.y - 64, width: w.frame.width + 128, height: w.frame.height + 128)
+        // The window as it is now (the drags moved it; the frame from before them framed other windows) and nothing around it.
+        if let now = scratchWindow() { w = now }
+        shotRects["finder"] = w.frame
         let c0 = session.totalBytes(), cr0 = session.samples.reduce(0) { $0 + $1.copyRects }
         var dir = -1.0
         for b in 0..<3 {
