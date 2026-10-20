@@ -63,8 +63,9 @@ swift test
 Products: `miraged` (host daemon + admin CLI), `mirage` (client CLI), `mirage-viewer`
 (macOS viewer), `MirageCore` (shared, iOS-compilable), `MirageHost` (macOS capture/encode/input).
 
-`scripts/make-viewer-app.sh` wraps the viewer in `.build/MirageViewer.app` (SwiftUI/AppKit
-want a bundle); `scripts/deploy-host.sh HOST` signs `miraged` with your Apple Development
+`scripts/make-viewer-app.sh` builds `.build/MirageViewer.app`, the macOS slice of the universal app
+(`App/Mirage.xcodeproj`, one target and bundle ID for macOS and iOS; `scripts/testflight.sh` ships the iOS
+slice to TestFlight); `scripts/deploy-host.sh HOST` signs `miraged` with your Apple Development
 identity (so the TCC grants below survive rebuilds), copies it over and restarts the LaunchAgent.
 
 ## Host setup (once, on the Mac you want to reach)
@@ -79,8 +80,10 @@ self-signed TLS certificate on first start under `~/Library/Application Support/
 
 ## Viewer app (GUI)
 
-`scripts/make-viewer-app.sh` wraps the release viewer in `MirageViewer.app`; copy it to
-`~/Applications`. Launched from Finder or the Dock it opens a connect window listing your paired
+`scripts/make-viewer-app.sh` builds `MirageViewer.app` (the universal app's macOS slice, incremental); copy it to
+`~/Applications`. On iPhone and iPad the same app (TestFlight) runs Desktop mode: one finger moves a
+trackpad-style pointer, tap clicks, two fingers scroll, a long press drags, and the on-screen or a hardware
+keyboard types, with the same scroll prediction and typeahead. Launched from Finder or the Dock it opens a connect window listing your paired
 Macs, with a host field and a 6-digit code field for pairing a new one. The command line
 (`mirage-viewer HOST [--pair CODE] …`) still works for scripts and headless measurement.
 
@@ -192,9 +195,11 @@ Sources/MirageCore/Store       on-disk state
 Sources/MirageHost             macOS: display + per-window SCStream capture (layers), tile diff, copy-rect detection, window tracker,
                                AX window commands, per-layer HEVC canvas encoders, tile encoder, pacing, CGEvent input, cursor monitor,
                                `miraged probe-layers` (per-window capture measurements)
-Sources/mirage-viewer          macOS viewer (AppKit window, CAMetalLayer, SwiftUI overlay, scripted scenarios), Unified mode
-                               (a native window per remote window), native chrome (remote menus, dock, status strip)
+Sources/mirage-viewer          the viewer: Session/ (platform-neutral session layer: connection, presentation and prediction
+                               state, typeahead), macOS/ (AppKit window, CAMetalLayer, scripted scenarios, Unified mode, native
+                               chrome), iOS/ (UIKit Desktop mode: touch pointer, scroll, keyboards)
+App/                           the universal app target (project.yml for xcodegen, the generated Mirage.xcodeproj)
 Sources/miraged, Sources/mirage  CLIs
 experiments/                   measurements that fixed the design (tilebench, seqbench, probes) and the test bench app
-scripts/                       make-viewer-app.sh, deploy-host.sh, resilience-test.sh (§4a loopback scenarios + dummynet notes)
+scripts/                       make-viewer-app.sh, testflight.sh, deploy-host.sh, resilience-test.sh (§4a loopback scenarios + dummynet notes)
 ```
