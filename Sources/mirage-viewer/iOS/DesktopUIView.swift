@@ -24,7 +24,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
     private var forceRedraw = false
     private var lastDisplacementCount = 0, lastArrangement = -1
 
-    private var pointer = TrackpadPointer()
+    var pointer = TrackpadPointer()
     private var pointerFromHost = false
     private var lastPanTranslation = CGPoint.zero, lastPanTime: CFTimeInterval = 0
     private var lastScrollTranslation = CGPoint.zero
@@ -63,7 +63,10 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         self.session = session
         metalLayer.device = session.compositor?.device ?? session.context?.device
         session.onChange = { [weak self] in DispatchQueue.main.async { self?.forceRedraw = true } }
+        if UserDefaults.standard.string(forKey: "demo") != nil { Task { @MainActor in await self.runDemo() } }
     }
+    /// Asks the screen to show or hide the on-screen keyboard (its toggle state lives in SwiftUI).
+    var onKeyboardRequest: ((Bool) -> Void)?
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
@@ -268,7 +271,9 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
         return session.send(.mouseButton(.init(button: b, down: down, x: pointer.x, y: pointer.y, clickCount: clickCount, modifiers: modifierFlags)))
     }
 
-    @objc private func tap(_ g: UITapGestureRecognizer) {
+    @objc private func tap(_ g: UITapGestureRecognizer) { tapForDemo() }
+    func momentumStartForDemo(vy: Double) { momentum.start(vx: 0, vy: vy) }
+    func tapForDemo() {
         momentum.stop()
         guard !observeOnly, let session else { return }
         session.typeaheadInvalidateBeforeClick()
@@ -339,7 +344,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 
     /// A scroll of `viewDX`, `viewDY` points of finger travel at the pointer: natural scrolling (the content follows the
     /// fingers), sent as precise deltas in host points, and predicted locally like the Mac viewer's trackpad scroll.
-    private func scroll(viewDX: Double, viewDY: Double) {
+    func scroll(viewDX: Double, viewDY: Double) {
         guard !observeOnly, let session, let comp = session.compositor, comp.width > 0 else { return }
         let r = videoRect
         guard r.width > 0 else { return }
@@ -476,28 +481,26 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate {
 }
 
 /// The on-screen keyboard's extra row: keys an iPhone keyboard lacks (Esc, Tab, arrows) and sticky ⌃ ⌥ ⌘ for the next key.
-final class KeyAccessoryBar: UIInputView {
+final class KeyAccessoryBar: UIView {
     private weak var owner: DesktopUIView?
+    private var buttons: [UIButton] = []
     private var modifierButtons: [(UInt64, UIButton)] = []
 
     init(owner: DesktopUIView) {
         self.owner = owner
-        super.init(frame: CGRect(x: 0, y: 0, width: 400, height: 44), inputViewStyle: .keyboard)
-        allowsSelfSizing = true
-        let stack = UIStackView()
-        stack.axis = .horizontal; stack.distribution = .fillEqually; stack.spacing = 6
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: layoutMarginsGuide.leadingAnchor), stack.trailingAnchor.constraint(equalTo: layoutMarginsGuide.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: 5), stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -5),
-            heightAnchor.constraint(equalToConstant: 44),
-        ])
+        super.init(frame: CGRect(x: 0, y: 0, width: 400, height: 46))
+        autoresizingMask = .flexibleWidth
+        backgroundColor = UIColor(white: 0.12, alpha: 0.92)
         func make(_ title: String, _ action: @escaping () -> Void) -> UIButton {
-            var c = UIButton.Configuration.gray(); c.title = title; c.cornerStyle = .medium
-            c.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { var a = $0; a.font = .systemFont(ofSize: 15, weight: .medium); return a }
-            let b = UIButton(configuration: c, primaryAction: UIAction { _ in action() })
-            stack.addArrangedSubview(b); return b
+            let b = UIButton(type: .system)
+            b.setTitle(title, for: .normal)
+            b.titleLabel?.font = .systemFont(ofSize: 16, weight: .medium)
+            b.titleLabel?.numberOfLines = 1
+            b.setTitleColor(.white, for: .normal)
+            b.backgroundColor = UIColor(white: 0.32, alpha: 1)
+            b.layer.cornerRadius = 6
+            b.addAction(UIAction { _ in action() }, for: .touchUpInside)
+            addSubview(b); buttons.append(b); return b
         }
         _ = make("esc") { [weak self] in self?.owner?.key(MacKeys.escape, characters: "\u{1B}", flags: 0) }
         _ = make("tab") { [weak self] in self?.owner?.key(MacKeys.tab, characters: "\t", flags: 0) }
@@ -509,13 +512,57 @@ final class KeyAccessoryBar: UIInputView {
         }
     }
     required init?(coder: NSCoder) { fatalError() }
+    override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: 46) }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        let inset = max(6, safeAreaInsets.left), gap: CGFloat = 6
+        let w = (bounds.width - 2 * inset - gap * CGFloat(buttons.count - 1)) / CGFloat(buttons.count)
+        for (i, b) in buttons.enumerated() { b.frame = CGRect(x: inset + CGFloat(i) * (w + gap), y: 5, width: w, height: bounds.height - 10) }
+    }
 
     func update(sticky: UInt64) {
-        for (f, b) in modifierButtons {
-            var c = sticky & f != 0 ? UIButton.Configuration.filled() : UIButton.Configuration.gray()
-            c.title = b.configuration?.title; c.cornerStyle = .medium
-            c.titleTextAttributesTransformer = b.configuration?.titleTextAttributesTransformer
-            b.configuration = c
+        for (f, b) in modifierButtons { b.backgroundColor = sticky & f != 0 ? .systemBlue : UIColor(white: 0.32, alpha: 1) }
+    }
+}
+
+// MARK: Demo script
+
+extension DesktopUIView {
+    /// Test hook (`-demo 1` launch argument): drives the same pointer, click, scroll and keyboard paths a person's touches
+    /// do, on a fixed timeline, so a simulator run can be watched and screenshotted without a touch injector. Aimed at
+    /// the "Mirage Test Bench" window when the host lists one (run the host in input-sink mode: nothing is injected).
+    func runDemo() async {
+        func log(_ s: String) { session?.log("demo: \(s)") }
+        for _ in 0..<300 where (session?.compositor?.width ?? 0) == 0 { try? await Task.sleep(for: .milliseconds(100)) }
+        try? await Task.sleep(for: .seconds(3))
+        guard let session, let comp = session.compositor, comp.width > 0 else { log("no picture"); return }
+        let bench = session.windowsSnapshot().first { $0.title.contains("Mirage Test Bench") && !$0.title.contains("overlay") }
+        let target = bench.map { (Double($0.frame.x + $0.frame.width / 2) / Double(comp.width), Double($0.frame.y + $0.frame.height / 3) / Double(comp.height)) } ?? (0.4, 0.4)
+        log("moving the pointer to \(target)")
+        // One finger: 40 small relative moves toward the target, as a pan would deliver them.
+        let r = videoRect
+        for i in 0..<40 {
+            let dx = (target.0 - pointer.x) * Double(r.width) / Double(40 - i), dy = (target.1 - pointer.y) * Double(r.height) / Double(40 - i)
+            pointer.move(dx: dx, dy: dy, pictureWidth: Double(r.width), pictureHeight: Double(r.height), dt: 0)
+            updateCursorLayer(); session.sendMouseMove(x: pointer.x, y: pointer.y)
+            try? await Task.sleep(for: .milliseconds(20))
         }
+        try? await Task.sleep(for: .seconds(1))
+        log("tap (click)")
+        tapForDemo()
+        try? await Task.sleep(for: .seconds(2))
+        log("two-finger scroll, then momentum")
+        // Three two-finger drags of ~0.8 s, each ending in a flick that coasts, a few seconds apart.
+        for _ in 0..<3 {
+            for _ in 0..<50 { scroll(viewDX: 0, viewDY: -2.5); try? await Task.sleep(for: .milliseconds(16)) }
+            momentumStartForDemo(vy: -700)
+            try? await Task.sleep(for: .seconds(3))
+        }
+        log("on-screen keyboard")
+        onKeyboardRequest?(true)
+        try? await Task.sleep(for: .seconds(2))
+        for ch in "typed on an iPhone" { insertText(String(ch)); try? await Task.sleep(for: .milliseconds(140)) }
+        log("done; typeahead \(session.typeaheadCounts()), predictions \(model?.stats.predictions ?? (0, 0, 0, 0))")
     }
 }

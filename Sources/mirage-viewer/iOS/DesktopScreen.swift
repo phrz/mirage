@@ -15,7 +15,7 @@ struct DesktopScreen: View {
             DesktopView(session: session, model: model, keyboard: $keyboard)
                 .ignoresSafeArea(.keyboard)   // the picture keeps its size (no re-stream); it lifts above the keyboard instead
             VStack(alignment: .leading, spacing: 8) {
-                if model.showStats { StatsPanel(model: model) }
+                if model.showStats { StatsPanel(model: model).padding(.top, 40) }   // below the control pill
                 Spacer()
                 banners
             }
@@ -97,6 +97,7 @@ struct DesktopView: UIViewRepresentable {
     func makeUIView(context: Context) -> DesktopUIView {
         let v = DesktopUIView(frame: .zero)
         v.model = model
+        v.onKeyboardRequest = { on in keyboard = on }
         v.attach(session)
         return v
     }

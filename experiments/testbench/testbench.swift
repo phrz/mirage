@@ -313,6 +313,12 @@ final class App: NSObject, NSApplicationDelegate {
         if !isStatic { Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in self?.updateCaption() } }
         if isStatic { w.level = .floating; w.makeFirstResponder(nil); tv.isSelectable = false; tv.isEditable = false } else { w.makeFirstResponder(tv) }
         tv.setSelectedRange(NSRange(location: text.utf16.count, length: 0))
+        // `--caret-visible`: the caret at the end of line 12, in view (typeahead demos against an input-sink host, where no
+        // click can move it).
+        if CommandLine.arguments.contains("--caret-visible") {
+            let lines = text.components(separatedBy: "\n").prefix(12)
+            tv.setSelectedRange(NSRange(location: lines.joined(separator: "\n").utf16.count - 1, length: 0))
+        }
         tv.scrollRangeToVisible(NSRange(location: 0, length: 0))
         window = w
         NSApp.activate(ignoringOtherApps: true)
