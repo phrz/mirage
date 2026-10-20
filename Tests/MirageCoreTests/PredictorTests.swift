@@ -8,9 +8,10 @@ final class PredictorTests: XCTestCase {
         var p = Predictor()
         p.predict(kind: .scroll, windowID: 7, rect: rect, dx: 0, dy: -40, inputSeq: 10, now: 1)
         p.predict(kind: .scroll, windowID: 7, rect: rect, dx: 0, dy: -30, inputSeq: 11, now: 2)
-        XCTAssertEqual(p.displacements(), [.init(kind: .scroll, windowID: 7, rect: rect, dx: 0, dy: -70)])
+        // Shown with the rubber band (51ba1fa): the remainder, resisted beyond small leads (a third of the 600-px view).
+        XCTAssertEqual(p.displacements(), [.init(kind: .scroll, windowID: 7, rect: rect, dx: 0, dy: Predictor.rubberBand(-70, limit: 200))])
         p.hostCopyRect(windowID: 7, rect: rect, dx: 0, dy: -40, now: 3)
-        XCTAssertEqual(p.displacements().first?.dy, -30)
+        XCTAssertEqual(p.displacements().first?.dy, Predictor.rubberBand(-30, limit: 200))
         p.hostCopyRect(windowID: 7, rect: rect, dx: 0, dy: -30, now: 4)
         XCTAssertTrue(p.displacements().isEmpty)
         XCTAssertEqual(p.stats.confirmed, 2); XCTAssertEqual(p.stats.mismatched, 0)
