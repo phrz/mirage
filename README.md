@@ -165,6 +165,11 @@ while the host is unreachable are queued (the overlay counts them); after 10 s t
 loss, 2 s bursts, input integrity, keepalive) against a local host in input-sink mode
 (`MIRAGE_INPUT_SINK=/path`: the host writes what it would inject to a file and injects nothing);
 `MIRAGE_TEST_LOSS=0.05 MIRAGE_TEST_BURST_MS=2000` inject loss in either process's datagram path.
+For screenshots of a client against your own Mac, `MIRAGE_TEST_ONLY_APP=com.paulherz.mirage.testbench` puts only the
+test bench's windows in the display picture (the rest is black, whatever else is on screen, the lock screen included)
+and `MIRAGE_LAYER_APPS="measurement window started by Claude"` keeps every other window from becoming a layer. The iOS
+app's `-demo 1` launch argument (`xcrun simctl launch … -connect 127.0.0.1:PORT -demo 1`) then drives its gestures on a
+timeline, writing `demo: shot NAME` marks to `tmp/demo.log` in its container when it holds still for a screenshot.
 
 `--headless --duration 60 --stats out.json` connects and decodes without a window and writes
 per-second samples plus medians, for measuring a link over SSH. `--scenario typing:30` (or

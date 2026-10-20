@@ -87,7 +87,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         self.onFrame = onFrame
         self.target = t
         excluded = excluding
-        let filter = SCContentFilter(display: t.display, excludingWindows: excluding)
+        let filter = try await Self.displayFilter(t.display, excluding: excluding)
         let s = SCStream(filter: filter, configuration: Self.configuration(for: t, maxFPS: req.maxFPS), delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await s.startCapture()
@@ -119,7 +119,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 let ids = want.map(\.windowID).sorted()
                 if Self.testNoExclude { log("TEST: display exclusion disabled (MIRAGE_TEST_NO_EXCLUDE); would exclude \(ids)"); self.excluded = []; applied?([]); continue }
                 do {
-                    try await stream.updateContentFilter(SCContentFilter(display: t.display, excludingWindows: want))
+                    try await stream.updateContentFilter(Self.displayFilter(t.display, excluding: want))
                     self.excluded = want
                     log("display filter applied: excluding windows \(ids)")
                     applied?(ids)
@@ -131,12 +131,26 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private var wantedExcluded: [SCWindow]? = nil
     private var applying = false
     static let testNoExclude = ProcessInfo.processInfo.environment["MIRAGE_TEST_NO_EXCLUDE"] != nil
+    /// Test only: MIRAGE_TEST_ONLY_APP=<bundle ID> puts that app's windows alone in the display picture (everything else
+    /// on the display is left out, black), for screenshots of a client against a person's own Mac. Pair it with
+    /// MIRAGE_LAYER_APPS naming the same app so no other window becomes a layer. Fails closed: no such app, no capture.
+    static let testOnlyApp = ProcessInfo.processInfo.environment["MIRAGE_TEST_ONLY_APP"]
+
+    /// The display picture's filter: the display minus `excluding` (window layers), or under MIRAGE_TEST_ONLY_APP that app only.
+    static func displayFilter(_ display: SCDisplay, excluding: [SCWindow]) async throws -> SCContentFilter {
+        guard let id = testOnlyApp else { return SCContentFilter(display: display, excludingWindows: excluding) }
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+        guard let app = content.applications.first(where: { $0.bundleIdentifier == id }) else {
+            throw MirageError.transport("MIRAGE_TEST_ONLY_APP: \(id) is not running; capturing nothing")
+        }
+        return SCContentFilter(display: display, including: [app], exceptingWindows: excluding)
+    }
 
     func update(_ req: ControlMessage.StreamRequest) async throws -> Target {
         guard let stream, let old = target else { throw MirageError.transport("not capturing") }
         var t = try await Self.resolve(req)
         if t.display.displayID != old.display.displayID {
-            try await stream.updateContentFilter(SCContentFilter(display: t.display, excludingWindows: excluded))
+            try await stream.updateContentFilter(Self.displayFilter(t.display, excluding: excluded))
         } else {
             t = Target(display: old.display, info: t.info, pixelWidth: t.pixelWidth, pixelHeight: t.pixelHeight)
         }
