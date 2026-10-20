@@ -9,8 +9,10 @@ if [ -z "${DEVELOPER_DIR:-}" ] && [ -d /Applications/Xcode-27.1.0-Beta.app ]; th
     export DEVELOPER_DIR=/Applications/Xcode-27.1.0-Beta.app/Contents/Developer
 fi
 APP=.build/MirageViewer.app
+# No -allowProvisioningUpdates: a macOS build with automatic signing needs no provisioning profile, and the flag made
+# xcodebuild wait for the Apple account (it hung while this Mac was locked). testflight.sh keeps it for iOS.
 xcodebuild -project App/Mirage.xcodeproj -scheme Mirage -configuration Release -destination 'platform=macOS' \
-    -derivedDataPath .build/xcode -allowProvisioningUpdates -quiet build
+    -derivedDataPath .build/xcode -quiet build
 rm -rf "$APP"
 ditto ".build/xcode/Build/Products/Release/Mirage Viewer.app" "$APP"
 echo "$APP"
