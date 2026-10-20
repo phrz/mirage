@@ -1016,7 +1016,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             tracker.holdUntilIdle(dirty, now: now)
             layer.backdropDirty = true; layer.backdropHeldNanos = now
             statBackdropTiles += dirty.count
-            layer.account.dirtyTiles += dirty.count
             layer.tracker = tracker; layer.lastFrame = pb
             refine(now: now)
             return
@@ -1807,8 +1806,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         refillTiles(now: now)
         sendDueDirect(now: now)
         sendBackdropLevels(now: now)
-        // Refinement starts nothing while held-back changed pixels are due (they go first, within ~300 ms).
-        if layers.values.contains(where: { $0.tracker.oldestDueDirect(now: now) != nil && !$0.occludedTiles.isSuperset(of: $0.tracker.dueDirect(now: now, limit: 64)) }) { return }
+        // (No gate on due direct tiles here: they borrow past the budget after 150 ms, and the debt holds refinement back by
+        // itself. Blocking refinement while any were due starved it through a whole Dock hover: a scrolled Finder window's
+        // stale bottom rows stayed ~10 s on mac-daddy.)
         // Priority 4: refinement runs on leftover budget only. It yields for 150 ms after any changed
         // pixels went out, keeps 30 % of the tile budget in reserve for them, and never has more than
         // ~300 ms of the link in flight (so it cannot build the queue the next keystroke would wait in).
