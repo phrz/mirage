@@ -266,6 +266,35 @@ public struct ShiftDetector {
         return (changed, explained)
     }
 
+    /// Diagnostics for a destination tile that failed verification: the share of its pixels that differ from the shifted source,
+    /// their mean and largest channel difference, and the same share for the shift ±1 px along the axis (a fractional scroll
+    /// offset re-rasterises everything a little: small differences everywhere, and a neighbouring shift no better).
+    public static func diffStats(old: Frame, new: Frame, tile t: PixelRect, dx: Int, dy: Int) -> (fraction: Double, mean: Double, max: Int, fractionMinus: Double, fractionPlus: Double) {
+        func stats(_ ox: Int, _ oy: Int) -> (Double, Double, Int) {
+            var n = 0, d = 0, sum = 0, mx = 0
+            for y in t.y..<t.maxY {
+                let sy = y - oy
+                guard sy >= 0, sy < old.height else { continue }
+                let a = new.base.advanced(by: y * new.stride).assumingMemoryBound(to: UInt8.self)
+                let b = old.base.advanced(by: sy * old.stride).assumingMemoryBound(to: UInt8.self)
+                for x in t.x..<t.maxX {
+                    let sx = x - ox
+                    guard sx >= 0, sx < old.width else { continue }
+                    n += 1
+                    var m = 0
+                    for c in 0..<3 { m = Swift.max(m, abs(Int(a[x * 4 + c]) - Int(b[sx * 4 + c]))) }
+                    if m > 0 { d += 1; sum += m; mx = Swift.max(mx, m) }
+                }
+            }
+            return (n == 0 ? 0 : Double(d) / Double(n), d == 0 ? 0 : Double(sum) / Double(d), mx)
+        }
+        let (f, mean, mx) = stats(dx, dy)
+        let vertical = dx == 0
+        let (fm, _, _) = stats(vertical ? dx : dx - 1, vertical ? dy - 1 : dy)
+        let (fp, _, _) = stats(vertical ? dx : dx + 1, vertical ? dy + 1 : dy)
+        return (f, mean, mx, fm, fp)
+    }
+
     /// Whether a tile must verify byte-exact: anything but photographic content (more than 1024 colours in a 64-px tile;
     /// anti-aliased text and UI stay far below).
     private func exactRequired(_ f: Frame, _ t: PixelRect) -> Bool {

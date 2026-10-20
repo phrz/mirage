@@ -118,6 +118,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     // Hybrid codec state shared across layers.
     private var detector = ShiftDetector()
+    /// Scroll diagnostics (why captures fail to verify byte-exact): the detector's candidate lines for the current capture, and
+    /// how many scroll captures may still be logged in this 30 s period.
+    private var shiftDiag: [String] = []
+    private var scrollDiagBudget = 40
     private var rc: RateController?
     private var captureSeq: UInt32 = 0
     private var lastInputSeq: UInt64 = 0
@@ -200,6 +204,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         statWindowAudited = 0; statWindowAuditRefreshed = 0
         if statAudited > 0 { log("picture audit, last 30 s: \(statAudited) desktop tiles fingerprinted, \(statAuditRefreshed) asked for again by the viewer; \(statDirectDue) held-back changed tiles sent when due (longest wait \(statDirectWaitMaxNanos / 1_000_000) ms), \(statCopyCorrections) of them copy-rect corrections; \(statStripLossy) exposed-strip tiles sent lossy with their copy-rect") }
         if statBackdropLevels > 0 { log("moved-window backdrops, last 30 s: \(statBackdropTiles) tiles held, \(statBackdropLevels) lossy levels \(statBackdropBytes / 1000) KB, \(statBackdropReleased) tiles released to lossless refinement when idle") }
+        scrollDiagBudget = 40
         statDirectDue = 0; statDirectWaitMaxNanos = 0; statCopyCorrections = 0; statStripLossy = 0; statBackdropTiles = 0; statBackdropLevels = 0; statBackdropBytes = 0; statBackdropReleased = 0
         statAudited = 0; statAuditRefreshed = 0
         for l in layers.values { l.account = Layer.Account() }
@@ -1132,7 +1137,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 }
                 var region = (known ?? (layer.isDisplay ? win?.frame : nil) ?? bb).intersection(bb)
                 if region.width < 64 || region.height < 64 { region = bb }
-                if region.height >= 96 || region.width >= 96, let r0 = detector.detect(old: old, new: new, rect: region, hint: scrollHere.map { ($0.dxPx, $0.dyPx) }), let r = ShiftDetector.trimmed(r0) {
+                let diag = scrollHere != nil && scrollDiagBudget > 0
+                if diag { shiftDiag = []; detector.debug = { [weak self] in self?.shiftDiag.append($0) } }
+                let detected = region.height >= 96 || region.width >= 96 ? detector.detect(old: old, new: new, rect: region, hint: scrollHere.map { ($0.dxPx, $0.dyPx) }) : nil
+                if diag {
+                    detector.debug = nil; scrollDiagBudget -= 1
+                    logScrollDiag(layer: layer, region: region, hint: scrollHere.map { ($0.dxPx, $0.dyPx) }, result: detected, old: old, new: new, unexplained: unexplained.count)
+                }
+                if let r0 = detected, let r = ShiftDetector.trimmed(r0) {
                     trimmedEdges.formUnion(Set(tracker.tiles(covering: [r0.rect.offset(r0.dx, r0.dy)])).subtracting(tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])))
                     copyRegion.formUnion(tracker.tiles(covering: [r.rect.union(r.rect.offset(r.dx, r.dy))]))
                     let dest = tracker.tiles(covering: [r.rect.offset(r.dx, r.dy)])
@@ -1965,6 +1977,31 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let windowLayers = ordered.filter { !$0.isDisplay }
         if refineStep(windowLayers, now: now) { return }
         if let d = display { _ = refineStep([d], now: now) }
+    }
+
+    /// One scroll capture's diagnostics: wheel delta, the detector's candidates (shift, verified fraction), and where and how the
+    /// mismatched tiles differ (top/bottom row, right column, interior; share of differing pixels, mean/max difference, and the
+    /// same share at the shift ±1 px).
+    private func logScrollDiag(layer: Layer, region: PixelRect, hint: (Int, Int)?, result: ShiftDetector.Result?, old: ShiftDetector.Frame, new: ShiftDetector.Frame, unexplained: Int) {
+        var line = "scroll diag layer \(layer.id) region \(region.x),\(region.y) \(region.width)x\(region.height) wheel \(hint.map { "\($0.0),\($0.1)" } ?? "-") px, \(unexplained) changed tiles; "
+        line += shiftDiag.filter { $0.contains("verify") }.map { $0.replacingOccurrences(of: "shift ", with: "") }.joined(separator: "; ")
+        if let r = result {
+            let dst = r.rect.offset(r.dx, r.dy)
+            var top = 0, bottom = 0, right = 0, inner = 0
+            var fr: [Double] = [], means: [Double] = [], maxes: [Int] = [], better = 0
+            for t in r.mismatchedTiles {
+                if t.y <= dst.y + 1 { top += 1 } else if t.maxY >= dst.maxY - 1 { bottom += 1 } else if t.maxX >= dst.maxX - 1 { right += 1 } else { inner += 1 }
+                if fr.count < 24 {
+                    let st = ShiftDetector.diffStats(old: old, new: new, tile: t, dx: r.dx, dy: r.dy)
+                    fr.append(st.fraction); means.append(st.mean); maxes.append(st.max)
+                    if min(st.fractionMinus, st.fractionPlus) < st.fraction { better += 1 }
+                }
+            }
+            func med(_ a: [Double]) -> Double { a.isEmpty ? 0 : a.sorted()[a.count / 2] }
+            line += String(format: " | chosen (%d,%d) conf %.2f, %d mismatched: top %d bottom %d right %d inner %d; differing px median %.0f%%, mean diff median %.0f, max diff max %d; ±1 px better for %d of %d",
+                           r.dx, r.dy, r.confidence, r.mismatchedTiles.count, top, bottom, right, inner, med(fr) * 100, med(means), maxes.max() ?? 0, better, fr.count)
+        } else { line += " | no copy-rect" }
+        log(line)
     }
 
     /// The q75 underlay of areas a move uncovered, refined to the normal quality: after everything else, from its
