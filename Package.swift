@@ -57,6 +57,9 @@ let package = Package(
         .executableTarget(
             name: "mirage-viewer",
             dependencies: ["MirageCore"],
+            // Session/ (platform-neutral) + macOS/ (AppKit shell). iOS/ is the UIKit shell, built only by the universal
+            // app (App/Mirage.xcodeproj), which compiles Session/ with it.
+            exclude: ["iOS"],
             swiftSettings: [.swiftLanguageMode(.v5)],
             linkerSettings: [.linkedFramework("AppKit"), .linkedFramework("SwiftUI"), .linkedFramework("AVFoundation"), .linkedFramework("VideoToolbox")]
         ),

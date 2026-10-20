@@ -1,5 +1,9 @@
 import Foundation
+#if os(macOS)
 import AppKit
+#else
+import UIKit
+#endif
 import CoreVideo
 import Network
 import MirageCore
@@ -46,7 +50,7 @@ final class ViewerModel: ObservableObject {
         var layers = 0, layerMB = 0
     }
     struct CursorImage {
-        let image: NSImage
+        let image: PlatformImage
         let hotspot: CGPoint
         let size: CGSize
     }
@@ -172,14 +176,17 @@ final class ViewerSession: @unchecked Sendable {
     static let debugPresent = ProcessInfo.processInfo.environment["MIRAGE_DEBUG_PRESENT"] != nil
     func resetWatched() { videoQueue.async { self.watchedTileBytes = 0; self.watchedTileCount = 0; self.watchedDirectBytes = 0; self.watchedVideoFrames = 0; self.watchedCopyRects = 0 } }
     func windowsSnapshot() -> [ControlMessage.WindowInfo] { predictorLock.lock(); defer { predictorLock.unlock() }; return windows }
+    #if os(macOS)
     var scenario: ScenarioRunner?
     /// Unified mode's controller while it is on (scenarios drive its windows).
     @MainActor weak var unified: UnifiedController?
+    #endif
 
     init(host: String, port: UInt16, pairCode: String?, model: ViewerModel) {
         self.host = host; self.port = port; self.pairCode = pairCode; self.model = model
         MainActor.assumeIsolated { model.hostName = host }
         if let context { layerViews[0] = LayerView(id: 0, context: context) }
+        resumeToken = ViewerCredentials.savedResumeToken(host: host, port: port)
     }
 
     /// The host is this Mac (loopback tests).
@@ -249,7 +256,7 @@ final class ViewerSession: @unchecked Sendable {
         backoffWait?.cancel()
     }
     private func watchWakeAndPath() {
-        wakeObservers.append(NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: nil) { [weak self] _ in self?.nudge("woke from sleep") })
+        wakeObservers.append(PlatformEvents.observeWake { [weak self] why in self?.nudge(why) })
         let m = NWPathMonitor()
         var lastPath: String?
         m.pathUpdateHandler = { [weak self] p in
@@ -304,7 +311,7 @@ final class ViewerSession: @unchecked Sendable {
         defer { client.close(); disconnectedAt = Date(); statsLock.lock(); hostStatus = nil; statsLock.unlock() }   // review M5: no leaked groups
         do {
             let store = try Store()
-            let identity = try store.identity(role: "client", name: DeviceNames.current())
+            let identity = try ViewerCredentials.clientIdentity(store: store)
             try await client.connect(timeout: resumable ? 4 : 15)
             guard let fp = client.tlsFingerprint else { throw MirageError.transport("no TLS fingerprint") }
             let control = try await client.openStream()
@@ -318,7 +325,7 @@ final class ViewerSession: @unchecked Sendable {
             let welcome = try await session.authenticate(resumeToken: resumeToken)
             let resumed = welcome.resumed == true
             if resumeToken != nil { if resumed { resumes += 1 } else { reconnects += 1 } }
-            if let t = welcome.resumeToken { resumeToken = t }
+            if let t = welcome.resumeToken { resumeToken = t; ViewerCredentials.saveResumeToken(t, host: host, port: port) }
             if resumeToken != nil, !resumed {
                 // The host did not know us (restarted, or the window passed): a fresh stream follows. The
                 // picture stays until its first keyframe replaces it; predictions from the old session are void.
@@ -477,7 +484,7 @@ final class ViewerSession: @unchecked Sendable {
                 if info.displayWidth > 0 { hostPxPerPoint = Double(info.width) / Double(info.displayWidth) }
                 Task { @MainActor in model.streamInfo = info; model.status = "streaming \(info.width)x\(info.height) from \(host)" }
             case .cursorShape(let c):
-                if let img = NSImage(data: c.png) {
+                if let img = PlatformImage(data: c.png) {
                     Task { @MainActor in model.cursor = .init(image: img, hotspot: CGPoint(x: c.hotspotX, y: c.hotspotY), size: CGSize(width: c.width, height: c.height)) }
                 }
             case .cursorPosition(let p):
@@ -1167,7 +1174,7 @@ final class ViewerSession: @unchecked Sendable {
         }
     }
     /// A key the viewer just sent (`seq`): predicted, taken back (backspace), or the predictions invalidated.
-    func typeaheadKey(keyCode: UInt16, characters: String?, modifiers: NSEvent.ModifierFlags, seq: UInt64) {
+    func typeaheadKey(keyCode: UInt16, characters: String?, modifiers: KeyModifiers, seq: UInt64) {
         guard typeaheadEnabled, seq != 0 else { return }
         let now = Clock.nowNanos()
         predictorLock.lock(); defer { predictorLock.unlock() }
@@ -1190,7 +1197,7 @@ final class ViewerSession: @unchecked Sendable {
     private func advancePx(_ ch: String, caret: ControlMessage.CaretInfo?) -> Double? {
         guard let c = caret else { return nil }
         let size = c.size ?? 13
-        let font = c.font.flatMap { NSFont(name: $0, size: size) } ?? NSFont.systemFont(ofSize: size)
+        let font = c.font.flatMap { PlatformFont(name: $0, size: size) } ?? PlatformFont.systemFont(ofSize: size)
         let w = (c.secure ? "•" : ch as NSString).size(withAttributes: [.font: font]).width
         return max(0.5, Double(w) * hostPxPerPoint)
     }
@@ -1576,7 +1583,7 @@ final class ViewerSession: @unchecked Sendable {
     }
 }
 
-
+#if os(macOS)   // --stats is for the command-line runs (headless, scenarios)
 extension ViewerSession {
     /// Aggregates for --stats: medians over the steady state (first 3 s dropped), plus totals.
     func statsJSON() -> Data {
@@ -1681,3 +1688,4 @@ extension ViewerSession {
         return (try? enc.encode(out)) ?? Data()
     }
 }
+#endif
