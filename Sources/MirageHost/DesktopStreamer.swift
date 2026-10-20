@@ -1084,6 +1084,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // strip). They go with the copy-rect, whatever the rate limit or budget: held back, the next copy-rect copied the
         // not-yet-updated rows on and the viewer showed them smeared (one label row repeated 7 times in a Finder scroll).
         var copyRegion = Set<Int>()
+        // Everything this capture's copy-rects leave wrong on the viewer (destinations that failed verification, copies of wrong
+        // pixels): it goes with them, lossy, whatever the budget (waiting for budget showed gaps and repeated rows for up to 1 s).
+        var copyWrong = Set<Int>()
         var copies: [(tiles: [Int], dx: Int, dy: Int)] = []
         let dirtyBeforeCopies = dirty.count
         var copyRectsThisCapture = 0
@@ -1144,6 +1147,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                         else { windows.learn(scrollRect: learnedRect.offset(layer.frame.x, layer.frame.y), for: layer.id) }
                     }
                     statCopyRects += 1; copyRectsThisCapture += 1
+                } else if scrollHere != nil {
+                    // A wheel scroll no copy-rect verified (byte-exact) for: its changes in the scroll region go lossy like an
+                    // exposed strip, not lossless tile by tile.
+                    copyRegion.formUnion(tracker.tiles(covering: [region]))
                 }
             }
         }
@@ -1157,7 +1164,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if !explained.isEmpty {
             dirty.removeAll { explained.contains($0) }
             for c in copies { tracker.markCopied(c.tiles, dx: c.dx, dy: c.dy, now: now) }
-            for c in copies { for i in c.tiles where tracker.isDirectPending(i) { layer.correctionTiles.insert(i) } }   // copied from wrong pixels
+            for c in copies { for i in c.tiles where tracker.isDirectPending(i) { copyWrong.insert(i) } }   // copied from pixels the viewer holds wrong
             // Copy-rect gate: a copy-rect explained at least half of this frame's change; for 300 ms nothing here is motion.
             if (explained.count + edgesDeferred) * 2 >= dirtyBeforeCopies { layer.copyGateNanos = now }   // deferred edges are handled too
         }
@@ -1185,15 +1192,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             withCopy = plan.lossless.filter { copyRegion.contains($0) }
         }
         if !wrongAfterCopy.isEmpty {
-            // Wrong pixels never wait for video or refinement: due now as direct changes (sendDueDirect, borrowing after 150 ms).
+            // Wrong pixels never wait for video, refinement or budget.
             let wrong = wrongAfterCopy.subtracting(layer.occludedTiles)
-            plan.lossless.removeAll { wrong.contains($0) }
-            let videoBefore = plan.video.count
-            plan.video.removeAll { wrong.contains($0) }
-            if plan.video.count != videoBefore { if plan.video.isEmpty { plan.videoRegion = .zero; plan.wholeFrame = false } else if !plan.wholeFrame { plan.videoRegion = tracker.boundingRect(plan.video) } }
-            tracker.markDirect(Array(wrong), now: now)
-            layer.correctionTiles.formUnion(wrong)
+            copyWrong.formUnion(wrong)
             statCopyCorrections += wrong.count
+        }
+        if !copyWrong.isEmpty {
+            // Out of video and the lossless plan: they go with the exposed strip below.
+            let w = copyWrong.subtracting(layer.occludedTiles)
+            plan.lossless.removeAll { w.contains($0) }
+            let videoBefore = plan.video.count
+            plan.video.removeAll { w.contains($0) }
+            if plan.video.count != videoBefore { if plan.video.isEmpty { plan.videoRegion = .zero; plan.wholeFrame = false } else if !plan.wholeFrame { plan.videoRegion = tracker.boundingRect(plan.video) } }
+            withCopy.append(contentsOf: w.filter { !withCopy.contains($0) })
         }
         // Motion bookkeeping for the refinement freeze: classified video, copy-rects, or the input stream.
         if !plan.video.isEmpty || copyRectsThisCapture > 0 { lastMotionNanos = now }
@@ -1230,21 +1241,22 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             plan.video = []; plan.videoRegion = .zero; plan.wholeFrame = false
         }
         refillTiles(now: now)
+        if !withCopy.isEmpty {
+            // The exposed strip and what the copy-rects left wrong: lossy now, on the stream right behind its copy-rect, refined
+            // lossless once it settles.
+            let w = Set(withCopy)
+            plan.lossless.removeAll { w.contains($0) }
+            if layer.isDisplay { displaySent(withCopy) }
+            tileTokens -= Double(submitLossless(layer: layer, tiles: withCopy, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: 60))
+            tracker.markVideo(withCopy, now: now)
+            statStripLossy += withCopy.count
+        }
         if !plan.lossless.isEmpty {
             // Priority 1: changed pixels near the input locus (pointer or caret) always go, now, on the
             // interactive stream, whatever the budget; they are small and they are what the person is
             // looking at. Priority 2: other changed pixels, budget permitting. Refinement yields to real
             // change (three tiles or more), not to a caret blink or a menu-bar clock.
             if plan.lossless.count >= 3 { lastDirectNanos = now }
-            if !withCopy.isEmpty {
-                // The exposed strip: lossy now, on the stream right behind its copy-rect, refined lossless once it settles.
-                let w = Set(withCopy)
-                plan.lossless.removeAll { w.contains($0) }
-                if layer.isDisplay { displaySent(withCopy) }
-                tileTokens -= Double(submitLossless(layer: layer, tiles: withCopy, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: 60))
-                tracker.markVideo(withCopy, now: now)
-                statStripLossy += withCopy.count
-            }
             let (near, far) = splitByLocus(plan.lossless, layer: layer, tracker: tracker)
             if !near.isEmpty {
                 if layer.isDisplay { displaySent(near) }

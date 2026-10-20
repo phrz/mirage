@@ -493,7 +493,9 @@ final class ScenarioRunner {
         t.setEventHandler { [weak self] in
             guard let self, let ctx = self.session.context, let sc = self.session.scene(pxPerPoint: 2), let bg = sc.background else { return }
             n += 1
-            for (name, r) in self.shotRects {
+            for (name, r0) in self.shotRects {
+                // The Finder crop is the window's own frame at this moment (moving or not): never a neighbouring window.
+                let r = name == "finder" ? (self.scratchWindow()?.frame ?? r0) : r0
                 let crop = r.intersection(PixelRect(x: 0, y: 0, width: bg.width, height: bg.height))
                 guard crop.area > 0 else { continue }
                 UnifiedShots.write(scene: sc, crop: crop, context: ctx, to: dir.appendingPathComponent(String(format: "%@-%04d.png", name, n)))
