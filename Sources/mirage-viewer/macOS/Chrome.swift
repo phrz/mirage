@@ -35,7 +35,7 @@ final class NativeChromeController: NSObject, NSMenuDelegate {
     private(set) var menuLatencies: [Double] = []
     private(set) var menuPresses = 0
     private static let iconDir: URL = {
-        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!.appendingPathComponent("com.paulherz.mirage.viewer/icons", isDirectory: true)
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!.appendingPathComponent("com.paulherz.mirage/icons", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base
     }()

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Archives the universal app's iOS slice (App/Mirage.xcodeproj, bundle ID com.paulherz.mirage.viewer) and uploads it to
+# Archives the universal app's iOS slice (App/Mirage.xcodeproj, bundle ID com.paulherz.mirage) and uploads it to
 # App Store Connect for TestFlight, signing automatically with the Apple ID Xcode is signed in to (team M8MME6Q9DA).
 # iOS only: the Mac viewer is the same target's macOS slice, built and deployed locally by make-viewer-app.sh.
 # The build number is the UTC time (BUILD=… overrides); the version is MARKETING_VERSION in App/project.yml.

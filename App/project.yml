@@ -40,7 +40,7 @@ targets:
         PRODUCT_NAME: $(MIRAGE_DISPLAY_NAME)
         EXECUTABLE_NAME: mirage-viewer   # what scripts and the README run: MirageViewer.app/Contents/MacOS/mirage-viewer
         PRODUCT_MODULE_NAME: MirageViewer
-        PRODUCT_BUNDLE_IDENTIFIER: com.paulherz.mirage.viewer
+        PRODUCT_BUNDLE_IDENTIFIER: com.paulherz.mirage
         MARKETING_VERSION: "0.1"
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: YES

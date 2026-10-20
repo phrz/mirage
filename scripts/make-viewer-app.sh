@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds the Mac viewer app: the macOS slice of the universal app target (App/Mirage.xcodeproj, the same target
-# TestFlight ships for iOS), bundle ID com.paulherz.mirage.viewer, signed with this Mac's Apple Development
+# TestFlight ships for iOS), bundle ID com.paulherz.mirage, signed with this Mac's Apple Development
 # certificate (stable TCC identity). Incremental; no App Store involvement. Output: .build/MirageViewer.app
 # (deploy: copy it to ~/Applications). The command-line viewer for scripts stays `swift build -c release`.
 set -e

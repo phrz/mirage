@@ -3,7 +3,7 @@ import Security
 
 /// Small generic-password store for the viewer's secrets (identity seed, resume tokens), this device only.
 enum Keychain {
-    static let service = "com.paulherz.mirage.viewer"
+    static let service = "com.paulherz.mirage"
 
     private static func query(_ account: String) -> [CFString: Any] {
         [kSecClass: kSecClassGenericPassword, kSecAttrService: service, kSecAttrAccount: account, kSecUseDataProtectionKeychain: true]

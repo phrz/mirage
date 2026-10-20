@@ -64,7 +64,7 @@ Products: `miraged` (host daemon + admin CLI), `mirage` (client CLI), `mirage-vi
 (macOS viewer), `MirageCore` (shared, iOS-compilable), `MirageHost` (macOS capture/encode/input).
 
 `scripts/make-viewer-app.sh` builds `.build/MirageViewer.app`, the macOS slice of the universal app
-(`App/Mirage.xcodeproj`, one target and bundle ID for macOS and iOS; `scripts/testflight.sh` ships the iOS
+(`App/Mirage.xcodeproj`, one target and one bundle ID, `com.paulherz.mirage`, for macOS and iOS; `scripts/testflight.sh` ships the iOS
 slice to TestFlight); `scripts/deploy-host.sh HOST` signs `miraged` with your Apple Development
 identity (so the TCC grants below survive rebuilds), copies it over and restarts the LaunchAgent.
 

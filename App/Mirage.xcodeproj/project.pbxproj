@@ -277,7 +277,7 @@
 				MARKETING_VERSION = 0.1;
 				MIRAGE_DISPLAY_NAME = Mirage;
 				"MIRAGE_DISPLAY_NAME[sdk=macosx*]" = "Mirage Viewer";
-				PRODUCT_BUNDLE_IDENTIFIER = com.paulherz.mirage.viewer;
+				PRODUCT_BUNDLE_IDENTIFIER = com.paulherz.mirage;
 				PRODUCT_MODULE_NAME = MirageViewer;
 				PRODUCT_NAME = "$(MIRAGE_DISPLAY_NAME)";
 				SDKROOT = auto;
@@ -440,7 +440,7 @@
 				MARKETING_VERSION = 0.1;
 				MIRAGE_DISPLAY_NAME = Mirage;
 				"MIRAGE_DISPLAY_NAME[sdk=macosx*]" = "Mirage Viewer";
-				PRODUCT_BUNDLE_IDENTIFIER = com.paulherz.mirage.viewer;
+				PRODUCT_BUNDLE_IDENTIFIER = com.paulherz.mirage;
 				PRODUCT_MODULE_NAME = MirageViewer;
 				PRODUCT_NAME = "$(MIRAGE_DISPLAY_NAME)";
 				SDKROOT = auto;
