@@ -1144,10 +1144,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if !trimmedEdges.isEmpty {
             let edges = trimmedEdges.subtracting(explained).intersection(dirty)
             edgesDeferred = edges.count
-            if !edges.isEmpty {
-                dirty.removeAll { edges.contains($0) }
-                tracker.defer(Array(edges), now: now, delayNanos: 300_000_000, direct: true)
-            }
+            // They go with the exposed strip (lossy, half size): deferred, a trimmed bottom row lagged behind a scroll and smeared.
+            copyRegion.formUnion(edges)
         }
         if !explained.isEmpty {
             dirty.removeAll { explained.contains($0) }
@@ -1234,7 +1232,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let w = Set(withCopy)
                 plan.lossless.removeAll { w.contains($0) }
                 if layer.isDisplay { displaySent(withCopy) }
-                tileTokens -= Double(submitLossless(layer: layer, tiles: withCopy, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: 70))
+                tileTokens -= Double(submitLossless(layer: layer, tiles: withCopy, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: 60))
                 tracker.markVideo(withCopy, now: now)
                 statStripLossy += withCopy.count
             }
@@ -1762,7 +1760,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let encoded: (TileCodec.Format, Data)? = d.withUnsafeBytes { p -> (TileCodec.Format, Data)? in
                     let base = p.baseAddress!
                     if !alpha, let solid = TileCodec.solidColour(base: base, width: r.width, height: r.height, stride: r.width * 4) { return (.solid, solid) }
-                    if let q = lossy, let data = TileCodec.encodeLossy(base: base, width: r.width, height: r.height, stride: r.width * 4, outWidth: r.width, outHeight: r.height, quality: q, alpha: alpha) { return (.lossy, data) }
+                    // At half size (the viewer draws a lossy rect scaled onto it): soft for a moment, refined lossless once it settles.
+                    if let q = lossy, let data = TileCodec.encodeLossy(base: base, width: r.width, height: r.height, stride: r.width * 4, outWidth: max(16, r.width / 2), outHeight: max(16, r.height / 2), quality: q, alpha: alpha) { return (.lossy, data) }
                     let photographic = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4, limit: 4096) > 4096
                     // Review #22: on constrained links a photographic rect (a wallpaper, a photo) ends at visually
                     // lossless (lossy WebP q90 at full size, ~4x under near-lossless on a 2x desktop picture), not at
@@ -1827,8 +1826,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
         }
         let (jobs, estimate) = copyOut(rects, from: f)
-        encodeAndSend(jobs, estimate: lossy == nil ? estimate : estimate / 4, layer: layer, refinement: refinement, block: false, nanos: nanos, photoQuality: photoQuality, staged: staged, lossy: lossy)
-        return lossy == nil ? estimate : estimate / 4
+        encodeAndSend(jobs, estimate: lossy == nil ? estimate : estimate / 12, layer: layer, refinement: refinement, block: false, nanos: nanos, photoQuality: photoQuality, staged: staged, lossy: lossy)
+        return lossy == nil ? estimate : estimate / 12
     }
 
     /// Encodes arbitrary rects (large lossless blocks) on the tile queue, one block in flight. Returns the byte estimate charged.

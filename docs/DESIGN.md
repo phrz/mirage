@@ -590,13 +590,13 @@ refinement budget. What the host counts as delivered must be what the viewer sho
 2. **A copy-rect only claims what it got right.** Destination tiles that fail verification are direct changes due now
    (9755f02), also where the host saw no change; a destination copied from a tile the viewer holds wrong (a pending direct
    change) is wrong too (6f9cddb); leading/trailing rows and columns that mostly fail are left out of the copy-rect
-   (63d5545: a translucent toolbar over a scroll view) and go once, 300 ms after they last changed (a80cbe1).
+   (63d5545: a translucent toolbar over a scroll view) and go with the exposed strip, lossy at half size.
    Video rides datagrams and cannot be ordered with the stream: the viewer skips a video tile where pixels from a newer
    capture already landed, and the host sends no video for a layer while its copy-rects flow (the 300 ms copy gate); the
    tiles wait as direct changes instead (280 stale video tiles per Finder scroll on mac-daddy before this).
    A copy-rect's new content (changed tiles inside its region that it does not explain: the exposed strip) goes with it,
    whatever the per-tile rate limit or the budget: held back, the next copy-rect copied the not-yet-updated rows on and the
-   viewer showed them smeared. It goes as lossy WebP (q70) on the stream, right behind its copy-rect, and is refined
+   viewer showed them smeared. It goes as lossy WebP (half size, q60) on the stream, right behind its copy-rect, and is refined
    lossless once it settles: lossless it cost 3.7 Mbps for 5 s of Finder scrolling at native scale on an 800 kbps link.
 3. **A tight box only where the viewer holds the previous frame.** A tile still owing an update goes whole (2df0793).
 4. **Backstop.** The picture audit compares fingerprints of tiles the host believes delivered with the viewer's canvas,
