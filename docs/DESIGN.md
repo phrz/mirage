@@ -91,6 +91,30 @@ Viewer          SwiftUI + AppKit/UIKit, Metal presentation         (macOS, iPadO
 remotectl       CLI on host: pair, status, revoke, metrics       (macOS)
 ```
 
+### 3.0 The host is the product (standing rule, phrz 2026-10-21)
+
+The host is the product; the viewer renders and predicts within host-given bounds. In phrz's words: "it stands to reason
+most of these rendering fixes should be server not client updates". An iOS viewer update needs a cable install or
+TestFlight, and once the app ships, every viewer change is an app update for every user. A host update is one deploy.
+
+- **Fix on the host first.** A rendering bug gets a host-side fix whenever the host can produce the right result: crop,
+  order, hold back or resend what it sends, own the state through transitions (Show Desktop: the host drops the blank
+  captures ScreenCaptureKit delivers for pushed-aside windows, so every viewer, old builds included, keeps their last
+  picture). Touch the viewer only where that is impossible, and say why in the commit.
+- **The viewer is a dumb compositor.** It draws what the host describes: layer frames, the display rect it clips to, z-order,
+  cut-outs, shadows, scroll rects. It does not infer geometry of its own. Where it still does (the unknown-desktop marks,
+  the viewer guard, shadow geometry from points per pixel), the inference moves to the host as the protocol allows.
+- **Tunables, not constants.** The numbers the viewer uses for local behaviour come from the host: `ControlMessage.tunables`,
+  a versioned dictionary sent after every `streamInfo` to viewers whose stream request carries `tunablesVersion`. It covers
+  gesture thresholds (two-finger pinch/scroll, hold delay, touch slop, double-click), the zoom limit, the scroll prediction's
+  rubber-band lead, and the crossfade and level-fade timings. The viewer keeps safe compiled-in defaults, clamps every value
+  to its key's bounds and ignores keys it does not know. The host sends its defaults overridden by `tunables.json` in its
+  store directory (`{"pinchRatio": 0.2}`), read at every stream start, so a retune needs neither an app update nor a host
+  restart. New viewer behaviour that has a number in it gets a key (`Tunables.Key`), not a literal.
+- **Exceptions are written down.** The scene renderer clips every layer to the display rect in the viewer (bf7e8a8). The host
+  cannot crop a window layer to the display without re-announcing it at a new size at every crossing of a display edge (a
+  whole layer resend per frame of a Show Desktop slide), and the display rect is host-given already (the stream size).
+
 ### 3.1 Transport and security
 
 - **QUIC over the tailnet** (`NWConnection` with `NWProtocolQUIC`). Tailscale already gives
