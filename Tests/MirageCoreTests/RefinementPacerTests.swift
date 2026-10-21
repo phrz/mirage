@@ -53,10 +53,12 @@ final class RefinementPacerTests: XCTestCase {
 
     func testRefinementYieldsOnlyToChangesThatUseTheLink() {
         var p = RefinementPacer()
-        let budget = 80_000.0                            // 12 KB per 150 ms; a quarter is 3 KB
+        let budget = 80_000.0                            // 12 KB per 150 ms; half is 6 KB
         p.noteDirect(bytes: 900, now: 1_000_000_000)     // a clock, a caret, three small tiles of an animating window
         XCTAssertFalse(p.yields(now: 1_000_000_000, tileBytesPerSecond: budget))
-        p.noteDirect(bytes: 4_000, now: 1_050_000_000)   // a burst of typing or a menu opening
+        p.noteDirect(bytes: 4_000, now: 1_050_000_000)   // steady background changes: shared, not yielded to
+        XCTAssertFalse(p.yields(now: 1_100_000_000, tileBytesPerSecond: budget))
+        p.noteDirect(bytes: 3_000, now: 1_100_000_000)   // a burst of typing or a menu opening on top
         XCTAssertTrue(p.yields(now: 1_100_000_000, tileBytesPerSecond: budget))
         XCTAssertFalse(p.yields(now: 1_250_000_000, tileBytesPerSecond: budget), "150 ms later refinement resumes")
     }

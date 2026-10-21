@@ -11,8 +11,10 @@ import Foundation
 ///   plus an encode per block idle: at 220 ms RTT refinement reached ~40 % of the target.
 public struct RefinementPacer {
     public static let yieldWindowNanos: UInt64 = 150_000_000
-    /// Share of the tile budget over the yield window that changed pixels must use for refinement to yield.
-    public static let yieldShare = 0.25
+    /// Share of the tile budget over the yield window that changed pixels must use for refinement to yield. Below it they
+    /// share the link through the token bucket: at a quarter, mac-daddy's desktop (~220 kbps of steady changes from animating
+    /// apps) held refinement at 25–250 kbps of 800 with the link half idle.
+    public static let yieldShare = 0.5
     /// Unacked block bytes allowed, in seconds of the tile budget (and a block's own size: half of that).
     public static let blockWindowSeconds = 0.5
     public static let blockSeconds = 0.25

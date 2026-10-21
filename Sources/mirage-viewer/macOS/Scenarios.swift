@@ -202,6 +202,15 @@ final class ScenarioRunner {
 
     func run() async {
         if name == "watch" { await watch(seconds: seconds); return }
+        if name == "passive" {
+            // No input, no focus change: the chrome after the connect, then idle (the host's log shows idle refinement).
+            for _ in 0..<100 where (session.compositor?.width ?? 0) == 0 { try? await Task.sleep(for: .milliseconds(100)) }
+            guard let c = session.compositor else { session.log("scenario passive: no picture"); return }
+            let ppp = await MainActor.run { session.pixelsPerPoint }
+            await measureChrome(label: "passive", W: c.width, H: c.height, ppp: ppp)
+            session.log("scenario passive: idle, nothing injected")
+            return
+        }
         if name == "keys" {
             // Input-integrity run: N scripted keystrokes at 20 keys/s. Only against a host that records
             // input instead of injecting it (HostStatus.inputSink), whatever is frontmost there.
@@ -564,6 +573,22 @@ final class ScenarioRunner {
         }
         t.resume(); realShotTimer = t
     }
+    /// The desktop's chrome (DESIGN §3.3): the menu bar (24 pt) and the Dock (its window, else a 70-pt bottom band), final
+    /// within a few seconds of the connect. Coverage sampled every 250 ms for 20 s.
+    private func measureChrome(label: String, W: Int, H: Int, ppp: Double) async {
+        let dockFrames = session.windows.filter { $0.app == "Dock" && $0.frame.y > H / 2 && $0.frame.height < H / 4 }.map(\.frame)
+        let chrome = [PixelRect(x: 0, y: 0, width: W, height: Int(24 * ppp))] + (dockFrames.isEmpty ? [PixelRect(x: 0, y: H - Int(70 * ppp), width: W, height: Int(70 * ppp))] : dockFrames)
+        var marks: [Int: Double] = [:]
+        for _ in 0..<80 {
+            try? await Task.sleep(for: .milliseconds(250))
+            let c = session.desktopLosslessCoverage(chrome)
+            guard c.total > 0 else { continue }
+            for pct in [50, 90, 100] where marks[pct] == nil && c.lossless * 100 >= c.total * pct { marks[pct] = c.lastMs }
+        }
+        let fin = session.desktopLosslessCoverage(chrome)
+        session.log("scenario \(label): chrome: \(fin.lossless)/\(fin.total) menu-bar and Dock tiles lossless (Dock \(dockFrames.isEmpty ? "band" : "window")); 50 % at \(marks[50].map { String(format: "%.1f s", $0 / 1000) } ?? "-"), 90 % at \(marks[90].map { String(format: "%.1f s", $0 / 1000) } ?? "-"), 100 % at \(marks[100].map { String(format: "%.1f s", $0 / 1000) } ?? "-") after the stream started")
+    }
+
     private func realApps() async {
         for _ in 0..<250 where scratchWindow() == nil || (session.compositor?.width ?? 0) == 0 || session.hostStatus == nil { try? await Task.sleep(for: .milliseconds(100)) }
         guard var w = scratchWindow(), let comp = session.compositor else { note("ABORT: no Finder window on MirageScratch"); return }
@@ -585,19 +610,7 @@ final class ScenarioRunner {
         }
         session.watchWindowID = w.id
         note("Finder window \(w.id) at \(w.frame), layered \(w.isLayered); waiting 20 s for the first picture")
-        // The desktop's chrome (DESIGN §3.3): the menu bar (24 pt) and the Dock (its window, else a 70-pt bottom band),
-        // lossless within a few seconds of the connect. Coverage sampled every 250 ms while the first picture lands.
-        let dockFrames = session.windows.filter { $0.app == "Dock" && $0.frame.y > H / 2 && $0.frame.height < H / 4 }.map(\.frame)
-        let chrome = [PixelRect(x: 0, y: 0, width: W, height: Int(24 * ppp))] + (dockFrames.isEmpty ? [PixelRect(x: 0, y: H - Int(70 * ppp), width: W, height: Int(70 * ppp))] : dockFrames)
-        var marks: [Int: Double] = [:]
-        for _ in 0..<80 {
-            try? await Task.sleep(for: .milliseconds(250))
-            let c = session.desktopLosslessCoverage(chrome)
-            guard c.total > 0 else { continue }
-            for pct in [50, 90, 100] where marks[pct] == nil && c.lossless * 100 >= c.total * pct { marks[pct] = c.lastMs }
-        }
-        let fin = session.desktopLosslessCoverage(chrome)
-        note("chrome: \(fin.lossless)/\(fin.total) menu-bar and Dock tiles lossless (Dock \(dockFrames.isEmpty ? "band" : "window")); 50 % at \(marks[50].map { String(format: "%.1f s", $0 / 1000) } ?? "-"), 90 % at \(marks[90].map { String(format: "%.1f s", $0 / 1000) } ?? "-"), 100 % at \(marks[100].map { String(format: "%.1f s", $0 / 1000) } ?? "-") after the stream started")
+        await measureChrome(label: "realapps", W: W, H: H, ppp: ppp)
         // Raise it through Accessibility (AXRaise + activate Finder): no click is needed, and none can land elsewhere.
         w = scratchWindow() ?? w
         let inside = (w.frame.x + w.frame.width * 2 / 3, w.frame.y + min(w.frame.height - Int(40 * ppp), Int(200 * ppp)))

@@ -2066,7 +2066,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Priority 4: refinement runs on leftover budget only. It yields while changed pixels use the link (RefinementPacer),
         // keeps 30 % of the tile budget in reserve for them, and keeps ~0.3 s (tiles) or ~0.5 s (blocks) of the link in
         // flight at most (so it cannot build the queue the next keystroke would wait in).
-        guard !pacer.yields(now: now, tileBytesPerSecond: Double(lastBudget.tileKbps * 1000 / 8)) else { return }
         // Sustained motion: refinement sends nothing and its queue is frozen (the blocks too). Video has
         // the whole target meanwhile; refinement resumes 300 ms after the motion stops, locus first.
         guard !motionSustained(now) else { return }
@@ -2081,6 +2080,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Then the desktop's menu bar and Dock: on screen whatever the windows do, they waited at the first picture's lowest
         // rung behind every window's levels and the desktop's centre-first blocks (~45 s after a connect on an iPhone).
         if let d = display, !unifiedView, chromeStep(d, now: now) { return }
+        // The rest yields while changed pixels use most of the link (the menu bar and Dock above do not: a desktop with a few
+        // animating apps kept them at the lowest rung for 20 s on mac-daddy).
+        guard !pacer.yields(now: now, tileBytesPerSecond: Double(lastBudget.tileKbps * 1000 / 8)) else { return }
         // Then every window's middle level (where it gets one), in the same order.
         if let l = ordered.first(where: { if case .intermediate = $0.fresh { return true }; return false }) { freshStep(l, now: now); return }
         // Then what people can see before what they cannot: window layers (blocks, backlog, per-tile refinement,
