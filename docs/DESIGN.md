@@ -141,8 +141,11 @@ In the compositor model nothing is ever baked:
   background, leaving out the desktop-level and normal windows. New menus appear in it without any filter change.
 - **Every visible normal window is a layer** as soon as its first picture lands (no exclusion wait). Layers are published
   as verified, so older viewers' guards let the desktop through. A window entirely covered by normal windows captures
-  nothing until it shows; the layer caps go to what can be seen, and a visible window over them is logged.
-- Off under the flag: the display guard (only desktop under two opaque windows waits), taint resends, the desktop underlay
+  nothing until it shows, but keeps its layer (the viewer its last picture) while it is in the list; the layer caps go to
+  what can be seen, and a visible window over them is logged.
+- **No unowned rectangle:** a shown window whose own capture has not delivered within 400 ms (a new window, one uncovered
+  again) is cut from the full display capture (the fallback below) until it does.
+- Off under the flag: the display guard (nothing waits), taint resends, the desktop underlay
   and its second capture, the exclusion bookkeeping. They are deleted once the flag wins the A/B.
 - Streams: desktop + overlay + one per visible window (the seam design: display + underlay + one per planned window).
 - The viewer change it needs: hit-testing skips the overlay layer (it covers the whole display). Viewers without it would

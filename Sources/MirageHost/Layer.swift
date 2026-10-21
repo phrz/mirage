@@ -30,6 +30,8 @@ final class Layer {
     var occludedTiles = Set<Int>()
     var frontmost = false
     var absentSince: UInt64 = 0
+    /// When the layer's own capture was (re)started and has not delivered since (0: it has, or none is wanted).
+    var awaitingOwnSince: UInt64 = 0
     var createdNanos: UInt64
     /// Display layer only: tiles the viewer may hold window pixels for (DisplayTaint) and the ones already queued for a re-send.
     var taint = DisplayTaint()
