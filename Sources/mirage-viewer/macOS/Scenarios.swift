@@ -313,8 +313,9 @@ final class ScenarioRunner {
             // Cross-app z-order (phrz: a dragged window fell behind another app's window once it overlapped it). A Finder
             // window on the bench's own folder (/tmp/mtb2, opened by the run script) sits behind the bench; its title bar is
             // pressed and it is dragged over the bench. The host's list must put Finder in front, during and after.
-            guard let finder = session.windowsSnapshot().first(where: { $0.app == "Finder" && $0.title == "mtb2" && $0.windowLevel == 0 && $0.isLayered }) else {
-                session.log("scenario zorder: no layered Finder window on mtb2"); return }
+            guard let finder = session.windowsSnapshot().first(where: { $0.app == "Finder" && $0.title == "mtb2" && $0.windowLevel == 0 }) else {
+                session.log("scenario zorder: no Finder window on mtb2"); return }
+            session.log("scenario zorder: Finder window \(finder.isLayered ? "is a layer" : "is in the desktop picture")")
             func front() -> Bool? {
                 let l = session.windowsSnapshot()
                 guard let f = l.first(where: { $0.id == finder.id }), let b = l.first(where: { $0.id == w.id }) else { return nil }
@@ -333,22 +334,22 @@ final class ScenarioRunner {
             else { session.log("scenario zorder: Finder's title strip is covered by the bench; move it aside first"); return }
             let py = fr.y + Int(12 * ppp)
             session.log("scenario zorder: pressing Finder's title strip at \(px),\(py)")
-            let injected = session.injectedDrags
+            // A window in the desktop picture (seam design) always gets the real press; a layer only with injected drags.
+            let injected = session.injectedDrags || !finder.isLayered
             if injected { let (nx, ny) = normalized(px, py); session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true); session.send(.mouseButton(.init(button: 0, down: true, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true) }
-            session.pressTitleBar(windowID: finder.id)
-            session.beginLayerDrag(windowID: finder.id)
+            if finder.isLayered { session.pressTitleBar(windowID: finder.id); session.beginLayerDrag(windowID: finder.id) }
             let target = PixelRect(x: w.frame.x + w.frame.width / 4, y: w.frame.y + 40, width: finder.frame.width, height: finder.frame.height)
             var frontAt: Double? = nil, lostAfter = false
             for k in 1...60 {   // 1 s drag toward the bench's middle
                 let f = finder.frame
                 let fx = f.x + (target.x - f.x) * k / 60, fy = f.y + (target.y - f.y) * k / 60
                 if injected { let (nx, ny) = normalized(px + fx - f.x, py + fy - f.y); session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true) }
-                session.dragLayer(windowID: finder.id, to: PixelRect(x: fx, y: fy, width: f.width, height: f.height))
+                if finder.isLayered { session.dragLayer(windowID: finder.id, to: PixelRect(x: fx, y: fy, width: f.width, height: f.height)) }
                 try? await Task.sleep(for: .milliseconds(16))
                 if let fr = front() { if fr, frontAt == nil { frontAt = Double(Clock.elapsed(since: t0, now: Clock.nowNanos())) / 1e6 }; if !fr, frontAt != nil { lostAfter = true } }
             }
             if injected { let (nx, ny) = normalized(px + target.x - finder.frame.x, py + target.y - finder.frame.y); session.send(.mouseButton(.init(button: 0, down: false, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true) }
-            session.endLayerDrag(windowID: finder.id)
+            if finder.isLayered { session.endLayerDrag(windowID: finder.id) }
             try? await Task.sleep(for: .seconds(2))
             let after = front()
             if let f = session.windowsSnapshot().first(where: { $0.id == finder.id })?.frame { session.log("scenario zorder: host frame after the drop \(f.x),\(f.y) (aimed at \(target.x),\(target.y))") }
