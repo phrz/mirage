@@ -157,6 +157,73 @@ In the compositor model nothing is ever baked:
   covered where a window is in front, never baked into the desktop. `MIRAGE_TEST_FALLBACK=<app name>` forces it for that
   app's windows.
 
+### 3.0b Placeholders: every window at once, then sharp (design, phrz 2026-10-21)
+
+phrz: on slow links windows must not pop in one at a time; a compact stand-in while they load. Today each window's first
+picture waits for its own capture to start (~0.6 s each, serially, on mac-daddy) and then for its still (5–13 KB): on
+Japan bus the last window appeared ~5 s after the first.
+
+- **Source.** At stream start (and on a resume with no picture), the host takes one small screenshot of the composited
+  display (SCScreenshotManager, ~400 px wide, one call, no stream) and the desktop layer's first frame. Each visible
+  layer's placeholder is cut from it at the layer's frame, with the parts covered by windows in front left transparent
+  (as the fallback cut does). The desktop's placeholder comes from the desktop-only frame, so it shows the desktop under
+  every window too.
+- **Format.** One small lossy image per layer, the long side 32 px (WebP q40 through the still encoder, ~150–400 bytes),
+  with its alpha. ThumbHash (~25 bytes) was considered: smaller, but blurrier and an extra codec in both apps; at 32 px a
+  dozen windows cost ~3–5 KB, ~60 ms of a 650 kbps link. The format field allows ThumbHash later.
+- **Wire.** `ControlMessage.placeholders(Placeholders)`: `[{layer: UInt32, frame: PixelRect, width, height, format,
+  data}]`, on the control stream right after the first window list, ahead of every still. A window shown later gets a
+  one-item message just before its layer's `.reset`. Only to viewers that put `placeholdersVersion` in their stream
+  request (an older viewer would fail on the unknown message), like `tunables`.
+- **Viewer.** Each layer draws its placeholder, upscaled to its frame with a blur of about one placeholder pixel, until
+  its first still arrives, then crossfades (tunable `crossfadeMs`). Hit-testing and z-order are the window list's, as for
+  real layers. The desktop's placeholder also stands under windows wherever the desktop's real tiles have not arrived:
+  on slow tiers the hidden desktop is not sent until a window moves (§3.4), and a window moved away reveals the blurred
+  desktop instead of an empty canvas while its tiles come.
+- **Cost and limits.** One screenshot per stream start (~20 ms of host CPU), a few KB on the wire. A placeholder is a
+  picture of the screen like any other: same transport, same pairing, nothing persisted.
+
+### 3.0c Persistent tile cache (design, phrz 2026-10-21; behind a tunable)
+
+The wallpaper and static app chrome are the same on every reconnect, yet each connect sends them again (the desktop's
+lossless blocks were ~1 MB of every first picture). A viewer-side cache of tiles it has seen, content-addressed, lets the
+host advertise what a tile is and send only what the viewer lacks.
+
+- **Keys.** A pairing keeps no shared secret (the PAKE yields pinned public keys only), so the viewer owns the cache's
+  keys: per paired host, a random 256-bit master key in its keychain. From it, HKDF derives `idKey` (label "mirage tile
+  ids v1") and `sealKey` ("mirage tile seal v1"). The viewer sends `idKey` to that host inside the authenticated session
+  (`StreamRequest.tileCacheKey`, only when the tunable is on); the host holds it in memory for the session and never
+  stores it. `sealKey` never leaves the viewer.
+- **Identity.** A tile's id is `HMAC-SHA256(idKey, SHA-256(lossless BGRA of the 64-px tile))`, truncated to 128 bits. Keys
+  are random per host and per viewer, so ids for the same pixels differ between hosts and between users: a host cannot
+  ask about another host's tiles, and ids are not comparable across pairings.
+- **Protocol.** In the fresh picture, for the desktop layer and windows whose content is stable, the host sends
+  `tileIDs(layer, [(tile index, id)])` ahead of the blocks. The viewer paints every tile it holds at once (lossless,
+  staged into the layer's next level like a block) and answers `tileMisses(layer, [tile index])` on the control stream;
+  the host plans its blocks over the misses only (and anything that changed since). Tiles the viewer stores are those it
+  received lossless and that stayed unchanged for 2 s (not every passing frame of a scroll). The host keeps no state
+  about the cache beyond the misses of the current session.
+- **Storage (viewer).** Per pairing: a directory in the app's own container (Application Support on macOS, the app
+  container on iOS), excluded from backups (`isExcludedFromBackup`), holding records sealed with AES-GCM under `sealKey` (one per tile; nonce
+  random per record; the tile id as associated data). The master key's keychain item is
+  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, `kSecAttrSynchronizable = false`. Size bound per viewer (tunable,
+  200 MB default), least-recently-used eviction across pairings.
+- **Lifecycle.** Unpairing or revoking a host deletes its cache directory and its master key. Settings has "Clear cache" (all
+  pairings). A host whose pairing secret changes (re-pair) starts a new cache.
+
+**Threat model.** The cache holds pictures of the host's screen, which can be sensitive (documents, messages).
+- *Another local user or process on the viewer device*: the files are in the user's container and sealed with a key only
+  this user's keychain releases after first unlock, never synced and never in a backup, so another macOS account, a
+  restored backup on another device or a copied disk image cannot read them.
+- *A stolen locked device*: the key is unavailable before first unlock (and the files are sealed even if the container is
+  copied off).
+- *A malicious or compromised host (or a second paired host)*: it holds only its own `idKey` (never `sealKey`, never
+  another host's keys), so it learns nothing about tiles from another host (no cache-existence oracle across hosts), and within its own pairing it learns only which of
+  the ids it advertised in this session the viewer lacks, which is no more than the pixels it already sent before.
+- *Network observers*: nothing new; ids and misses travel inside the authenticated QUIC session.
+- *Not addressed*: a user who can unlock the device and run code as the user can read the screen too; that is the
+  device's own security.
+
 ### 3.1 Transport and security
 
 - **QUIC over the tailnet** (`NWConnection` with `NWProtocolQUIC`). Tailscale already gives
@@ -228,6 +295,15 @@ In the compositor model nothing is ever baked:
 - Optional second factor for free: host calls the Tailscale local API `whois` on the peer
   address and refuses nodes not owned by `phrz@`.
 - TCC: Screen Recording + Accessibility granted once on the host via GUI (over ARD today).
+
+**Security review checklist** (every change that touches pairing, persistence, or what the host learns):
+- [ ] Pairing secrets and per-pairing keys stay in the keychain, `ThisDeviceOnly`, not synchronizable.
+- [ ] Anything persisted about a host's screen (the tile cache, §3.0c) is sealed at rest (AES-GCM, key in the keychain),
+      excluded from backups, in the user's own container, and deleted with the pairing.
+- [ ] Identifiers derived from screen content are keyed per pairing (HMAC), never bare hashes.
+- [ ] The host learns nothing about the viewer's stored state beyond answers to what it asked in this session.
+- [ ] New control messages are only sent to viewers that announced them (versioned request fields).
+- [ ] No screen content in logs (sizes, counts and rects only).
 
 ### 3.2 Capture: one desktop stream plus a visibility mask
 
