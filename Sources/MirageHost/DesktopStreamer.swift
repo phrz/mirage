@@ -468,6 +468,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let excl = overlayExclusion(t.display)
         _ = try await ov.start(req, target: t, excluding: excl) { [weak self] pb, nanos, _ in self?.queue.async { self?.captured(pb, nanos, dirtyRects: [], layerID: ControlMessage.WindowInfo.overlayID) } }
         queue.async { self.overlayExcludedIDs = Set(excl.map(\.windowID)); self.desktopLevelIDs = Set(excl.filter { $0.windowLayer < 0 }.map(\.windowID)) }
+        compositorSinceNanos = Clock.nowNanos()
         log("compositor model: desktop-only display layer, overlay layer above the normal level (\(excl.count) windows left out of it)")
         return ov
     }
@@ -1007,12 +1008,21 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Layers no longer planned (window gone, minimized, dropped out of the cap): capture stops; the
         // pixels stay for a while in case it comes right back (a Space switch, a restore).
         for (id, l) in layers where id != 0 && id != ControlMessage.WindowInfo.overlayID && !plannedIDs.contains(id) {
+            // Compositor model: a window covered by others (or pushed aside by Show Desktop) keeps its layer, and the viewer
+            // its picture, for as long as it is in the list. Released after 10 s, it came back as a new layer whose capture
+            // took 8 s to deliver, and nothing owned its rectangle meanwhile (phrz's first compositor session: Music's mini
+            // player shown as wallpaper). Its capture runs on for 10 s, all of it held back as covered, so a quick return
+            // (a Show Desktop round trip, a window raised and lowered) needs no restart: restarts took up to 12 s there.
+            if compositor, !screenLocked, s.byID[id] != nil {
+                pendingFallback.remove(id)
+                if l.absentSince == 0 { l.absentSince = now; l.occludedTiles = Set(0..<l.tracker.tileCount) }
+                if let cap = l.capturer, Clock.elapsed(since: l.absentSince, now: now) > layerRetainNanos {
+                    l.capturer = nil; l.awaitingOwnSince = 0; Task { await cap.stop() }
+                }
+                continue
+            }
             if let cap = l.capturer { l.capturer = nil; Task { await cap.stop() } }
             if screenLocked { l.absentSince = 0; continue }   // paused, not gone: kept for the unlock
-            // Compositor model: a window covered by others keeps its layer (and the viewer its picture) for as long as it is
-            // in the list. Released after 10 s, it came back as a new layer whose capture took 8 s to deliver, and nothing
-            // owned its rectangle meanwhile: phrz's first compositor session, Music's mini player shown as wallpaper.
-            if compositor, s.byID[id] != nil { l.absentSince = 0; l.awaitingOwnSince = 0; pendingFallback.remove(id); continue }
             if l.absentSince == 0 { l.absentSince = now }
             else if Clock.elapsed(since: l.absentSince, now: now) > layerRetainNanos { layers[id] = nil; ax?.forget(id); log("layer \(id) released") }
         }
@@ -1020,8 +1030,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // again) is cut from the full display capture until it does, so its rectangle always has its window.
         if compositor {
             for w in planned {
+                // Not for the stream's first windows: the full display capture starts no faster than theirs (3 s on mac-daddy).
                 guard let l = layers[w.id], l.awaitingOwnSince != 0, !fallbackLayers.contains(w.id), !pendingFallback.contains(w.id),
-                      Clock.elapsed(since: l.awaitingOwnSince, now: now) > 400_000_000 else { continue }
+                      Clock.elapsed(since: l.awaitingOwnSince, now: now) > 400_000_000,
+                      Clock.elapsed(since: compositorSinceNanos, now: now) > 10_000_000_000 else { continue }
                 pendingFallback.insert(w.id)
                 if debugLayers { log("layer \(w.id): own capture not delivering yet; cut from the full display capture meanwhile") }
                 ensureFallbackCapture()
@@ -1160,6 +1172,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var fallbackLayers = Set<UInt32>()
     /// Layers cut from the full display capture only until their own capture delivers.
     private var pendingFallback = Set<UInt32>()
+    /// When the compositor model's layers were set up for this stream.
+    private var compositorSinceNanos: UInt64 = 0
     private var fallbackCapture: ScreenCapturer?
     private var fallbackStarting = false
     private var fallbackPools: [UInt32: (pool: CVPixelBufferPool, w: Int, h: Int)] = [:]
