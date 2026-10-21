@@ -391,8 +391,8 @@ final class TileSchedulerTests: XCTestCase {
         t.holdUntilIdle([5, 6], now: s)
         _ = t.classify(dirty: [7], now: s)
         XCTAssertEqual(t.stalePending([5, 6, 7], olderThan: 10 * s, now: s + 5 * s), [])
-        XCTAssertEqual(Set(t.stalePending([5, 6, 7], olderThan: 10 * s, now: s + 11 * s)), [5, 6], "held for 11 s, never released")
-        XCTAssertTrue(t.due(now: s + 11 * s, limit: 10, centre: nil).isEmpty || !t.due(now: s + 11 * s, limit: 10, centre: nil).contains(5), "held: not due")
+        XCTAssertEqual(Set(t.stalePending([5, 6, 7], olderThan: 10 * s, now: s + 11 * s)), [5, 6], "held for 11 s, never released; 7 is due (a backlog), not held")
+        XCTAssertFalse(t.due(now: s + 11 * s, limit: 10, centre: nil).contains(5), "held: not due")
         t.forceDue([5, 6], now: s + 11 * s)
         XCTAssertTrue(Set(t.due(now: s + 11 * s, limit: 10, centre: nil)).isSuperset(of: [5, 6]), "forced: due now")
     }

@@ -30,6 +30,8 @@ final class Layer {
     var occludedTiles = Set<Int>()
     /// Tiles wholly off the display at the last occlusion pass.
     var offDisplayTiles = Set<Int>()
+    /// Visible tiles held back (not due) at the last invariant audit.
+    var auditHeldVisible = Set<Int>()
     var frontmost = false
     var absentSince: UInt64 = 0
     /// When the layer's own capture was (re)started and has not delivered since (0: it has, or none is wanted).

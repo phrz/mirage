@@ -201,7 +201,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard compositor, !screenLocked else { return }
         for l in layers.values where l.announced || l.isDisplay {
             let visible = (0..<l.tracker.tileCount).filter { !l.occludedTiles.contains($0) && !(l.isDisplay && l.underLayer.contains($0)) && !l.offDisplayTiles.contains($0) }
-            let stale = l.tracker.stalePending(visible, olderThan: 10_000_000_000, now: now)
+            // Held back (not due) while visible at this audit and the last one: a tile uncovered a moment ago after a long
+            // wait covered is not a missed release (the uncover path makes it due), nor is a due backlog waiting its turn.
+            let held = Set(l.tracker.stalePending(visible, olderThan: 10_000_000_000, now: now))
+            let stale = held.intersection(l.auditHeldVisible).sorted()
+            l.auditHeldVisible = held
             guard !stale.isEmpty else { continue }
             l.tracker.forceDue(stale, now: now)
             log("INVARIANT: layer \(l.id) had \(stale.count) visible tiles unsent for over 10 s; made due now")
