@@ -1312,24 +1312,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let scale = min(1.0, (budget / 0.1 / Double(r.width * r.height)).squareRoot())
             let ow = max(16, Int(Double(r.width) * scale)), oh = max(16, Int(Double(r.height) * scale))
             guard let data = cut.withUnsafeBytes({ TileCodec.encodeLossy(base: $0.baseAddress!, width: r.width, height: r.height, stride: r.width * 4, outWidth: ow, outHeight: oh, quality: 60) }) else { continue }
-            let now = Clock.nowNanos()
-            sendTileMessage(.reset(layer: id, width: l.width, height: l.height), captureNanos: now)
-            sendTileMessage(.tiles(.init(header: header(layer: id, nanos: now), refinement: false, staged: true, tiles: [.init(rect: l.bounds, format: .lossy, data: data)])), captureNanos: now)
-            l.stillSent = true; l.cutStill = true
-            if stage1Active { stage1Staged.insert(id) } else { sendTileMessage(.commit(layer: id), captureNanos: now); l.exposed = true }
-            // At full size the cut is the window's visible pixels: its first frame. Lossless refinement plans from it now;
-            // the window's own capture, when it delivers, is diffed against it (only real differences go).
-            if k >= 0.999, r.width == l.width, r.height == l.height, let pb = makeFrame(cut, width: r.width, height: r.height) {
-                var tr = l.tracker
-                tr.markVideo(Array(0..<tr.tileCount), now: now)
-                l.tracker = tr
-                l.lastFrame = pb
-                l.announced = true
-                l.fresh = .blocks(remaining: planBlocks(l))
-            }
+            // Paced: queued, and sent as the tile budget allows (refine), not as one blast.
+            l.cutStill = true
+            stage1Queue.append((id, data))
             sent += 1; bytes += data.count
+            continue
         }
-        if sent > 0 { log("placeholders and stage-1 cuts: the desktop and \(sent - 1) windows, \(bytes) bytes"); checkStage1(now: Clock.nowNanos()); publishWindows(now: Clock.nowNanos(), full: false) }
+        if sent > 0 { log("placeholders and stage-1 cuts: the desktop and \(sent - 1) windows, \(bytes) bytes (cuts paced)"); sendStage1Queue(now: Clock.nowNanos()); checkStage1(now: Clock.nowNanos()); publishWindows(now: Clock.nowNanos(), full: false) }
     }
 
     /// Layers cut from the full display capture only until their own capture delivers (off: see reconcileLayers).
@@ -1967,24 +1956,26 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         return (min(t.cols - 1, max(0, l.x / TileTracker.tile)), min(t.rows - 1, max(0, l.y / TileTracker.tile)))
     }
 
-    /// A BGRA pixel buffer holding `px` (a stage-1 cut used as a layer's first frame).
-    private func makeFrame(_ px: [UInt8], width: Int, height: Int) -> CVPixelBuffer? {
-        var pb: CVPixelBuffer?
-        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
-        guard CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb) == kCVReturnSuccess, let pb else { return nil }
-        CVPixelBufferLockBaseAddress(pb, []); defer { CVPixelBufferUnlockBaseAddress(pb, []) }
-        guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
-        let stride = CVPixelBufferGetBytesPerRow(pb)
-        px.withUnsafeBytes { src in for y in 0..<height { memcpy(base.advanced(by: y * stride), src.baseAddress!.advanced(by: y * width * 4), width * 4) } }
-        return pb
-    }
-
     // MARK: Stage 1, coherent stills presented together (DESIGN M-FIVE)
 
     /// From a fresh picture's start until every visible layer's still has gone (or 0.7 s), stills are staged and held; then
     /// one commit per layer presents them all in the same frame on the viewer (a whole-layer crossfade each), instead of
     /// windows popping in one by one as their captures start.
     private var stage1Active = false
+    /// Stage-1 cuts waiting for the tile budget (layer, lossy still), sent in order by `sendStage1Queue`.
+    private var stage1Queue: [(id: UInt32, data: Data)] = []
+    private func sendStage1Queue(now: UInt64) {
+        refillTiles(now: now)
+        while let next = stage1Queue.first, tileTokens > 0 || freshTokens > 0 {
+            stage1Queue.removeFirst()
+            guard let l = layers[next.id], !l.stillSent || l.cutStill else { continue }
+            sendTileMessage(.reset(layer: next.id, width: l.width, height: l.height), captureNanos: now)
+            sendTileMessage(.tiles(.init(header: header(layer: next.id, nanos: now), refinement: false, staged: true, tiles: [.init(rect: l.bounds, format: .lossy, data: next.data)])), captureNanos: now)
+            if tileTokens > 0 { tileTokens -= Double(next.data.count) } else { freshTokens -= Double(next.data.count); tileTokens -= Double(next.data.count) }
+            l.stillSent = true
+            if stage1Active { stage1Staged.insert(next.id) } else { sendTileMessage(.commit(layer: next.id), captureNanos: now); l.exposed = true }
+        }
+    }
     private var stage1Staged = Set<UInt32>()
     private var stage1Deadline: UInt64 = 0
     private func checkStage1(now: UInt64) {
@@ -2659,6 +2650,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// video tiles and rate-limited sparse tiles, oldest first, locus first, within the tile budget.
     private func refine(now: UInt64) {
         guard display != nil else { return }
+        if !stage1Queue.isEmpty { sendStage1Queue(now: now) }
         checkStage1(now: now)
         presentLevels(now: now)
         refillTiles(now: now)
