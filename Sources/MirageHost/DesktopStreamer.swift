@@ -1600,7 +1600,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // a capped rate (host tunables, default 3 fps q50, ~40 kbps for an icon), refined lossless once it stops (classify left
         // the tiles pending). As video, one Dock icon took ~230 kbps of an 800 kbps link on mac-daddy, and its frames were the
         // rate controller's only delay samples: they read a queue that was not there and held the target at 150 kbps.
-        let smallVideo = !plan.video.isEmpty && !plan.wholeFrame && !MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount, screenTiles: display?.tracker.tileCount ?? 0)
+        // The overlay never goes as video: HEVC has no alpha, and a keyframe over the overlay painted its transparent tiles
+        // opaque black, a column of which stayed over the left edge of everything (mac-daddy, compositor: the host's
+        // capture there was alpha 0 throughout). Its changes take the small-animation path (lossy WebP keeps alpha).
+        let isOverlay = layer.id == ControlMessage.WindowInfo.overlayID
+        if isOverlay { plan.wholeFrame = false }
+        let smallVideo = !plan.video.isEmpty && (isOverlay || !plan.wholeFrame && !MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount, screenTiles: display?.tracker.tileCount ?? 0))
         if smallVideo || !plan.flicker.isEmpty {
             let small = ((smallVideo ? plan.video : []) + plan.flicker).filter { !layer.occludedTiles.contains($0) }
             if smallVideo { plan.video = []; plan.videoRegion = .zero }
