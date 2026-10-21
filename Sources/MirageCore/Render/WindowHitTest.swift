@@ -52,7 +52,11 @@ public enum WindowHitTest {
             if plain, firstClick, normal, inTitleBar, x > w.frame.x + Int(trafficLightsPoints * pxPerPoint) { return .layerTitleBar(id: w.id, frame: w.frame) }
             return .layer(id: w.id, raise: plain && normal)
         }
-        if plain, firstClick, inTitleBar { return .displayTitleBar(id: w.id, frame: w.frame) }
+        // The predicted (copy-rect) drag moves the display layer's pixels: in the compositor model (an overlay is listed) the
+        // display layer is the desktop alone, and a window not yet a layer is not in it, so the prediction smeared the desktop
+        // (phrz, 08:46Z: "artifacting galore on desktop", "some weird pseudo window"). There the press just goes.
+        let compositorModel = arranged.contains { $0.isOverlay }
+        if plain, firstClick, inTitleBar, !compositorModel { return .displayTitleBar(id: w.id, frame: w.frame) }
         return .display(id: w.id)
     }
 }

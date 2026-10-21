@@ -496,10 +496,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let e = compositorEnv { return e != "0" }
         return Tunables.load(from: (try? Store())?.url("tunables.json")).tunables[.compositorModel] >= 0.5
     }
-    /// The windows the overlay leaves out: the desktop-level ones and every normal window on the display (they are layers).
+    /// The windows the overlay leaves out: the desktop-level ones, every normal window on the display, and floating app
+    /// windows (they are layers).
     private func overlayExclusion(_ display: SCDisplay) -> [SCWindow] {
-        catalog.all.filter { $0.windowLayer <= 0 && $0.frame.intersects(display.frame) }
+        catalog.all.filter { $0.frame.intersects(display.frame) && ($0.windowLayer <= 0 || Self.floatingLevels.contains($0.windowLayer) && !Self.systemOwners.contains($0.owningApplication?.applicationName ?? "")) }
     }
+    /// Floating app windows (stay-on-top panels, utility windows: levels 1–19) are layers of their own in the compositor model,
+    /// hit-testable like any window. In the overlay (which hit-testing passes over) they could not be clicked (phrz, 08:46Z:
+    /// "stay on top windows are not interactable"). The menu bar, the Dock and system UI stay in the overlay.
+    static let floatingLevels = 1...19
+    static let systemOwners: Set<String> = ["Window Server", "Dock", "Control Center", "Notification Center", "SystemUIServer", "WindowManager", "Spotlight", "loginwindow"]
+    static func isFloatingAppWindow(_ w: ControlMessage.WindowInfo) -> Bool { floatingLevels.contains(w.windowLevel) && !systemOwners.contains(w.app ?? "") }
     /// Starts the overlay capture (frames go to the overlay layer).
     private func startOverlay(_ req: ControlMessage.StreamRequest, _ t: ScreenCapturer.Target) async throws -> ScreenCapturer {
         let ov = ScreenCapturer(queue: queue)
@@ -982,7 +989,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // so the stream and pixel caps go to what can be seen; a visible window that still misses them is logged.
         let normals = list.filter { $0.windowLevel == 0 }
         let screen = display?.bounds
-        for w in list where w.windowLevel == 0 && w.app != "Window Server" && w.app != "Dock" && w.frame.width >= 64 && w.frame.height >= 64
+        for w in list where (w.windowLevel == 0 || compositor && Self.isFloatingAppWindow(w)) && w.app != "Window Server" && w.app != "Dock" && w.frame.width >= 64 && w.frame.height >= 64
                             && (Self.layerApps.map { apps in apps.contains(w.app ?? "") || apps.contains { w.title.contains($0) } } ?? true) && (compositor || !unexcludable.contains(w.id)) {
             if compositor, let screen, WindowTracker.occlusion(of: w, in: normals, display: screen).visibleFraction < 0.002 { continue }
             guard out.count < maxWindowLayers, pixels + w.frame.area <= maxLayerPixels else {
@@ -1071,9 +1078,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if compositor, !placeholdersDone, !planned.isEmpty, hostTunables[.placeholders] >= 1 { placeholdersDone = true; sendPlaceholders() }
         // Compositor model: a shown window whose own capture has not delivered within 400 ms (a new window, one uncovered
         // again) is cut from the full display capture until it does, so its rectangle always has its window.
-        if compositor {
+        // (The 400 ms full-display stopgap for windows whose own capture had not delivered is gone: cut every 100 ms at the
+        // list's frame, a window jiggled inside its frame and carried transparent holes where windows in front of it were,
+        // the desktop showing through: phrz, 08:46Z, "window contents jiggle inside, artifacting galore". A window keeps its
+        // last picture until its own capture delivers; the stream's first windows get placeholders.)
+        if compositor, Self.pendingFallbackEnabled {
             for w in planned {
-                // Not for the stream's first windows: the full display capture starts no faster than theirs (3 s on mac-daddy).
                 guard let l = layers[w.id], l.awaitingOwnSince != 0, !fallbackLayers.contains(w.id), !pendingFallback.contains(w.id),
                       Clock.elapsed(since: l.awaitingOwnSince, now: now) > 400_000_000,
                       Clock.elapsed(since: compositorSinceNanos, now: now) > 10_000_000_000 else { continue }
@@ -1279,8 +1289,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if sent > 0 { log("placeholders: \(sent) windows at once, \(bytes) bytes"); publishWindows(now: Clock.nowNanos(), full: false) }
     }
 
-    /// Layers cut from the full display capture only until their own capture delivers.
+    /// Layers cut from the full display capture only until their own capture delivers (off: see reconcileLayers).
     private var pendingFallback = Set<UInt32>()
+    static let pendingFallbackEnabled = false
     /// When the compositor model's layers were set up for this stream.
     private var compositorSinceNanos: UInt64 = 0
     /// A window has moved this session (a drag, Show Desktop): the desktop under windows may be seen.
@@ -2192,7 +2203,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
             return out + s.windows.map { w in
                 var w = w
-                let exposed = !screenLocked && w.windowLevel == 0 && (layers[w.id]?.exposed ?? false)
+                let exposed = !screenLocked && (w.windowLevel == 0 || Self.isFloatingAppWindow(w)) && (layers[w.id]?.exposed ?? false)
                 w.layered = exposed
                 if exposed, let l = layers[w.id], let r = w.scrollRect { w.scrollRect = l.local(r) }
                 w.cutout = nil

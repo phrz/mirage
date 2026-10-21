@@ -57,7 +57,7 @@ final class OverlayLayerTests: XCTestCase {
         XCTAssertEqual(press(200, 50, plain: false), .layer(id: 5, raise: false), "⌘-click: neither drag nor raise")
         XCTAssertEqual(press(200, 50, first: false), .layer(id: 5, raise: true), "a double click's second press is no drag")
         XCTAssertEqual(press(200, 150), .layer(id: 5, raise: true))
-        XCTAssertEqual(press(390, 20), .displayTitleBar(id: 7, frame: carried.frame), "a window the display layer carries: a predicted drag")
+        XCTAssertEqual(press(390, 20), .display(id: 7), "compositor model (an overlay is listed): no predicted drag of desktop pixels for a window that is not a layer; the press goes")
         XCTAssertNil(press(390, 20).raises)
         XCTAssertEqual(press(390, 280), .display(id: 7))
         // A layer above the normal level (a panel) is never raised or dragged locally.
