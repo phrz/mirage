@@ -9,12 +9,14 @@ import MirageCore
 enum LocalShortcuts {
     @MainActor static var toggleStats: (() -> Void)?
     @MainActor static var toggleMode: (() -> Void)?
+    @MainActor static var openSettings: (() -> Void)?
     @MainActor static func handle(_ e: NSEvent, session: ViewerSession?) -> Bool {
         let local: NSEvent.ModifierFlags = [.control, .option, .command]
         guard e.type == .keyDown, e.modifierFlags.intersection([.control, .option, .command, .shift]) == local else { return false }
         switch e.keyCode {
         case 1: toggleStats?(); return true                             // S
         case 32: toggleMode?(); return true                             // U
+        case 43: openSettings?(); return true                           // ,
         case 126: session?.adjustBitrate(by: 200); return true          // ↑
         case 125: session?.adjustBitrate(by: -200); return true         // ↓
         case 12: session?.stop(); NSApp.terminate(nil); return true      // Q

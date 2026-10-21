@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		0DDE0B47E12B085CF9C24D74 /* PairingScan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6997B50C1540FB4C278BB8AB /* PairingScan.swift */; platformFilters = (ios, ); };
+		A1B2C3D4E5F6071829304153 /* SettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304154 /* SettingsSheet.swift */; platformFilters = (ios, ); };
 		229802F3AE277C06A4CF2008 /* Scenarios.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11A92A44688F29579B43412B /* Scenarios.swift */; platformFilters = (macos, ); };
 		3E6A04A7673B4F5012946E47 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830F2869DAB069200150F308 /* main.swift */; platformFilters = (macos, ); };
 		4B51E2C9DAA080EF89B09D51 /* MirageCore in Frameworks */ = {isa = PBXBuildFile; productRef = A64D72A433235EF9BA968170 /* MirageCore */; };
@@ -21,6 +22,7 @@
 		C4DE1008FBECEE2276DF4255 /* Unified.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593D553163B75E9D6D807360 /* Unified.swift */; platformFilters = (macos, ); };
 		D4955D8CADDBC6C1A94F4118 /* HostMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DEE1C387469669B68D1F6D9 /* HostMenu.swift */; platformFilters = (macos, ); };
 		E114511A2FB50BA7601F0F43 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5646FA52FFFCC715643009 /* Keychain.swift */; };
+		A1B2C3D4E5F6071829304151 /* ViewerSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304152 /* ViewerSettings.swift */; };
 		E179BADF39B60A6D17B7BB75 /* Chrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7BD24766B550945C4E385B /* Chrome.swift */; platformFilters = (macos, ); };
 		ECB3983ACC10C20F61032EB2 /* FrameRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA8357B3AEC263F39103FAC9 /* FrameRecorder.swift */; };
 /* End PBXBuildFile section */
@@ -37,11 +39,13 @@
 		5A7BD24766B550945C4E385B /* Chrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Chrome.swift; sourceTree = "<group>"; };
 		670E76E253BB3EF4D7177FA4 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		6997B50C1540FB4C278BB8AB /* PairingScan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingScan.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F6071829304154 /* SettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSheet.swift; sourceTree = "<group>"; };
 		7BD487592CA684E9D4C6E42B /* ua */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ua; path = ..; sourceTree = SOURCE_ROOT; };
 		830F2869DAB069200150F308 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		C40E9355D3AE6E2F90D4D78B /* Mirage.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = Mirage.icon; sourceTree = "<group>"; };
 		CA8357B3AEC263F39103FAC9 /* FrameRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameRecorder.swift; sourceTree = "<group>"; };
 		DA5646FA52FFFCC715643009 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
+		A1B2C3D4E5F6071829304152 /* ViewerSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerSettings.swift; sourceTree = "<group>"; };
 		E0D40802ED1D018B7D94046B /* VideoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoView.swift; sourceTree = "<group>"; };
 		EEEE1C67B65AE477DCDF5D99 /* DesktopUIView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopUIView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -78,6 +82,7 @@
 				EEEE1C67B65AE477DCDF5D99 /* DesktopUIView.swift */,
 				50E8318C6686CABEEB9AB706 /* MirageMobileApp.swift */,
 				6997B50C1540FB4C278BB8AB /* PairingScan.swift */,
+				A1B2C3D4E5F6071829304154 /* SettingsSheet.swift */,
 			);
 			path = iOS;
 			sourceTree = "<group>";
@@ -113,6 +118,7 @@
 			children = (
 				CA8357B3AEC263F39103FAC9 /* FrameRecorder.swift */,
 				DA5646FA52FFFCC715643009 /* Keychain.swift */,
+				A1B2C3D4E5F6071829304152 /* ViewerSettings.swift */,
 				325AE3F4F8CE4455604ECEFB /* Platform.swift */,
 				0E1152201D0785134F2ADEBA /* ViewerSession.swift */,
 			);
@@ -268,8 +274,10 @@
 				ECB3983ACC10C20F61032EB2 /* FrameRecorder.swift in Sources */,
 				D4955D8CADDBC6C1A94F4118 /* HostMenu.swift in Sources */,
 				E114511A2FB50BA7601F0F43 /* Keychain.swift in Sources */,
+				A1B2C3D4E5F6071829304151 /* ViewerSettings.swift in Sources */,
 				58C40680A08B27AB9A4F2620 /* MirageMobileApp.swift in Sources */,
 				0DDE0B47E12B085CF9C24D74 /* PairingScan.swift in Sources */,
+				A1B2C3D4E5F6071829304153 /* SettingsSheet.swift in Sources */,
 				98A22E05D6AAAC07987921F4 /* Platform.swift in Sources */,
 				229802F3AE277C06A4CF2008 /* Scenarios.swift in Sources */,
 				C4DE1008FBECEE2276DF4255 /* Unified.swift in Sources */,

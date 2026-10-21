@@ -180,6 +180,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         stepViewMomentum(dt: dt)
         if scrollView.isTracking || scrollView.isDecelerating { pullFromScrollView() }
         syncViewport()
+        applyStartZoom()
         stepZoomAnimation()
         followCaret(dt: dt)
         guard let session, let comp = session.compositor, comp.width > 0, let context = session.context else { return }
@@ -366,6 +367,16 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         let p = scrollView.panGestureRecognizer
         guard p.state == .began || p.state == .changed else { return }
         p.isEnabled = false; p.isEnabled = touchMode == .direct
+    }
+
+    /// Settings › Display › On Connect: 1:1 host pixels (from the top-left, where the menu bar starts) instead of fit, once
+    /// per session, when the first picture's size is known.
+    private var startZoomApplied = false
+    private func applyStartZoom() {
+        guard !startZoomApplied, model?.streamInfo != nil, let c = session?.compositor, c.width > 0 else { return }
+        startZoomApplied = true
+        guard UserDefaults.standard.bool(forKey: ViewerSettings.startAtOneToOneKey) else { return }
+        animateZoom(to: oneToOne, about: CGPoint(x: containerRect.minX, y: containerRect.minY), duration: 0.3)
     }
 
     private func animateZoom(to z: Double, about anchor: CGPoint, duration: Double = 0.25) {
@@ -956,7 +967,9 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
     override var canBecomeFirstResponder: Bool { true }
     /// While the on-screen keyboard is off the view stays first responder (hardware keys arrive here) with an empty input view.
     override var inputView: UIView? { softKeyboard ? nil : noKeyboard }
-    override var inputAccessoryView: UIView? { softKeyboard ? accessoryBar : nil }
+    override var inputAccessoryView: UIView? { softKeyboard && accessoryRow ? accessoryBar : nil }
+    /// Settings › Input › Keyboard Accessory Row: esc, tab, ⌃⌥⌘ and the arrows above the on-screen keyboard.
+    var accessoryRow = true { didSet { if accessoryRow != oldValue, softKeyboard { reloadInputViews() } } }
 
     func setSoftKeyboard(_ on: Bool) {
         guard on != softKeyboard else { return }

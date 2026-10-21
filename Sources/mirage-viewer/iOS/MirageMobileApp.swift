@@ -57,11 +57,9 @@ final class AppState: ObservableObject {
         offered = nil
         guard !link.isExpired() else { linkProblem = "That pairing code has expired. Scan the one the Mac shows now."; return }
         UserDefaults.standard.set(link.address, forKey: "lastHost")
-        let defaults = UserDefaults.standard
-        let m = ViewerModel(bitrateKbps: defaults.object(forKey: "bitrate") as? Int ?? 800, pixelFactor: defaults.object(forKey: "scale") as? Double ?? 1.0)
-        m.showStats = false
+        let m = Self.makeModel()
         let s = ViewerSession(host: link.address, port: link.port, pairCode: nil, pairLink: link, model: m)
-        model = m; session = s
+        model = m; session = s; ViewerPreferences.shared.session = s
         s.start()
     }
 
@@ -81,17 +79,24 @@ final class AppState: ObservableObject {
     func connect(_ address: String, pairCode: String?) {
         let (host, port) = Self.parse(address)
         UserDefaults.standard.set(address, forKey: "lastHost")
-        let defaults = UserDefaults.standard
-        let m = ViewerModel(bitrateKbps: defaults.object(forKey: "bitrate") as? Int ?? 800, pixelFactor: defaults.object(forKey: "scale") as? Double ?? 1.0)
-        m.showStats = false   // behind the stats button; a phone has no room to spare for them by default
+        let m = Self.makeModel()
         let s = ViewerSession(host: host, port: port, pairCode: pairCode, model: m)
-        model = m; session = s
+        model = m; session = s; ViewerPreferences.shared.session = s
         s.start()
+    }
+
+    /// A session's model from the settings: bitrate cap (automatic by default), throttle (only a pinned one survives a
+    /// relaunch), stats overlay (behind the stats button; a phone has no room to spare for them by default).
+    private static func makeModel() -> ViewerModel {
+        let d = UserDefaults.standard, prefs = ViewerPreferences.shared
+        let m = ViewerModel(bitrateKbps: prefs.bitrateKbps, pixelFactor: d.object(forKey: "scale") as? Double ?? 1.0, throttle: prefs.throttle)
+        m.showStats = d.bool(forKey: ViewerSettings.showStatsKey)
+        return m
     }
 
     func disconnect() {
         session?.stop()
-        session = nil; model = nil
+        session = nil; model = nil; ViewerPreferences.shared.session = nil
     }
 
     /// Test and power-user hook: `-connect HOST[:PORT] [-pair CODE]` as launch arguments (simctl launch) connects at once;

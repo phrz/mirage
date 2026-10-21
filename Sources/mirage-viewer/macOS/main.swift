@@ -6,7 +6,10 @@ struct Options {
     var host = ""
     var port = Mirage.defaultPort
     var pair: String?
-    var bitrate = 800
+    /// nil: the Settings window's cap (automatic by default); headless runs: automatic.
+    var bitrate: Int?
+    /// --throttle: a preset's name, or DOWN/UP/RTT[/LOSS] (kbps, kbps, ms, %).
+    var throttle: NetworkThrottle?
     var pixelFactor = 1.0
     var statsLog: String?
     var window = (1280, 720)
@@ -31,6 +34,7 @@ struct Options {
         if let v = value("--port"), let p = UInt16(v) { o.port = p }
         if let v = value("--pair") { o.pair = v }
         if let v = value("--bitrate"), let b = Int(v) { o.bitrate = b }
+        if let v = value("--throttle") { o.throttle = Self.throttle(v) }
         if let v = value("--scale"), let f = Double(v) { o.pixelFactor = f }
         if let v = value("--stats-log") { o.statsLog = v }
         if let v = value("--duration"), let d = Double(v) { o.duration = d }
@@ -49,7 +53,8 @@ struct Options {
         if args.contains("-h") || args.contains("--help") {
             print("""
                 usage: mirage-viewer HOST [--port N] [--pair CODE] [--bitrate KBPS] [--scale F]
-                  --bitrate  bitrate cap in kbit/s (default 800); the host's controller stays at or below it; ⌃⌥⌘↑/↓ adjusts live
+                  --bitrate  bitrate cap in kbit/s (default: automatic, 0); the host's controller stays at or below it; ⌃⌥⌘↑/↓ adjusts live
+                  --throttle NAME | DOWN/UP/RTT[/LOSS]  simulate a link: Fast 4G, Slow 4G, 3G, Japan bus 4G, Extreme, or kbps/kbps/ms/%
                   --scale    stream pixels = window points × backing scale × F (default 1.0)
                   --window   initial window size in points, WxH (default 1280x720)
                   --stats-log PATH  append one line of stats per second to PATH
@@ -62,12 +67,21 @@ struct Options {
                              keys:N sends N scripted keystrokes to a host in input-sink mode only (input-integrity test)
                   --observe  show the picture but forward no local input (watching a scripted run without disturbing it)
                   --unified  start in Unified mode: every remote window a native window (⌃⌥⌘U switches Desktop ↔ Unified)
-                  ⌃⌥⌘S toggles the stats overlay, ⌃⌥⌘Q quits; all other keys go to the host.
+                  ⌃⌥⌘S toggles the stats overlay, ⌃⌥⌘, opens Settings, ⌃⌥⌘Q quits; all other keys go to the host.
                 """)
             exit(0)
         }
         o.host = args[0]
         return o
+    }
+
+    /// "Slow 4G" (any case, spaces optional) or "1000/500/300/1" (down kbps / up kbps / added RTT ms / loss %).
+    static func throttle(_ v: String) -> NetworkThrottle? {
+        let key = v.lowercased().replacingOccurrences(of: " ", with: "")
+        if let p = NetworkThrottle.presets.first(where: { $0.name.lowercased().replacingOccurrences(of: " ", with: "") == key }) { return p }
+        let n = v.split(separator: "/").compactMap { Double($0) }
+        guard n.count >= 3 else { FileHandle.standardError.write(Data("unknown --throttle \(v)\n".utf8)); return nil }
+        return NetworkThrottle(name: NetworkThrottle.customName, downKbps: Int(n[0]), upKbps: Int(n[1]), rttMs: n[2], lossPercent: n.count > 3 ? n[3] : 0)
     }
 }
 
@@ -202,10 +216,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @MainActor private func startViewer(host: String, pairCode: String?, pairLink: PairingLink? = nil) {
         UserDefaults.standard.set(host, forKey: "lastHost")
-        model = ViewerModel(bitrateKbps: options.bitrate, pixelFactor: options.pixelFactor)
+        let prefs = ViewerPreferences.shared
+        if let t = options.throttle { prefs.throttle = t }
+        model = ViewerModel(bitrateKbps: options.bitrate ?? prefs.bitrateKbps, pixelFactor: options.pixelFactor, throttle: prefs.throttle)
         model.observeOnly = options.observe || options.scenario != nil
         model.statsLog = options.statsLog.map { URL(fileURLWithPath: $0) }
         session = ViewerSession(host: host, port: pairLink?.port ?? options.port, pairCode: pairCode, pairLink: pairLink, model: model)
+        prefs.session = session
         if options.scenario != nil { session.inputAutoFlush = true }
         let content = ContentView(session: session, model: model)
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: options.window.0, height: options.window.1),
@@ -224,6 +241,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             c.unified = unified; unified?.chrome = c; chrome = c
         }
         LocalShortcuts.toggleStats = { [weak self] in self?.model.showStats.toggle() }
+        LocalShortcuts.openSettings = { [weak self] in self?.showSettings(nil) }
         LocalShortcuts.toggleMode = { [weak self] in self?.setUnified(!(self?.model.unified ?? false)) }
         if options.unified { setUnified(true) }
         session.start()
@@ -273,6 +291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if (notification.object as? NSWindow) === connectWindow { connectWindow = nil; becomeAccessoryIfIdle(); return }
         guard (notification.object as? NSWindow) === window else { return }
         session?.stop()
+        MainActor.assumeIsolated { ViewerPreferences.shared.session = nil }
         // Hosting: the viewer closes, the app stays in the menu bar. Otherwise closing the viewer quits, as before.
         if hostingCompanion { session = nil; window = nil; becomeAccessoryIfIdle() } else { NSApp.terminate(nil) }
     }
@@ -288,6 +307,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         quit.keyEquivalentModifierMask = [.control, .option, .command]
         let unifiedItem = NSMenuItem(title: "Unified Windows", action: #selector(toggleUnified(_:)), keyEquivalent: "u")
         unifiedItem.keyEquivalentModifierMask = [.control, .option, .command]
+        // ⌘, while the picture has focus goes to the host, as every other key; ⌃⌥⌘, opens Settings there.
+        appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        appMenu.addItem(.separator())
         appMenu.addItem(unifiedItem)
         appMenu.addItem(withTitle: "Show Remote Dock", action: #selector(toggleDock(_:)), keyEquivalent: "")
         appMenu.addItem(.separator())
@@ -313,6 +335,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSApp.mainMenu = main
     }
     @objc func quit(_ sender: Any?) { requestQuit() }
+
+    /// Settings (⌘, from the menu, ⌃⌥⌘, over the picture): the bitrate cap and the network throttle, applied to the
+    /// connected session at once.
+    private var settingsWindow: NSWindow?
+    @objc func showSettings(_ sender: Any?) {
+        MainActor.assumeIsolated {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            if let w = settingsWindow { w.makeKeyAndOrderFront(nil); return }
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 420), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            w.title = "Settings"
+            w.contentView = NSHostingView(rootView: MacSettingsView(prefs: ViewerPreferences.shared, model: model))
+            w.isReleasedWhenClosed = false
+            w.center()
+            w.makeKeyAndOrderFront(nil)
+            settingsWindow = w
+        }
+    }
+}
+
+/// The Mac's Settings window: Connection (bitrate cap; the network throttle under Developer) and About.
+struct MacSettingsView: View {
+    @ObservedObject var prefs: ViewerPreferences
+    let model: ViewerModel?
+    var body: some View {
+        Form {
+            ConnectionSettingsSection(prefs: prefs)
+            Section("About") {
+                LabeledContent("Mirage Viewer", value: ViewerSettings.appBuild)
+                if let model { MacHostAbout(model: model) }
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 460)
+        .frame(minHeight: 380)
+    }
+}
+private struct MacHostAbout: View {
+    @ObservedObject var model: ViewerModel
+    var body: some View {
+        LabeledContent("Host", value: model.hostDisplayName ?? model.hostName)
+        LabeledContent("Host Build", value: model.hostBuild ?? "older host (not reported)")
+    }
 }
 
 /// First window of the app: pick a paired host or enter a new one (with its 6-digit code).
@@ -446,7 +511,8 @@ struct StatsOverlay: View {
         let s = model.stats
         VStack(alignment: .leading, spacing: 2) {
             Text(model.status)
-            Text(String(format: "rtt %4.0f ms   age %4.0f ms   %4.1f fps   video %5.0f kbps   tiles %5.0f kbps   (cap %d)", s.rttMs, s.frameAgeMs, s.fps, s.kbps, s.tileKbps, model.bitrateKbps))
+            Text(String(format: "rtt %4.0f ms   age %4.0f ms   %4.1f fps   video %5.0f kbps   tiles %5.0f kbps   (cap %@)", s.rttMs, s.frameAgeMs, s.fps, s.kbps, s.tileKbps, model.bitrateKbps > 0 ? "\(model.bitrateKbps)" : "auto"))
+            if let t = model.throttle { Text("Throttled: \(t.name) (\(t.summary))").foregroundStyle(.orange) }
             Text(String(format: "%@   target %d kbps   capacity %d   queue %.0f ms   rung %d (%.3gx%@)   tile budget %d", s.rate.tier?.name ?? "–", s.rate.targetKbps, s.rate.capacityKbps, s.rate.queueMs, s.rate.rung, s.rate.scale, s.upscaling ? " MetalFX" : "", s.rate.tileBudgetKbps))
             Text(String(format: "video %dx%d   decode %.1f ms   frames %d   lost %d   skipped %d   tile rects %d   copy-rects %d   nacks %d (recovered %d, parity %d)", s.width, s.height, s.decodeMs, s.frames, s.lost, s.dropped, s.tileRects, s.copyRects, s.nacks, s.recoveredByNack, s.recoveredByParity))
             Text(String(format: "predictions shown %d   confirmed %d   mismatched %d   expired %d   layers %d (%d MB)", s.predictions.shown, s.predictions.confirmed, s.predictions.mismatched, s.predictions.expired, s.layers, s.layerMB))
@@ -454,7 +520,7 @@ struct StatsOverlay: View {
                 Text("host: \(h.consoleLocked ? "SCREEN LOCKED" : "unlocked")   front: \(h.frontmostApp) — \(h.frontmostWindowTitle.prefix(40))")
                     .foregroundStyle(h.consoleLocked ? .red : .white)
             }
-            Text("⌃⌥⌘S stats  ⌃⌥⌘U unified  ⌃⌥⌘↑↓ bitrate  ⌃⌥⌘Q quit").foregroundStyle(.secondary)
+            Text("⌃⌥⌘S stats  ⌃⌥⌘U unified  ⌃⌥⌘↑↓ bitrate  ⌃⌥⌘, settings  ⌃⌥⌘Q quit").foregroundStyle(.secondary)
         }
         .font(.system(size: 11, design: .monospaced))
         .foregroundStyle(.white)
@@ -469,7 +535,7 @@ if CommandLine.arguments.contains("--headless") {
     // Headless measurement mode: decode without presenting; usable over SSH on a machine with no GUI access.
     let o = Options.parse()
     let (model, session) = MainActor.assumeIsolated { () -> (ViewerModel, ViewerSession) in
-        let m = ViewerModel(bitrateKbps: o.bitrate, pixelFactor: o.pixelFactor)
+        let m = ViewerModel(bitrateKbps: o.bitrate ?? 0, pixelFactor: o.pixelFactor, throttle: o.throttle)
         m.statsLog = o.statsLog.map { URL(fileURLWithPath: $0) }
         return (m, ViewerSession(host: o.host, port: o.port, pairCode: o.pair, model: m))
     }

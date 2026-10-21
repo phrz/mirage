@@ -10,6 +10,10 @@ public final class Store: @unchecked Sendable {
     public init(root: URL? = nil) throws {
         if let root {
             self.root = root
+        } else if let test = ProcessInfo.processInfo.environment["MIRAGE_TEST_STORE"], !test.isEmpty {
+            // Test only: a throwaway host or viewer (its own identity, pairings and tunables), e.g. a loopback host for the
+            // iOS Simulator that must not touch this Mac's real pairings.
+            self.root = URL(fileURLWithPath: (test as NSString).expandingTildeInPath, isDirectory: true)
         } else {
             let base = try fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
             self.root = base.appendingPathComponent("Mirage", isDirectory: true)

@@ -18,7 +18,13 @@ final class ViewerModel: ObservableObject {
     @Published var cursor: CursorImage?
     @Published var remoteCursor: CGPoint? = nil      // normalized, host-reported
     @Published var streamInfo: ControlMessage.StreamInfo?
+    /// The bitrate cap the person chose, kbit/s; 0 = automatic (the host probes up to what the link sustains).
     @Published var bitrateKbps: Int
+    /// A simulated link for testing (developer setting); nil = the real link. Not kept across launches unless pinned.
+    @Published var throttle: NetworkThrottle?
+    /// The host's own name and build, from its Welcome (About).
+    @Published var hostDisplayName: String?
+    @Published var hostBuild: String?
     @Published var pixelFactor: Double
     var statsLog: URL?
     /// Forward no local input (a scripted run is being watched).
@@ -55,7 +61,7 @@ final class ViewerModel: ObservableObject {
         let size: CGSize
     }
 
-    init(bitrateKbps: Int, pixelFactor: Double) { self.bitrateKbps = bitrateKbps; self.pixelFactor = pixelFactor }
+    init(bitrateKbps: Int, pixelFactor: Double, throttle: NetworkThrottle? = nil) { self.bitrateKbps = bitrateKbps; self.pixelFactor = pixelFactor; self.throttle = throttle }
 }
 
 /// Owns the connection; feeds decoded frames, tiles and copy-rects to the compositor, forwards input,
@@ -192,7 +198,8 @@ final class ViewerSession: @unchecked Sendable {
 
     init(host: String, port: UInt16, pairCode: String?, pairLink: PairingLink? = nil, model: ViewerModel) {
         self.host = host; self.port = port; self.pairCode = pairCode; self.pairLink = pairLink; self.model = model
-        MainActor.assumeIsolated { model.hostName = host }
+        let throttle = MainActor.assumeIsolated { () -> NetworkThrottle? in model.hostName = host; return model.throttle }
+        applyUpstreamThrottle(throttle)
         if let context { layerViews[0] = LayerView(id: 0, context: context) }
         if let saved = ViewerCredentials.savedResume(host: host, port: port) {
             // A relaunched app (iOS): resume the host's session; input numbering continues past what the host has applied.
@@ -361,9 +368,12 @@ final class ViewerSession: @unchecked Sendable {
                 predictorLock.lock(); predictor = Predictor(); predictorLock.unlock()
                 videoQueue.sync { for v in layerViews.values { v.awaitingRecovery = false } }
             }
+            Task { @MainActor in model.hostDisplayName = welcome.hostName; model.hostBuild = welcome.hostBuild }
             log(resumed ? "session resumed by \(welcome.hostName) (\(disconnectedAt.map { String(format: "%.1f s gap", Date().timeIntervalSince($0)) } ?? ""))" : "authenticated to \(welcome.hostName)")
             setStatus(resumed ? "resumed session with \(welcome.hostName)" : "authenticated to \(welcome.hostName)")
-            sender = ControlSender(stream: control, log: { [weak self] in self?.log($0) })
+            let s = ControlSender(stream: control, log: { [weak self] in self?.log($0) })
+            s.shaper = { [weak self] in self?.upShaper }   // the throttle's upstream: acks, requests, window commands
+            sender = s
             // Tile stream (reliable) and datagram flow, both before the stream request so the host finds them.
             let tiles = try await client.openStream()
             try await tiles.sendRaw(Data([tileStreamMagic]))
@@ -477,7 +487,8 @@ final class ViewerSession: @unchecked Sendable {
 
     func requestStream(width: Int, height: Int) {
         Task { @MainActor in
-            var req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: model.bitrateKbps, maxFPS: 30, snapNative: Self.snapNative ? true : nil, tunablesVersion: Tunables.schemaVersion)
+            var req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: max(0, model.bitrateKbps), maxFPS: 30, snapNative: Self.snapNative ? true : nil, tunablesVersion: Tunables.schemaVersion,
+                                                   explicitBitrate: true, throttle: model.throttle)
             if req == lastRequest { return }
             guard let sender else { pendingRequest = req; log("stream request \(width)x\(height) queued until connected"); return }
             lastRequest = req; lastRequestSent = req
@@ -485,7 +496,7 @@ final class ViewerSession: @unchecked Sendable {
             // a viewer that holds none (an app relaunched with its saved resume token), and brings a kept one current.
             let held = holdsPicture
             req.holdsPicture = held
-            log("stream request \(width)x\(height) cap \(req.bitrateKbps) kbps\(held ? "" : ", no picture held")")
+            log("stream request \(width)x\(height) \(req.bitrateKbps > 0 ? "cap \(req.bitrateKbps) kbps" : "automatic bitrate")\(req.throttle.map { ", throttled: \($0.name) (\($0.summary))" } ?? "")\(held ? "" : ", no picture held")")
             sender.send(.streamRequest(req))
         }
     }
@@ -494,9 +505,40 @@ final class ViewerSession: @unchecked Sendable {
     var holdsPicture: Bool { statsLock.lock(); defer { statsLock.unlock() }; return pictureHeld }
     private var pictureHeld = false
 
+    /// ⌃⌥⌘↑/↓ on the Mac: from automatic, the steps start at the host's current target.
     @MainActor func adjustBitrate(by delta: Int) {
-        model.bitrateKbps = max(100, min(20_000, model.bitrateKbps + delta))
+        statsLock.lock(); let target = rateState.targetKbps; statsLock.unlock()
+        let base = model.bitrateKbps > 0 ? model.bitrateKbps : (target > 0 ? target : BitratePolicy.startKbps)
+        setBitrate(max(BitratePolicy.minimumCapKbps, min(50_000, base + delta)))
+    }
+    /// The person's cap (0 = automatic), applied at once with a new stream request.
+    @MainActor func setBitrate(_ kbps: Int) {
+        guard kbps != model.bitrateKbps else { return }
+        model.bitrateKbps = max(0, kbps)
         if let r = lastRequest { lastRequest = nil; requestStream(width: r.width, height: r.height) }
+    }
+    /// A simulated link (nil = off): the host shapes its downstream from the next stream request, this viewer its upstream now.
+    @MainActor func setThrottle(_ t: NetworkThrottle?) {
+        guard t != model.throttle else { return }
+        model.throttle = t
+        applyUpstreamThrottle(t)
+        log(t.map { "network throttle: \($0.name) (\($0.summary))" } ?? "network throttle off")
+        if let r = lastRequest { lastRequest = nil; requestStream(width: r.width, height: r.height) }
+    }
+
+    /// The throttle's upstream half: input datagrams, pings, probe echoes and control messages go through it.
+    private let shaperLock = NSLock()
+    private var _upShaper: LinkShaper?
+    var upShaper: LinkShaper? { shaperLock.lock(); defer { shaperLock.unlock() }; return _upShaper }
+    func applyUpstreamThrottle(_ t: NetworkThrottle?) {
+        shaperLock.lock(); defer { shaperLock.unlock() }
+        guard let t else { _upShaper = nil; return }
+        if let s = _upShaper { s.update(t, upstream: true) } else { _upShaper = LinkShaper(profile: t, upstream: true, label: "mirage.viewer.shaper") }
+    }
+    /// A datagram to the host, through the throttle when there is one.
+    private func sendDatagram(_ d: Data, on flow: MessageStream) {
+        let send = { flow.connection.send(content: d, completion: .contentProcessed { _ in }) }
+        if let s = upShaper { s.send(bytes: d.count, channel: LinkShaper.Channel.datagrams, reliable: false, send) } else { send() }
     }
 
     // MARK: Receive loops
@@ -616,7 +658,7 @@ final class ViewerSession: @unchecked Sendable {
                 if ping.echoNanos == 0 {
                     // A host delay probe: stamp it with our clock and send it straight back (the host's
                     // serialization-free one-way-delay sample for its rate controller).
-                    flow.connection.send(content: DatagramPing.echo(d, now: now), completion: .contentProcessed { _ in })
+                    sendDatagram(DatagramPing.echo(d, now: now), on: flow)
                 } else {
                     rttSample(sentNanos: ping.sentNanos, echoNanos: ping.echoNanos, now: now)
                 }
@@ -1068,7 +1110,7 @@ final class ViewerSession: @unchecked Sendable {
         while !stopped {
             try? await Task.sleep(for: .seconds(Mirage.keepaliveSeconds))
             pingSeq += 1
-            if let flow { try? await flow.sendRaw(DatagramPing.encode(seq: pingSeq)) }
+            if let flow { if upShaper != nil { sendDatagram(DatagramPing.encode(seq: pingSeq), on: flow) } else { try? await flow.sendRaw(DatagramPing.encode(seq: pingSeq)) } }
         }
     }
 
@@ -1148,7 +1190,7 @@ final class ViewerSession: @unchecked Sendable {
     private func sendInputDatagram(_ d: Data) {
         guard let flow else { return }
         if LossInjector.shared.shouldDrop() { return }   // test-only (MIRAGE_TEST_LOSS in the viewer's environment)
-        flow.connection.send(content: d, completion: .contentProcessed { _ in })
+        sendDatagram(d, on: flow)
     }
     private func flushInputNow() { if let d = input.packet(now: Clock.nowNanos()) { sendInputDatagram(d) } }
     private func inputAck(_ a: InputAck) { inputQueue.async { self.input.ack(a) } }
