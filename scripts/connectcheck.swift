@@ -62,10 +62,14 @@ func blockMad(_ a: [UInt8], _ b: [UInt8], _ m: [Bool]) -> Double {
     return n > 0 ? s / Double(n) : 0
 }
 struct R { var coherent: Int?; var crisp: Int?; var changes = 0; var inChange = false; var bestToFinal = Double.infinity; var regress = false }
+// The first picture: the first frame where anything is drawn (the desktop region no longer the empty canvas), so times can
+// be read from it as well as from the recorder's start (which includes connecting and signing in).
+var firstPictureMs: Int? = nil
 var res = [R](repeating: R(), count: regions.count)
 var prev: [UInt8]? = nil
 for line in lines {
     guard let f = load(line.i) else { continue }
+    if firstPictureMs == nil, blockMad(f, final, regions[0].mask) < 40 { firstPictureMs = line.ms }
     for (k, r) in regions.enumerated() {
         let toFinal = mad(f, final, r.mask)
         if res[k].coherent == nil, blockMad(f, final, r.mask) < 6 { res[k].coherent = line.ms }
@@ -87,5 +91,8 @@ for (k, reg) in regions.enumerated() { let r = res[k]
     if !ok { pass = false }
     print("\(reg.name): coherent \(t(res[k].coherent)), crisp \(t(res[k].crisp)), changes \(res[k].changes)\(res[k].regress ? ", REGRESSED" : "") \(ok ? "ok" : "FAIL")")
 }
-let coh = res.compactMap(\.coherent).max(), crisp = res.allSatisfy({ $0.crisp != nil }) ? res.compactMap(\.crisp).max() : nil
-print("ALL: coherent \(t(coh)), crisp \(t(crisp)) over \(lines.count) frames; \(pass ? "PASS (flicker)" : "FAIL (flicker)")")
+// The overall times leave out regions under 1 % of the frame (a window almost entirely covered), still listed above.
+let big = regions.indices.filter { k in regions[k].mask.filter { $0 }.count * 100 >= W * H }
+let coh = big.compactMap { res[$0].coherent }.max(), crisp = big.allSatisfy({ res[$0].crisp != nil }) ? big.compactMap { res[$0].crisp }.max() : nil
+func rel(_ ms: Int?) -> String { guard let ms, let f = firstPictureMs else { return "?" }; return String(format: "%.1f s", Double(ms - f) / 1000) }
+print("ALL: coherent \(t(coh)), crisp \(t(crisp)) (from the first picture at \(t(firstPictureMs)): coherent \(rel(coh)), crisp \(rel(crisp))) over \(lines.count) frames; \(pass ? "PASS (flicker)" : "FAIL (flicker)")")
