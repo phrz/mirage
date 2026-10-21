@@ -131,6 +131,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var tileSent: [UInt32: (nanos: UInt64, bytes: Int, refinement: Int, block: Int?, layer: UInt32, rects: [PixelRect])] = [:]
     /// Tile-stream bytes sent and not yet acked (RateController.inflightCapBytes bounds refinement by it).
     private var tileInflightBytes = 0
+    private var refineDesktopFirst = false
     private var lastEdgeLogNanos: UInt64 = 0
     /// In flight for the cap: what is on the stream plus blocks still being encoded (several were dispatched before the
     /// first was counted: 1.8 MB in flight against a 480 KB cap on a shaped Fast 4G run).
@@ -192,6 +193,21 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var statTimer: DispatchSourceTimer?
     private var statStaleDropped = 0
     private var accountTicks = 0
+    /// Invariant (compositor model): no tile anyone can see stays unsent. Every 5 s, per layer, visible tiles (not covered;
+    /// the desktop's not under a shown window) pending for over 10 s without changing are logged loudly and made due at
+    /// once. Hold-and-release rules had left revealed desktop black for good (phrz, 08:24Z: "patchy with black that never
+    /// heals"); whatever rule misses a release next, this catches it.
+    private func auditVisibleUnsent(now: UInt64) {
+        guard compositor, !screenLocked else { return }
+        for l in layers.values where l.announced || l.isDisplay {
+            let visible = (0..<l.tracker.tileCount).filter { !l.occludedTiles.contains($0) && !(l.isDisplay && l.underLayer.contains($0)) && !l.offDisplayTiles.contains($0) }
+            let stale = l.tracker.stalePending(visible, olderThan: 10_000_000_000, now: now)
+            guard !stale.isEmpty else { continue }
+            l.tracker.forceDue(stale, now: now)
+            log("INVARIANT: layer \(l.id) had \(stale.count) visible tiles unsent for over 10 s; made due now")
+        }
+    }
+
     /// Per-layer bytes by class over the last 30 s, largest first (app names only, never window titles).
     private func logAccount() {
         let byID = windows?.current?.byID ?? [:]
@@ -1499,7 +1515,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // toolbars and sidebars) show the blurred desktop behind it, which a move changes everywhere. Nothing goes now:
         // the tiles are held, the window settles, one lossy whole-layer level shows it (sendBackdropLevels), and lossless
         // refinement waits for idle. Lossless per move resent ~386 tiles, 374–487 KB per Finder drag at 800 kbps.
-        if Self.backdropHold, !layer.isDisplay, layer.movedNanos > 0, layer.backdropDirty || Clock.elapsed(since: layer.movedNanos, now: now) < Self.backdropSettleNanos,
+        if Self.backdropHold, !compositor, !layer.isDisplay, layer.movedNanos > 0, layer.backdropDirty || Clock.elapsed(since: layer.movedNanos, now: now) < Self.backdropSettleNanos,
            dirty.count >= max(12, (tracker.tileCount - layer.occludedTiles.count) / 20) {
             tracker.holdUntilIdle(dirty, now: now)
             layer.backdropDirty = true; layer.backdropHeldNanos = now
@@ -2511,8 +2527,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // else is idle: a desktop with an animating app would starve it).
         if let d = display { upgradeStep(d, now: now) }
         let windowLayers = ordered.filter { !$0.isDisplay }
+        // The desktop and the windows take turns: windows always first starved the desktop whenever one window had live
+        // activity (the Claude app on mac-daddy), and desktop revealed by a moved window stayed black for good.
+        refineDesktopFirst.toggle()
+        if refineDesktopFirst, let d = display, refineStep([d], now: now) { return }
         if refineStep(windowLayers, now: now) { return }
-        if let d = display, refineStep([d], now: now) { return }
+        if !refineDesktopFirst, let d = display, refineStep([d], now: now) { return }
         // Nothing to refine with budget and room in flight: the acks that follow say what we sent, not what the link carries.
         if tileTokens > 0 { rc?.noteIdle(now: now) }
     }
@@ -3233,6 +3253,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             for l in layers.values { l.frames = 0; l.sentBytes = 0; l.sentDirect = 0; l.sentRefine = 0 }
             accountTicks += 1
             if accountTicks >= 6 { accountTicks = 0; logAccount() }
+            auditVisibleUnsent(now: Clock.nowNanos())
             statStaleDropped = 0; statStills = 0; statOccluded = 0; statWindowCommands = 0; statTaintResent = 0; statExclusionLag = 0
             statControlBytes = 0; statFoveaTiles = 0
             statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0

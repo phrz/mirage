@@ -382,4 +382,18 @@ final class TileSchedulerTests: XCTestCase {
         for k in 0..<10 { let p = typing.classify(dirty: icon, now: UInt64(k) * 80_000_000 + 1_000_000_000); sent += p.lossless.count; XCTAssertTrue(p.flicker.isEmpty) }
         XCTAssertEqual(sent, 30, "with input flowing it stays lossless")
     }
+
+    /// The never-unsent invariant's tools: a held tile (a release that never came) shows up as stale after the age and
+    /// becomes due when forced; a tile that keeps changing is never stale (it is being sent).
+    func testAHeldTileThatNeverGetsReleasedIsFoundAndMadeDue() {
+        var t = TileTracker(width: 640, height: 384)
+        let s: UInt64 = 1_000_000_000
+        t.holdUntilIdle([5, 6], now: s)
+        _ = t.classify(dirty: [7], now: s)
+        XCTAssertEqual(t.stalePending([5, 6, 7], olderThan: 10 * s, now: s + 5 * s), [])
+        XCTAssertEqual(Set(t.stalePending([5, 6, 7], olderThan: 10 * s, now: s + 11 * s)), [5, 6], "held for 11 s, never released")
+        XCTAssertTrue(t.due(now: s + 11 * s, limit: 10, centre: nil).isEmpty || !t.due(now: s + 11 * s, limit: 10, centre: nil).contains(5), "held: not due")
+        t.forceDue([5, 6], now: s + 11 * s)
+        XCTAssertTrue(Set(t.due(now: s + 11 * s, limit: 10, centre: nil)).isSuperset(of: [5, 6]), "forced: due now")
+    }
 }

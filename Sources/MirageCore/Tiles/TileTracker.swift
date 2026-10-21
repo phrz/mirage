@@ -197,6 +197,14 @@ public struct TileTracker {
     /// Pending tiles inside `rect` (and in `only`, if given) become due now (a fovea moved over them, a
     /// covered part of a window was uncovered).
     @discardableResult
+    /// Pending tiles (among `candidates`) waiting since before `now - ageNanos`: deferred, held or starved, not re-dirtied.
+    public func stalePending(_ candidates: [Int], olderThan ageNanos: UInt64, now: UInt64) -> [Int] {
+        candidates.filter { $0 >= 0 && $0 < cells.count && cells[$0].pending && cells[$0].pendingSince > 0 && now &- cells[$0].pendingSince > ageNanos }
+    }
+    /// These tiles are due now, held or deferred or not.
+    public mutating func forceDue(_ tiles: [Int], now: UInt64) {
+        for i in tiles where i >= 0 && i < cells.count && cells[i].pending { cells[i].held = false; cells[i].dueNanos = now }
+    }
     public mutating func expedite(in rect: PixelRect, now: UInt64, only: Set<Int>? = nil) -> Int {
         var n = 0
         for i in tiles(covering: [rect]) where cells[i].pending && !cells[i].held && cells[i].dueNanos > now && (only?.contains(i) ?? true) { cells[i].dueNanos = now; n += 1 }
