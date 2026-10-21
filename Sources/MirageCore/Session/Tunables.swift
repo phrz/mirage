@@ -45,6 +45,9 @@ public struct Tunables: Codable, Equatable, Sendable {
         // Host only: an automatic-bitrate stream's ceiling in kbit/s (BitratePolicy): the controller starts at 800 and probes
         // up to whatever the link sustains, never above this.
         case autoMaxKbps
+        // Host only: 1 = warm host (WarmPool): with no stream, the visible windows' captures keep running at 1 fps, their
+        // latest frames in memory (never on disk, dropped on lock, display sleep or battery), adopted at connect; 0 = off.
+        case warmCapture
 
         /// Compiled-in default and the bounds a host value is clamped to.
         public var spec: (default: Double, min: Double, max: Double) {
@@ -74,6 +77,7 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .connectProbe: return (1, 0, 1)
             case .startKbps: return (2_000, 150, 50_000)
             case .autoMaxKbps: return (50_000, 1_000, 200_000)
+            case .warmCapture: return (1, 0, 1)
             }
         }
     }

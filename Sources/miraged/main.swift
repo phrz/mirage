@@ -38,6 +38,7 @@ struct Serve: AsyncParsableCommand {
         let ctx = HostContext(identity: identity, store: store, tlsFingerprint: tls.fingerprint, log: { log($0) },
                               makeStreamer: { MacDesktopStreamer(log: { log($0) }) })
         let host = try QUICHost(port: port, tls: tls)
+        WarmPool.shared.start(log: { log($0) })   // warm host (M-FIVE): visible windows' captures running before anyone connects
         log("mirage host \(identity.name) id=\(identity.id.prefix(12)) tls=\(tls.fingerprint.prefix(6).map { String(format: "%02x", $0) }.joined()) devices=\(try store.authorizedDevices().count)")
         // TCC: prompting registers this binary in System Settings → Privacy & Security so it can be ticked once.
         // MIRAGE_NO_PERMISSION_PROMPTS: check only (test runs on a Mac whose grants belong to another binary).

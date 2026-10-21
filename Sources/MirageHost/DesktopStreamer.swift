@@ -16,7 +16,17 @@ import MirageCore
 /// z-order, levels, which windows are layers) goes on the control stream; the client composites.
 /// All mutable state lives on `queue`; tile encoding runs on `tileQueue`.
 public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
-    private let queue = DispatchQueue(label: "mirage.host.video", qos: .userInteractive)
+    /// One queue for every streamer and the warm pool (WarmPool), so a capture the pool started is adopted on its own queue.
+    static let hostQueue = DispatchQueue(label: "mirage.host.video", qos: .userInteractive)
+    private let queue = MacDesktopStreamer.hostQueue
+    /// This streamer counts as an active stream for the warm pool (between start/resume and suspend/stop).
+    private var warmHeld = false
+    /// On `queue`.
+    private func holdWarm(_ on: Bool) {
+        guard on != warmHeld else { return }
+        warmHeld = on
+        if on { WarmPool.shared.streamStarted() } else { WarmPool.shared.streamStopped() }
+    }
     private let inputQueue = DispatchQueue(label: "mirage.host.input", qos: .userInteractive)
     private let tileQueue = DispatchQueue(label: "mirage.host.tiles", qos: .userInitiated)
     private let log: @Sendable (String) -> Void
@@ -380,6 +390,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     // MARK: DesktopStreamer
 
     public func start(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
+        queue.sync { holdWarm(true) }
+        do { return try await startStream(req, output: output) } catch { queue.sync { holdWarm(false) }; throw error }
+    }
+    private func startStream(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         let t = try await ScreenCapturer.resolve(req)
         // The window list and the SCWindow catalog come first, so the display stream can exclude the
         // layered windows from its very first frame (the picture under them is part of the base picture).
@@ -801,6 +815,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Whatever was in flight is treated as lost: unacked tile messages have their rects queued for a
     /// lossless resend, unacked video frames are forgotten (the resume keyframe replaces them).
     public func suspend() async {
+        queue.sync { holdWarm(false) }
         queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.request?.networkFingerprint) }   // the next connect starts there
         // The session is cut loose first (output, timers, captures detached), then the captures are stopped, each within 3 s:
         // ScreenCaptureKit's stopCapture can fail to return, and awaiting it before the cut left a suspended streamer
@@ -899,6 +914,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     public func resume(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         // Taken over from a connection the host had not yet noticed was dead: suspend that side first.
         if capturer != nil { await suspend() }
+        queue.sync { holdWarm(true) }
+        do { return try await resumeStream(req, output: output) } catch { queue.sync { holdWarm(false) }; throw error }
+    }
+    private func resumeStream(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         let cap = ScreenCapturer(queue: queue)
         cap.forceNextFrame = true
         await catalog.refreshNow()
@@ -959,6 +978,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     public func stop() async {
+        queue.sync { holdWarm(false) }
         queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.request?.networkFingerprint) }
         // Cut loose first, then stop the captures within 3 s each (suspend()).
         let (cap, caps): (ScreenCapturer?, [WindowCapturer]) = await withCheckedContinuation { c in
@@ -1222,6 +1242,23 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // on transparency, and macOS does not badge a window that a capture merely leaves in.
         let own = Set([l.id] + (s.children[l.id] ?? []))
         let others = catalog.all.filter { !own.contains($0.windowID) }
+        // Warm host: the pool's running capture of this window, reconfigured for the layer, with its latest frame as the
+        // layer's first; no ScreenCaptureKit start to wait for.
+        if let (cap, last) = WarmPool.shared.take(l.id) {
+            l.capturer = cap
+            l.forceFullDiff = true
+            cap.onStop = { [weak self, weak l] err in self?.queue.async {
+                guard let l, l.capturer === cap else { return }; l.capturer = nil; self?.log("layer \(l.id) capture stopped: \(err.map { "\($0)" } ?? "ok")")
+                if let err { self?.useFallback(l, why: "its own capture stopped (\(err))") }
+            } }
+            cap.adopt { [weak self] pb, nanos in self?.queue.async { self?.ownFrame(pb, nanos, layer: l) } }
+            cap.exclude(others)
+            cap.follow(pointFrame: pointFrame, width: l.width, height: l.height, fps: 10)
+            let fits = last.map { CVPixelBufferGetWidth($0) == cap.width && CVPixelBufferGetHeight($0) == cap.height } ?? false
+            log("layer \(l.id): warm capture adopted\(fits ? " with its frame" : last == nil ? " (no frame yet)" : " (its frame is another size)")")
+            if fits, let last, l.lastFrame == nil { captured(last, Clock.nowNanos(), dirtyRects: [], layerID: l.id) }
+            return
+        }
         let cap = WindowCapturer(window: sc, display: display, pointFrame: pointFrame, width: l.width, height: l.height, fps: 10, queue: queue)
         l.capturer = cap
         l.forceFullDiff = true

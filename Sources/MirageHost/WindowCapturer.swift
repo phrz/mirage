@@ -125,6 +125,9 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         queue.sync { stream = s; appliedFilter = ids; appliedConfig = k; needFull = true; apply() }
     }
 
+    /// On `queue`: a running capture changes hands (the warm pool's, taken over by a streamer): frames go to `onFrame` now.
+    func adopt(onFrame: @escaping (CVPixelBuffer, UInt64) -> Void) { self.onFrame = onFrame; needFull = true }
+
     /// On `queue`: the window's current frame (global points), pixel size and frame interval.
     func follow(pointFrame f: CGRect, width: Int, height: Int, fps: Int) {
         let w = max(2, width) & ~1, h = max(2, height) & ~1

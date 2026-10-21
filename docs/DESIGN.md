@@ -211,6 +211,16 @@ over from there. Stage (1)'s budget uses this estimate.
 The viewer also logs each stage per layer (placeholder, coherent, lossless) with its time, and the host logs the probe's
 estimate, so a failure says where it came from.
 
+**Warm host (prototype, WarmPool).** ScreenCaptureKit starts window streams *and* screenshots one after another (~0.75 s
+each on mac-daddy), so "parallel capture starts" cannot work: with eight windows the last own frame came ~4-6 s after the
+connect. So the starts leave the connect path: while no stream is active, the host keeps the visible normal windows'
+captures running (the largest 12, 1 fps, the stream's own filter, dirty-rect driven so a still window costs nothing) with
+each window's latest frame in memory. At connect the streamer adopts the running capture (follow + exclude reconfigure
+it to 10 fps and the layer's size) and its frame is the layer's first. Privacy: frames only in memory, never on disk;
+everything dropped while the screen is locked, the display sleeps or the Mac is on battery (laptops warm on AC only).
+Tunable `warmCapture` (default 1). Next: the desktop and overlay display captures warm too, and each layer's lossless tiles
+kept pre-encoded (1x and 2x), so stage 1 and lossless go out at link rate from the first round trip.
+
 **Order of work.** Spec (this) → placeholders in both models, with the desktop's → probe → stage (1) set and barrier on the
 viewer → stage (2) per-layer only → parallel capture starts → the acceptance test, which then gates deploys. The tile cache
 (§3.0c) follows.
