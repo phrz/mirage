@@ -135,4 +135,19 @@ final class DeliveryRateTests: XCTestCase {
         XCTAssertFalse(rc.inStartup)
         XCTAssertEqual(rc.deliveryCeilingKbps, 19_800, "1.1 × the resumed estimate until acks measure the link")
     }
+
+    /// The viewer reads datagrams in batches and stamps a batch with one time (the 231 Mbps misread of a 20 Mbps link).
+    /// Whatever the batch size, the probe either reads nothing or reads within 2x of the truth; never 10x.
+    func testBatchedArrivalsNeverReadTenTimesTheLink() {
+        let spacing = 1.225e6   // 8.1 Mbps, 1240-byte packets
+        for batch in 1...12 {
+            for count in [16, 40] {
+                // Packet i really arrives at i x spacing; the viewer stamps it when its batch is read (the batch's last packet).
+                let r: [UInt64] = (0..<count).map { i in UInt64((Double((i / batch + 1) * batch - 1)) * spacing) }
+                guard let kbps = RateController.trainRate(r, packetBytes: 1240) else { continue }
+                XCTAssertLessThanOrEqual(Double(kbps), 8_100 * 2, "batch \(batch), \(count) packets: \(kbps) kbps")
+                XCTAssertGreaterThanOrEqual(Double(kbps), 8_100 * 0.5, "batch \(batch), \(count) packets: \(kbps) kbps")
+            }
+        }
+    }
 }
