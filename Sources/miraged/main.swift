@@ -23,6 +23,7 @@ struct Serve: AsyncParsableCommand {
     @Option(name: .shortAndLong, help: "UDP port to listen on.") var port: UInt16 = Mirage.defaultPort
     @Option(help: "Host name shown to clients (default: this Mac's computer name).") var name: String?
     @Option(help: "Append stdout and stderr to this file (~ expands): the app's login-item agent cannot name ~ in its plist.") var logFile: String?
+    @Flag(help: "No local control socket and no permission watcher: a second, test instance beside the login-item agent (whose control.sock it would otherwise take over).") var noLocalControl = false
 
     func run() async throws {
         if let logFile {
@@ -56,8 +57,11 @@ struct Serve: AsyncParsableCommand {
         })
         // The Mirage app on this Mac drives pairing through the local control socket (Pair a Device…, Allow / Deny).
         let control = LocalControlServer(ctx: ctx, port: port, log: { log($0) })
-        do { try control.start() } catch { log("local control unavailable: \(error)") }
-        if !(screen && ax) { watchPermissions(screen: screen, ax: ax, control: control) }
+        if noLocalControl { log("test instance: no local control, no permission watcher") }
+        else {
+            do { try control.start() } catch { log("local control unavailable: \(error)") }
+            if !(screen && ax) { watchPermissions(screen: screen, ax: ax, control: control) }
+        }
         try await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
         _ = control
     }
