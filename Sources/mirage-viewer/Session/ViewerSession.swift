@@ -1186,7 +1186,7 @@ final class ViewerSession: @unchecked Sendable {
 
     /// Test measurement: of the desktop layer's tiles touching `rects`, how many have been shown lossless since the stream
     /// started, and when the last of those landed (ms after the start).
-    func desktopLosslessCoverage(_ rects: [PixelRect]) -> (lossless: Int, total: Int, lastMs: Double) {
+    func desktopLosslessCoverage(_ rects: [PixelRect], excluding covered: [PixelRect] = []) -> (lossless: Int, total: Int, lastMs: Double) {
         var n = 0, total = 0, last: UInt64 = 0
         videoQueue.sync {
             guard let v = layerViews[0], v.compositor.width > 0, !v.losslessAt.isEmpty, streamStartNanos > 0 else { return }
@@ -1196,6 +1196,8 @@ final class ViewerSession: @unchecked Sendable {
                 let c0 = max(0, pr.x / 64), c1 = min(cols - 1, (pr.maxX - 1) / 64), r0 = max(0, pr.y / 64), r1 = min(rows - 1, (pr.maxY - 1) / 64)
                 guard c1 >= c0, r1 >= r0 else { continue }
                 for r in r0...r1 { for c in c0...c1 where seen.insert(r * cols + c).inserted {
+                    let tile = PixelRect(x: c * 64, y: r * 64, width: 64, height: 64)
+                    if covered.contains(where: { $0.intersection(tile) == tile }) { continue }   // under a window: never sent there
                     total += 1
                     let t = v.losslessAt[r * cols + c]
                     if t > streamStartNanos { n += 1; last = max(last, t) }

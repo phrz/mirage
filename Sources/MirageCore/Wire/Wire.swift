@@ -569,8 +569,12 @@ public enum ControlMessage: Codable, Equatable {
         /// Viewers streaming from this host right now, this one included: a scripted run refuses to start (and stops)
         /// while anyone else is connected.
         public var viewers: Int?
-        public init(consoleLocked: Bool, frontmostApp: String, frontmostWindowID: UInt32, frontmostWindowTitle: String, inputSink: Bool? = nil, viewers: Int? = nil) {
+        /// The desktop's always-visible chrome in stream pixels (menu bar and Dock: the screen's frame minus its visibleFrame),
+        /// as the host refines it first; measurements use it. nil from older hosts.
+        public var chrome: [PixelRect]?
+        public init(consoleLocked: Bool, frontmostApp: String, frontmostWindowID: UInt32, frontmostWindowTitle: String, inputSink: Bool? = nil, viewers: Int? = nil, chrome: [PixelRect]? = nil) {
             self.consoleLocked = consoleLocked; self.frontmostApp = frontmostApp; self.frontmostWindowID = frontmostWindowID; self.frontmostWindowTitle = frontmostWindowTitle; self.inputSink = inputSink; self.viewers = viewers
+            self.chrome = chrome
         }
     }
     /// What the host's rate controller is doing, once a second, for the overlay and --headless JSON.

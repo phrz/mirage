@@ -576,17 +576,23 @@ final class ScenarioRunner {
     /// The desktop's chrome (DESIGN §3.3): the menu bar (24 pt) and the Dock (its window, else a 70-pt bottom band), final
     /// within a few seconds of the connect. Coverage sampled every 250 ms for 20 s.
     private func measureChrome(label: String, W: Int, H: Int, ppp: Double) async {
+        // The host's own chrome rects (frame minus visibleFrame, in its status), else the Dock window, else a 70-pt band; tiles fully
+        // under a layered window (inset for its rounded corners) are left out, as the host leaves them out.
+        for _ in 0..<40 where session.hostStatus?.chrome == nil { try? await Task.sleep(for: .milliseconds(100)) }
         let dockFrames = session.windows.filter { $0.app == "Dock" && $0.frame.y > H / 2 && $0.frame.height < H / 4 }.map(\.frame)
-        let chrome = [PixelRect(x: 0, y: 0, width: W, height: Int(24 * ppp))] + (dockFrames.isEmpty ? [PixelRect(x: 0, y: H - Int(70 * ppp), width: W, height: Int(70 * ppp))] : dockFrames)
+        let hostChrome = session.hostStatus?.chrome ?? []
+        let chrome = !hostChrome.isEmpty ? hostChrome : [PixelRect(x: 0, y: 0, width: W, height: Int(24 * ppp))] + (dockFrames.isEmpty ? [PixelRect(x: 0, y: H - Int(70 * ppp), width: W, height: Int(70 * ppp))] : dockFrames)
+        let inset = Int(14 * ppp)
+        let covered = session.windows.filter(\.isLayered).map { PixelRect(x: $0.frame.x + inset, y: $0.frame.y + inset, width: $0.frame.width - 2 * inset, height: $0.frame.height - 2 * inset) }
         var marks: [Int: Double] = [:]
         for _ in 0..<80 {
             try? await Task.sleep(for: .milliseconds(250))
-            let c = session.desktopLosslessCoverage(chrome)
+            let c = session.desktopLosslessCoverage(chrome, excluding: covered)
             guard c.total > 0 else { continue }
             for pct in [50, 90, 100] where marks[pct] == nil && c.lossless * 100 >= c.total * pct { marks[pct] = c.lastMs }
         }
-        let fin = session.desktopLosslessCoverage(chrome)
-        session.log("scenario \(label): chrome: \(fin.lossless)/\(fin.total) menu-bar and Dock tiles lossless (Dock \(dockFrames.isEmpty ? "band" : "window")); 50 % at \(marks[50].map { String(format: "%.1f s", $0 / 1000) } ?? "-"), 90 % at \(marks[90].map { String(format: "%.1f s", $0 / 1000) } ?? "-"), 100 % at \(marks[100].map { String(format: "%.1f s", $0 / 1000) } ?? "-") after the stream started")
+        let fin = session.desktopLosslessCoverage(chrome, excluding: covered)
+        session.log("scenario \(label): chrome: \(fin.lossless)/\(fin.total) menu-bar and Dock tiles lossless (\(!hostChrome.isEmpty ? "host rects" : dockFrames.isEmpty ? "band" : "Dock window")); 50 % at \(marks[50].map { String(format: "%.1f s", $0 / 1000) } ?? "-"), 90 % at \(marks[90].map { String(format: "%.1f s", $0 / 1000) } ?? "-"), 100 % at \(marks[100].map { String(format: "%.1f s", $0 / 1000) } ?? "-") after the stream started")
     }
 
     private func realApps() async {
