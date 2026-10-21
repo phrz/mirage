@@ -296,6 +296,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // Uncovered tiles that went out at underlay quality are refined at the normal quality now.
             let uncoveredLossy = d.underlayLossy.subtracting(under)
             if !uncoveredLossy.isEmpty { d.upgradePending.formUnion(uncoveredLossy); d.underlayLossy.subtract(uncoveredLossy) }
+            // Compositor model: desktop under a window is left for last; uncovered before it was sent (Show Desktop, a window
+            // moved away), it is due now. It stayed black down the left edge for a whole Show Desktop round on mac-daddy.
+            if compositor {
+                let uncovered = d.underLayer.subtracting(under).filter { !d.tracker.isCrisp($0) }
+                if !uncovered.isEmpty { _ = d.tracker.expedite(in: d.bounds, now: now, only: uncovered) }
+            }
             d.underLayer = under
         }
         // Desktop under two or more shown windows only shows if both move: its underlay waits until one window covers it.
@@ -1071,12 +1077,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
             l.visibleFraction = fraction
             l.frontmost = w.id == frontID
-            // Tiles of the layer fully inside a covering rect (or outside the display) are occluded.
+            // Tiles of the layer fully inside a covering rect (or wholly outside the display) are occluded. A tile across the
+            // display's edge is partly visible: counted as occluded, it was never sent again, and a window over the left edge
+            // showed a black column after Show Desktop (mac-daddy, compositor, 8249cda).
             var occluded = Set<Int>()
             let onScreen = l.local(w.frame.intersection(displayRect))
             for i in 0..<l.tracker.tileCount {
                 let r = l.tracker.rect(of: i)
-                if r.intersection(onScreen) != r || hiddenHere && unifiedView { occluded.insert(i); continue }
+                if r.intersection(onScreen).isEmpty || hiddenHere && unifiedView { occluded.insert(i); continue }
                 let rd = r.offset(l.frame.x, l.frame.y)
                 if covering.contains(where: { $0.intersection(rd) == rd }) { occluded.insert(i) }
             }
