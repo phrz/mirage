@@ -35,7 +35,17 @@ for l in last.layers {
     if m.contains(true) { regions.append(Region(name: "layer \(l.id) \(l.x * 4),\(l.y * 4) \(l.w * 4)x\(l.h * 4)", mask: m)) }
 }
 regions.insert(Region(name: "desktop", mask: covered.map { !$0 }), at: 0)
+// The menu bar and the Dock (the overlay's chrome, live: clocks, animated icons) are no window's and no desktop's: left out.
+let topBand = 64 / 4, bottomBand = 176 / 4
+for k in regions.indices { for y in 0..<H where y < topBand || y >= H - bottomBand { for x in 0..<W { regions[k].mask[y * W + x] = false } } }
 guard let final = load(last.i) else { print("no final frame"); exit(1) }
+// The final frame must be settled (the last 2 s steady), or "crisp" means nothing: run longer.
+if lines.count > 21, let early = load(lines[lines.count - 21].i) {
+    var s = 0, n = 0
+    for p in stride(from: 0, to: W * H, by: 7) where regions.contains(where: { $0.mask[p] }) { let o = p * 4; s += abs(Int(early[o]) - Int(final[o])) + abs(Int(early[o+1]) - Int(final[o+1])) + abs(Int(early[o+2]) - Int(final[o+2])); n += 3 }
+    let d = n > 0 ? Double(s) / Double(n) : 0
+    if d > 0.5 { print(String(format: "final frame not settled (%.2f levels moved in its last 2 s): run longer", d)) }
+}
 func mad(_ a: [UInt8], _ b: [UInt8], _ m: [Bool]) -> Double {
     var s = 0, n = 0
     for p in stride(from: 0, to: W * H, by: 2) where m[p] { let o = p * 4; s += abs(Int(a[o]) - Int(b[o])) + abs(Int(a[o+1]) - Int(b[o+1])) + abs(Int(a[o+2]) - Int(b[o+2])); n += 3 }
