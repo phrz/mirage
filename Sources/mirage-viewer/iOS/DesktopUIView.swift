@@ -847,6 +847,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         switch target {
         case .layerTitleBar(let id, let frame):
             layerDrag = (id, frame, p, false)
+            if session.injectedDrags { button(0, down: true) }   // the real press: the host's window server takes it
             session.pressTitleBar(windowID: id)
         case .displayTitleBar(let id, let frame):
             let seq = button(0, down: true)
@@ -867,6 +868,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
                 ld.moved = true; layerDrag = ld
                 session.beginLayerDrag(windowID: ld.windowID)
             }
+            if session.injectedDrags { session.sendMouseMove(x: pointer.x, y: pointer.y) }
             session.dragLayer(windowID: ld.windowID, to: ld.frame.offset(dx, dy))   // held where macOS lets a window go
             return
         }
@@ -886,6 +888,11 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         guard let session, !observeOnly else { layerDrag = nil; drag = nil; return }
         if let ld = layerDrag {
             layerDrag = nil
+            if session.injectedDrags {
+                button(0, down: false)
+                if ld.moved { session.endLayerDrag(windowID: ld.windowID) }
+                return
+            }
             if ld.moved { session.endLayerDrag(windowID: ld.windowID) }
             else {
                 let seq = button(0, down: true)

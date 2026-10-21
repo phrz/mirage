@@ -34,6 +34,9 @@ public struct Tunables: Codable, Equatable, Sendable {
         case compositorModel
         // Host only: 1 = placeholders (DESIGN §3.0b): at stream start every visible window gets a 32-px stand-in at once.
         case placeholders
+        // 1 = a window drag is real mouse events on the host (down at the press, moves, up), the local layer drag only a
+        // prediction reconciled to the host's frame; 0 = the window is moved and raised through Accessibility.
+        case injectedDrags
         // Host only: an automatic-bitrate stream's ceiling in kbit/s (BitratePolicy): the controller starts at 800 and probes
         // up to whatever the link sustains, never above this.
         case autoMaxKbps
@@ -62,6 +65,7 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .smallAnimationQuality: return (50, 10, 90)
             case .compositorModel: return (0, 0, 1)
             case .placeholders: return (1, 0, 1)
+            case .injectedDrags: return (1, 0, 1)
             case .autoMaxKbps: return (50_000, 1_000, 200_000)
             }
         }

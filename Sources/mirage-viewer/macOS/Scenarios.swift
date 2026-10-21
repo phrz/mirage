@@ -322,6 +322,19 @@ final class ScenarioRunner {
             }
             session.log("scenario zorder: before: Finder in front \(front().map(String.init) ?? "?")")
             let t0 = Clock.nowNanos()
+            // The press point: in the title-bar strip, past the traffic lights (as a hand would take it).
+            // On the part of its title strip the bench does not cover (a press there is a press on Finder, as for a hand).
+            let fr = finder.frame, bf = w.frame
+            let visL = fr.x + Int(100 * ppp), visR = fr.maxX - Int(20 * ppp)
+            let px: Int
+            if bf.maxX < visR { px = (max(visL, bf.maxX) + visR) / 2 }
+            else if bf.x > visL { px = (visL + min(visR, bf.x)) / 2 }
+            else if fr.y + Int(12 * ppp) < bf.y { px = (visL + visR) / 2 }
+            else { session.log("scenario zorder: Finder's title strip is covered by the bench; move it aside first"); return }
+            let py = fr.y + Int(12 * ppp)
+            session.log("scenario zorder: pressing Finder's title strip at \(px),\(py)")
+            let injected = session.injectedDrags
+            if injected { let (nx, ny) = normalized(px, py); session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true); session.send(.mouseButton(.init(button: 0, down: true, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true) }
             session.pressTitleBar(windowID: finder.id)
             session.beginLayerDrag(windowID: finder.id)
             let target = PixelRect(x: w.frame.x + w.frame.width / 4, y: w.frame.y + 40, width: finder.frame.width, height: finder.frame.height)
@@ -329,13 +342,16 @@ final class ScenarioRunner {
             for k in 1...60 {   // 1 s drag toward the bench's middle
                 let f = finder.frame
                 let fx = f.x + (target.x - f.x) * k / 60, fy = f.y + (target.y - f.y) * k / 60
+                if injected { let (nx, ny) = normalized(px + fx - f.x, py + fy - f.y); session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true) }
                 session.dragLayer(windowID: finder.id, to: PixelRect(x: fx, y: fy, width: f.width, height: f.height))
                 try? await Task.sleep(for: .milliseconds(16))
                 if let fr = front() { if fr, frontAt == nil { frontAt = Double(Clock.elapsed(since: t0, now: Clock.nowNanos())) / 1e6 }; if !fr, frontAt != nil { lostAfter = true } }
             }
+            if injected { let (nx, ny) = normalized(px + target.x - finder.frame.x, py + target.y - finder.frame.y); session.send(.mouseButton(.init(button: 0, down: false, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true) }
             session.endLayerDrag(windowID: finder.id)
             try? await Task.sleep(for: .seconds(2))
             let after = front()
+            if let f = session.windowsSnapshot().first(where: { $0.id == finder.id })?.frame { session.log("scenario zorder: host frame after the drop \(f.x),\(f.y) (aimed at \(target.x),\(target.y))") }
             session.log("scenario zorder: Finder in front on the host after \(frontAt.map { String(format: "%.0f ms", $0) } ?? "never"), \(lostAfter ? "lost it again during the drag" : "kept it"), after the drop: \(after.map(String.init) ?? "?")")
             session.sendWindowCommand(.init(id: finder.id, action: .close))   // our own test window, closed through Accessibility
         case "showdesktop":
@@ -484,13 +500,18 @@ final class ScenarioRunner {
                 if win.isLayered {
                     // Layered desktop: the window moves here, the host is told the frame; no press travels.
                     layered = true
+                    let injected = session.injectedDrags
+                    if injected { session.send(.mouseButton(.init(button: 0, down: true, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true) }
+                    session.pressTitleBar(windowID: win.id)
                     session.beginLayerDrag(windowID: win.id)
                     for _ in 0..<50 {   // 0.8 s drag, 6×3 px per 16 ms
                         x += 6 * dir; y += 3 * dir
+                        if injected { (nx, ny) = normalized(x, y); session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true) }
                         session.dragLayer(windowID: win.id, to: win.frame.offset(x - x0, y - y0))
                         try? await Task.sleep(for: .milliseconds(16))
                     }
                     let final = win.frame.offset(x - x0, y - y0)
+                    if injected { session.send(.mouseButton(.init(button: 0, down: false, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true) }
                     session.endLayerDrag(windowID: win.id)
                     let released = Clock.nowNanos()
                     let during = Double(session.totalBytes() - bytes0) / 1000

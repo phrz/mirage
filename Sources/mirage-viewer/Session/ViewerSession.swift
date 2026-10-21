@@ -1581,17 +1581,22 @@ final class ViewerSession: @unchecked Sendable {
         guard let c = compositor, c.width > 0, c.height > 0 else { return nil }
         return WindowDragLimits.host(display: PixelRect(x: 0, y: 0, width: c.width, height: c.height), windows: windowsSnapshot(), pxPerPoint: scenePxPerPoint)
     }
+    /// Window drags as real mouse events on the host (tunable `injectedDrags`): the press, the moves and the release go as
+    /// input, so the window server raises, activates and moves the window (Stage Manager, snapping, edge limits stay ground
+    /// truth); the local layer drag is only a prediction, retired when the host's list reflects the release. Accessibility
+    /// raises did not reorder windows across apps from the host's background agent (mac-daddy, 2026-10-21).
+    var injectedDrags: Bool { tunables[.injectedDrags] >= 0.5 }
     /// A press on a window layer's title bar raises it at once, here and on the host, as macOS does on the press (not when
     /// the drag starts): the window is in front on both sides before it moves over another.
     func pressTitleBar(windowID: UInt32) {
-        sendWindowCommand(.init(id: windowID, action: .raise))
+        if !injectedDrags { sendWindowCommand(.init(id: windowID, action: .raise)) }   // injected: the press itself raises it
         localRaise(windowID: windowID, inputSeq: lastInputSeqSent())
     }
     func beginLayerDrag(windowID: UInt32) {
         guard let f = arrangedWindows().first(where: { $0.id == windowID })?.frame else { return }
         let limits = windowDragLimits()
         predictorLock.lock(); localFrames[windowID] = LocalFrame(frame: f, inputSeq: 0, releasedNanos: 0); layerDragLimits[windowID] = (f, limits); predictorLock.unlock()
-        sendWindowCommand(.init(id: windowID, action: .raise))
+        if !injectedDrags { sendWindowCommand(.init(id: windowID, action: .raise)) }
         localRaise(windowID: windowID, inputSeq: lastInputSeqSent())
     }
     func dragLayer(windowID: UInt32, to frame: PixelRect) {
@@ -1601,7 +1606,7 @@ final class ViewerSession: @unchecked Sendable {
         localFrames[windowID]?.frame = frame
         predictorLock.unlock()
         let now = Clock.nowNanos()
-        if Clock.elapsed(since: lastMoveCommandNanos, now: now) > 50_000_000 { lastMoveCommandNanos = now; sendWindowCommand(.init(id: windowID, action: .move, x: frame.x, y: frame.y)) }
+        if !injectedDrags, Clock.elapsed(since: lastMoveCommandNanos, now: now) > 50_000_000 { lastMoveCommandNanos = now; sendWindowCommand(.init(id: windowID, action: .move, x: frame.x, y: frame.y)) }
         onChange?()
     }
     func endLayerDrag(windowID: UInt32) {
@@ -1610,7 +1615,8 @@ final class ViewerSession: @unchecked Sendable {
         lf.releasedNanos = Clock.nowNanos()
         layerDragLimits[windowID] = nil
         predictorLock.unlock()
-        let seq = sendWindowCommand(.init(id: windowID, action: .move, x: lf.frame.x, y: lf.frame.y))
+        // Injected: the release has just gone as input; the prediction retires once the host's list reflects it.
+        let seq = injectedDrags ? lastInputSeqSent() : sendWindowCommand(.init(id: windowID, action: .move, x: lf.frame.x, y: lf.frame.y))
         lf.inputSeq = seq
         predictorLock.lock(); localFrames[windowID] = lf; predictorLock.unlock()
     }

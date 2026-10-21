@@ -207,6 +207,7 @@ final class VideoNSView: NSView {
             if !ld.moved, abs(dx) < 3, abs(dy) < 3 { return }
             if !ld.moved { ld.moved = true; session.beginLayerDrag(windowID: ld.windowID) }
             layerDrag = ld
+            if session.injectedDrags { let (x, y) = normalized(event); session.send(.mouseMove(.init(x: x, y: y))) }
             session.dragLayer(windowID: ld.windowID, to: ld.frame.offset(dx, dy))
             return
         }
@@ -244,6 +245,7 @@ final class VideoNSView: NSView {
         case .layerTitleBar(let id, let frame):
             // A window layer's title bar: hold the click until the pointer moves (a local drag) or the button is released.
             layerDrag = (id, frame, p, false, event)
+            if session.injectedDrags { button(event, 0, down: true) }   // the real press: the host's window server takes it
             session.pressTitleBar(windowID: id)
         case .displayTitleBar(let id, let frame):
             // A window the display layer still carries: the press goes, and starts a predicted (copy-rect) drag.
@@ -257,6 +259,12 @@ final class VideoNSView: NSView {
     override func mouseUp(with event: NSEvent) {
         if let ld = layerDrag {
             layerDrag = nil
+            if session?.injectedDrags == true {
+                // The press went at once: the release goes now, wherever the drag ended.
+                button(event, 0, down: false)
+                if ld.moved { session?.endLayerDrag(windowID: ld.windowID) }
+                return
+            }
             if ld.moved { session?.endLayerDrag(windowID: ld.windowID) }
             else {
                 // It was a click after all: the press goes now, then the release (one RTT later than it could have, invisibly).
