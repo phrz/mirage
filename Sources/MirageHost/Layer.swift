@@ -30,6 +30,8 @@ final class Layer {
     var occludedTiles = Set<Int>()
     /// Tiles wholly off the display at the last occlusion pass.
     var offDisplayTiles = Set<Int>()
+    /// The layer's stage-1 still has gone (M-FIVE).
+    var stillSent = false
     /// Visible tiles held back (not due) at the last invariant audit.
     var auditHeldVisible = Set<Int>()
     var frontmost = false

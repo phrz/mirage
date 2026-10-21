@@ -98,4 +98,18 @@ final class DeliveryRateTests: XCTestCase {
         XCTAssertEqual(Double(rc.deliveryKbps), 8_000, accuracy: 800)
         XCTAssertEqual(Double(rc.inflightCapBytes), (rc.inStartup ? 3 : 2) * 8_000_000 / 8 * 0.2, accuracy: 40_000, "2 × (3 × in startup) 1 MB/s × 200 ms")
     }
+
+    /// M-FIVE: the connect probe seeds the target at 0.7 × the train's rate (not 800 kbps and a climb), under the cap.
+    func testTheConnectProbeSeedsTheTarget() {
+        var rc = RateController(initialKbps: 800, maxKbps: 50_000, nativePixels: 3200 * 1800)
+        rc.seedFromProbe(kbps: 20_000)
+        XCTAssertEqual(rc.targetKbps, 14_000)
+        XCTAssertEqual(rc.deliveryKbps, 20_000)
+        var capped = RateController(initialKbps: 800, maxKbps: 6_000, nativePixels: 3200 * 1800)
+        capped.seedFromProbe(kbps: 20_000)
+        XCTAssertEqual(capped.targetKbps, 6_000, "never above the cap")
+        var slow = RateController(initialKbps: 800, maxKbps: 50_000, nativePixels: 3200 * 1800)
+        slow.seedFromProbe(kbps: 600)
+        XCTAssertEqual(slow.targetKbps, 800, "a slow probe does not lower the start (the controller does that from evidence)")
+    }
 }

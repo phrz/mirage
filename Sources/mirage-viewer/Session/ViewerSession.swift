@@ -659,7 +659,8 @@ final class ViewerSession: @unchecked Sendable {
                 if ping.echoNanos == 0 {
                     // A host delay probe: stamp it with our clock and send it straight back (the host's
                     // serialization-free one-way-delay sample for its rate controller).
-                    sendDatagram(DatagramPing.echo(d, now: now), on: flow)
+                    // Only the header goes back: the host's bandwidth probe train pads its pings to 1.2 KB (M-FIVE).
+                    sendDatagram(DatagramPing.echo(Data(d.prefix(DatagramPing.minSize)), now: now), on: flow)
                 } else {
                     rttSample(sentNanos: ping.sentNanos, echoNanos: ping.echoNanos, now: now)
                 }

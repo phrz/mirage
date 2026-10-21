@@ -426,6 +426,14 @@ public struct RateController {
     /// host sent, not what the link can carry.
     public mutating func noteIdle(now: UInt64) { lastIdleNanos = now }
 
+    /// The connect-time probe (DESIGN M-FIVE): a packet train's delivery rate. The target starts at 0.7 × it (under the cap)
+    /// instead of 800 kbps and a climb, and the delivery estimate starts there, so the first picture is sized for the link.
+    public mutating func seedFromProbe(kbps: Int) {
+        guard kbps > 0 else { return }
+        deliveryKbps = max(deliveryKbps, kbps)
+        targetKbps = min(maxKbps, max(targetKbps, max(tuning.minKbps, Int(Double(kbps) * tuning.capacityFraction))))
+    }
+
     /// Bytes the viewer acked (a tile message, a block, a video frame). `receivedNanos`: when the viewer received them (its
     /// clock); the window is taken on those times when given, since acks come back over the uplink in clumps (Fast 4G's
     /// 1.35 Mbps up: an 8.1 Mbps link read 10 Mbps on the host's arrival times).

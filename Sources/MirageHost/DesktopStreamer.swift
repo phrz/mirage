@@ -784,7 +784,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     public func handle(probeEcho sentNanos: UInt64, receivedNanos: UInt64) {
-        queue.async { self.rc?.probeSample(sentNanos: sentNanos, receivedNanos: receivedNanos, now: Clock.nowNanos()); self.applyBudget(now: Clock.nowNanos()) }
+        queue.async {
+            if self.trainSent.contains(sentNanos) { self.trainEcho(receivedNanos: receivedNanos); return }
+            self.rc?.probeSample(sentNanos: sentNanos, receivedNanos: receivedNanos, now: Clock.nowNanos()); self.applyBudget(now: Clock.nowNanos())
+        }
     }
     private var probeSeq: UInt64 = 0
 
@@ -1922,11 +1925,80 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         return (min(t.cols - 1, max(0, l.x / TileTracker.tile)), min(t.rows - 1, max(0, l.y / TileTracker.tile)))
     }
 
+    // MARK: Stage 1, coherent stills presented together (DESIGN M-FIVE)
+
+    /// From a fresh picture's start until every visible layer's still has gone (or 0.7 s), stills are staged and held; then
+    /// one commit per layer presents them all in the same frame on the viewer (a whole-layer crossfade each), instead of
+    /// windows popping in one by one as their captures start.
+    private var stage1Active = false
+    private var stage1Staged = Set<UInt32>()
+    private var stage1Deadline: UInt64 = 0
+    private func checkStage1(now: UInt64) {
+        guard stage1Active else { return }
+        let waiting = layers.values.filter { l in
+            !l.stillSent && (l.isDisplay || (plannedFrames[l.id] != nil && l.visibleFraction > 0.002)) && l.id != ControlMessage.WindowInfo.overlayID
+        }
+        guard waiting.isEmpty || now >= stage1Deadline else { return }
+        stage1Active = false
+        for id in stage1Staged.sorted() {
+            sendTileMessage(.commit(layer: id), captureNanos: now)
+            layers[id]?.exposed = true
+        }
+        log("stage 1: \(stage1Staged.count) stills presented together\(waiting.isEmpty ? "" : " (\(waiting.count) layers not ready by 0.7 s: they follow on their own)")")
+        stage1Staged = []
+        publishWindows(now: now, full: false)
+    }
+
+    // MARK: Connect probe (DESIGN M-FIVE)
+
+    /// A packet train at stream start: 40 pings padded to 1.2 KB, back to back. The viewer stamps each with its clock and
+    /// returns the header; the spread of the stamps gives the link's rate before anything else is sized.
+    private var trainSent = Set<UInt64>()
+    private var trainReceived: [UInt64] = []
+    private var trainStartNanos: UInt64 = 0
+    static let trainCount = 40, trainSize = 1200
+    private func sendProbeTrain() {
+        guard let out = output else { return }
+        trainSent = []; trainReceived = []; trainStartNanos = Clock.nowNanos()
+        for _ in 0..<Self.trainCount {
+            probeSeq += 1
+            let d = DatagramPing.encode(seq: probeSeq, size: Self.trainSize)
+            if let s = DatagramPing.decode(d)?.sentNanos { trainSent.insert(s) }
+            out.sendDatagram(d)
+        }
+        queue.asyncAfter(deadline: .now() + 1.5) { [weak self] in self?.finishTrain() }
+    }
+    private func trainEcho(receivedNanos: UInt64) {
+        trainReceived.append(receivedNanos)
+        if trainReceived.count >= Self.trainCount { finishTrain() }
+    }
+    private func finishTrain() {
+        guard !trainSent.isEmpty else { return }
+        let r = trainReceived.sorted()
+        trainSent = []
+        guard r.count >= 8, let first = r.first, let last = r.last, last > first else { log("connect probe: \(r.count) of \(Self.trainCount) echoes; no estimate"); return }
+        let bytes = Double((r.count - 1) * (Self.trainSize + 40))
+        let kbps = Int(bytes * 8 / (Double(last - first) / 1e9) / 1000)
+        rc?.seedFromProbe(kbps: kbps)
+        log("connect probe: \(r.count) of \(Self.trainCount) echoes over \(Double(last - first) / 1e6) ms: \(kbps) kbps; target \(rc?.targetKbps ?? 0) kbps")
+        applyBudget(now: Clock.nowNanos())
+    }
+
     // MARK: Fresh pictures (DESIGN §3.3 "lossy first")
 
     /// Starts the display layer's fresh-picture sequence; the next keyframe is its base.
     private func beginFreshPicture(_ trigger: FreshPictureTrigger, detail: String = "") {
         guard trigger.restartsWholePicture else { return }
+        if trigger == .streamStart || trigger == .viewerEmpty { sendProbeTrain() }
+        if compositor {
+            // M-FIVE: the desktop's first picture is a still like every window's (no tiny keyframe and ladder climb: the
+            // "very noisy start"), presented with the others behind the stage-1 barrier.
+            display?.fresh = .still
+            for l in layers.values { l.stillSent = false }
+            stage1Active = true; stage1Staged = []; stage1Deadline = Clock.nowNanos() + 700_000_000
+            log("fresh picture (\(trigger.rawValue)\(detail)): stage 1, one coherent still per visible layer, presented together")
+            return
+        }
         display?.fresh = .base(seq: 0)
         log("fresh picture (\(trigger.rawValue)\(detail)): tiny keyframe first, then ladder climb, then large lossless blocks")
     }
@@ -2421,7 +2493,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// of the link, upscaled on the client; lossless blocks follow (DESIGN §3.3 "lossy first, always").
     private func submitStill(_ layer: Layer, from f: ShiftDetector.Frame, nanos: UInt64) -> Int {
         let rect = layer.bounds
-        let targetBytes = max(6_000.0, Double(lastBudget.tileKbps * 1000 / 8) * 0.15)
+        // M-FIVE stage 1 (compositor model): all the visible layers' stills together take ~0.5 s of the measured rate, each its
+        // share of what can be seen; the seam design keeps its old size.
+        let rateBytes = Double(lastBudget.tileKbps * 1000 / 8)
+        let targetBytes: Double
+        if compositor, let d = display {
+            let visible = layer.isDisplay ? Double(d.tracker.tileCount - d.underLayer.count) / Double(max(1, d.tracker.tileCount)) * Double(d.bounds.area)
+                                          : layer.visibleFraction * Double(rect.area)
+            targetBytes = max(4_000, rateBytes * 0.5 * visible / Double(max(1, d.bounds.area)))
+        } else {
+            targetBytes = max(6_000.0, rateBytes * 0.15)
+        }
+        let staged = compositor
+        layer.stillSent = true
         // ~0.1 B/px for UI at quality 60 after rescale.
         let area = Double(rect.area)
         let scale = min(1.0, (targetBytes / 0.1 / area).squareRoot())
@@ -2438,11 +2522,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let data = d.withUnsafeBytes { TileCodec.encodeLossy(base: $0.baseAddress!, width: rect.width, height: rect.height, stride: rect.width * 4, outWidth: ow, outHeight: oh, quality: 60) }
             guard let data else { self.queue.async { self.pacer.dropped(id: block) }; return }
             // On the stream from here, in order with the layer's copy-rects (DESIGN §3.3 ordering invariant).
-            self.send(tile: .tiles(.init(header: hdr, refinement: false, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: block, layer: layerID)
+            self.send(tile: .tiles(.init(header: hdr, refinement: false, staged: staged, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: block, layer: layerID)
             self.queue.async {
                 self.tileTokens -= Double(data.count - estimate)
                 self.statTileBytes += data.count; self.statTileRects += 1; self.secTileBytes += data.count
-                if let l = self.layers[layerID] { l.exposed = true; l.account.still += data.count }
+                if let l = self.layers[layerID] {
+                    l.account.still += data.count
+                    // Staged: presented by its commit, with the other stage-1 stills (the barrier) or at once after it.
+                    if !staged { l.exposed = true }
+                    else if self.stage1Active { self.stage1Staged.insert(layerID); self.checkStage1(now: Clock.nowNanos()) }
+                    else { self.sendTileMessage(.commit(layer: layerID), captureNanos: nanos); l.exposed = true }
+                }
                 self.log("layer \(layerID): still \(ow)x\(oh) \(data.count) bytes for a \(rect.width)x\(rect.height) window")
                 if let s = self.windows?.current { self.reconcileLayers(s, now: Clock.nowNanos()); self.publishWindows(now: Clock.nowNanos(), full: false) }
             }
@@ -2495,6 +2585,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// video tiles and rate-limited sparse tiles, oldest first, locus first, within the tile budget.
     private func refine(now: UInt64) {
         guard display != nil else { return }
+        checkStage1(now: now)
         presentLevels(now: now)
         refillTiles(now: now)
         sendDueDirect(now: now)
