@@ -136,6 +136,7 @@ function fineGrain(parent) {
 
 function buildIcon(ab, opts) {
   var F = opts.features || {};
+  var BAND = opts.band || 56;   // px below the horizon where the mirage sheet has faded out
   var TEX = OUT + '/export/textures/' + (opts.tex || 'base');
   var icon = G('Icon', ab);
   var mask = radius(rect(icon, 'Squircle Mask', 100, 100, 824, 824, solid('#FFFFFF')), 185, true);
@@ -210,7 +211,7 @@ function buildIcon(ab, opts) {
   path(refl, 'Reflected Keyline', reflD, solid('rgba(255,255,255,0.7)'), {
     borders: [{ color: 'rgba(255,255,255,0.7)', thickness: 6 * scale / 3 * 0.75, position: Style.BorderPosition.Outside }], blur: blur(3) });
   path(refl, 'Reflected Pointer', reflD,
-    lin([[0, 'rgba(62,76,104,0.78)'], [1, 'rgba(62,76,104,0.4)']]), { blur: blur(3) });
+    lin([[0, 'rgba(62,76,104,' + Math.min(1, 0.78 * (opts.reflBoost || 1)).toFixed(2) + ')'], [1, 'rgba(62,76,104,' + Math.min(1, 0.4 * (opts.reflBoost || 1)).toFixed(2) + ')']]), { blur: blur(3) });
   // bright turbulent air veils the inverted image
   rect(refl, 'Air Veil', cx - 80, HORIZON, 60 * scale + 160, BAND, lin([[0, 'rgba(226,238,252,0.3)'], [1, 'rgba(226,238,252,0)']]));
   refl.adjustToFit();
@@ -265,6 +266,10 @@ function onRun(context) {
   var A = new Artboard({ name: 'Mirage 1024', parent: page, frame: new Rectangle(0, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
   buildIcon(A, { window: false, cursorScale: 3.3, cursorX: 432, cursorY: HORIZON - 95 * 3.3 - 2 * 3.3 - 3, features: { sky: true, sand: true }, tex: 'form' }); // keyline miter at the tail reaches ~2 px past the stroke width
   dbg('A built');
+  // Compact variant for small sizes: bigger pointer, taller mirage sheet, stronger reflection
+  var C = new Artboard({ name: 'Mirage 1024 (compact)', parent: page, frame: new Rectangle(1224, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
+  buildIcon(C, { window: false, cursorScale: 4.3, cursorX: 400, cursorY: HORIZON - 95 * 4.3 - 2 * 4.3 - 3, features: { sky: true, sand: true }, tex: 'form-wide', band: 96, reflBoost: 1.3 });
+  dbg('C built');
   var variants = new sketch.Page({ name: 'Variants', parent: doc });
   var B = new Artboard({ name: 'Mirage 1024 (window variant)', parent: variants, frame: new Rectangle(0, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
   buildIcon(B, { window: true, cursorScale: 2.4, cursorX: 560, cursorY: 400 });
