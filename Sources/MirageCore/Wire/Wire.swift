@@ -299,10 +299,14 @@ public enum ControlMessage: Codable, Equatable {
         public var explicitBitrate: Bool?
         /// A simulated link for testing (developer setting): the host shapes its downstream to it. nil = the real link.
         public var throttle: NetworkThrottle?
+        /// The viewer's network, hashed (interface type and gateways; no SSID, no addresses in the clear): the host resumes
+        /// the last delivery estimate it saw for this pairing on this network (careful resume), else starts afresh.
+        public var networkFingerprint: String?
         public init(width: Int, height: Int, bitrateKbps: Int = 0, maxFPS: Int = 30, displayID: UInt32? = nil, snapNative: Bool? = nil, holdsPicture: Bool? = nil, tunablesVersion: Int? = nil,
-                    explicitBitrate: Bool? = nil, throttle: NetworkThrottle? = nil) {
+                    explicitBitrate: Bool? = nil, throttle: NetworkThrottle? = nil, networkFingerprint: String? = nil) {
             self.width = width; self.height = height; self.bitrateKbps = bitrateKbps; self.maxFPS = maxFPS; self.displayID = displayID; self.snapNative = snapNative
             self.holdsPicture = holdsPicture; self.tunablesVersion = tunablesVersion; self.explicitBitrate = explicitBitrate; self.throttle = throttle
+            self.networkFingerprint = networkFingerprint
         }
     }
     public struct StreamInfo: Codable, Equatable {

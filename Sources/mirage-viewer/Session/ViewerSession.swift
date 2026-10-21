@@ -6,6 +6,7 @@ import UIKit
 #endif
 import CoreVideo
 import Network
+import CryptoKit
 import MirageCore
 
 /// Everything the viewer knows about one host connection, published for SwiftUI.
@@ -266,6 +267,15 @@ final class ViewerSession: @unchecked Sendable {
     private var backoffWait: Task<Void, Never>?
     private var wakeObservers: [NSObjectProtocol] = []
     private var pathMonitor: NWPathMonitor?
+    /// The current network, hashed (the stream request carries it; the host's careful resume keys on it).
+    private(set) var networkFingerprint: String?
+    static func fingerprint(_ p: NWPath) -> String? {
+        guard p.status == .satisfied else { return nil }
+        let kind = p.usesInterfaceType(.wifi) ? "wifi" : p.usesInterfaceType(.cellular) ? "cell" : p.usesInterfaceType(.wiredEthernet) ? "wired" : "other"
+        let gw = p.gateways.map { "\($0)" }.sorted().joined(separator: ",")
+        let digest = SHA256.hash(data: Data((kind + "|" + gw).utf8))
+        return kind + "-" + digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+    }
     /// The Mac woke or the network changed: a dead connection is dropped and the host dialed at once (the resume token
     /// brings the same session back for a day, DESIGN §4a), instead of after the backoff.
     func nudge(_ why: String) {
@@ -281,6 +291,7 @@ final class ViewerSession: @unchecked Sendable {
         let m = NWPathMonitor()
         var lastPath: String?
         m.pathUpdateHandler = { [weak self] p in
+            self?.networkFingerprint = Self.fingerprint(p)
             let desc = p.status == .satisfied ? p.availableInterfaces.map(\.name).joined(separator: ",") : "none"
             defer { lastPath = desc }
             guard let lp = lastPath, lp != desc, p.status == .satisfied else { return }
@@ -491,7 +502,7 @@ final class ViewerSession: @unchecked Sendable {
     func requestStream(width: Int, height: Int) {
         Task { @MainActor in
             var req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: max(0, model.bitrateKbps), maxFPS: 30, snapNative: Self.snapNative ? true : nil, tunablesVersion: Tunables.schemaVersion,
-                                                   explicitBitrate: true, throttle: model.throttle)
+                                                   explicitBitrate: true, throttle: model.throttle, networkFingerprint: networkFingerprint)
             if req == lastRequest { return }
             guard let sender else { pendingRequest = req; log("stream request \(width)x\(height) queued until connected"); return }
             lastRequest = req; lastRequestSent = req

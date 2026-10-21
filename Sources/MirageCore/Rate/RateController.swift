@@ -306,7 +306,8 @@ public struct RateController {
             if probing, targetKbps < ceiling, Clock.elapsed(since: underSince, now: now) >= tuning.probeAfterNanos, Clock.elapsed(since: lastProbeNanos, now: now) >= max(UInt64(srttNanos), tuning.probeMinIntervalNanos) {
                 // Recovery from a transient: the queue has been clear for a second, so climb back
                 // multiplicatively, one step per RTT, until the ceiling (then the slow additive rule again).
-                targetKbps = min(ceiling, Int(Double(targetKbps) * tuning.probeIncrease))
+                // Startup doubles per round trip (BBR-style, bounded by the delivery ceiling: 2 × what was delivered).
+                targetKbps = min(ceiling, Int(Double(targetKbps) * (inStartup ? 2.0 : tuning.probeIncrease)))
                 lastProbeNanos = now; lastIncreaseNanos = now
                 if targetKbps >= ceiling, !inStartup { probing = false }
             } else if Double(Clock.elapsed(since: lastDecreaseNanos, now: now)) > 2 * srttNanos {
@@ -402,7 +403,18 @@ public struct RateController {
     private var lastDeliveryAdjust: UInt64 = 0
     /// 1.1 after startup: on mac-daddy's shaped Fast 4G the estimate itself read up to 1.19 × the link (the viewer's receive
     /// times clump too), and 1.25 × that put the target at 1.49 ×.
-    public var deliveryGain: Double { inStartup ? 2.0 : 1.1 }
+    public var deliveryGain: Double { inStartup ? 2.0 : (probeUpActive ? 1.25 : 1.1) }
+    /// Ongoing probe-up (BBR's ProbeBW): every 6 s, for one round trip, the ceiling allows 1.25 × delivery, so bandwidth
+    /// that came back after a dip is found again; the delivery estimate settles it either way.
+    private var probeUpActive = false
+    private var lastProbeUpNanos: UInt64 = 0
+    /// Careful resume (the IETF draft's idea): start from this pairing's last estimate on this network, then verify.
+    public mutating func resume(fromKbps k: Int) {
+        guard k > 0 else { return }
+        deliveryKbps = k
+        targetKbps = min(maxKbps, max(tuning.minKbps, Int(Double(k) * 0.75)))
+        inStartup = false   // the 1.1 × gain applies as soon as the first window of acks measures the link
+    }
     private var deliveryWindowNanos: UInt64 { max(1_500_000_000, UInt64(4 * srttNanos)) }
 
     /// The delivery-rate ceiling on the target (the cap until there is an estimate).
@@ -494,6 +506,12 @@ public struct RateController {
                 // too (it held the 2 × gain for good on a Fast 4G run, the target at 20 Mbps on an 8.1 Mbps link).
                 else if appLimited { startupIdleRounds += 1; if startupIdleRounds >= 3 { inStartup = false } }
             }
+        }
+        // Startup ends on a rising round trip too (> 25 % over the minimum: a queue building).
+        if inStartup, !probeRTT.isNaN, minRTTNanos.isFinite, probeRTT > minRTTNanos * 1.25, now &- firstAckNanos > 2 * UInt64(srttNanos) { inStartup = false }
+        if !inStartup {
+            if probeUpActive, now &- lastProbeUpNanos > max(UInt64(srttNanos), 250_000_000) { probeUpActive = false }
+            if !probeUpActive, now &- lastProbeUpNanos > 6_000_000_000 { probeUpActive = true; lastProbeUpNanos = now }
         }
         if now &- lastDeliveryAdjust >= 100_000_000 {
             lastDeliveryAdjust = now

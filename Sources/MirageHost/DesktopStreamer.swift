@@ -449,8 +449,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             kept.maxKbps = req.bitrateKbps
             rc = kept
         } else {
-            var controller = RateController(initialKbps: min(req.bitrateKbps, 800), maxKbps: req.bitrateKbps, nativePixels: w * h)
+            loadHostTunables()
+            var controller = RateController(initialKbps: min(req.bitrateKbps, Int(hostTunables[.startKbps])), maxKbps: req.bitrateKbps, nativePixels: w * h)
             if let old = rc { controller = RateController(initialKbps: old.targetKbps, maxKbps: req.bitrateKbps, nativePixels: w * h) }
+            else if let k = Self.priorDelivery(for: output?.peerID, network: req.networkFingerprint) {
+                controller.resume(fromKbps: k)
+                log("careful resume: this pairing's last estimate on this network \(k) kbps; starting at \(controller.targetKbps) kbps")
+            }
             rc = controller
         }
         let controller = rc!
@@ -796,7 +801,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Whatever was in flight is treated as lost: unacked tile messages have their rects queued for a
     /// lossless resend, unacked video frames are forgotten (the resume keyframe replaces them).
     public func suspend() async {
-        queue.sync { Self.savePriorDelivery(self.rc?.deliveryKbps ?? 0, for: self.output?.peerID) }   // the next connect starts there
+        queue.sync { Self.savePriorDelivery(self.rc?.deliveryKbps ?? 0, for: self.output?.peerID, network: self.request?.networkFingerprint) }   // the next connect starts there
         // The session is cut loose first (output, timers, captures detached), then the captures are stopped, each within 3 s:
         // ScreenCaptureKit's stopCapture can fail to return, and awaiting it before the cut left a suspended streamer
         // capturing, refining and sending into the dead connection for good (mac-daddy 2026-10-21: a second streamer
@@ -954,7 +959,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     public func stop() async {
-        queue.sync { Self.savePriorDelivery(self.rc?.deliveryKbps ?? 0, for: self.output?.peerID) }
+        queue.sync { Self.savePriorDelivery(self.rc?.deliveryKbps ?? 0, for: self.output?.peerID, network: self.request?.networkFingerprint) }
         // Cut loose first, then stop the captures within 3 s each (suspend()).
         let (cap, caps): (ScreenCapturer?, [WindowCapturer]) = await withCheckedContinuation { c in
             queue.async {
@@ -1246,10 +1251,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func sendPlaceholders() {
         guard let t = target else { return }
         // Half the stream's width in the compositor model: the windows' stage-1 stills are cut from it (M-FIVE).
-        // Full size in the compositor model: each not-yet-captured window's cut becomes its layer's first frame, so its
-        // lossless blocks go at once (ScreenCaptureKit starts window captures one after another, ~0.75 s apart: the last
-        // window's lossless waited ~6 s on mac-daddy). 800 px otherwise (only the desktop placeholder).
-        let shotW = compositor ? t.pixelWidth : 800, shotH = max(1, shotW * t.pixelHeight / max(1, t.pixelWidth))
+        // Half the stream's width in the compositor model (the windows' stage-1 stills); 800 px otherwise.
+        // (Full size, with each cut as the window's first frame, was tried in 26ae000: the window's own capture then differed
+        // from the composited cut in most tiles, which went again, and windows changed 4-6 times: 20 Mbps crisp 15.8 s.)
+        let shotW = compositor ? max(800, t.pixelWidth / 2) : 800, shotH = max(1, shotW * t.pixelHeight / max(1, t.pixelWidth))
         Task { [weak self] in
             let c = SCStreamConfiguration()
             c.width = shotW; c.height = shotH; c.showsCursor = false
@@ -2025,28 +2030,28 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard !trainSent.isEmpty else { return }
         let r = trainReceived.sorted()
         trainSent = []
-        let prior = Self.priorDelivery(for: output?.peerID)
         guard let kbps = RateController.trainRate(r, packetBytes: Self.trainSize + 40) else {
-            log("connect probe: \(r.count) of \(Self.trainCount) echoes; no estimate\(prior > 0 ? "; this pairing's last estimate \(prior) kbps" : "")")
-            if prior > 0 { rc?.seedFromProbe(kbps: prior); applyBudget(now: Clock.nowNanos()) }
-            return
+            log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read"); return
         }
-        // Never below what this pairing's last session delivered: a train at connect meets QUIC's congestion window,
-        // which has not opened yet (8.1 Mbps of Fast 4G read 1.3 Mbps from the train's total time).
-        rc?.seedFromProbe(kbps: max(kbps, prior))
-        log("connect probe: \(r.count) of \(Self.trainCount) echoes: \(kbps) kbps from the densest burst\(prior > 0 ? ", this pairing's last \(prior) kbps" : ""); target \(rc?.targetKbps ?? 0) kbps")
+        // A cross-check that can only raise the start (careful resume and the doubling startup lead).
+        rc?.seedFromProbe(kbps: kbps)
+        log("connect probe: \(r.count) of \(Self.trainCount) echoes: \(kbps) kbps from the densest burst; target \(rc?.targetKbps ?? 0) kbps")
         applyBudget(now: Clock.nowNanos())
     }
-    /// Per pairing (the device id), the last session's delivery estimate in kbit/s (the host's store, delivery.json).
-    static func priorDelivery(for peer: String?) -> Int {
-        guard let peer, let url = (try? Store())?.url("delivery.json"), let d = try? Data(contentsOf: url),
-              let m = try? JSONDecoder().decode([String: Int].self, from: d) else { return 0 }
-        return m[peer] ?? 0
+    /// Per pairing and viewer network (the request's fingerprint), the last session's delivery estimate in kbit/s, if from
+    /// the last 24 h (the host's store, delivery.json).
+    struct PriorDelivery: Codable { var kbps: Int; var at: Date }
+    static func priorDelivery(for peer: String?, network: String?) -> Int? {
+        guard let peer, let network, let url = (try? Store())?.url("delivery.json"), let d = try? Data(contentsOf: url),
+              let m = try? JSONDecoder().decode([String: PriorDelivery].self, from: d), let e = m[peer + "|" + network],
+              Date().timeIntervalSince(e.at) < 24 * 3600, e.kbps > 0 else { return nil }
+        return e.kbps
     }
-    static func savePriorDelivery(_ kbps: Int, for peer: String?) {
-        guard let peer, kbps > 0, let url = (try? Store())?.url("delivery.json") else { return }
-        var m = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) } ?? [:]
-        m[peer] = kbps
+    static func savePriorDelivery(_ kbps: Int, for peer: String?, network: String?) {
+        guard let peer, let network, kbps > 0, let url = (try? Store())?.url("delivery.json") else { return }
+        var m = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode([String: PriorDelivery].self, from: $0) } ?? [:]
+        m[peer + "|" + network] = PriorDelivery(kbps: kbps, at: Date())
+        m = m.filter { Date().timeIntervalSince($0.value.at) < 7 * 24 * 3600 }
         if let d = try? JSONEncoder().encode(m) { try? d.write(to: url, options: .atomic) }
     }
 

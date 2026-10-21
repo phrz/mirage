@@ -39,6 +39,9 @@ public struct Tunables: Codable, Equatable, Sendable {
         case injectedDrags
         // Host only: 1 = the connect-time bandwidth probe (a 48 KB packet train at a fresh stream, M-FIVE); 0 = off.
         case connectProbe
+        // Host only: an automatic stream's first rate in kbit/s on a network with no recent estimate (BBR-style startup doubles
+        // it per round trip from there while delivery keeps up).
+        case startKbps
         // Host only: an automatic-bitrate stream's ceiling in kbit/s (BitratePolicy): the controller starts at 800 and probes
         // up to whatever the link sustains, never above this.
         case autoMaxKbps
@@ -69,6 +72,7 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .placeholders: return (1, 0, 1)
             case .injectedDrags: return (1, 0, 1)
             case .connectProbe: return (1, 0, 1)
+            case .startKbps: return (2_000, 150, 50_000)
             case .autoMaxKbps: return (50_000, 1_000, 200_000)
             }
         }

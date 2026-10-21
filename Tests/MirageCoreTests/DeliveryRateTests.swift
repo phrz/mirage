@@ -123,4 +123,14 @@ final class DeliveryRateTests: XCTestCase {
         XCTAssertEqual(Double(kbps), 8_100, accuracy: 400, "the burst's rate, not 40 packets over ~251 ms (1.6 Mbps)")
         XCTAssertNil(RateController.trainRate([0, 10 * ms, 20 * ms, 30 * ms], packetBytes: 1240), "no burst: no estimate")
     }
+
+    /// Careful resume: the last estimate on this network gives 0.75 × it at once, out of startup (1.1 × delivery from the
+    /// first window of acks), so a worse network today is caught by the first measurement.
+    func testCarefulResumeStartsAtThreeQuartersAndLeavesStartup() {
+        var rc = RateController(initialKbps: 2_000, maxKbps: 50_000, nativePixels: 3200 * 1800)
+        rc.resume(fromKbps: 18_000)
+        XCTAssertEqual(rc.targetKbps, 13_500)
+        XCTAssertFalse(rc.inStartup)
+        XCTAssertEqual(rc.deliveryCeilingKbps, 19_800, "1.1 × the resumed estimate until acks measure the link")
+    }
 }
