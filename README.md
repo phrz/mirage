@@ -63,7 +63,7 @@ swift test
 Products: `miraged` (host daemon + admin CLI), `mirage` (client CLI), `mirage-viewer`
 (macOS viewer), `MirageCore` (shared, iOS-compilable), `MirageHost` (macOS capture/encode/input).
 
-`scripts/make-viewer-app.sh` builds `.build/MirageViewer.app`, the macOS slice of the universal app
+`scripts/make-viewer-app.sh` builds `.build/Mirage.app`, the macOS slice of the universal app
 (`App/Mirage.xcodeproj`, one target and one bundle ID, `com.paulherz.mirage`, for macOS and iOS; `scripts/testflight.sh` ships the iOS
 slice to TestFlight); `scripts/deploy-host.sh HOST` signs `miraged` with your Apple Development
 identity (so the TCC grants below survive rebuilds), copies it over and restarts the LaunchAgent.
@@ -80,11 +80,14 @@ self-signed TLS certificate on first start under `~/Library/Application Support/
 
 ## Viewer app (GUI)
 
-`scripts/make-viewer-app.sh` builds `MirageViewer.app` (the universal app's macOS slice, incremental); copy it to
-`~/Applications`. On iPhone and iPad the same app (TestFlight) runs Desktop mode: touches act where they land
+`scripts/make-viewer-app.sh` builds `Mirage.app` (the universal app's macOS slice, incremental);
+`scripts/install-viewer-app.sh [DIR]` builds it and installs it as `DIR/Mirage.app` (default `~/Applications`), removing
+a `MirageViewer.app` or `Mirage Viewer.app` from older builds (same bundle ID; pairings and settings stay). On iPhone and iPad the same app (TestFlight) runs Desktop mode: touches act where they land
 (a tap clicks there, a hold presses there and drags, two fingers scroll there; a trackpad-style pointer is the other
-touch mode), and the on-screen or a hardware keyboard types, with the same scroll prediction and typeahead. Launched from Finder or the Dock it opens a connect window listing your paired
-Macs, with a host field and a 6-digit code field for pairing a new one. The command line
+touch mode), and the on-screen or a hardware keyboard types, with the same scroll prediction and typeahead. Launched from Finder or the Dock it opens a window listing your paired
+Macs with their own device icons (double-click or Return connects); + in its toolbar adds another by name or address
+with the 6-digit code its Pair a Device… shows. On iPhone and iPad the list is the same (each Mac's symbol, a tap
+connects), and + also scans the QR code. The command line
 (`mirage-viewer HOST [--pair CODE] …`) still works for scripts and headless measurement.
 
 On a phone or tablet the picture fills the safe area (in landscape, the full height; the control pill hides itself
@@ -158,7 +161,7 @@ Admin: `miraged devices`, `miraged revoke <id-prefix>`, `mirage hosts`, `miraged
 ## View the desktop
 
 ```bash
-.build/MirageViewer.app/Contents/MacOS/mirage-viewer HOST [--bitrate KBPS] [--scale 1.0]
+.build/Mirage.app/Contents/MacOS/mirage-viewer HOST [--bitrate KBPS] [--scale 1.0]
 ```
 
 The viewer requests the stream at its window size (points × backing scale × `--scale`), so

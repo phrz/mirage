@@ -182,21 +182,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         session?.stop(); NSApp.terminate(nil)
     }
 
-    /// The GUI entry point: recent and paired Macs, a new one with its pairing code, Pair a Device… for this Mac as a host.
+    /// The GUI entry point: the paired Macs (double-click or Return connects), + for another one with its pairing code.
     @MainActor private func showConnectWindow() {
-        let known = (try? Store().knownHosts()) ?? [:]
-        let hosts = ConnectView.hosts(known: known.map { ($0.key, $0.value.hostName) }, recent: ViewerSettings.recentHosts())
-        let view = ConnectView(hosts: hosts, lastHost: UserDefaults.standard.string(forKey: "lastHost") ?? "", onPairDevice: { [weak self] in self?.pairDevice() }) { [weak self] host, code in
+        let hosts = ConnectList.load()
+        let view = ConnectView(hosts: hosts, lastHost: UserDefaults.standard.string(forKey: "lastHost"),
+                               openAdd: ProcessInfo.processInfo.environment["MIRAGE_TEST_OPEN_ADD"] != nil) { [weak self] host, code in
             self?.connectWindow?.close(); self?.connectWindow = nil
             MainActor.assumeIsolated { self?.startViewer(host: host, pairCode: code) }
         }
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 500),
-                         styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
-        w.title = "Connect to a Mac"
-        w.titleVisibility = .hidden
-        w.titlebarAppearsTransparent = true
-        w.isMovableByWindowBackground = true
-        w.contentView = NSHostingView(rootView: view)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 340),
+                         styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        w.title = "Mirage"
+        // The SwiftUI toolbar (the + button) becomes this window's toolbar.
+        let host = NSHostingController(rootView: view)
+        host.sceneBridgingOptions = [.toolbars]
+        w.contentViewController = host
+        w.toolbarStyle = .unified
+        w.setContentSize(NSSize(width: 420, height: 340))
+        w.contentMinSize = NSSize(width: 340, height: 220)
         w.isReleasedWhenClosed = false
         w.delegate = self
         w.center()
@@ -204,7 +207,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         connectWindow = w
     }
 
-    /// Pair a Device… (the connect window): this Mac's rotating code and QR for another device, as the menu-bar item does.
+    /// Pair a Device… (the Connection menu): this Mac's rotating code and QR for another device, as the menu-bar item does.
     @MainActor private func pairDevice() {
         if let m = hostMenu, m.isConnected { m.pairDevice(); return }
         info("This Mac does not accept connections yet.", "Turn on Allow Connections to This Mac in Mirage's menu-bar item, then choose Pair a Device… again.")
@@ -373,22 +376,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         let appItem = NSMenuItem(); main.addItem(appItem)
         let appMenu = NSMenu()
-        _ = item(appMenu, "About Mirage Viewer", #selector(NSApplication.orderFrontStandardAboutPanel(_:)))
+        _ = item(appMenu, "About Mirage", #selector(NSApplication.orderFrontStandardAboutPanel(_:)))
         appMenu.addItem(.separator())
         // ⌘, while the picture has focus goes to the host when shortcuts are sent to the Mac; ⌃⌥⌘, opens Settings there.
         _ = item(appMenu, "Settings…", #selector(showSettings(_:)), ",")
         appMenu.addItem(.separator())
-        _ = item(appMenu, "Hide Mirage Viewer", #selector(NSApplication.hide(_:)), "h")
+        _ = item(appMenu, "Hide Mirage", #selector(NSApplication.hide(_:)), "h")
         _ = item(appMenu, "Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option])
         _ = item(appMenu, "Show All", #selector(NSApplication.unhideAllApplications(_:)))
         appMenu.addItem(.separator())
-        _ = item(appMenu, "Quit Mirage Viewer", #selector(quit(_:)), "q")
+        _ = item(appMenu, "Quit Mirage", #selector(quit(_:)), "q")
         appItem.submenu = appMenu
 
         let connItem = NSMenuItem(); main.addItem(connItem)
         let conn = NSMenu(title: "Connection")
         _ = item(conn, "Connect to a Mac…", #selector(newConnection(_:)), "n")
         _ = item(conn, "Disconnect", #selector(disconnectMenu(_:)), "d", [.command, .shift])
+        conn.addItem(.separator())
+        _ = item(conn, "Pair a Device with This Mac…", #selector(pairDeviceMenu(_:)))
         conn.addItem(.separator())
         _ = item(conn, "Close Window", #selector(NSWindow.performClose(_:)), "w")
         connItem.submenu = conn
@@ -422,6 +427,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.mainMenu = main
     }
     @objc func quit(_ sender: Any?) { requestQuit() }
+    @objc func pairDeviceMenu(_ sender: Any?) { MainActor.assumeIsolated { pairDevice() } }
 
     /// Settings (⌘, from the menu, ⌃⌥⌘, over the picture, the toolbar's gear): iOS's sections, applied to the connected
     /// session at once.
@@ -476,109 +482,105 @@ struct MacSettingsView: View {
     }
 }
 
-/// First window of the app: recent and paired Macs, another one by name with its 6-digit code, and Pair a Device… for this
-/// Mac as a host. Recent first; a double click connects.
+/// First window of the app: the paired Macs, each with its device icon, most recently connected first. Double-click or
+/// Return connects; + (the toolbar) adds another Mac by name or address with its pairing code.
 struct ConnectView: View {
-    struct Host: Identifiable, Equatable { var alias: String; var name: String?; var id: String { alias } }
-    let hosts: [Host]
-    /// A Mac from the list, or nil while one is typed below.
+    let hosts: [PairedHost]
     @State private var selection: String?
-    @State private var address: String
-    @State private var code = ""
-    let onPairDevice: () -> Void
+    @State private var adding: Bool
     let onConnect: (String, String?) -> Void
 
-    init(hosts: [Host], lastHost: String, onPairDevice: @escaping () -> Void, onConnect: @escaping (String, String?) -> Void) {
+    init(hosts: [PairedHost], lastHost: String?, openAdd: Bool = false, onConnect: @escaping (String, String?) -> Void) {
         self.hosts = hosts
-        let listed = hosts.contains { $0.alias == lastHost }
-        self._selection = State(initialValue: listed ? lastHost : hosts.first?.alias)
-        self._address = State(initialValue: listed || !hosts.isEmpty ? "" : lastHost)
-        self.onPairDevice = onPairDevice
+        self._selection = State(initialValue: ConnectList.initialSelection(hosts, lastHost: lastHost))
+        self._adding = State(initialValue: openAdd)
         self.onConnect = onConnect
     }
 
-    /// Paired Macs, the recently connected ones first (most recent at the top), then the others by name.
-    static func hosts(known: [(alias: String, name: String)], recent: [String]) -> [Host] {
-        let names = Dictionary(known.map { ($0.alias, $0.name) }, uniquingKeysWith: { a, _ in a })
-        let recentPaired = recent.filter { names[$0] != nil }
-        let rest = names.keys.filter { !recentPaired.contains($0) }.sorted()
-        return (recentPaired + rest).map { Host(alias: $0, name: names[$0]) }
+    var body: some View {
+        Group {
+            if hosts.isEmpty {
+                VStack(spacing: 12) {
+                    Text("No paired Macs yet.").foregroundStyle(.secondary)
+                    Button { adding = true } label: { Label("Add a Mac", systemImage: "plus") }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(hosts, selection: $selection) { h in
+                    row(h).tag(h.alias)
+                }
+                .listStyle(.inset)
+                .alternatingRowBackgrounds(.disabled)
+                .contextMenu(forSelectionType: String.self) { items in
+                    if let a = items.first { Button("Connect") { onConnect(a, nil) } }
+                } primaryAction: { items in
+                    if let a = items.first { onConnect(a, nil) }   // double-click, Return
+                }
+            }
+        }
+        .frame(minWidth: 340, minHeight: 220)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button { adding = true } label: { Label("Add a Mac", systemImage: "plus") }
+                    .help("Add a Mac")
+            }
+        }
+        .sheet(isPresented: $adding) {
+            AddHostSheet(paired: hosts, onCancel: { adding = false }) { address, code in
+                adding = false
+                onConnect(address, code)
+            }
+        }
     }
 
-    private var typed: String { address.trimmingCharacters(in: .whitespaces) }
-    /// What Connect connects to: the typed address, else the Mac chosen in the list.
-    private var target: String { typed.isEmpty ? (selection ?? "") : typed }
-    private var isPaired: Bool { hosts.contains { $0.alias == target } }
-    private var canConnect: Bool { !target.isEmpty && (isPaired || PairingCode.normalize(code) != nil) }
+    private func row(_ h: PairedHost) -> some View {
+        HStack(spacing: 10) {
+            DeviceIconView(model: h.model, family: h.family, size: 36)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(h.title).fontWeight(.medium)
+                if let d = h.detail() { Text(d).font(.caption).foregroundStyle(.secondary) }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 3)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The + sheet: a Mac by name or address, and its 6-digit pairing code (Pair a Device… in Mirage's menu-bar item on that
+/// Mac) unless this Mac is already paired with it.
+struct AddHostSheet: View {
+    let paired: [PairedHost]
+    let onCancel: () -> Void
+    let onConnect: (String, String?) -> Void
+    @State private var form = AddHostForm()
 
     var body: some View {
         VStack(spacing: 0) {
-            VStack(spacing: 6) {
-                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 72, height: 72)
-                Text("Connect to a Mac").font(.title2.weight(.semibold))
-                Text("Over your network or tailnet.").foregroundStyle(.secondary)
-            }
-            .padding(.top, 34).padding(.bottom, 4)
             Form {
-                if !hosts.isEmpty {
-                    Section("Recent") {
-                        ForEach(hosts) { h in row(h) }
-                    }
-                }
-                Section {
-                    TextField("Name or Address", text: $address, prompt: Text("mac-studio.local or 100.64.0.1"))
-                        .onChange(of: address) { if !typed.isEmpty { selection = nil } }
-                        .onSubmit { connect() }
-                    if !typed.isEmpty && !isPaired {
-                        TextField("Pairing Code", text: $code, prompt: Text("6 digits"))
-                            .onSubmit { connect() }
-                    }
-                } header: {
-                    Text(hosts.isEmpty ? "Add a Mac" : "Another Mac")
-                } footer: {
-                    Text("On that Mac, choose Pair a Device… in Mirage's menu-bar item and type the code it shows. Pairing happens once.")
-                        .font(.caption).foregroundStyle(.secondary)
+                TextField("Name or Address", text: $form.address, prompt: Text("mac-studio.local"))
+                    .onSubmit(connect)
+                if form.needsCode(paired) {
+                    TextField("Pairing Code", text: $form.code, prompt: Text("6 digits"))
+                        .onSubmit(connect)
                 }
             }
             .formStyle(.grouped)
-            .scrollContentBackground(.hidden)
+            .scrollDisabled(true)
             HStack {
-                Button("Pair a Device…", action: onPairDevice)
-                    .help("Show this Mac's pairing code, for an iPhone, iPad or another Mac to connect to it")
                 Spacer()
-                Button("Connect") { connect() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!canConnect)
+                Button("Cancel", role: .cancel, action: onCancel).keyboardShortcut(.cancelAction)
+                Button("Connect", action: connect).keyboardShortcut(.defaultAction).disabled(form.request(paired) == nil)
             }
-            .controlSize(.large)
-            .padding(.horizontal, 20).padding(.bottom, 18).padding(.top, 4)
+            .padding(.horizontal, 20).padding(.bottom, 16)
         }
-        .frame(width: 460, height: 500)
-        .background(.background)
+        .frame(width: 380)
+        .fixedSize(horizontal: false, vertical: true)
     }
-
-    private func row(_ h: Host) -> some View {
-        let selected = typed.isEmpty && h.alias == selection
-        return HStack(spacing: 10) {
-            Image(systemName: "desktopcomputer").font(.title3).foregroundStyle(selected ? Color.accentColor : .secondary).frame(width: 24)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(h.name ?? h.alias).fontWeight(.medium)
-                if let n = h.name, n != h.alias { Text(h.alias).font(.caption).foregroundStyle(.secondary) }
-            }
-            Spacer()
-            if selected { Image(systemName: "checkmark").foregroundStyle(.tint).fontWeight(.semibold) }
-        }
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) { choose(h); connect() }
-        .onTapGesture { choose(h) }
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAddTraits(selected ? .isSelected : [])
-    }
-    private func choose(_ h: Host) { selection = h.alias; address = ""; code = "" }
 
     private func connect() {
-        guard canConnect else { return }
-        onConnect(target, isPaired ? nil : PairingCode.normalize(code))
+        guard let r = form.request(paired) else { return }
+        onConnect(r.address, r.code)
     }
 }
 

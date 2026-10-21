@@ -56,7 +56,7 @@ final class AppState: ObservableObject {
     func pair(_ link: PairingLink) {
         offered = nil
         guard !link.isExpired() else { linkProblem = "That pairing code has expired. Scan the one the Mac shows now."; return }
-        UserDefaults.standard.set(link.address, forKey: "lastHost")
+        ViewerSettings.noteConnected(link.address)
         let m = Self.makeModel()
         let s = ViewerSession(host: link.address, port: link.port, pairCode: nil, pairLink: link, model: m)
         model = m; session = s; ViewerPreferences.shared.session = s
@@ -64,21 +64,12 @@ final class AppState: ObservableObject {
     }
 
     /// `HOST`, `HOST:PORT` or `[V6]:PORT`.
-    static func parse(_ s: String) -> (host: String, port: UInt16) {
-        let t = s.trimmingCharacters(in: .whitespaces)
-        if t.hasPrefix("["), let close = t.firstIndex(of: "]") {
-            let h = String(t[t.index(after: t.startIndex)..<close])
-            let rest = t[t.index(after: close)...]
-            return (h, rest.hasPrefix(":") ? UInt16(rest.dropFirst()) ?? Mirage.defaultPort : Mirage.defaultPort)
-        }
-        let parts = t.split(separator: ":")
-        if parts.count == 2, let p = UInt16(parts[1]) { return (String(parts[0]), p) }
-        return (t, Mirage.defaultPort)
-    }
+    static func parse(_ s: String) -> (host: String, port: UInt16) { ConnectList.parseAddress(s) }
 
     func connect(_ address: String, pairCode: String?) {
         let (host, port) = Self.parse(address)
         UserDefaults.standard.set(address, forKey: "lastHost")
+        ViewerSettings.noteConnected(host)   // the connect list's order: most recent first
         let m = Self.makeModel()
         let s = ViewerSession(host: host, port: port, pairCode: pairCode, model: m)
         model = m; session = s; ViewerPreferences.shared.session = s
@@ -110,71 +101,101 @@ final class AppState: ObservableObject {
     }
 }
 
-/// Paired hosts, or a new one with the 6-digit code `miraged pair` shows on that Mac.
+/// The paired Macs, each with its device's symbol, most recently connected first; a tap connects. + (the navigation bar)
+/// adds another one by name or address with its 6-digit code or the QR code its Pair a Device… shows.
 struct ConnectScreen: View {
     let onConnect: (String, String?) -> Void
     let onLink: (PairingLink) -> Void
-    @State private var scanning = false
-    @State private var host = UserDefaults.standard.string(forKey: "lastHost") ?? ""
-    @State private var code = ""
-    @State private var known: [(alias: String, name: String)] = []
+    @State private var hosts: [PairedHost] = []
+    @State private var adding = ProcessInfo.processInfo.environment["MIRAGE_TEST_OPEN_ADD"] != nil
 
-    private func isPaired(_ address: String) -> Bool {
-        let (h, _) = AppState.parse(address)
-        return known.contains { $0.alias == h }
+    var body: some View {
+        NavigationStack {
+            Group {
+                if hosts.isEmpty {
+                    VStack(spacing: 14) {
+                        Text("No paired Macs yet.").foregroundStyle(.secondary)
+                        Button { adding = true } label: { Label("Add a Mac", systemImage: "plus") }
+                            .buttonStyle(.bordered)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    List(hosts) { h in
+                        Button { onConnect(h.alias, nil) } label: { row(h) }
+                            .tint(.primary)
+                    }
+                }
+            }
+            .navigationTitle("Mirage")
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { adding = true } label: { Image(systemName: "plus") }
+                        .accessibilityLabel("Add a Mac")
+                }
+            }
+            .sheet(isPresented: $adding) {
+                AddHostScreen(paired: hosts, onCancel: { adding = false }, onConnect: { address, code in
+                    adding = false
+                    onConnect(address, code)
+                }, onLink: { link in
+                    // The "Pair with …?" alert lives on the root view: this sheet goes first.
+                    adding = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { onLink(link) }
+                })
+            }
+        }
+        .onAppear { hosts = ConnectList.load() }
     }
-    private var canConnect: Bool {
-        let h = host.trimmingCharacters(in: .whitespaces)
-        return !h.isEmpty && (isPaired(h) || PairingCode.normalize(code) != nil)
+
+    private func row(_ h: PairedHost) -> some View {
+        HStack(spacing: 12) {
+            DeviceIconView(model: h.model, family: h.family, size: 34)
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(h.title).foregroundStyle(.primary)
+                if let d = h.detail() { Text(d).font(.caption).foregroundStyle(.secondary) }
+            }
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
     }
+}
+
+/// The + sheet: name or address, then the pairing code (typed, or its QR scanned) unless this device is already paired.
+struct AddHostScreen: View {
+    let paired: [PairedHost]
+    let onCancel: () -> Void
+    let onConnect: (String, String?) -> Void
+    let onLink: (PairingLink) -> Void
+    @State private var form = AddHostForm()
+    @State private var scanning = false
 
     var body: some View {
         NavigationStack {
             Form {
-                if !known.isEmpty {
-                    Section("Paired Macs") {
-                        ForEach(known, id: \.alias) { h in
-                            Button { host = h.alias; code = "" } label: {
-                                HStack {
-                                    Image(systemName: "desktopcomputer")
-                                    VStack(alignment: .leading) {
-                                        Text(h.name).foregroundStyle(.primary)
-                                        Text(h.alias).font(.caption).foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                    if AppState.parse(host).host == h.alias { Image(systemName: "checkmark").foregroundStyle(.tint) }
-                                }
-                            }
-                        }
+                TextField("Name or Address", text: $form.address, prompt: Text("mac-studio.local"))
+                    .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                if form.needsCode(paired) {
+                    HStack {
+                        TextField("Pairing Code", text: $form.code, prompt: Text("6 digits"))
+                            .keyboardType(.numberPad)
+                        Button { scanning = true } label: { Image(systemName: "qrcode.viewfinder").font(.title3) }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Scan Pairing Code")
                     }
-                }
-                Section {
-                    TextField("Host name or address (e.g. mac-daddy)", text: $host)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                    if !isPaired(host) {
-                        HStack {
-                            TextField("6-digit pairing code", text: $code)
-                                .keyboardType(.numberPad)
-                            Button { scanning = true } label: { Image(systemName: "qrcode.viewfinder").font(.title3) }
-                                .buttonStyle(.borderless)
-                                .accessibilityLabel("Scan pairing code")
-                        }
-                    }
-                } header: { Text(known.isEmpty ? "Add a Mac" : "Or another Mac") } footer: {
-                    Text(isPaired(host) ? "Over your tailnet. Pairing happened once; this device is remembered." : "On that Mac choose Pair a Device… in the Mirage menu bar item, then scan its code (or type the 6 digits). Pairing happens once; afterwards this device is remembered.")
-                }
-                Section {
-                    Button("Connect") { connect() }.disabled(!canConnect)
                 }
             }
-            .navigationTitle("Mirage")
+            .navigationTitle("Add a Mac")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel", action: onCancel) }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Connect") { if let r = form.request(paired) { onConnect(r.address, r.code) } }
+                        .disabled(form.request(paired) == nil)
+                }
+            }
             .sheet(isPresented: $scanning) { PairingScanSheet(onLink: onLink) }
         }
-        .onAppear { known = ((try? Store().knownHosts()) ?? [:]).map { ($0.key, $0.value.hostName) }.sorted { $0.0 < $1.0 } }
-    }
-
-    private func connect() {
-        let h = host.trimmingCharacters(in: .whitespaces)
-        onConnect(h, isPaired(h) ? nil : PairingCode.normalize(code))
+        .presentationDetents([.medium, .large])
     }
 }

@@ -43,7 +43,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: $(MIRAGE_DISPLAY_NAME)
-        EXECUTABLE_NAME: mirage-viewer   # what scripts and the README run: MirageViewer.app/Contents/MacOS/mirage-viewer
+        EXECUTABLE_NAME: mirage-viewer   # what scripts and the README run: Mirage.app/Contents/MacOS/mirage-viewer
         PRODUCT_MODULE_NAME: MirageViewer
         PRODUCT_BUNDLE_IDENTIFIER: com.paulherz.mirage
         MARKETING_VERSION: "0.1"
@@ -56,7 +56,6 @@ targets:
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
         SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
         MIRAGE_DISPLAY_NAME: Mirage
-        "MIRAGE_DISPLAY_NAME[sdk=macosx*]": Mirage Viewer
         INFOPLIST_KEY_CFBundleDisplayName: $(MIRAGE_DISPLAY_NAME)
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Paul Herz. MIT License."

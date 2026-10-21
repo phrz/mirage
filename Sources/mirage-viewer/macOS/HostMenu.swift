@@ -111,6 +111,7 @@ final class HostMenu: NSObject, NSMenuDelegate {
             let sub = NSMenu()
             for d in devices.sorted(by: { $0.pairedAt < $1.pairedAt }) {
                 let i = NSMenuItem(title: "Revoke \(d.name)…", action: #selector(revoke(_:)), keyEquivalent: ""); i.target = self; i.representedObject = d
+                i.image = DeviceIcon.menuImage(model: d.model)   // the device's own picture (iPhone, MacBook Pro, …)
                 sub.addItem(i)
             }
             let devicesItem = NSMenuItem(title: devices.count == 1 ? "1 Paired Device" : "\(devices.count) Paired Devices", action: nil, keyEquivalent: "")

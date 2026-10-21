@@ -264,16 +264,9 @@ struct AboutSettingsSection: View {
     let model: ViewerModel?
     var body: some View {
         Section("About") {
-            LabeledContent(appName, value: ViewerSettings.appBuild)
+            LabeledContent("Mirage", value: ViewerSettings.appBuild)
             if let model { HostAboutRows(model: model) }
         }
-    }
-    private var appName: String {
-        #if os(macOS)
-        "Mirage Viewer"
-        #else
-        "Mirage"
-        #endif
     }
 }
 private struct HostAboutRows: View {

@@ -24,7 +24,7 @@ cat <<'INFO'
 == once, on the host Mac (System Settings > Privacy & Security):
    Screen & System Audio Recording, and Accessibility: enable "miraged"
    (/Applications/Mirage.app/Contents/MacOS/miraged; the host asks for both when it starts, so it is listed).
-   If Settings lists it as "Mirage Viewer" instead, enable that. The Mirage menu-bar item shows
+   If Settings lists it as "Mirage" (or "Mirage Viewer", from older builds) instead, enable that. The Mirage menu-bar item shows
    "Mirage needs Screen Recording / Accessibility" with buttons to these panes until the host sees both grants;
    then restart it: launchctl kickstart -k gui/$(id -u)/com.paulherz.mirage.host
 INFO
