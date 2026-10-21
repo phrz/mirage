@@ -796,6 +796,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Whatever was in flight is treated as lost: unacked tile messages have their rects queued for a
     /// lossless resend, unacked video frames are forgotten (the resume keyframe replaces them).
     public func suspend() async {
+        queue.sync { Self.savePriorDelivery(self.rc?.deliveryKbps ?? 0, for: self.output?.peerID) }   // the next connect starts there
         // The session is cut loose first (output, timers, captures detached), then the captures are stopped, each within 3 s:
         // ScreenCaptureKit's stopCapture can fail to return, and awaiting it before the cut left a suspended streamer
         // capturing, refining and sending into the dead connection for good (mac-daddy 2026-10-21: a second streamer
@@ -953,6 +954,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     public func stop() async {
+        queue.sync { Self.savePriorDelivery(self.rc?.deliveryKbps ?? 0, for: self.output?.peerID) }
         // Cut loose first, then stop the captures within 3 s each (suspend()).
         let (cap, caps): (ScreenCapturer?, [WindowCapturer]) = await withCheckedContinuation { c in
             queue.async {
@@ -2023,12 +2025,29 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard !trainSent.isEmpty else { return }
         let r = trainReceived.sorted()
         trainSent = []
-        guard r.count >= 8, let first = r.first, let last = r.last, last > first else { log("connect probe: \(r.count) of \(Self.trainCount) echoes; no estimate"); return }
-        let bytes = Double((r.count - 1) * (Self.trainSize + 40))
-        let kbps = Int(bytes * 8 / (Double(last - first) / 1e9) / 1000)
-        rc?.seedFromProbe(kbps: kbps)
-        log("connect probe: \(r.count) of \(Self.trainCount) echoes over \(Double(last - first) / 1e6) ms: \(kbps) kbps; target \(rc?.targetKbps ?? 0) kbps")
+        let prior = Self.priorDelivery(for: output?.peerID)
+        guard let kbps = RateController.trainRate(r, packetBytes: Self.trainSize + 40) else {
+            log("connect probe: \(r.count) of \(Self.trainCount) echoes; no estimate\(prior > 0 ? "; this pairing's last estimate \(prior) kbps" : "")")
+            if prior > 0 { rc?.seedFromProbe(kbps: prior); applyBudget(now: Clock.nowNanos()) }
+            return
+        }
+        // Never below what this pairing's last session delivered: a train at connect meets QUIC's congestion window,
+        // which has not opened yet (8.1 Mbps of Fast 4G read 1.3 Mbps from the train's total time).
+        rc?.seedFromProbe(kbps: max(kbps, prior))
+        log("connect probe: \(r.count) of \(Self.trainCount) echoes: \(kbps) kbps from the densest burst\(prior > 0 ? ", this pairing's last \(prior) kbps" : ""); target \(rc?.targetKbps ?? 0) kbps")
         applyBudget(now: Clock.nowNanos())
+    }
+    /// Per pairing (the device id), the last session's delivery estimate in kbit/s (the host's store, delivery.json).
+    static func priorDelivery(for peer: String?) -> Int {
+        guard let peer, let url = (try? Store())?.url("delivery.json"), let d = try? Data(contentsOf: url),
+              let m = try? JSONDecoder().decode([String: Int].self, from: d) else { return 0 }
+        return m[peer] ?? 0
+    }
+    static func savePriorDelivery(_ kbps: Int, for peer: String?) {
+        guard let peer, kbps > 0, let url = (try? Store())?.url("delivery.json") else { return }
+        var m = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) } ?? [:]
+        m[peer] = kbps
+        if let d = try? JSONEncoder().encode(m) { try? d.write(to: url, options: .atomic) }
     }
 
     // MARK: Fresh pictures (DESIGN §3.3 "lossy first")

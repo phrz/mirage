@@ -112,4 +112,15 @@ final class DeliveryRateTests: XCTestCase {
         slow.seedFromProbe(kbps: 600)
         XCTAssertEqual(slow.targetKbps, 800, "a slow probe does not lower the start (the controller does that from evidence)")
     }
+
+    /// The probe reads the link from a burst's spacing, not the train's total time (which the congestion window stretches).
+    func testTheTrainRateComesFromTheDensestBurst() {
+        let ms: UInt64 = 1_000_000
+        // 8.1 Mbps: a 1240-byte packet every ~1.22 ms; released in bursts of 10, an RTT (80 ms) apart.
+        var r: [UInt64] = []
+        for b in 0..<4 { for i in 0..<10 { r.append(UInt64(b) * 80 * ms + UInt64(Double(i) * 1.225 * 1e6)) } }
+        let kbps = RateController.trainRate(r, packetBytes: 1240)!
+        XCTAssertEqual(Double(kbps), 8_100, accuracy: 400, "the burst's rate, not 40 packets over ~251 ms (1.6 Mbps)")
+        XCTAssertNil(RateController.trainRate([0, 10 * ms, 20 * ms, 30 * ms], packetBytes: 1240), "no burst: no estimate")
+    }
 }

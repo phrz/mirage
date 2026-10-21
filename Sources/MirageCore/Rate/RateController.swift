@@ -434,6 +434,21 @@ public struct RateController {
         targetKbps = min(maxKbps, max(targetKbps, max(tuning.minKbps, Int(Double(kbps) * tuning.capacityFraction))))
     }
 
+    /// The train's rate from its densest burst (packets with no gap over 5 ms, at least 4 of them, spanning 1 ms or more):
+    /// the congestion window releases the train in bursts an RTT apart, and inside a burst the packets arrive at the link's
+    /// rate. Nil without such a burst.
+    public static func trainRate(_ received: [UInt64], packetBytes: Int) -> Int? {
+        guard received.count >= 4 else { return nil }
+        var best: Double = 0, start = 0
+        for i in 1...received.count {
+            if i == received.count || received[i] - received[i - 1] > 5_000_000 {
+                let n = i - start, span = Double(received[i - 1] - received[start])
+                if n >= 4, span >= 1_000_000 { best = max(best, Double((n - 1) * packetBytes) * 8 / (span / 1e9) / 1000) }
+                start = i
+            }
+        }
+        return best > 0 ? Int(best) : nil
+    }
     /// Bytes the viewer acked (a tile message, a block, a video frame). `receivedNanos`: when the viewer received them (its
     /// clock); the window is taken on those times when given, since acks come back over the uplink in clumps (Fast 4G's
     /// 1.35 Mbps up: an 8.1 Mbps link read 10 Mbps on the host's arrival times).

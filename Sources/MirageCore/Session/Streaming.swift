@@ -12,7 +12,10 @@ public protocol StreamOutput: AnyObject, Sendable {
     /// `fast` = the interactive stream (changed pixels, copy-rects), else the refinement stream.
     func sendTiles(_ data: Data, fast: Bool)
     var maxDatagramSize: Int { get }
+    /// The paired device on the other end (its id), for state kept per pairing (the last delivery estimate).
+    var peerID: String? { get }
 }
+public extension StreamOutput { var peerID: String? { nil } }
 
 /// A platform implementation of "stream this display, inject this input" (macOS: MirageHost).
 /// MirageCore itself stays free of ScreenCaptureKit/AppKit so it compiles for iOS.
@@ -314,6 +317,7 @@ final class ConnectionOutput: StreamOutput, @unchecked Sendable {
 
     /// The connection whose throttle (`HostConnection.shaper`) every send goes through.
     weak var link: HostConnection?
+    var peerID: String? { link?.deviceID }
 
     init(flow: MessageStream, tiles: MessageStream?, fastTiles: MessageStream?, control: MessageStream, link: HostConnection? = nil, log: @escaping @Sendable (String) -> Void) {
         self.flow = flow; self.tiles = tiles; self.fastTiles = fastTiles; self.control = ControlSender(stream: control, log: log); self.log = log
