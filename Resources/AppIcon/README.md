@@ -16,7 +16,7 @@ Everything above is generated from `Source/`:
 Rebuild from `Source/` with Sketch running:
 
 ```bash
-uv run --with numpy --with pillow python -I gen_textures.py 620 --out form --form   # main icon's texture set
+uv run --with numpy --with pillow python -I gen_textures.py 620 --out form-wide --form --band 84   # main icon's texture set
 ST=/Applications/Sketch.app/Contents/Resources/sketchtool/bin/sketchtool
 "$ST" run "$PWD/mirage-icon.sketchplugin" build2 --without-activating=YES
 "$ST" run "$PWD/mirage-icon.sketchplugin" export --without-activating=YES

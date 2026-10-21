@@ -16,6 +16,9 @@ tag = None
 for i, a in enumerate(sys.argv[1:]):
     if a == "--out": tag = sys.argv[1:][i + 1]
 OUT_DIR = "export/textures/" + (tag or "base")
+BAND_PT = 50
+for i, a in enumerate(sys.argv[1:]):
+    if a == "--band": BAND_PT = int(sys.argv[1:][i + 1])
 S = 3                       # supersample vs 1024 canvas (3072 px wide)
 W = 1024 * S
 H = (1024 - HORIZON) * S
@@ -152,7 +155,7 @@ base = lerp(base, haze_col, haze[..., None])
 
 # ---- inferior mirage: sky reflected on hot sand just below the horizon, as thin stratified sheets
 sky_h = np.array([0.86, 0.93, 1.00])     # bright sky right at the horizon, as a sheet of light
-band_px = 50 * S
+band_px = BAND_PT * S
 ypix = np.arange(H, dtype=np.float32)[:, None]
 fall = np.exp(-(ypix / band_px) ** 1.6)                              # smooth falloff with depth
 # stratification: smooth variation along y with a slow drift along x (sheets of hot air)
