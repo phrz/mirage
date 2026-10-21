@@ -139,12 +139,16 @@ public struct WindowBlanking: Equatable {
     }
 }
 
-/// Which video counts as the sustained motion that freezes refinement (DESIGN §3.3c): only video over at least 2 % of a
-/// layer. A small animation (a bouncing or badged Dock icon, a spinner, a progress bar) is shown through video all the same,
-/// but it must not hold every other layer's refinement back (mac-daddy 2026-10-21: an animated Dock icon, 9 tiles of 1450,
-/// kept refinement at 0 kbps for 2 min with a 5,465-tile backlog).
+/// Which video counts as the sustained motion that freezes refinement (DESIGN §3.3c): only video over at least 2 % of the
+/// layer and of the screen. A small animation (a bouncing or badged Dock icon, a spinner, a progress bar) is shown through
+/// video all the same, but it must not hold every other layer's refinement back (mac-daddy 2026-10-21: an animated Dock
+/// icon, 9 tiles of 1450, kept refinement at 0 kbps for 2 min with a 5,465-tile backlog). Against the screen too: in the
+/// compositor model every window is a layer, and an app's busy indicator was 2 % of its own window, which froze refinement
+/// and put a passive full picture at 48 s (seam 29 s, where the same window was part of the display).
 public enum MotionGate {
-    public static func counts(videoTiles: Int, layerTiles: Int) -> Bool { videoTiles > 0 && videoTiles * 50 >= max(1, layerTiles) }
+    public static func counts(videoTiles: Int, layerTiles: Int, screenTiles: Int = 0) -> Bool {
+        videoTiles > 0 && videoTiles * 50 >= max(1, layerTiles, screenTiles)
+    }
 }
 
 /// Which guarded desktop tiles may take the window-free underlay (DesktopUnderlay). The underlay is the desktop with no

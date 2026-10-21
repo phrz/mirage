@@ -1551,7 +1551,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // a capped rate (host tunables, default 3 fps q50, ~40 kbps for an icon), refined lossless once it stops (classify left
         // the tiles pending). As video, one Dock icon took ~230 kbps of an 800 kbps link on mac-daddy, and its frames were the
         // rate controller's only delay samples: they read a queue that was not there and held the target at 150 kbps.
-        if !plan.video.isEmpty, !plan.wholeFrame, !MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount) {
+        if !plan.video.isEmpty, !plan.wholeFrame, !MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount, screenTiles: display?.tracker.tileCount ?? 0) {
             let small = plan.video.filter { !layer.occludedTiles.contains($0) }
             plan.video = []; plan.videoRegion = .zero
             let interval = UInt64(1e9 / hostTunables[.smallAnimationFps])
@@ -1565,7 +1565,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Motion bookkeeping for the refinement freeze: classified video, copy-rects, or the input stream.
         // Sustained motion freezes all refinement, so only motion that matters counts: copy-rects, or video over at least 2 %
         // of the layer. A bouncing Dock icon (192x192 px, 9 tiles) froze every layer's refinement for 2 min on mac-daddy.
-        if copyRectsThisCapture > 0 || MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount) { lastMotionNanos = now }
+        if copyRectsThisCapture > 0 || MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount, screenTiles: display?.tracker.tileCount ?? 0) { lastMotionNanos = now }
         if let hint = injector?.motionHintNanos, hint > lastMotionNanos { lastMotionNanos = hint }
         let motion = motionSustained(now)
         if motion != wasMotion { wasMotion = motion; lastBudgetApply = 0; applyBudget(now: now) }
@@ -1652,7 +1652,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // Only video that matters moves the budget to video (tiles 45 % of the target instead of 90 %): an animated Dock
             // icon held the tile budget at 360 of 800 kbps on mac-daddy, the full picture unfinished after 108 s. Small video
             // still gets the remainder (at least 100 kbps).
-            if MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount) { videoActiveNanos = now }
+            if MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount, screenTiles: display?.tracker.tileCount ?? 0) { videoActiveNanos = now }
         }
         layer.tracker = tracker
         layer.lastFrame = pb

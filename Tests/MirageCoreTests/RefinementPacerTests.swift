@@ -114,6 +114,8 @@ final class RefinementPacerTests: XCTestCase {
         XCTAssertTrue(MotionGate.counts(videoTiles: 60, layerTiles: 1450), "a small video window")
         XCTAssertTrue(MotionGate.counts(videoTiles: 1450, layerTiles: 1450), "a full-screen change")
         XCTAssertTrue(MotionGate.counts(videoTiles: 5, layerTiles: 200), "a small window's own animation is a large part of it")
+        XCTAssertFalse(MotionGate.counts(videoTiles: 20, layerTiles: 990, screenTiles: 1450), "an app's busy indicator: 2 % of its window, not of the screen")
+        XCTAssertTrue(MotionGate.counts(videoTiles: 60, layerTiles: 200, screenTiles: 1450), "a small video window")
     }
 
     /// The underlay never lands where a window is: not under a window the desktop picture carries (phrz's Finder mosaic after
