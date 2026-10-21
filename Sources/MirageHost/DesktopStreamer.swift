@@ -1001,7 +1001,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         for w in planned {
             if let l = layers[w.id] {
                 l.absentSince = 0
-                if l.frame.x != w.frame.x || l.frame.y != w.frame.y { l.movedNanos = now }
+                if l.frame.x != w.frame.x || l.frame.y != w.frame.y { l.movedNanos = now; windowMovedThisSession = true }
                 l.frame = w.frame
                 // Resized only when its size in points changed by a point or more: pixel rounding of a moving window's
                 // frame at a fractional scale is not a resize (each one re-announced and re-sent the whole layer).
@@ -1203,6 +1203,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var pendingFallback = Set<UInt32>()
     /// When the compositor model's layers were set up for this stream.
     private var compositorSinceNanos: UInt64 = 0
+    /// A window has moved this session (a drag, Show Desktop): the desktop under windows may be seen.
+    private var windowMovedThisSession = false
+    /// Compositor model: the desktop under shown windows is refined (at underlay quality) only where it may be seen: on
+    /// fast tiers, or once a window has moved this session. On Constrained/Extreme it was 950 KB nobody saw on a 650 kbps
+    /// link (Japan bus); when a window does move away, the uncovered tiles are expedited (updateDisplayHidden).
+    private var underlayWanted: Bool { windowMovedThisSession || (rc?.tier.rawValue ?? 0) < LinkTier.constrained.rawValue }
     private var fallbackCapture: ScreenCapturer?
     private var fallbackStarting = false
     private var fallbackPools: [UInt32: (pool: CVPixelBufferPool, w: Int, h: Int)] = [:]
@@ -2007,8 +2013,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard let src = l.lastFrame else { return }
         refillTiles(now: now)
         // One block in flight and budget-limited: it does not yield to motion (that would starve the
-        // base picture whenever something animates), it just takes the leftover tokens.
-        guard tileTokens > 0 else { return }
+        // base picture whenever something animates), it takes the leftover tokens or its own reserve.
+        let fromReserve = tileTokens <= 0
+        guard !fromReserve || freshTokens > 0 else { return }
+        let charged = tileTokens
+        defer { if fromReserve { freshTokens -= charged - tileTokens } }
         switch l.fresh {
         case .still:
             CVPixelBufferLockBaseAddress(src, .readOnly)
@@ -2361,8 +2370,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         lastTileRefill = now
         tileTokens = min(cap * 0.5, tileTokens + dt * cap)
         tileTokens = max(tileTokens, -cap)
+        freshTokens = min(cap * 0.2, freshTokens + dt * cap * Self.freshShare)
     }
     private var lastTileRefill = Clock.nowNanos()
+    /// First pictures (stills, middle levels, fresh blocks) have 40 % of the tile budget to themselves: live activity in one
+    /// window (the Claude app on mac-daddy, ~240 kbps of changes) drove the shared tokens negative and held every other
+    /// window's first picture back. What they take from this reserve is also charged to the shared tokens.
+    static let freshShare = 0.4
+    private var freshTokens = 0.0
 
     /// Refinement across layers: fresh pictures first (stills and blocks, one in flight), then settled
     /// video tiles and rate-limited sparse tiles, oldest first, locus first, within the tile budget.
@@ -2700,6 +2715,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if !l.occludedTiles.isEmpty {
                 let hidden = due.filter { l.occludedTiles.contains($0) }
                 if !hidden.isEmpty { l.tracker.defer(hidden, now: now, delayNanos: 3_600_000_000_000); due.removeAll { l.occludedTiles.contains($0) } }
+            }
+            if compositor, l.isDisplay, !underlayWanted {
+                let under = due.filter { l.underLayer.contains($0) }
+                if !under.isEmpty { l.tracker.defer(under, now: now, delayNanos: 3_600_000_000_000); due.removeAll { l.underLayer.contains($0) } }
             }
             guard !due.isEmpty else { continue }
             // Something visible is waiting: it goes when the refinement budget allows (and nothing behind it meanwhile).
