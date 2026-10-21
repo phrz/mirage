@@ -147,8 +147,10 @@ In the compositor model nothing is ever baked:
 - Streams: desktop + overlay + one per visible window (the seam design: display + underlay + one per planned window).
 - The viewer change it needs: hit-testing skips the overlay layer (it covers the whole display). Viewers without it would
   hit the overlay for every title-bar drag, so the default flips only after the app update is out.
-- Open: a window whose own capture fails has no fallback yet (the seam design left it in the desktop picture; the plan is to
-  cut it from a full display capture at its frame).
+- **Fallback:** a window whose own capture fails (or stops with an error) is still a layer, cut at its frame from one full
+  display capture (the composited screen, nothing left out) that runs only while some layer needs it. Soft, and partly
+  covered where a window is in front, never baked into the desktop. `MIRAGE_TEST_FALLBACK=<app name>` forces it for that
+  app's windows.
 
 ### 3.1 Transport and security
 

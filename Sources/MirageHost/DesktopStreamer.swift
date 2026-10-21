@@ -754,6 +754,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if let und { Task { await Self.bounded("desktop underlay", log: self.log) { await und.stop() } } }
                 let ov = self.overlay; self.overlay = nil
                 if let ov { Task { await Self.bounded("overlay capture", log: self.log) { await ov.stop() } } }
+                let fb = self.fallbackCapture; self.fallbackCapture = nil; self.fallbackPools = [:]
+                if let fb { Task { await Self.bounded("fallback capture", log: self.log) { await fb.stop() } } }
                 self.cursor?.stop(); self.cursor = nil
                 self.statTimer?.cancel(); self.statTimer = nil
                 self.refineTimer?.cancel(); self.refineTimer = nil
@@ -855,6 +857,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.compositor = comp; self.overlay = ov
                     self.ensureOverlayLayer()
                     self.ensureUnderlay(t)
+                    if !self.fallbackLayers.isEmpty { self.ensureFallbackCapture() }
                     self.loadHostTunables()
                     self.lastExcludedIDs = Set(excluded.map(\.windowID))
                     let old = self.target
@@ -904,6 +907,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if let und { Task { await Self.bounded("desktop underlay", log: self.log) { await und.stop() } } }
                 let ov = self.overlay; self.overlay = nil
                 if let ov { Task { await Self.bounded("overlay capture", log: self.log) { await ov.stop() } } }
+                let fb = self.fallbackCapture; self.fallbackCapture = nil; self.fallbackPools = [:]
+                if let fb { Task { await Self.bounded("fallback capture", log: self.log) { await fb.stop() } } }
                 self.cursor?.stop(); self.cursor = nil
                 self.statTimer?.cancel(); self.statTimer = nil
                 self.refineTimer?.cancel(); self.refineTimer = nil
@@ -986,7 +991,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     l.resize(width: w.frame.width, height: w.frame.height)
                     log("layer \(w.id) resized to \(w.frame.width)x\(w.frame.height)")
                 }
-                if l.capturer == nil { startCapturer(for: l, sample: s, needCatalog: &needCatalog) }
+                if l.capturer == nil, !fallbackLayers.contains(l.id) { startCapturer(for: l, sample: s, needCatalog: &needCatalog) }
             } else {
                 let l = Layer(id: w.id, width: w.frame.width, height: w.frame.height, frame: w.frame, now: now)
                 layers[w.id] = l
@@ -1108,6 +1113,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var catalogMissNanos: [UInt32: UInt64] = [:]
 
     private func startCapturer(for l: Layer, sample s: WindowTracker.Sample, needCatalog: inout [UInt32]) {
+        if compositor, let app = Self.testFallbackApp, s.byID[l.id]?.app == app { useFallback(l, why: "MIRAGE_TEST_FALLBACK"); return }
         guard let sc = catalog.window(l.id) else { needCatalog.append(l.id); return }
         let pointFrame = s.pointBounds[l.id] ?? sc.frame
         guard let display = catalog.display(for: pointFrame) else { needCatalog.append(l.id); return }
@@ -1118,10 +1124,79 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let cap = WindowCapturer(window: sc, display: display, pointFrame: pointFrame, width: l.width, height: l.height, fps: 10, queue: queue)
         l.capturer = cap
         l.forceFullDiff = true
-        cap.onStop = { [weak self, weak l] err in self?.queue.async { guard let l, l.capturer === cap else { return }; l.capturer = nil; self?.log("layer \(l.id) capture stopped: \(err.map { "\($0)" } ?? "ok")") } }
+        cap.onStop = { [weak self, weak l] err in self?.queue.async {
+            guard let l, l.capturer === cap else { return }; l.capturer = nil; self?.log("layer \(l.id) capture stopped: \(err.map { "\($0)" } ?? "ok")")
+            if let err { self?.useFallback(l, why: "its own capture stopped (\(err))") }
+        } }
         Task { [weak self] in
             do { try await cap.start(excluding: others) { [weak self] pb, nanos in self?.queue.async { self?.captured(pb, nanos, dirtyRects: [], layerID: l.id) } } }
-            catch { self?.queue.async { if l.capturer === cap { l.capturer = nil }; self?.log("layer \(l.id) capture failed: \(error)") } }
+            catch { self?.queue.async { if l.capturer === cap { l.capturer = nil }; self?.log("layer \(l.id) capture failed: \(error)"); self?.useFallback(l, why: "its own capture failed") } }
+        }
+    }
+
+    // MARK: Fallback (compositor model): a window cut from the full display capture
+
+    /// Layers whose own capture failed (or MIRAGE_TEST_FALLBACK names their app): their frames are cut at their frame from one
+    /// full display capture (the composited screen, nothing left out), started while any layer needs it. Soft, and partly
+    /// covered where a window is in front, but still a layer: never baked into the desktop.
+    private var fallbackLayers = Set<UInt32>()
+    private var fallbackCapture: ScreenCapturer?
+    private var fallbackStarting = false
+    private var fallbackPools: [UInt32: (pool: CVPixelBufferPool, w: Int, h: Int)] = [:]
+    static let testFallbackApp = ProcessInfo.processInfo.environment["MIRAGE_TEST_FALLBACK"]
+    private func useFallback(_ l: Layer, why: String) {
+        guard compositor, !l.isDisplay, !fallbackLayers.contains(l.id) else { return }
+        fallbackLayers.insert(l.id); l.forceFullDiff = true
+        log("layer \(l.id): \(why); cut from the full display capture at its frame")
+        ensureFallbackCapture()
+    }
+    private func ensureFallbackCapture() {
+        guard compositor, fallbackCapture == nil, !fallbackStarting, let t = target, let req = request else { return }
+        fallbackStarting = true
+        let cap = ScreenCapturer(queue: queue)   // .display, nothing excluded: the screen as composited
+        Task { [weak self] in
+            do {
+                _ = try await cap.start(req, target: t, excluding: []) { [weak self] pb, nanos, _ in self?.queue.async { self?.fallbackFrame(pb, nanos) } }
+                self?.queue.async { self?.fallbackCapture = cap; self?.fallbackStarting = false; self?.log("fallback capture started (full display)") }
+            } catch { self?.queue.async { self?.fallbackStarting = false; self?.log("fallback capture failed: \(error)") } }
+        }
+    }
+    private func fallbackFrame(_ pb: CVPixelBuffer, _ nanos: UInt64) {
+        fallbackLayers = fallbackLayers.filter { layers[$0] != nil }
+        let live = fallbackLayers.filter { plannedFrames[$0] != nil }
+        if fallbackLayers.isEmpty, let cap = fallbackCapture {
+            fallbackCapture = nil; fallbackPools = [:]
+            let log = self.log
+            Task { await Self.bounded("fallback capture", log: log) { await cap.stop() } }
+            log("fallback capture stopped (no layer needs it)")
+            return
+        }
+        CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        let src = frameView(pb)
+        let screen = PixelRect(x: 0, y: 0, width: src.width, height: src.height)
+        for id in live.sorted() {
+            guard let l = layers[id] else { continue }
+            let w = l.width, h = l.height
+            if fallbackPools[id].map({ $0.w != w || $0.h != h }) ?? true {
+                let attrs: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey: w, kCVPixelBufferHeightKey: h, kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+                var pool: CVPixelBufferPool?
+                CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey: 3] as CFDictionary, attrs as CFDictionary, &pool)
+                guard let pool else { continue }
+                fallbackPools[id] = (pool, w, h)
+            }
+            var out: CVPixelBuffer?
+            guard let pool = fallbackPools[id]?.pool, CVPixelBufferPoolCreatePixelBuffer(nil, pool, &out) == kCVReturnSuccess, let out else { continue }
+            CVPixelBufferLockBaseAddress(out, [])
+            let dst = CVPixelBufferGetBaseAddress(out)!, ds = CVPixelBufferGetBytesPerRow(out)
+            memset(dst, 0, ds * h)   // transparent where the window is off the display
+            let r = PixelRect(x: l.frame.x, y: l.frame.y, width: w, height: h).intersection(screen)
+            if !r.isEmpty {
+                for y in 0..<r.height {
+                    memcpy(dst.advanced(by: (r.y - l.frame.y + y) * ds + (r.x - l.frame.x) * 4), src.base.advanced(by: (r.y + y) * src.stride + r.x * 4), r.width * 4)
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(out, [])
+            captured(out, nanos, dirtyRects: [], layerID: id)
         }
     }
 
