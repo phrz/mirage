@@ -401,14 +401,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let tracker = WindowTracker(displayID: t.display.displayID, streamWidth: t.pixelWidth)
         let now = Clock.nowNanos()
         let sample = tracker.sample(captureSeq: 0, now: now, force: true)
-        let cap = ScreenCapturer(queue: queue)
-        let planned = sample.map { plannedLayers(in: $0.sample.windows, displayPixels: t.pixelWidth * t.pixelHeight) } ?? []
-        _ = planned
         let comp = Self.compositorWanted()
-        if comp { cap.source = .desktop }   // the compositor model: the desktop alone, never an app window
         let excluded: [SCWindow] = []   // a window stays in the display picture until its own still has landed
-        _ = try await cap.start(req, target: t, excluding: excluded) { [weak self] pb, nanos, dirty in self?.queue.async { self?.captured(pb, nanos, dirtyRects: dirty, layerID: 0) } }
-        let ov = comp ? try await startOverlay(req, t) : nil
+        let (cap, deskFrame) = try await startDesktop(req, t, compositor: comp, excluding: excluded)
+        let (ov, overlayFrame) = comp ? try await startOverlay(req, t) : (nil, nil)
         return try await withCheckedThrowingContinuation { c in
             queue.async {
                 do {
@@ -446,6 +442,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                         for w in s.sample.windows { self.log(String(format: "window %u level %d owner %@ %dx%d at %d,%d%@%@", w.id, w.windowLevel, (w.app ?? "?") as NSString, w.frame.width, w.frame.height, w.frame.x, w.frame.y, Self.cutoutSafe(w, displayArea: area) ? " cut-out" : "", w.title.contains("Mirage Test Bench") ? " (bench)" : "")) }
                         self.reconcileLayers(s.sample, now: now); self.publishWindows(now: now, full: true)
                     }
+                    self.feedWarmFrames(desktop: deskFrame, overlay: overlayFrame, t)
                     self.startTimers()
                     c.resume(returning: t.info)
                 } catch { c.resume(throwing: error) }
@@ -517,8 +514,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
     /// The windows the overlay leaves out: the desktop-level ones, every normal window on the display, and floating app
     /// windows (they are layers).
-    private func overlayExclusion(_ display: SCDisplay) -> [SCWindow] {
-        catalog.all.filter { $0.frame.intersects(display.frame) && ($0.windowLayer <= 0 || Self.floatingLevels.contains($0.windowLayer) && !Self.systemOwners.contains($0.owningApplication?.applicationName ?? "")) }
+    private func overlayExclusion(_ display: SCDisplay) -> [SCWindow] { Self.overlayExclusion(catalog.all, display) }
+    static func overlayExclusion(_ windows: [SCWindow], _ display: SCDisplay) -> [SCWindow] {
+        windows.filter { $0.frame.intersects(display.frame) && ($0.windowLayer <= 0 || floatingLevels.contains($0.windowLayer) && !systemOwners.contains($0.owningApplication?.applicationName ?? "")) }
     }
     /// Floating app windows (stay-on-top panels, utility windows: levels 1–19) are layers of their own in the compositor model,
     /// hit-testable like any window. In the overlay (which hit-testing passes over) they could not be clicked (phrz, 08:46Z:
@@ -526,17 +524,59 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     static let floatingLevels = 1...19
     static let systemOwners: Set<String> = ["Window Server", "Dock", "Control Center", "Notification Center", "SystemUIServer", "WindowManager", "Spotlight", "loginwindow"]
     static func isFloatingAppWindow(_ w: ControlMessage.WindowInfo) -> Bool { floatingLevels.contains(w.windowLevel) && !systemOwners.contains(w.app ?? "") }
-    /// Starts the overlay capture (frames go to the overlay layer).
-    private func startOverlay(_ req: ControlMessage.StreamRequest, _ t: ScreenCapturer.Target) async throws -> ScreenCapturer {
-        let ov = ScreenCapturer(queue: queue)
-        ov.source = .overlay
+    /// The display stream (layer 0): the desktop alone in the compositor model, else the display minus `excluding`. The warm
+    /// pool's running desktop capture is adopted when there is one (no ScreenCaptureKit start), with its latest frame.
+    private func startDesktop(_ req: ControlMessage.StreamRequest, _ t: ScreenCapturer.Target, compositor comp: Bool, excluding: [SCWindow], forceFirst: Bool = false) async throws -> (ScreenCapturer, CVPixelBuffer?) {
+        let onFrame: (CVPixelBuffer, UInt64, [PixelRect]) -> Void = { [weak self] pb, nanos, dirty in self?.queue.async { self?.captured(pb, nanos, dirtyRects: dirty, layerID: 0) } }
+        if comp, let (warm, last) = queue.sync(execute: { WarmPool.shared.takeDisplay(.desktop, displayID: t.display.displayID) }) {
+            do {
+                _ = try await warm.adopt(req, target: t, onFrame: onFrame)
+                log("desktop: warm capture adopted\(last == nil ? " (no frame yet)" : "")")
+                return (warm, last)
+            } catch { log("desktop: warm capture not adopted (\(error))"); await warm.stop() }
+        }
+        let cap = ScreenCapturer(queue: queue)
+        cap.forceNextFrame = forceFirst
+        if comp { cap.source = .desktop }   // the compositor model: the desktop alone, never an app window
+        _ = try await cap.start(req, target: t, excluding: excluding, onFrame: onFrame)
+        return (cap, nil)
+    }
+    /// On `queue`: the warm captures' latest frames as the desktop's and the overlay's first, where they are the stream's size.
+    private func feedWarmFrames(desktop: CVPixelBuffer?, overlay: CVPixelBuffer?, _ t: ScreenCapturer.Target) {
+        func fits(_ pb: CVPixelBuffer) -> Bool { CVPixelBufferGetWidth(pb) == t.pixelWidth && CVPixelBufferGetHeight(pb) == t.pixelHeight }
+        let now = Clock.nowNanos()
+        if let pb = desktop {
+            if fits(pb) { captured(pb, now, dirtyRects: [PixelRect(x: 0, y: 0, width: t.pixelWidth, height: t.pixelHeight)], layerID: 0) }
+            else { log("desktop: warm frame \(CVPixelBufferGetWidth(pb))x\(CVPixelBufferGetHeight(pb)) is not the stream's \(t.pixelWidth)x\(t.pixelHeight); waiting for the next") }
+        }
+        if let pb = overlay, fits(pb) { captured(pb, now, dirtyRects: [], layerID: ControlMessage.WindowInfo.overlayID) }
+    }
+
+    /// Starts the overlay capture (frames go to the overlay layer), or adopts the warm pool's, with its latest frame.
+    private func startOverlay(_ req: ControlMessage.StreamRequest, _ t: ScreenCapturer.Target) async throws -> (ScreenCapturer, CVPixelBuffer?) {
         let excl = overlayExclusion(t.display)
-        _ = try await ov.start(req, target: t, excluding: excl) { [weak self] pb, nanos, _ in self?.queue.async { self?.captured(pb, nanos, dirtyRects: [], layerID: ControlMessage.WindowInfo.overlayID) } }
+        let onFrame: (CVPixelBuffer, UInt64, [PixelRect]) -> Void = { [weak self] pb, nanos, _ in self?.queue.async { self?.captured(pb, nanos, dirtyRects: [], layerID: ControlMessage.WindowInfo.overlayID) } }
+        var ov: ScreenCapturer? = nil, last: CVPixelBuffer? = nil
+        if let (warm, frame) = queue.sync(execute: { WarmPool.shared.takeDisplay(.overlay, displayID: t.display.displayID) }) {
+            do {
+                _ = try await warm.adopt(req, target: t, onFrame: onFrame)
+                warm.requestExcluded(excl, log: { [weak self] in self?.log($0) })
+                ov = warm; last = frame
+                log("overlay: warm capture adopted\(frame == nil ? " (no frame yet)" : "")")
+            } catch { log("overlay: warm capture not adopted (\(error))"); await warm.stop() }
+        }
+        if ov == nil {
+            let c = ScreenCapturer(queue: queue)
+            c.source = .overlay
+            _ = try await c.start(req, target: t, excluding: excl, onFrame: onFrame)
+            ov = c
+        }
+        let result = ov!
         queue.async { self.overlayExcludedIDs = Set(excl.map(\.windowID)); self.desktopLevelIDs = Set(excl.filter { $0.windowLayer < 0 }.map(\.windowID)) }
         compositorSinceNanos = Clock.nowNanos()
         queue.async { self.placeholdersDone = false }
         log("compositor model: desktop-only display layer, overlay layer above the normal level (\(excl.count) windows left out of it)")
-        return ov
+        return (result, last)
     }
     /// The overlay layer (full display, alpha, topmost), created with the stream in the compositor model.
     private func ensureOverlayLayer() {
@@ -918,14 +958,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         do { return try await resumeStream(req, output: output) } catch { queue.sync { holdWarm(false) }; throw error }
     }
     private func resumeStream(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
-        let cap = ScreenCapturer(queue: queue)
-        cap.forceNextFrame = true
         await catalog.refreshNow()
         let comp = Self.compositorWanted()
-        if comp { cap.source = .desktop }
         let excluded = await withCheckedContinuation { c in queue.async { c.resume(returning: self.layers.values.filter { $0.exposed && !$0.isDisplay }.flatMap { l in [l.id] + (self.windows?.current?.children[l.id] ?? []) }.compactMap { self.catalog.window($0) }) } }
-        let t = try await cap.start(req, excluding: comp ? [] : excluded) { [weak self] pb, nanos, dirty in self?.queue.async { self?.captured(pb, nanos, dirtyRects: dirty, layerID: 0) } }
-        let ov = comp ? try await startOverlay(req, t) : nil
+        let t = try await ScreenCapturer.resolve(req)
+        let (cap, deskFrame) = try await startDesktop(req, t, compositor: comp, excluding: comp ? [] : excluded, forceFirst: true)
+        let (ov, overlayFrame) = comp ? try await startOverlay(req, t) : (nil, nil)
         return try await withCheckedThrowingContinuation { c in
             queue.async {
                 do {
@@ -959,6 +997,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                         self.log("resumed after \(gapMs) ms: rung \(self.rc?.rung ?? -1), tier \(self.rc?.tier.name ?? "?"), target \(self.rc?.targetKbps ?? 0) kbps, fresh \(self.display?.fresh.description ?? "?"), \(self.layers.count - 1) window layers; masked keyframe next")
                     }
                     self.injector?.setDisplay(t.display.displayID)
+                    self.feedWarmFrames(desktop: deskFrame, overlay: overlayFrame, t)
                     let cur = CursorMonitor(displayID: t.display.displayID)
                     cur.onShape = { [weak self] s in self?.output?.sendControl(.cursorShape(s)) }
                     cur.onPosition = { [weak self] p in self?.output?.sendControl(.cursorPosition(p)) }

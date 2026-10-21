@@ -24,6 +24,8 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// While a viewer is connected the host's display stays awake (it would otherwise sleep ~90 s
     /// after the wake we trigger, and SCK then delivers nothing).
     private var displayAssertion: IOPMAssertionID = 0
+    /// False for the warm pool's captures (no viewer: the display may sleep); a streamer adopting one turns it on.
+    var keepsDisplayAwake = true
 
     init(queue: DispatchQueue) { self.queue = queue }
 
@@ -52,12 +54,17 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         guard let display = wanted() ?? content.displays.max(by: { $0.width * $0.height < $1.width * $1.height }) else {
             throw MirageError.transport("no display to capture (displays asleep?)")
         }
+        return target(for: display, requested: (req.width, req.height), snapNative: req.snapNative == true)
+    }
+
+    /// The stream size for `display`: its aspect fitted into `requested` (nil: native pixels).
+    static func target(for display: SCDisplay, requested: (Int, Int)?, snapNative: Bool) -> Target {
         var pw = Double(CGDisplayPixelsWide(display.displayID)), ph = Double(CGDisplayPixelsHigh(display.displayID))
         if pw < 64 || ph < 64 { pw = Double(display.width); ph = Double(display.height) }
         let mode = CGDisplayCopyDisplayMode(display.displayID)
         let scale = mode.map { Double($0.pixelWidth) / Double($0.width) } ?? 1
         // Fit the display aspect into the requested box, never beyond native pixels; even dimensions keep the encoder happy.
-        let (ew, eh) = StreamScale.resolve(requested: (req.width, req.height), nativePixels: (pw * scale, ph * scale), snapNative: req.snapNative == true)
+        let (ew, eh) = StreamScale.resolve(requested: requested ?? (Int(pw * scale), Int(ph * scale)), nativePixels: (pw * scale, ph * scale), snapNative: requested == nil || snapNative)
         // (CGDisplayPixelsWide reports points on current macOS; the mode's scale gives the backing pixels.)
         let name = "display \(display.displayID) (\(display.width)x\(display.height) pt, \(Int(pw * scale))x\(Int(ph * scale)) px)"
         let info = ControlMessage.StreamInfo(width: ew, height: eh, displayID: display.displayID, displayWidth: display.width, displayHeight: display.height,
@@ -87,23 +94,44 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     func start(_ req: ControlMessage.StreamRequest, target: Target? = nil, excluding: [SCWindow] = [], onFrame: @escaping (CVPixelBuffer, UInt64, [PixelRect]) -> Void) async throws -> Target {
         let t: Target
         if let target { t = target } else { t = try await Self.resolve(req) }
+        return try await start(maxFPS: req.maxFPS, target: t, excluding: excluding, onFrame: onFrame)
+    }
+    func start(maxFPS: Int, target t: Target, excluding: [SCWindow] = [], onFrame: @escaping (CVPixelBuffer, UInt64, [PixelRect]) -> Void) async throws -> Target {
         self.onFrame = onFrame
         self.target = t
         excluded = excluding
         let filter = source == .desktop ? try await Self.desktopFilter(t.display) : try await Self.displayFilter(t.display, excluding: excluding)
-        let config = Self.configuration(for: t, maxFPS: req.maxFPS)
+        let config = configuration(for: t, maxFPS: maxFPS)
+        let s = SCStream(filter: filter, configuration: config, delegate: self)
+        try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+        try await s.startCapture()
+        stream = s
+        if keepsDisplayAwake { holdDisplayAwake() }
+        return t
+    }
+    private func holdDisplayAwake() {
+        if displayAssertion == 0 {
+            IOPMAssertionCreateWithName(kIOPMAssertPreventUserIdleDisplaySleep as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn), "Mirage viewer connected" as CFString, &displayAssertion)
+        }
+    }
+    /// This source's configuration (the overlay's on a clear background, its menus' shadows kept).
+    private func configuration(for t: Target, maxFPS: Int) -> SCStreamConfiguration {
+        let config = Self.configuration(for: t, maxFPS: maxFPS)
         if source == .overlay {
             // Clear where no overlay window is (the window layers show through), and the menus' own shadows kept.
             config.backgroundColor = CGColor.clear
             config.ignoreShadowsDisplay = false
         }
-        let s = SCStream(filter: filter, configuration: config, delegate: self)
-        try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
-        try await s.startCapture()
-        stream = s
-        if displayAssertion == 0 {
-            IOPMAssertionCreateWithName(kIOPMAssertPreventUserIdleDisplaySleep as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn), "Mirage viewer connected" as CFString, &displayAssertion)
-        }
+        return config
+    }
+
+    /// A running capture changes hands (the warm pool's, taken over by a streamer, WarmPool): frames go to `onFrame`, the
+    /// display is kept awake, and the stream is reconfigured for `req` (size, frame rate). Returns the stream's target.
+    func adopt(_ req: ControlMessage.StreamRequest, target t: Target, onFrame: @escaping (CVPixelBuffer, UInt64, [PixelRect]) -> Void) async throws -> Target {
+        queue.sync { self.onFrame = onFrame; self.forceNextFrame = true; self.target = t }
+        keepsDisplayAwake = true; holdDisplayAwake()
+        guard let stream else { throw MirageError.transport("warm capture not running") }
+        try await stream.updateConfiguration(configuration(for: t, maxFPS: req.maxFPS))
         return t
     }
 
@@ -179,7 +207,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         } else {
             t = Target(display: old.display, info: t.info, pixelWidth: t.pixelWidth, pixelHeight: t.pixelHeight)
         }
-        try await stream.updateConfiguration(Self.configuration(for: t, maxFPS: req.maxFPS))
+        try await stream.updateConfiguration(configuration(for: t, maxFPS: req.maxFPS))
         target = t
         return t
     }

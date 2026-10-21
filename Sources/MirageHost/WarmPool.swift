@@ -10,13 +10,16 @@ import IOKit.ps
 /// last window; a warm host hands its streamer running captures and their frames at once.
 /// Privacy: frames are held in memory only, never written anywhere, and everything is dropped while the screen is locked.
 /// Tunable `warmCapture` (host tunables.json; default on): a Mac on battery never warms (laptops on AC only); nothing runs
-/// while the display sleeps. The desktop and overlay display captures are not warmed yet (they start once per connect).
+/// while the display sleeps. In the compositor model the desktop and overlay display captures are warmed too (first).
 public final class WarmPool: @unchecked Sendable {
     public static let shared = WarmPool()
     /// Everything here runs on the host's shared queue (the streamers' too), so an adopted capturer stays on its queue.
     let queue = MacDesktopStreamer.hostQueue
     private struct Entry { var cap: WindowCapturer; var last: CVPixelBuffer? }
     private var entries: [UInt32: Entry] = [:]
+    private struct DisplayEntry { var cap: ScreenCapturer; var displayID: UInt32; var last: CVPixelBuffer? }
+    /// The compositor model's display captures: the desktop alone and the overlay (DesktopStreamer).
+    private var desk: DisplayEntry?, overlay: DisplayEntry?
     private var activeStreams = 0
     private var timer: DispatchSourceTimer?
     private var refreshing = false
@@ -49,6 +52,16 @@ public final class WarmPool: @unchecked Sendable {
         return (e.cap, e.last)
     }
 
+    /// On the host queue. The running desktop or overlay capture of `displayID` and its latest frame.
+    func takeDisplay(_ source: ScreenCapturer.Source, displayID: UInt32) -> (ScreenCapturer, CVPixelBuffer?)? {
+        let e = source == .overlay ? overlay : desk
+        guard let e else { return nil }
+        if source == .overlay { overlay = nil } else { desk = nil }
+        guard e.displayID == displayID else { Task { await e.cap.stop() }; return nil }
+        e.cap.onStop = nil
+        return (e.cap, e.last)
+    }
+
     /// On AC power (always, on a Mac with no battery).
     static func onAC() -> Bool {
         guard let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(), let type = IOPSGetProvidingPowerSourceType(info)?.takeUnretainedValue() else { return true }
@@ -60,14 +73,47 @@ public final class WarmPool: @unchecked Sendable {
     }
 
     /// The pool's state, for the log line a stream start writes.
-    var summary: String { "\(entries.count) warm, \(entries.values.filter { $0.last != nil }.count) with a frame" }
+    var summary: String { "\(entries.count) windows warm, \(entries.values.filter { $0.last != nil }.count) with a frame; desktop \(desk == nil ? "cold" : desk?.last == nil ? "starting" : "warm"), overlay \(overlay == nil ? "cold" : overlay?.last == nil ? "starting" : "warm")" }
 
     private func dropAll(_ why: String) {
-        guard !entries.isEmpty else { return }
+        let displays = [desk?.cap, overlay?.cap].compactMap { $0 }
+        desk = nil; overlay = nil
+        for c in displays { Task { await c.stop() } }
+        guard !entries.isEmpty || !displays.isEmpty else { return }
         let caps = entries.values.map(\.cap)
         entries = [:]
         for c in caps { Task { await c.stop() } }
-        log?("warm host: dropped \(caps.count) window captures (\(why))")
+        log?("warm host: dropped \(caps.count) window captures and \(displays.count) display captures (\(why))")
+        lastSummary = ""
+    }
+    private var lastSummary = ""
+
+    /// On the host queue: the desktop or overlay capture, started if missing (the frames it delivers kept as its latest).
+    private func warmDisplay(_ source: ScreenCapturer.Source, _ display: SCDisplay, excluding: [SCWindow]) {
+        let existing = source == .overlay ? overlay : desk
+        if let existing, existing.displayID == display.displayID {
+            if source == .overlay { existing.cap.requestExcluded(excluding, log: { _ in }) }
+            return
+        }
+        let cap = ScreenCapturer(queue: queue)
+        cap.source = source
+        cap.keepsDisplayAwake = false
+        let e = DisplayEntry(cap: cap, displayID: display.displayID, last: nil)
+        if source == .overlay { overlay = e } else { desk = e }
+        let t = ScreenCapturer.target(for: display, requested: nil, snapNative: true)
+        func mine() -> Bool { (source == .overlay ? self.overlay : self.desk)?.cap === cap }
+        cap.onStop = { [weak self] _ in self?.queue.async { guard let self, mine() else { return }; if source == .overlay { self.overlay = nil } else { self.desk = nil } } }
+        Task { [weak self] in
+            do {
+                _ = try await cap.start(maxFPS: 1, target: t, excluding: excluding) { [weak self] pb, _, _ in
+                    guard let self, mine() else { return }
+                    if source == .overlay { self.overlay?.last = pb } else { self.desk?.last = pb }
+                }
+            } catch {
+                self?.queue.async { guard let self, mine() else { return }; if source == .overlay { self.overlay = nil } else { self.desk = nil } }
+                self?.log?("warm host: \(source) capture failed: \(error)")
+            }
+        }
     }
 
     private func refresh() {
@@ -82,8 +128,18 @@ public final class WarmPool: @unchecked Sendable {
             guard let self else { return }
             let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
             self.queue.async {
-                defer { self.refreshing = false }
+                defer {
+                    self.refreshing = false
+                    if self.summary != self.lastSummary { self.lastSummary = self.summary; self.log?("warm host: \(self.summary)") }
+                }
                 guard self.activeStreams == 0, let content, let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first else { return }
+                if MacDesktopStreamer.compositorWanted() {
+                    self.warmDisplay(.desktop, display, excluding: [])
+                    self.warmDisplay(.overlay, display, excluding: MacDesktopStreamer.overlayExclusion(content.windows, display))
+                } else if self.desk != nil || self.overlay != nil {
+                    for c in [self.desk?.cap, self.overlay?.cap].compactMap({ $0 }) { Task { await c.stop() } }
+                    self.desk = nil; self.overlay = nil
+                }
                 let normals = content.windows.filter { $0.windowLayer == 0 && $0.isOnScreen && $0.frame.width >= 32 && $0.frame.height >= 32 && $0.frame.intersects(display.frame) }
                 let keep = Array(normals.sorted { $0.frame.width * $0.frame.height > $1.frame.width * $1.frame.height }.prefix(Self.maxWindows))
                 let keepIDs = Set(keep.map(\.windowID))

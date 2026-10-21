@@ -218,8 +218,10 @@ captures running (the largest 12, 1 fps, the stream's own filter, dirty-rect dri
 each window's latest frame in memory. At connect the streamer adopts the running capture (follow + exclude reconfigure
 it to 10 fps and the layer's size) and its frame is the layer's first. Privacy: frames only in memory, never on disk;
 everything dropped while the screen is locked, the display sleeps or the Mac is on battery (laptops warm on AC only).
-Tunable `warmCapture` (default 1). Next: the desktop and overlay display captures warm too, and each layer's lossless tiles
-kept pre-encoded (1x and 2x), so stage 1 and lossless go out at link rate from the first round trip.
+Tunable `warmCapture` (default 1). In the compositor model the desktop and overlay display captures are warmed too (1 fps,
+native size, no display-sleep assertion until a streamer adopts them; adoption reconfigures size and frame rate and the
+overlay's exclusion). Next: each layer's lossless tiles kept pre-encoded (1x and 2x), so stage 1 and lossless go out at link
+rate from the first round trip.
 
 **Order of work.** Spec (this) → placeholders in both models, with the desktop's → probe → stage (1) set and barrier on the
 viewer → stage (2) per-layer only → parallel capture starts → the acceptance test, which then gates deploys. The tile cache
