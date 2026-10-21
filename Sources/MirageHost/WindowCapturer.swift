@@ -207,6 +207,7 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
     /// For a window opaque to its edges: all four edge midpoints (outermost pixel) present (the window fills the source rect). Learned
     /// from the first frames; a window whose edges really turn transparent is relearned after a second at rest.
+    private var edgeHits = 0
     private func edgesHold(_ pb: CVPixelBuffer) -> Bool {
         CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(pb)?.assumingMemoryBound(to: UInt8.self) else { return true }
@@ -216,7 +217,9 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         let opaque = a.allSatisfy { $0 >= 200 }
         if Self.debug { hostLog("capture \(windowID): edge alpha \(a) learned \(edgeOpaque.map { "\($0)" } ?? "-")") }
         guard let learned = edgeOpaque else { edgeOpaque = opaque; return true }
-        if !learned || opaque { edgeMisses = 0; return true }
+        // Edges opaque again for a while (a window back from Show Desktop's dimming): checked for a shift again.
+        if !learned { edgeHits = opaque ? edgeHits + 1 : 0; if edgeHits > 10 { edgeOpaque = true; edgeHits = 0 }; return true }
+        if opaque { edgeMisses = 0; return true }
         if a.allSatisfy({ $0 >= 100 }) { return true }
         edgeMisses += 1
         if edgeMisses > 10, Clock.elapsed(since: lastMoveNanos, now: Clock.nowNanos()) > 1_000_000_000 {

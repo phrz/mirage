@@ -92,4 +92,17 @@ final class RefinementPacerTests: XCTestCase {
                        [PixelRect(x: 0, y: 0, width: 3200, height: 48), PixelRect(x: 0, y: 0, width: 121, height: 1800)])
         XCTAssertEqual(DesktopChrome.bands(width: 3200, height: 1800, pxPerPoint: 2, top: 0, bottom: 0, left: 0, right: 0), [])
     }
+
+    /// Show Desktop: a pushed-aside window is captured blank; those frames are dropped for a window seen opaque, never
+    /// for one that is transparent from the start, and partly transparent content is kept.
+    func testShowDesktopBlankCapturesAreDropped() {
+        var b = WindowBlanking()
+        XCTAssertTrue(b.keep(alphas: [255, 255, 255, 255, 255]))
+        XCTAssertFalse(b.keep(alphas: [0, 0, 0, 0, 0]), "pushed aside: blank, dropped")
+        XCTAssertFalse(b.keep(alphas: [0, 0, 3, 0, 255]), "four of five transparent: still blank")
+        XCTAssertTrue(b.keep(alphas: [255, 255, 255, 255, 255]), "back")
+        XCTAssertTrue(b.keep(alphas: [200, 0, 0, 255, 255]), "partly transparent content is a picture")
+        var overlay = WindowBlanking()
+        XCTAssertTrue(overlay.keep(alphas: [0, 0, 0, 0, 0]), "a window never seen opaque keeps its frames")
+    }
 }

@@ -80,6 +80,9 @@ final class Layer {
     /// Window layers: when the window last moved on the host, and whether a backdrop change since then waits for its
     /// lossy level (TileTracker.holdUntilIdle); when the last held capture came.
     var movedNanos: UInt64 = 0
+    /// Drops the blank captures Show Desktop produces (WindowBlanking).
+    var blanking = WindowBlanking()
+    var blankDropped = 0
     var backdropDirty = false
     var backdropHeldNanos: UInt64 = 0
     /// Window picture audit: where its slow sweep continues.

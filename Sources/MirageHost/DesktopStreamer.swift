@@ -656,13 +656,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Whatever was in flight is treated as lost: unacked tile messages have their rects queued for a
     /// lossless resend, unacked video frames are forgotten (the resume keyframe replaces them).
     public func suspend() async {
-        let cap = capturer
-        await cap?.stop()
-        let caps: [WindowCapturer] = await withCheckedContinuation { c in queue.async { c.resume(returning: self.layers.values.compactMap { l in let w = l.capturer; l.capturer = nil; return w }) } }
-        for w in caps { await w.stop() }
-        await withCheckedContinuation { c in
+        // The session is cut loose first (output, timers, captures detached), then the captures are stopped, each within 3 s:
+        // ScreenCaptureKit's stopCapture can fail to return, and awaiting it before the cut left a suspended streamer
+        // capturing, refining and sending into the dead connection for good (mac-daddy 2026-10-21: a second streamer
+        // alongside the next session's, its exclusion checks every 10 s, tile sends failing for minutes).
+        let (cap, caps): (ScreenCapturer?, [WindowCapturer]) = await withCheckedContinuation { c in
             queue.async {
                 let now = Clock.nowNanos()
+                let cap = self.capturer
+                let caps = self.layers.values.compactMap { l in let w = l.capturer; l.capturer = nil; return w }
                 self.cursor?.stop(); self.cursor = nil
                 self.statTimer?.cancel(); self.statTimer = nil
                 self.refineTimer?.cancel(); self.refineTimer = nil
@@ -690,11 +692,35 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.suspendedAt = now
                 let inj = self.injector
                 self.inputQueue.async { inj?.releaseAll() }   // nothing stays held while nobody is connected
-                c.resume()
+                c.resume(returning: (cap, caps))
             }
         }
+        await stopCaptures(cap, caps)
     }
     private var suspendedAt: UInt64 = 0
+
+    /// Stops the captures in parallel, giving each up to 3 s (a stopCapture that never returns is logged and left behind).
+    private func stopCaptures(_ display: ScreenCapturer?, _ windows: [WindowCapturer]) async {
+        let log = self.log
+        await withTaskGroup(of: Void.self) { g in
+            if let display { g.addTask { await Self.bounded("display capture", log: log) { await display.stop() } } }
+            for w in windows { g.addTask { await Self.bounded("window capture", log: log) { await w.stop() } } }
+        }
+    }
+    /// Runs `op` and returns when it finishes or after `seconds`, whichever comes first (op keeps running unawaited then).
+    static func bounded(_ what: String, seconds: Double = 3, log: @escaping @Sendable (String) -> Void, _ op: @escaping @Sendable () async -> Void) async {
+        final class Once: @unchecked Sendable {
+            private let lock = NSLock(); private var k: CheckedContinuation<Bool, Never>?
+            init(_ k: CheckedContinuation<Bool, Never>) { self.k = k }
+            func resume(_ v: Bool) { lock.lock(); let c = k; k = nil; lock.unlock(); c?.resume(returning: v) }
+        }
+        let finished = await withCheckedContinuation { (k: CheckedContinuation<Bool, Never>) in
+            let once = Once(k)
+            Task { await op(); once.resume(true) }
+            Task { try? await Task.sleep(for: .seconds(seconds)); once.resume(false) }
+        }
+        if !finished { log("\(what): stop did not return within \(Int(seconds)) s; left behind") }
+    }
 
     public func cachedBytes() async -> Int {
         await withCheckedContinuation { c in queue.async {
@@ -773,12 +799,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     public func stop() async {
-        let cap = capturer
-        await cap?.stop()
-        let caps: [WindowCapturer] = await withCheckedContinuation { c in queue.async { c.resume(returning: self.layers.values.compactMap { l in let w = l.capturer; l.capturer = nil; return w }) } }
-        for w in caps { await w.stop() }
-        await withCheckedContinuation { c in
+        // Cut loose first, then stop the captures within 3 s each (suspend()).
+        let (cap, caps): (ScreenCapturer?, [WindowCapturer]) = await withCheckedContinuation { c in
             queue.async {
+                let cap = self.capturer
+                let caps = self.layers.values.compactMap { l in let w = l.capturer; l.capturer = nil; return w }
                 self.cursor?.stop(); self.cursor = nil
                 self.statTimer?.cancel(); self.statTimer = nil
                 self.refineTimer?.cancel(); self.refineTimer = nil
@@ -789,9 +814,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.caret?.stop(); self.caret = nil
                 let inj = self.injector; self.injector = nil
                 self.inputQueue.async { inj?.releaseAll() }
-                c.resume()
+                c.resume(returning: (cap, caps))
             }
         }
+        await stopCaptures(cap, caps)
     }
 
     // MARK: Layers
@@ -1031,6 +1057,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
         let new = frameView(pb)
         guard new.width == layer.width, new.height == layer.height else { return }   // a stale frame around a resize
+        if !layer.isDisplay, new.width >= 8, new.height >= 8 {
+            // Show Desktop: a pushed-aside window is captured blank; the layer keeps its last real picture (it slides with its
+            // frame) and the frames after the return match it again.
+            let pts = [(new.width / 2, new.height / 2), (new.width / 4, new.height / 2), (new.width * 3 / 4, new.height / 2), (new.width / 2, new.height / 4), (new.width / 2, new.height * 3 / 4)]
+            let alphas = pts.map { new.base.advanced(by: $0.1 * new.stride + $0.0 * 4 + 3).assumingMemoryBound(to: UInt8.self).pointee }
+            guard layer.blanking.keep(alphas: alphas) else {
+                layer.blankDropped += 1
+                if debugLayers, layer.blankDropped == 1 { log("layer \(layer.id): blank capture (Show Desktop); kept the last picture") }
+                return
+            }
+            layer.blankDropped = 0
+        }
         var tracker = layer.tracker
         // Every tile is a candidate, the display's too: ScreenCaptureKit's dirty rects can leave out a change (the Dock's
         // tooltips on macOS 27 vanish without one, phrz's tile-aligned ghost labels: the vacated tiles were never diffed,
@@ -1732,6 +1770,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             publishedWindows = list; lastFullWindowsNanos = now
             sendControlCounted(.windowList(.init(captureSeq: captureSeq, windows: list, inputSeq: inputSeq)))
         } else if let d = ControlMessage.WindowList.delta(from: publishedWindows, to: list, captureSeq: captureSeq, inputSeq: inputSeq) {
+            if debugLayers {
+                let old = Dictionary(publishedWindows.map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a })
+                let ch = list.filter { old[$0.id] != nil && old[$0.id] != $0.frame }.map { "\($0.id) \($0.frame.x),\($0.frame.y)" }
+                if !ch.isEmpty { log("window list delta: " + ch.joined(separator: " | ")) }
+            }
             publishedWindows = list
             sendControlCounted(.windowList(d))
         }

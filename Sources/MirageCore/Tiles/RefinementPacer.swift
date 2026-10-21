@@ -108,3 +108,19 @@ public enum DesktopChrome {
         return out.filter { !$0.isEmpty }
     }
 }
+
+/// Show Desktop pushes the windows to the screen edges, and ScreenCaptureKit then delivers their captures blank (alpha 0
+/// throughout, sometimes with an opaque edge) until they come back. Sent as they were, those frames emptied the window
+/// layers on the viewer (ghost outlines), and the opaque frames after the return were held as a moved window's backdrop:
+/// pale windows until refinement went idle (phrz on mac-daddy, 2026-10-21; loopback showdesktop scenario). A capture whose
+/// interior samples are (almost) all transparent, of a window seen opaque before, is not a picture of the window.
+public struct WindowBlanking: Equatable {
+    private var seenOpaque = false
+    public init() {}
+    public static func isBlank(_ alphas: [UInt8]) -> Bool { alphas.filter { $0 <= 10 }.count * 5 >= alphas.count * 4 }
+    /// One capture's interior alpha samples: false when the frame is to be dropped.
+    public mutating func keep(alphas: [UInt8]) -> Bool {
+        if alphas.allSatisfy({ $0 >= 250 }) { seenOpaque = true }
+        return !(seenOpaque && Self.isBlank(alphas))
+    }
+}
