@@ -37,6 +37,8 @@ public struct Tunables: Codable, Equatable, Sendable {
         // 1 = a window drag is real mouse events on the host (down at the press, moves, up), the local layer drag only a
         // prediction reconciled to the host's frame; 0 = the window is moved and raised through Accessibility.
         case injectedDrags
+        // Host only: 1 = the connect-time bandwidth probe (a 48 KB packet train at a fresh stream, M-FIVE); 0 = off.
+        case connectProbe
         // Host only: an automatic-bitrate stream's ceiling in kbit/s (BitratePolicy): the controller starts at 800 and probes
         // up to whatever the link sustains, never above this.
         case autoMaxKbps
@@ -66,6 +68,7 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .compositorModel: return (0, 0, 1)
             case .placeholders: return (1, 0, 1)
             case .injectedDrags: return (1, 0, 1)
+            case .connectProbe: return (1, 0, 1)
             case .autoMaxKbps: return (50_000, 1_000, 200_000)
             }
         }

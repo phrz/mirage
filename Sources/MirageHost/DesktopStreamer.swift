@@ -2012,7 +2012,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func beginFreshPicture(_ trigger: FreshPictureTrigger, detail: String = "") {
         guard trigger.restartsWholePicture else { return }
         if trigger == .streamStart || trigger == .viewerEmpty {
-            sendProbeTrain()
+            if hostTunables[.connectProbe] >= 1 { sendProbeTrain() }   // kill switch: tunables.json {"connectProbe": 0}
             if hostTunables[.placeholders] >= 1 { sendPlaceholders() }   // M-FIVE stage 0, both models
         }
         if compositor {
