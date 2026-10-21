@@ -29,7 +29,9 @@ let W = last.width, H = last.height
 struct Region { var name: String; var mask: [Bool] }
 var regions: [Region] = []
 var covered = [Bool](repeating: false, count: W * H)
-for l in last.layers {
+// The overlay layer spans the whole frame (clear except the menu bar, the Dock and menus, which are in the bands left out
+// below): as a region it would be everything, and the desktop nothing. Left out, so the desktop is what no window covers.
+for l in last.layers where !(l.x <= 0 && l.y <= 0 && l.w >= W && l.h >= H) {
     var m = [Bool](repeating: false, count: W * H)
     for y in max(0, l.y)..<min(H, l.y + l.h) { for x in max(0, l.x)..<min(W, l.x + l.w) { m[y * W + x] = true; covered[y * W + x] = true } }
     if m.contains(true) { regions.append(Region(name: "layer \(l.id) \(l.x * 4),\(l.y * 4) \(l.w * 4)x\(l.h * 4)", mask: m)) }
@@ -65,12 +67,14 @@ struct R { var coherent: Int?; var crisp: Int?; var changes = 0; var inChange = 
 // The first picture: the first frame where anything is drawn (the desktop region no longer the empty canvas), so times can
 // be read from it as well as from the recorder's start (which includes connecting and signing in).
 var firstPictureMs: Int? = nil
+let verbose = ProcessInfo.processInfo.environment["CONNECTCHECK_VERBOSE"] != nil
 var res = [R](repeating: R(), count: regions.count)
 var prev: [UInt8]? = nil
 for line in lines {
     guard let f = load(line.i) else { continue }
     if firstPictureMs == nil, blockMad(f, final, regions[0].mask) < 40 { firstPictureMs = line.ms }
     for (k, r) in regions.enumerated() {
+        let reg = r
         let toFinal = mad(f, final, r.mask)
         if res[k].coherent == nil, blockMad(f, final, r.mask) < 6 { res[k].coherent = line.ms }
         if toFinal < 1.5 { if res[k].crisp == nil { res[k].crisp = line.ms } } else if res[k].crisp != nil, toFinal > 4 { res[k].crisp = nil }
@@ -78,7 +82,7 @@ for line in lines {
         res[k].bestToFinal = min(res[k].bestToFinal, toFinal)
         if let p = prev, res[k].crisp == nil || res[k].crisp == line.ms {
             let moving = mad(f, p, r.mask) > 2
-            if moving, !res[k].inChange { res[k].changes += 1 }
+            if moving, !res[k].inChange { res[k].changes += 1; if verbose { print(String(format: "  %@: change %d at %.1f s (%.1f levels; %.1f from the final)", reg.name, res[k].changes, Double(line.ms) / 1000, mad(f, p, r.mask), toFinal)) } }
             res[k].inChange = moving
         }
     }
