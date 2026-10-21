@@ -1324,7 +1324,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             withCopy.append(contentsOf: w.filter { !withCopy.contains($0) })
         }
         // Motion bookkeeping for the refinement freeze: classified video, copy-rects, or the input stream.
-        if !plan.video.isEmpty || copyRectsThisCapture > 0 { lastMotionNanos = now }
+        // Sustained motion freezes all refinement, so only motion that matters counts: copy-rects, or video over at least 2 %
+        // of the layer. A bouncing Dock icon (192x192 px, 9 tiles) froze every layer's refinement for 2 min on mac-daddy.
+        if copyRectsThisCapture > 0 || MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount) { lastMotionNanos = now }
         if let hint = injector?.motionHintNanos, hint > lastMotionNanos { lastMotionNanos = hint }
         let motion = motionSustained(now)
         if motion != wasMotion { wasMotion = motion; lastBudgetApply = 0; applyBudget(now: now) }

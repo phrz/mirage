@@ -124,3 +124,11 @@ public struct WindowBlanking: Equatable {
         return !(seenOpaque && Self.isBlank(alphas))
     }
 }
+
+/// Which video counts as the sustained motion that freezes refinement (DESIGN §3.3c): only video over at least 2 % of a
+/// layer. A small animation (a bouncing or badged Dock icon, a spinner, a progress bar) is shown through video all the same,
+/// but it must not hold every other layer's refinement back (mac-daddy 2026-10-21: an animated Dock icon, 9 tiles of 1450,
+/// kept refinement at 0 kbps for 2 min with a 5,465-tile backlog).
+public enum MotionGate {
+    public static func counts(videoTiles: Int, layerTiles: Int) -> Bool { videoTiles > 0 && videoTiles * 50 >= max(1, layerTiles) }
+}

@@ -105,4 +105,12 @@ final class RefinementPacerTests: XCTestCase {
         var overlay = WindowBlanking()
         XCTAssertTrue(overlay.keep(alphas: [0, 0, 0, 0, 0]), "a window never seen opaque keeps its frames")
     }
+
+    func testASmallAnimationIsNotSustainedMotion() {
+        XCTAssertFalse(MotionGate.counts(videoTiles: 9, layerTiles: 1450), "a bouncing Dock icon")
+        XCTAssertFalse(MotionGate.counts(videoTiles: 0, layerTiles: 1450))
+        XCTAssertTrue(MotionGate.counts(videoTiles: 60, layerTiles: 1450), "a small video window")
+        XCTAssertTrue(MotionGate.counts(videoTiles: 1450, layerTiles: 1450), "a full-screen change")
+        XCTAssertTrue(MotionGate.counts(videoTiles: 5, layerTiles: 200), "a small window's own animation is a large part of it")
+    }
 }
