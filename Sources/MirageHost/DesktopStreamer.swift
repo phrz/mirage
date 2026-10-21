@@ -131,6 +131,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var tileSent: [UInt32: (nanos: UInt64, bytes: Int, refinement: Int, block: Int?, layer: UInt32, rects: [PixelRect])] = [:]
     /// Tile-stream bytes sent and not yet acked (RateController.inflightCapBytes bounds refinement by it).
     private var tileInflightBytes = 0
+    private var lastEdgeLogNanos: UInt64 = 0
     /// In flight for the cap: what is on the stream plus blocks still being encoded (several were dispatched before the
     /// first was counted: 1.8 MB in flight against a 480 KB cap on a shaped Fast 4G run).
     private var tileInflightForCap: Int { tileInflightBytes + pacer.blocks.reduce(0) { $1.msgSeq == nil ? $0 + $1.bytes : $0 } }
@@ -1374,6 +1375,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 return
             }
             layer.blankDropped = 0
+        }
+        // Debug (layers debug on): the overlay's first tile column, mean alpha and colour, every 10 s; numbers only. On the
+        // viewer that column showed opaque black over everything (mac-daddy, compositor); this tells host from viewer.
+        if debugLayers, layer.id == ControlMessage.WindowInfo.overlayID, Clock.elapsed(since: lastEdgeLogNanos, now: now) > 10_000_000_000 {
+            lastEdgeLogNanos = now
+            var a = 0, rgb = 0, n = 0
+            for y in Swift.stride(from: 128, to: min(new.height, 1600), by: 16) { for x in Swift.stride(from: 0, to: 64, by: 8) {
+                let p = new.base.advanced(by: y * new.stride + x * 4).assumingMemoryBound(to: UInt8.self)
+                a += Int(p[3]); rgb += Int(p[0]) + Int(p[1]) + Int(p[2]); n += 1 } }
+            if n > 0 { log("overlay edge column: mean alpha \(a / n), mean rgb \(rgb / n / 3) over \(n) samples") }
         }
         var tracker = layer.tracker
         // Every tile is a candidate, the display's too: ScreenCaptureKit's dirty rects can leave out a change (the Dock's

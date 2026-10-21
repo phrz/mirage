@@ -578,6 +578,15 @@ final class ScenarioRunner {
                 let crop = r.intersection(PixelRect(x: 0, y: 0, width: bg.width, height: bg.height))
                 guard crop.area > 0 else { continue }
                 UnifiedShots.write(scene: sc, crop: crop, context: ctx, to: dir.appendingPathComponent(String(format: "%@-%04d.png", name, n)))
+                // Test knob MIRAGE_TEST_LAYER_DUMP=1 (Show Desktop runs): every 40th shot, each layer's left 128 px of the screen
+                // as that layer's own canvas holds it (alpha kept), to tell which layer draws what at the display's edge.
+                if name == "sd", n % 40 == 0, ProcessInfo.processInfo.environment["MIRAGE_TEST_LAYER_DUMP"] != nil {
+                    for case .layer(let c, let f, _, _) in sc.items {
+                        let local = PixelRect(x: max(0, -f.x), y: 0, width: max(0, min(c.width, 128 - f.x) - max(0, -f.x)), height: c.height)
+                        guard local.width > 0, let id = self.session.layerViews.first(where: { $0.value.compositor === c })?.key else { continue }
+                        UnifiedShots.write(c, source: local, context: ctx, to: dir.appendingPathComponent(String(format: "layer-%u-%04d.png", id, n)))
+                    }
+                }
             }
         }
         t.resume(); realShotTimer = t
