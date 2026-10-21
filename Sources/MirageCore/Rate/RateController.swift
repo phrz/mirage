@@ -400,8 +400,10 @@ public struct RateController {
     private var startupRoundStart: UInt64 = 0
     private var startupFlatRounds = 0
     private var lastDeliveryAdjust: UInt64 = 0
-    public var deliveryGain: Double { inStartup ? 2.0 : 1.25 }
-    private var deliveryWindowNanos: UInt64 { max(1_000_000_000, UInt64(3 * srttNanos)) }
+    /// 1.1 after startup: on mac-daddy's shaped Fast 4G the estimate itself read up to 1.19 × the link (the viewer's receive
+    /// times clump too), and 1.25 × that put the target at 1.49 ×.
+    public var deliveryGain: Double { inStartup ? 2.0 : 1.1 }
+    private var deliveryWindowNanos: UInt64 { max(1_500_000_000, UInt64(4 * srttNanos)) }
 
     /// The delivery-rate ceiling on the target (the cap until there is an estimate).
     public var deliveryCeilingKbps: Int {
