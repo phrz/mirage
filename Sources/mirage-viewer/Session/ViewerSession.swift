@@ -498,9 +498,23 @@ final class ViewerSession: @unchecked Sendable {
     // MARK: Receive loops
 
     private func receiveControl(_ control: MessageStream) async throws {
-        while true {
-            let msg = try await control.receive()
-            await Self.holdForTestDelay(arrived: Clock.nowNanos())
+        guard Self.testDelayNanos > 0 else { while true { handleControl(try await control.receive()) } }
+        // Test delay: one task reads and stamps arrival, this one handles each message at arrival + delay, in order. Holding
+        // the delay inside the read loop serialized the stream at one message per delay (window lists sent every 33 ms
+        // arrived 200 ms apart, seconds behind the host by the end of a Show Desktop slide).
+        let (arrivals, sink) = AsyncThrowingStream<(ControlMessage, UInt64), Error>.makeStream()
+        let reader = Task {
+            do { while true { sink.yield((try await control.receive(), Clock.nowNanos())) } } catch { sink.finish(throwing: error) }
+        }
+        defer { reader.cancel() }
+        for try await (msg, arrived) in arrivals {
+            await Self.holdForTestDelay(arrived: arrived)
+            handleControl(msg)
+        }
+    }
+
+    private func handleControl(_ msg: ControlMessage) {
+        do {
             noteHostPacket(Clock.nowNanos())
             switch msg {
             case .pong(let p):
@@ -1337,6 +1351,7 @@ final class ViewerSession: @unchecked Sendable {
     }
 
     private func hostWindowList(_ list: ControlMessage.WindowList, now: UInt64) {
+        if Self.debugPresent, let ch = list.changed, !ch.isEmpty { log(String(format: "%.3f window list in: ", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 60)) + ch.map { "\($0.id) \($0.frame.x),\($0.frame.y)" }.joined(separator: " | ")) }
         predictorLock.lock()
         let before = hostFrames
         windows = list.apply(to: windows)

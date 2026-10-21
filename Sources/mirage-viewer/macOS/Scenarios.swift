@@ -291,6 +291,32 @@ final class ScenarioRunner {
         case "idle":
             session.resetWatched()
             try? await Task.sleep(for: .seconds(seconds))
+        case "showdesktop":
+            // Show Desktop (F11, the symbolic hot key): every window slides to the display edges, the desktop shows, and a
+            // second press brings them back. Three rounds, the viewer's picture shot at 4 fps (MIRAGE_TEST_BENCH_SHOTS).
+            // Focus may leave the bench while the desktop shows, so only the console lock and other viewers are checked.
+            if let c = session.compositor, let dir = ProcessInfo.processInfo.environment["MIRAGE_TEST_BENCH_SHOTS"].map({ URL(fileURLWithPath: $0) }) {
+                shotRects = ["sd": PixelRect(x: 0, y: 0, width: c.width, height: c.height)]
+                startRealShots(dir: dir, fps: Double(ProcessInfo.processInfo.environment["MIRAGE_TEST_BENCH_FPS"] ?? "") ?? 4)
+            }
+            func f11() { session.send(.key(.init(keyCode: 103, down: true, isRepeat: false, modifiers: 0x800000, characters: nil)), scripted: true)
+                         session.send(.key(.init(keyCode: 103, down: false, isRepeat: false, modifiers: 0x800000, characters: nil)), scripted: true) }
+            func framesNote(_ label: String) {
+                let ws = session.windowsSnapshot().filter { $0.title.contains("Mirage Test Bench") }
+                session.log("scenario showdesktop: \(label): " + ws.map { "\($0.id) \($0.frame.x),\($0.frame.y) \($0.frame.width)x\($0.frame.height)" }.joined(separator: " | "))
+            }
+            for round in 1...3 {
+                guard let st = session.hostStatus, !st.consoleLocked, (st.viewers ?? 1) <= 1 else { session.log("scenario showdesktop: ABORT, console locked or another viewer"); break }
+                framesNote("round \(round) before")
+                f11()
+                try? await Task.sleep(for: .milliseconds(2500))
+                framesNote("round \(round) desktop shown")
+                guard let st2 = session.hostStatus, !st2.consoleLocked else { break }
+                f11()
+                try? await Task.sleep(for: .milliseconds(3500))
+                framesNote("round \(round) back")
+            }
+            realShotTimer?.cancel(); realShotTimer = nil
         case "login":
             // Password-style field at the top of the bench (below the caption): click it, type a character every
             // 500 ms, and time each keystroke to the first changed pixels arriving inside the field.
