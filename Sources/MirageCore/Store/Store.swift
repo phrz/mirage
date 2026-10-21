@@ -72,6 +72,13 @@ public final class Store: @unchecked Sendable {
         list.append(device)
         try write(list, "authorized-devices.json")
     }
+    /// Replaces an authorized device's record in place (its model learned at a later connection); nothing if it was revoked.
+    public func updateAuthorized(_ device: DeviceRecord) throws {
+        var list = try authorizedDevices()
+        guard let i = list.firstIndex(where: { $0.id == device.id && $0.publicKey == device.publicKey }) else { return }
+        list[i] = device
+        try write(list, "authorized-devices.json")
+    }
     public func revoke(idPrefix: String) throws -> [DeviceRecord] {
         let list = try authorizedDevices()
         let removed = list.filter { $0.id.hasPrefix(idPrefix) }
@@ -142,6 +149,18 @@ public final class Store: @unchecked Sendable {
         public var publicKey: Data
         public var endpoint: String
         public var pairedAt: Date
+        /// The host's model identifier ("Mac15,14") and family (`DeviceFamily` raw value) as it last reported them, for
+        /// its icon; nil until a connection to a host that reports them.
+        public var model: String?
+        public var family: String?
+        /// The last time this viewer authenticated to it.
+        public var lastConnected: Date?
+        public init(hostID: String, hostName: String, publicKey: Data, endpoint: String, pairedAt: Date, model: String? = nil, family: String? = nil, lastConnected: Date? = nil) {
+            self.hostID = hostID; self.hostName = hostName; self.publicKey = publicKey; self.endpoint = endpoint; self.pairedAt = pairedAt
+            self.model = model; self.family = family; self.lastConnected = lastConnected
+        }
+        /// Its family: as the host named it, else from its model identifier.
+        public var deviceFamily: DeviceFamily? { family.flatMap(DeviceFamily.init(rawValue:)) ?? DeviceModel.family(of: model) }
     }
     public func knownHosts() throws -> [String: KnownHost] {
         try read([String: KnownHost].self, "known-hosts.json") ?? [:]
@@ -149,6 +168,15 @@ public final class Store: @unchecked Sendable {
     public func remember(host: KnownHost, as alias: String) throws {
         var hosts = try knownHosts()
         hosts[alias] = host
+        try write(hosts, "known-hosts.json")
+    }
+    /// Changes a known host's record (what its latest Welcome said); nothing if the alias is not known.
+    public func updateKnownHost(_ alias: String, _ change: (inout KnownHost) -> Void) throws {
+        guard var hosts = try read([String: KnownHost].self, "known-hosts.json"), var h = hosts[alias] else { return }
+        let before = h
+        change(&h)
+        guard h != before else { return }
+        hosts[alias] = h
         try write(hosts, "known-hosts.json")
     }
 }

@@ -121,7 +121,7 @@ public final class LocalControlServer: @unchecked Sendable {
     private func sendStatus(to c: Client) {
         let devices = (try? ctx.store.authorizedDevices()) ?? []
         let base = LocalControl.Status(hostName: ctx.identity.name, pairedDevices: devices.count, pairingOpen: ctx.pairing.window?.isOpen() ?? false,
-                                       devices: devices.map { .init(id: $0.id, name: $0.name, pairedAt: $0.pairedAt) },
+                                       devices: devices.map { .init(id: $0.id, name: $0.name, pairedAt: $0.pairedAt, model: $0.model) },
                                        screenRecording: HostPermissions.screenRecordingGranted(), accessibility: HostPermissions.accessibilityGranted(prompt: false))
         let conns = ctx.connections
         Task {

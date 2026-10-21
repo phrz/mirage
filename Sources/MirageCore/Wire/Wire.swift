@@ -182,9 +182,12 @@ public enum ControlMessage: Codable, Equatable {
         /// Token from an earlier `Welcome` on this host: resume that session (stream, tier, caches,
         /// prediction state) instead of starting a new one. Authentication still runs in full.
         public var resumeToken: Data?
-        public init(protocolVersion: Int, deviceID: String, deviceName: String, clientNonce: Data, resumeToken: Data? = nil) {
+        /// The device's model identifier ("iPhone17,1", "Mac16,6"; `DeviceModel.current`), for its icon in the host's list
+        /// of paired devices. nil from older viewers.
+        public var deviceModel: String?
+        public init(protocolVersion: Int, deviceID: String, deviceName: String, clientNonce: Data, resumeToken: Data? = nil, deviceModel: String? = nil) {
             self.protocolVersion = protocolVersion; self.deviceID = deviceID
-            self.deviceName = deviceName; self.clientNonce = clientNonce; self.resumeToken = resumeToken
+            self.deviceName = deviceName; self.clientNonce = clientNonce; self.resumeToken = resumeToken; self.deviceModel = deviceModel
         }
     }
     public struct Challenge: Codable, Equatable {
@@ -217,8 +220,14 @@ public enum ControlMessage: Codable, Equatable {
         public var resumed: Bool?
         /// The host's build, for the viewer's About ("0.1 (1), built 2026-10-21 14:03Z"). nil from older hosts.
         public var hostBuild: String?
-        public init(hostName: String, sessionID: String, resumeToken: Data? = nil, resumed: Bool? = nil, hostBuild: String? = nil) {
+        /// The host's hardware model identifier (`hw.model`, "Mac15,14") and its family as the host's own system names it
+        /// (`DeviceFamily` raw value, "macStudio": right even for a model newer than the viewer), for the host's icon. nil
+        /// from older hosts.
+        public var hostModel: String?
+        public var hostFamily: String?
+        public init(hostName: String, sessionID: String, resumeToken: Data? = nil, resumed: Bool? = nil, hostBuild: String? = nil, hostModel: String? = nil, hostFamily: String? = nil) {
             self.hostName = hostName; self.sessionID = sessionID; self.resumeToken = resumeToken; self.resumed = resumed; self.hostBuild = hostBuild
+            self.hostModel = hostModel; self.hostFamily = hostFamily
         }
     }
     public struct Reject: Codable, Equatable {
@@ -690,8 +699,10 @@ public struct DeviceRecord: Codable, Equatable, Sendable {
     public var name: String
     public var publicKey: Data     // Ed25519 raw, 32 bytes
     public var pairedAt: Date
-    public init(id: String, name: String, publicKey: Data, pairedAt: Date) {
-        self.id = id; self.name = name; self.publicKey = publicKey; self.pairedAt = pairedAt
+    /// The device's model identifier (`DeviceModel.current`), for its icon; nil from older builds.
+    public var model: String?
+    public init(id: String, name: String, publicKey: Data, pairedAt: Date, model: String? = nil) {
+        self.id = id; self.name = name; self.publicKey = publicKey; self.pairedAt = pairedAt; self.model = model
     }
 }
 

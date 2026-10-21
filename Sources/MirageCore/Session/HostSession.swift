@@ -215,7 +215,7 @@ public enum HostSession {
 
         let claimedID = DeviceIdentity.id(forPublicKey: auth.clientPublicKey)
         guard claimedID == hello.deviceID,
-              let device = try ctx.store.authorizedDevices().first(where: { $0.id == claimedID && $0.publicKey == auth.clientPublicKey }) else {
+              var device = try ctx.store.authorizedDevices().first(where: { $0.id == claimedID && $0.publicKey == auth.clientPublicKey }) else {
             ctx.log("[\(remote)] rejected unknown device \(hello.deviceID.prefix(12)) (\(hello.deviceName))")
             try await stream.send(.reject(.init(reason: "device not paired")))
             throw MirageError.authenticationFailed("unknown device")
@@ -226,6 +226,11 @@ public enum HostSession {
             try await stream.send(.reject(.init(reason: "bad signature")))
             throw MirageError.authenticationFailed("signature")
         }
+        // The device's model (its icon in the menu-bar item's list), kept current: older pairings carry none.
+        if let m = hello.deviceModel, !m.isEmpty, m != device.model {
+            device.model = m
+            try? ctx.store.updateAuthorized(device)
+        }
         let session = UUID().uuidString
         // Resume: a token from an earlier Welcome names a session whose streamer the host kept (or still
         // holds on a connection the viewer gave up on). Authentication ran in full above regardless.
@@ -234,7 +239,8 @@ public enum HostSession {
             conn.streamer = claimed.streamer; conn.resumed = true; conn.lastRequest = claimed.request; resumed = true
         }
         let token = resumed ? conn.resumeToken! : await ctx.connections.issueToken(for: conn.id, deviceID: device.id)
-        try await stream.send(.welcome(.init(hostName: ctx.identity.name, sessionID: session, resumeToken: token, resumed: resumed, hostBuild: BuildInfo.current)))
+        try await stream.send(.welcome(.init(hostName: ctx.identity.name, sessionID: session, resumeToken: token, resumed: resumed, hostBuild: BuildInfo.current,
+                                             hostModel: DeviceModel.current, hostFamily: DeviceModel.currentFamily?.rawValue)))
         ctx.log("[\(remote)] authenticated \(device.name) (\(device.id.prefix(12)))\(resumed ? ", resuming its session" : hello.resumeToken != nil ? " (resume token unknown or expired: new session)" : "")")
         return device
     }

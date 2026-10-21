@@ -152,6 +152,38 @@ final class PairingFlowTests: XCTestCase {
         XCTAssertTrue(try r.hostStore.authorizedDevices().isEmpty)
     }
 
+    /// Each side learns the other's model: the host's in pairing and every Welcome (with its family and the time), the
+    /// viewer's in its pairing record, and in Hello for a pairing that predates models.
+    func testModelsTravelInPairingAndAuthentication() async throws {
+        let r = try await rig(); defer { r.host.stop(); try? FileManager.default.removeItem(at: r.tmp) }
+        let w = PairingWindow(); r.ctx.pairing.window = w
+        r.ctx.pairing.confirm = { _ in true }
+        let viewer = DeviceIdentity(name: "test-phone")
+        let code = w.current().code
+        let host = try await pair(r, viewer: viewer) { try await $0.pair(code: code) }
+        XCTAssertEqual(host.model, DeviceModel.current)
+        XCTAssertEqual(try r.hostStore.authorizedDevices().first?.model, DeviceModel.current)
+        XCTAssertEqual(try r.viewerStore.knownHosts()["test-host"]?.model, DeviceModel.current)
+
+        // A record from before models: the next Hello fills it in, in place.
+        var old = try XCTUnwrap(r.hostStore.authorizedDevices().first); old.model = nil
+        try r.hostStore.updateAuthorized(old)
+        try r.viewerStore.updateKnownHost("test-host") { $0.model = nil; $0.family = nil }
+        let before = Date()
+        let welcome = try await pair(r, viewer: viewer) { s -> DeviceRecord in
+            let w = try await s.authenticate()
+            XCTAssertEqual(w.hostModel, DeviceModel.current)
+            XCTAssertEqual(w.hostFamily, DeviceModel.currentFamily?.rawValue)
+            return old
+        }
+        _ = welcome
+        XCTAssertEqual(try r.hostStore.authorizedDevices().map(\.model), [DeviceModel.current])
+        let known = try XCTUnwrap(r.viewerStore.knownHosts()["test-host"])
+        XCTAssertEqual(known.model, DeviceModel.current)
+        XCTAssertEqual(known.deviceFamily, DeviceModel.currentFamily)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(known.lastConnected), before.addingTimeInterval(-1))
+    }
+
     final class Asked: @unchecked Sendable {
         private let lock = NSLock(); private var n: [String] = []
         func add(_ s: String) { lock.lock(); n.append(s); lock.unlock() }

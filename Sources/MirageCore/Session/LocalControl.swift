@@ -72,7 +72,9 @@ public enum LocalControl {
         public var id: String
         public var name: String
         public var pairedAt: Date
-        public init(id: String, name: String, pairedAt: Date) { self.id = id; self.name = name; self.pairedAt = pairedAt }
+        /// Its model identifier ("iPhone17,1"), for its icon; nil when it has not said.
+        public var model: String?
+        public init(id: String, name: String, pairedAt: Date, model: String? = nil) { self.id = id; self.name = name; self.pairedAt = pairedAt; self.model = model }
     }
 
     /// One line of the wire format.

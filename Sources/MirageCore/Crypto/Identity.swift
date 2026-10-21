@@ -30,7 +30,7 @@ public struct DeviceIdentity: Sendable {
     }
 
     public var record: DeviceRecord {
-        DeviceRecord(id: id, name: name, publicKey: publicKey, pairedAt: Date())
+        DeviceRecord(id: id, name: name, publicKey: publicKey, pairedAt: Date(), model: DeviceModel.current)
     }
 
     // MARK: Session authentication transcript
