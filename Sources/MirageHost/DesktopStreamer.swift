@@ -2363,7 +2363,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // In flight: at most twice the bandwidth-delay product the acks show (RateController). A still screen gives the
         // controller no video delay to back off on; refinement then queued megabytes in QUIC's buffers on phrz's 4G, acks
         // came seconds late, and parts of windows stayed lossy. Changed pixels above are not held by this.
-        if let rc, tileInflightForCap >= rc.inflightCapBytes { self.rc?.noteCapped(now: now); return }
+        // Refinement has half the cap to itself: changed pixels count toward the total but must not starve it (Show Desktop
+        // at 800 kbps after e9c56d4: a busy menu bar's small-animation tiles kept the 32 KB cap full, refinement waited two
+        // minutes, and tiles never sent showed black). Only a total over 1.5 × the cap holds it regardless.
+        if let rc {
+            let cap = rc.inflightCapBytes
+            let pendingEncode = pacer.blocks.reduce(0) { $1.msgSeq == nil ? $0 + $1.bytes : $0 }
+            if refinementInFlight + pendingEncode >= cap / 2 || tileInflightForCap >= cap * 3 / 2 { self.rc?.noteCapped(now: now); return }
+        }
         let ordered = layersByPriority()
         // Fresh pictures: the display's ladder gates everything until its base is acked; window stills
         // and lossless blocks go one at a time, locus layer first.
