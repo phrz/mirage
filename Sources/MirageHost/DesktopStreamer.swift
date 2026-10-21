@@ -1812,7 +1812,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let rect = PixelRect(x: c * side, y: r * side, width: min(side, tracker.width - c * side), height: min(side, tracker.height - r * side))
             guard !rect.isEmpty else { continue }
             let tiles = tracker.tiles(covering: [rect])
-            if !tiles.allSatisfy({ tracker.isCrisp($0) || tracker.isHeld($0) || l.occludedTiles.contains($0) }) { blocks.append(rect) }
+            // Compositor model: desktop under a shown window is per-tile refinement's, after everything visible.
+            let underOK = compositor && l.isDisplay
+            if !tiles.allSatisfy({ tracker.isCrisp($0) || tracker.isHeld($0) || l.occludedTiles.contains($0) || underOK && l.underLayer.contains($0) }) { blocks.append(rect) }
         } }
         var cx = tracker.width / 2, cy = tracker.height / 2
         if let p = locus(in: l) { cx = p.x; cy = p.y }
@@ -2608,7 +2610,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         // A backlog of more than 40 % of a layer (after a drag or a full-screen change) is refined
         // as large locus-first blocks, one in flight, not as a march of a thousand tiles.
-        for l in layers where l.tracker.pendingUnheld * 10 > l.tracker.tileCount * 4 && l.lastFrame != nil {
+        // (Compositor model: the desktop under shown windows does not count; it is refined per tile, and counted it re-planned
+        // blocks with nothing to send in a loop: d75b1d0 on phrz's iPhone, "fresh picture: complete" 100 times in 24 s.)
+        func backlog(_ l: Layer) -> Int {
+            guard compositor, l.isDisplay else { return l.tracker.pendingUnheld }
+            return l.tracker.pendingUnheld - l.underLayer.filter { l.tracker.isPending($0) && !l.tracker.isHeld($0) }.count
+        }
+        for l in layers where backlog(l) * 10 > l.tracker.tileCount * 4 && l.lastFrame != nil {
             let blocks = planBlocks(l)
             if !blocks.isEmpty {
                 l.fresh = .blocks(remaining: blocks)

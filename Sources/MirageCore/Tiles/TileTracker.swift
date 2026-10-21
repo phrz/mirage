@@ -174,6 +174,7 @@ public struct TileTracker {
         return n
     }
     public func isHeld(_ i: Int) -> Bool { cells[i].held }
+    public func isPending(_ i: Int) -> Bool { cells[i].pending }
     public var heldCount: Int { cells.reduce(0) { $0 + ($1.held ? 1 : 0) } }
 
     /// Pending tiles inside `rect` (and in `only`, if given) become due now (a fovea moved over them, a
