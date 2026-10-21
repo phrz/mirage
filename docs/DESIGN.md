@@ -211,7 +211,16 @@ over from there. Stage (1)'s budget uses this estimate.
 The viewer also logs each stage per layer (placeholder, coherent, lossless) with its time, and the host logs the probe's
 estimate, so a failure says where it came from.
 
-**Warm host (prototype, WarmPool).** ScreenCaptureKit starts window streams *and* screenshots one after another (~0.75 s
+**Warm host, snapshot mode (default, phrz 2026-10-21: "it should not be more than every 30s").** Running warm captures
+cost WindowServer ~34 points of CPU on mac-daddy (10 windows, each a display-minus-everything-else composite). So while
+nobody is connected the host keeps only one display snapshot (half the native width), retaken at most every
+`warmSnapshotSeconds` (30), with the on-screen window layout (ids and frames, CGWindowList) it was taken in. At connect,
+placeholders and stage-1 cuts come from it when the layout is unchanged (no screenshot to wait for); otherwise a new shot
+is taken as before. `warmMode` 1 keeps the running captures below for comparison. `windowShotIndependent` 1 takes each
+window's first-frame snapshot with the window-alone filter; the host logs each snapshot's time and its difference from the
+window's own first frame.
+
+**Warm host, running captures (prototype, WarmPool, warmMode 1).** ScreenCaptureKit starts window streams *and* screenshots one after another (~0.75 s
 each on mac-daddy), so "parallel capture starts" cannot work: with eight windows the last own frame came ~4-6 s after the
 connect. So the starts leave the connect path: while no stream is active, the host keeps the visible normal windows'
 captures running (the largest 12, 1 fps, the stream's own filter, dirty-rect driven so a still window costs nothing) with

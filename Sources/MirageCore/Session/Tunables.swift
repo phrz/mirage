@@ -51,6 +51,11 @@ public struct Tunables: Codable, Equatable, Sendable {
         // Host only, warm host: how many windows (the largest) are kept warm; their capture size as a fraction of native
         // (under 1: smaller, cheaper for WindowServer, no usable first frame); 1 = warmed with the window-alone filter.
         case warmWindows, warmScale, warmIndependent
+        // Host only, warm host: 0 = a display snapshot every warmSnapshotSeconds (phrz: never more often than every 30 s),
+        // stage 1 cut from it at connect while the window layout is unchanged; 1 = the windows' captures kept running.
+        case warmMode, warmSnapshotSeconds
+        // Host only: 1 = a window's first-frame snapshot at connect uses the window-alone filter (desktopIndependentWindow).
+        case windowShotIndependent
 
         /// Compiled-in default and the bounds a host value is clamped to.
         public var spec: (default: Double, min: Double, max: Double) {
@@ -84,6 +89,9 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .warmWindows: return (12, 0, 40)
             case .warmScale: return (1, 0.02, 1)
             case .warmIndependent: return (0, 0, 1)
+            case .warmMode: return (0, 0, 1)
+            case .warmSnapshotSeconds: return (30, 30, 3600)
+            case .windowShotIndependent: return (0, 0, 1)
             }
         }
     }

@@ -33,6 +33,8 @@ final class Layer {
     /// The layer's stage-1 still has gone (M-FIVE); `cutStill`: it was cut from the stream-start screenshot.
     var stillSent = false
     var cutStill = false
+    /// The first frame came from a snapshot: compared with the own capture's first frame (logged), then dropped.
+    var snapshotFrame: CVPixelBuffer?
     /// Visible tiles held back (not due) at the last invariant audit.
     var auditHeldVisible = Set<Int>()
     var frontmost = false

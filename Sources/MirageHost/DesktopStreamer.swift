@@ -1307,10 +1307,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         } }
         // The window's first frame from a snapshot with the stream's own filter, while ScreenCaptureKit queues the stream.
         if compositor {
+            let independent = hostTunables[.windowShotIndependent] >= 0.5
             Task { [weak self] in
-                guard let pb = await cap.snapshot(excluding: others) else { return }
+                guard let pb = await cap.snapshot(excluding: others, independent: independent) else { return }
                 let nanos = Clock.nowNanos()
-                self?.queue.async { guard let self, l.capturer === cap, l.lastFrame == nil else { return }; self.captured(pb, nanos, dirtyRects: [], layerID: l.id) }
+                self?.queue.async { guard let self, l.capturer === cap, l.lastFrame == nil else { return }; l.snapshotFrame = pb; self.captured(pb, nanos, dirtyRects: [], layerID: l.id) }
             }
         }
         Task { [weak self] in
@@ -1338,20 +1339,30 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Half the stream's width in the compositor model (the windows' stage-1 stills); 800 px otherwise.
         // (Full size, with each cut as the window's first frame, was tried in 26ae000: the window's own capture then differed
         // from the composited cut in most tiles, which went again, and windows changed 4-6 times: 20 Mbps crisp 15.8 s.)
+        // Warm host: the idle snapshot, while the window layout is the one it was taken in (no screenshot to wait for).
+        if compositor, let (snap, age) = WarmPool.shared.freshSnapshot(displayID: t.display.displayID) {
+            log("placeholders and stage 1 from the warm snapshot (\(age / 1000) s old)")
+            placeholders(from: snap.px, width: snap.width, height: snap.height, streamWidth: t.pixelWidth)
+            return
+        }
         let shotW = compositor ? max(800, t.pixelWidth / 2) : 800, shotH = max(1, shotW * t.pixelHeight / max(1, t.pixelWidth))
         Task { [weak self] in
-            let c = SCStreamConfiguration()
-            c.width = shotW; c.height = shotH; c.showsCursor = false
-            guard let img = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(display: t.display, excludingWindows: []), configuration: c) else { return }
-            var px = [UInt8](repeating: 0, count: shotW * shotH * 4)
-            let ok = px.withUnsafeMutableBytes { buf -> Bool in
-                guard let ctx = CGContext(data: buf.baseAddress, width: shotW, height: shotH, bitsPerComponent: 8, bytesPerRow: shotW * 4, space: CGColorSpaceCreateDeviceRGB(),
-                                          bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return false }
-                ctx.draw(img, in: CGRect(x: 0, y: 0, width: shotW, height: shotH)); return true
-            }
-            guard ok else { return }
+            guard let px = await Self.displayShot(t.display, width: shotW, height: shotH) else { return }
             self?.queue.async { self?.placeholders(from: px, width: shotW, height: shotH, streamWidth: t.pixelWidth) }
         }
+    }
+    /// One screenshot of the composited display at `width`x`height`, premultiplied BGRA.
+    static func displayShot(_ display: SCDisplay, width shotW: Int, height shotH: Int) async -> [UInt8]? {
+        let c = SCStreamConfiguration()
+        c.width = shotW; c.height = shotH; c.showsCursor = false
+        guard let img = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(display: display, excludingWindows: []), configuration: c) else { return nil }
+        var px = [UInt8](repeating: 0, count: shotW * shotH * 4)
+        let ok = px.withUnsafeMutableBytes { buf -> Bool in
+            guard let ctx = CGContext(data: buf.baseAddress, width: shotW, height: shotH, bitsPerComponent: 8, bytesPerRow: shotW * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return false }
+            ctx.draw(img, in: CGRect(x: 0, y: 0, width: shotW, height: shotH)); return true
+        }
+        return ok ? px : nil
     }
     private func placeholders(from px: [UInt8], width sw: Int, height sh: Int, streamWidth: Int) {
         guard let s = windows?.current else { return }
@@ -1443,8 +1454,25 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func ownFrame(_ pb: CVPixelBuffer, _ nanos: UInt64, layer l: Layer) {
         guard l.capturer != nil else { return }
         l.awaitingOwnSince = 0
+        // How far the window's snapshot was from its own first frame (the snapshot filter's correctness; M-FIVE).
+        if let snap = l.snapshotFrame { l.snapshotFrame = nil; log("layer \(l.id): snapshot vs own first frame: \(Self.meanDifference(snap, pb).map { String(format: "%.2f levels", $0) } ?? "sizes differ")") }
         if pendingFallback.remove(l.id) != nil { l.forceFullDiff = true }
         captured(pb, nanos, dirtyRects: [], layerID: l.id)
+    }
+    /// Mean absolute difference per channel (B, G, R, A) between two BGRA frames of the same size, sampled; nil otherwise.
+    static func meanDifference(_ a: CVPixelBuffer, _ b: CVPixelBuffer) -> Double? {
+        let w = CVPixelBufferGetWidth(a), h = CVPixelBufferGetHeight(a)
+        guard w == CVPixelBufferGetWidth(b), h == CVPixelBufferGetHeight(b) else { return nil }
+        CVPixelBufferLockBaseAddress(a, .readOnly); CVPixelBufferLockBaseAddress(b, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(a, .readOnly); CVPixelBufferUnlockBaseAddress(b, .readOnly) }
+        guard let pa = CVPixelBufferGetBaseAddress(a), let pb = CVPixelBufferGetBaseAddress(b) else { return nil }
+        let sa = CVPixelBufferGetBytesPerRow(a), sb = CVPixelBufferGetBytesPerRow(b)
+        var sum = 0, n = 0
+        for y in stride(from: 0, to: h, by: 3) {
+            let ra = pa.advanced(by: y * sa).assumingMemoryBound(to: UInt8.self), rb = pb.advanced(by: y * sb).assumingMemoryBound(to: UInt8.self)
+            for x in stride(from: 0, to: w * 4, by: 12) { for c in 0..<4 { sum += abs(Int(ra[x + c]) - Int(rb[x + c])) }; n += 4 }
+        }
+        return n > 0 ? Double(sum) / Double(n) : nil
     }
     /// Frames of the windows in front of `id` that overlap it (its own child windows, and desktop-sized transparent windows
     /// such as the Dock's, excepted), in stream pixels.

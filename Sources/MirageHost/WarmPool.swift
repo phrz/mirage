@@ -67,6 +67,52 @@ public final class WarmPool: @unchecked Sendable {
         return (type as String) == kIOPMACPowerKey
     }
 
+    /// Mode 0 (default): one display snapshot (half the native width), at most every warmSnapshotSeconds, with the window
+    /// layout it was taken in. No capture runs between snapshots.
+    struct Snapshot { let px: [UInt8]; let width: Int; let height: Int; let displayID: UInt32; let nanos: UInt64; let layout: String }
+    private var snapshot: Snapshot?
+    private var shooting = false
+
+    /// The on-screen app windows (levels 0-19) and their frames, front to back: a snapshot is only used while this is unchanged.
+    static func layout() -> String {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return "" }
+        return list.compactMap { w -> String? in
+            guard let layer = w[kCGWindowLayer as String] as? Int, (0...19).contains(layer), let id = w[kCGWindowNumber as String] as? Int,
+                  let b = w[kCGWindowBounds as String] as? NSDictionary, let r = CGRect(dictionaryRepresentation: b) else { return nil }
+            return "\(id):\(Int(r.minX)),\(Int(r.minY)),\(Int(r.width)),\(Int(r.height))"
+        }.joined(separator: " ")
+    }
+    /// On the host queue. The snapshot of `displayID` if the window layout is still the one it was taken in.
+    func freshSnapshot(displayID: UInt32) -> (Snapshot, ageMs: UInt64)? {
+        guard let s = snapshot, s.displayID == displayID else { return nil }
+        let age = Clock.elapsed(since: s.nanos, now: Clock.nowNanos()) / 1_000_000
+        guard Self.layout() == s.layout else { log?("warm host: snapshot (\(age / 1000) s old) not used: the window layout changed"); return nil }
+        return (s, age)
+    }
+    private func takeSnapshot() {
+        guard !shooting, let id = Optional(CGMainDisplayID()) else { return }
+        if let s = snapshot, Clock.elapsed(since: s.nanos, now: Clock.nowNanos()) < UInt64(tun[.warmSnapshotSeconds] * 1e9) { return }
+        shooting = true
+        let layout = Self.layout()
+        Task { [weak self] in
+            let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard let self else { return }
+            guard let display = content?.displays.first(where: { $0.displayID == id }) else { self.queue.async { self.shooting = false }; return }
+            let native = CGDisplayCopyDisplayMode(id).map { $0.pixelWidth } ?? display.width * 2
+            let w = max(800, native / 2), h = max(1, w * display.height / max(1, display.width))
+            let t0 = Clock.nowNanos()
+            let px = await MacDesktopStreamer.displayShot(display, width: w, height: h)
+            let ms = Clock.elapsed(since: t0, now: Clock.nowNanos()) / 1_000_000
+            self.queue.async {
+                self.shooting = false
+                guard let px, self.activeStreams == 0, !InputInjector.consoleLocked() else { return }
+                let first = self.snapshot == nil
+                self.snapshot = Snapshot(px: px, width: w, height: h, displayID: id, nanos: Clock.nowNanos(), layout: layout)
+                if first { self.log?("warm host: display snapshot \(w)x\(h) in \(ms) ms (every \(Int(self.tun[.warmSnapshotSeconds])) s from now)") }
+            }
+        }
+    }
+
     private var tun = Tunables.defaults
     private func enabled() -> Bool {
         tun = Tunables.load(from: Tunables.hostFileURL(try? Store())).tunables
@@ -77,6 +123,7 @@ public final class WarmPool: @unchecked Sendable {
     var summary: String { "\(entries.count) windows warm, \(entries.values.filter { $0.last != nil }.count) with a frame; desktop \(desk == nil ? "cold" : desk?.last == nil ? "starting" : "warm"), overlay \(overlay == nil ? "cold" : overlay?.last == nil ? "starting" : "warm")" }
 
     private func dropAll(_ why: String) {
+        if snapshot != nil { snapshot = nil; log?("warm host: snapshot dropped (\(why))") }
         let displays = [desk?.cap, overlay?.cap].compactMap { $0 }
         desk = nil; overlay = nil
         for c in displays { Task { await c.stop() } }
@@ -124,6 +171,13 @@ public final class WarmPool: @unchecked Sendable {
         if InputInjector.consoleLocked() { dropAll("screen locked"); return }
         if CGDisplayIsAsleep(CGMainDisplayID()) != 0 { dropAll("display asleep"); return }
         if !Self.onAC() { dropAll("on battery"); return }
+        if tun[.warmMode] < 0.5 {
+            // Snapshot mode: no running capture at all.
+            if !entries.isEmpty || desk != nil || overlay != nil { let s = snapshot; dropAll("snapshot mode"); snapshot = s }
+            takeSnapshot()
+            return
+        }
+        snapshot = nil
         refreshing = true
         Task { [weak self] in
             guard let self else { return }
