@@ -126,6 +126,30 @@ TestFlight, and once the app ships, every viewer change is an app update for eve
   the tile budget) with the window-free flag. The viewer's guard lets them through; they stay pending on the host, so the
   real desktop follows once a window uncovers them.
 
+### 3.0a The compositor model (phrz approved 2026-10-21; host flag `compositorModel` / `MIRAGE_COMPOSITOR`, default off until the A/B)
+
+The seam design keeps one display stream minus the windows it manages to exclude, and a window becomes a layer only once
+the stream verifiably leaves it out. Everything that goes wrong at that seam needed machinery: the display guard, the
+viewer guard, taint, unknown-desktop marks, exclusion checks and "unexcludable" windows, the urgent underlay. Show Desktop
+broke it repeatedly (a window baked into the desktop picture, revealed when it moved).
+
+In the compositor model nothing is ever baked:
+- **The desktop layer** (layer 0) is a capture of the desktop-level windows only (window layer below zero: the wallpaper,
+  the desktop icons, widgets). No app window can be in it, so the desktop under a window is always the desktop.
+- **The overlay layer** (`WindowInfo.overlayID`, level `overlayLevel`, listed first) is one full-display capture of
+  everything above the normal level (the menu bar, the Dock, menus, popovers, tooltips, notifications) on a clear
+  background, leaving out the desktop-level and normal windows. New menus appear in it without any filter change.
+- **Every visible normal window is a layer** as soon as its first picture lands (no exclusion wait). Layers are published
+  as verified, so older viewers' guards let the desktop through. A window entirely covered by normal windows captures
+  nothing until it shows; the layer caps go to what can be seen, and a visible window over them is logged.
+- Off under the flag: the display guard (only desktop under two opaque windows waits), taint resends, the desktop underlay
+  and its second capture, the exclusion bookkeeping. They are deleted once the flag wins the A/B.
+- Streams: desktop + overlay + one per visible window (the seam design: display + underlay + one per planned window).
+- The viewer change it needs: hit-testing skips the overlay layer (it covers the whole display). Viewers without it would
+  hit the overlay for every title-bar drag, so the default flips only after the app update is out.
+- Open: a window whose own capture fails has no fallback yet (the seam design left it in the desktop picture; the plan is to
+  cut it from a full display capture at its frame).
+
 ### 3.1 Transport and security
 
 - **QUIC over the tailnet** (`NWConnection` with `NWProtocolQUIC`). Tailscale already gives

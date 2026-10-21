@@ -111,6 +111,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Bounds on per-window capture (host memory and WindowServer work): count and summed pixels.
     private var maxWindowLayers = 16
     private var maxLayerPixels = 48_000_000
+    private var loggedCapMiss = Set<UInt32>()
     private var lastExcludedIDs: Set<UInt32> = []
     private var pendingMoved: [WindowTracker.Delta] = []
     private var layerRetainNanos: UInt64 = 10_000_000_000
@@ -248,8 +249,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func updateDisplayHidden(now: UInt64) {
         guard let d = display else { return }
         var shown: [UInt32: PixelRect] = [:]
-        if !screenLocked { for (id, f) in plannedFrames where (layers[id]?.exposed ?? false) && excludedFrom[id] != nil { shown[id] = f } }
-        displayGuard.update(layered: shown, verified: verifiedExclusions, now: now)
+        if !screenLocked { for (id, f) in plannedFrames where (layers[id]?.exposed ?? false) && (compositor || excludedFrom[id] != nil) { shown[id] = f } }
+        // (Compositor model: the desktop picture never holds a window, so every layer is verified and the guard keeps nothing.)
+        displayGuard.update(layered: shown, verified: compositor ? Set(shown.keys) : verifiedExclusions, now: now)
         // Tiles fully under a shown window (inset by the corner radius): the underlay.
         let inset = Int(14 * (windows?.pxPerPoint ?? 2))
         let insetFrames = shown.values.map { PixelRect(x: $0.x + inset, y: $0.y + inset, width: $0.width - 2 * inset, height: $0.height - 2 * inset) }
@@ -285,7 +287,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             d.underLayer = under
         }
         // Desktop under two or more shown windows only shows if both move: its underlay waits until one window covers it.
-        var hidden = displayGuard.guardedTiles(d.tracker, now: now).union(doubly)
+        var hidden = compositor ? doubly : displayGuard.guardedTiles(d.tracker, now: now).union(doubly)
         if unifiedView {
             // Unified: the display layer is shown only as menus, popovers, tooltips (cut-out-safe windows above the normal
             // level, known here, so a new menu costs no extra round trip) and the rects the viewer asks for (status items).
@@ -309,7 +311,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// Visible tainted desktop tiles are refined from the current desktop (after motion settles, like any refinement).
     private func scheduleTaintedResends(now: UInt64) {
-        guard let d = display, !screenLocked else { return }
+        guard let d = display, !screenLocked, !compositor else { return }
         let due = d.taint.due(hidden: d.occludedTiles, tracker: d.tracker, windowAreas: windowAreas(now: now)).filter { !d.taintScheduled.contains($0) }
         guard !due.isEmpty else { return }
         d.tracker.markDirect(due, now: now)   // a correction: shown on arrival, never staged
@@ -347,14 +349,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let cap = ScreenCapturer(queue: queue)
         let planned = sample.map { plannedLayers(in: $0.sample.windows, displayPixels: t.pixelWidth * t.pixelHeight) } ?? []
         _ = planned
+        let comp = Self.compositorWanted()
+        if comp { cap.source = .desktop }   // the compositor model: the desktop alone, never an app window
         let excluded: [SCWindow] = []   // a window stays in the display picture until its own still has landed
         _ = try await cap.start(req, target: t, excluding: excluded) { [weak self] pb, nanos, dirty in self?.queue.async { self?.captured(pb, nanos, dirtyRects: dirty, layerID: 0) } }
+        let ov = comp ? try await startOverlay(req, t) : nil
         return try await withCheckedThrowingContinuation { c in
             queue.async {
                 do {
                     self.output = output
                     self.setLive(true)
                     self.capturer = cap
+                    self.compositor = comp; self.overlay = ov
                     self.target = t
                     self.request = req
                     self.windows = tracker
@@ -415,6 +421,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         d.canvas = try Self.makeBuffer(width: w, height: h)
         d.announced = true; d.exposed = true
         layers[0] = d
+        ensureOverlayLayer()
         lastBudget = controller.budget(videoActive: false)
         try rebuildEncoder(d)
         tokens = bucketCapacity(); tileTokens = Double(lastBudget.tileKbps * 1000 / 8) * 0.5
@@ -435,10 +442,59 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let error { log(error) }
     }
 
+    // MARK: The compositor model (DESIGN "The compositor model"; host flag, default off)
+
+    /// On: the display layer is the desktop alone (desktop-level windows), everything above the normal level is one overlay
+    /// layer on top, and every normal window is a layer as soon as it has a picture (no exclusion wait, no seam machinery).
+    private(set) var compositor = false
+    private var overlay: ScreenCapturer?
+    private var overlayExcludedIDs: Set<UInt32> = []
+    private var desktopLevelIDs: Set<UInt32> = []
+    static let compositorEnv = ProcessInfo.processInfo.environment["MIRAGE_COMPOSITOR"]
+    static func compositorWanted() -> Bool {
+        if let e = compositorEnv { return e != "0" }
+        return Tunables.load(from: (try? Store())?.url("tunables.json")).tunables[.compositorModel] >= 0.5
+    }
+    /// The windows the overlay leaves out: the desktop-level ones and every normal window on the display (they are layers).
+    private func overlayExclusion(_ display: SCDisplay) -> [SCWindow] {
+        catalog.all.filter { $0.windowLayer <= 0 && $0.frame.intersects(display.frame) }
+    }
+    /// Starts the overlay capture (frames go to the overlay layer).
+    private func startOverlay(_ req: ControlMessage.StreamRequest, _ t: ScreenCapturer.Target) async throws -> ScreenCapturer {
+        let ov = ScreenCapturer(queue: queue)
+        ov.source = .overlay
+        let excl = overlayExclusion(t.display)
+        _ = try await ov.start(req, target: t, excluding: excl) { [weak self] pb, nanos, _ in self?.queue.async { self?.captured(pb, nanos, dirtyRects: [], layerID: ControlMessage.WindowInfo.overlayID) } }
+        queue.async { self.overlayExcludedIDs = Set(excl.map(\.windowID)); self.desktopLevelIDs = Set(excl.filter { $0.windowLayer < 0 }.map(\.windowID)) }
+        log("compositor model: desktop-only display layer, overlay layer above the normal level (\(excl.count) windows left out of it)")
+        return ov
+    }
+    /// The overlay layer (full display, alpha, topmost), created with the stream in the compositor model.
+    private func ensureOverlayLayer() {
+        guard compositor, let d = display else { return }
+        let id = ControlMessage.WindowInfo.overlayID
+        if let l = layers[id], l.width == d.width, l.height == d.height { return }
+        layers[id] = Layer(id: id, width: d.width, height: d.height, frame: d.bounds, now: Clock.nowNanos())
+    }
+    /// Keeps the overlay's exclusion (new normal windows) and the desktop layer's windows (a widget added) current.
+    private func reconcileCompositor(_ s: WindowTracker.Sample, needCatalog: inout [UInt32]) {
+        guard compositor, let t = target else { return }
+        for w in s.windows where w.windowLevel <= 0 && catalog.window(w.id) == nil { needCatalog.append(w.id) }
+        let excl = overlayExclusion(t.display)
+        let ids = Set(excl.map(\.windowID))
+        if ids != overlayExcludedIDs, let ov = overlay {
+            overlayExcludedIDs = ids
+            ov.requestExcluded(excl, log: { [weak self] in self?.log($0) })
+        }
+        let desk = Set(excl.filter { $0.windowLayer < 0 }.map(\.windowID))
+        if desk != desktopLevelIDs { desktopLevelIDs = desk; capturer?.refreshDesktop(log: { [weak self] in self?.log($0) }) }
+    }
+
     /// The desktop-only capture (DesktopUnderlay) for this display, at half the stream size; restarted with the stream.
     private var underlay: DesktopUnderlay?
     private var underlayFor: (display: CGDirectDisplayID, w: Int, h: Int)?
     private func ensureUnderlay(_ t: ScreenCapturer.Target) {
+        guard !compositor else { return }   // the display layer is the desktop itself: no second desktop capture
         let w = t.pixelWidth / 2, h = t.pixelHeight / 2
         if underlay != nil, let f = underlayFor, f.display == t.display.displayID, f.w == w, f.h == h { return }
         let old = underlay
@@ -696,6 +752,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let caps = self.layers.values.compactMap { l in let w = l.capturer; l.capturer = nil; return w }
                 let und = self.underlay; self.underlay = nil; self.underlayFor = nil
                 if let und { Task { await Self.bounded("desktop underlay", log: self.log) { await und.stop() } } }
+                let ov = self.overlay; self.overlay = nil
+                if let ov { Task { await Self.bounded("overlay capture", log: self.log) { await ov.stop() } } }
                 self.cursor?.stop(); self.cursor = nil
                 self.statTimer?.cancel(); self.statTimer = nil
                 self.refineTimer?.cancel(); self.refineTimer = nil
@@ -781,8 +839,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let cap = ScreenCapturer(queue: queue)
         cap.forceNextFrame = true
         await catalog.refreshNow()
+        let comp = Self.compositorWanted()
+        if comp { cap.source = .desktop }
         let excluded = await withCheckedContinuation { c in queue.async { c.resume(returning: self.layers.values.filter { $0.exposed && !$0.isDisplay }.flatMap { l in [l.id] + (self.windows?.current?.children[l.id] ?? []) }.compactMap { self.catalog.window($0) }) } }
-        let t = try await cap.start(req, excluding: excluded) { [weak self] pb, nanos, dirty in self?.queue.async { self?.captured(pb, nanos, dirtyRects: dirty, layerID: 0) } }
+        let t = try await cap.start(req, excluding: comp ? [] : excluded) { [weak self] pb, nanos, dirty in self?.queue.async { self?.captured(pb, nanos, dirtyRects: dirty, layerID: 0) } }
+        let ov = comp ? try await startOverlay(req, t) : nil
         return try await withCheckedThrowingContinuation { c in
             queue.async {
                 do {
@@ -791,6 +852,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.output = output
                     self.setLive(true)
                     self.capturer = cap
+                    self.compositor = comp; self.overlay = ov
+                    self.ensureOverlayLayer()
                     self.ensureUnderlay(t)
                     self.loadHostTunables()
                     self.lastExcludedIDs = Set(excluded.map(\.windowID))
@@ -839,6 +902,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let caps = self.layers.values.compactMap { l in let w = l.capturer; l.capturer = nil; return w }
                 let und = self.underlay; self.underlay = nil; self.underlayFor = nil
                 if let und { Task { await Self.bounded("desktop underlay", log: self.log) { await und.stop() } } }
+                let ov = self.overlay; self.overlay = nil
+                if let ov { Task { await Self.bounded("overlay capture", log: self.log) { await ov.stop() } } }
                 self.cursor?.stop(); self.cursor = nil
                 self.statTimer?.cancel(); self.statTimer = nil
                 self.refineTimer?.cancel(); self.refineTimer = nil
@@ -863,9 +928,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func plannedLayers(in list: [ControlMessage.WindowInfo], displayPixels: Int) -> [ControlMessage.WindowInfo] {
         var out: [ControlMessage.WindowInfo] = []
         var pixels = 0
+        // Compositor model: a window entirely covered by normal windows (or off the display) captures nothing until it shows,
+        // so the stream and pixel caps go to what can be seen; a visible window that still misses them is logged.
+        let normals = list.filter { $0.windowLevel == 0 }
+        let screen = display?.bounds
         for w in list where w.windowLevel == 0 && w.app != "Window Server" && w.app != "Dock" && w.frame.width >= 64 && w.frame.height >= 64
-                            && (Self.layerApps.map { apps in apps.contains(w.app ?? "") || apps.contains { w.title.contains($0) } } ?? true) && !unexcludable.contains(w.id) {
-            guard out.count < maxWindowLayers, pixels + w.frame.area <= maxLayerPixels else { continue }
+                            && (Self.layerApps.map { apps in apps.contains(w.app ?? "") || apps.contains { w.title.contains($0) } } ?? true) && (compositor || !unexcludable.contains(w.id)) {
+            if compositor, let screen, WindowTracker.occlusion(of: w, in: normals, display: screen).visibleFraction < 0.002 { continue }
+            guard out.count < maxWindowLayers, pixels + w.frame.area <= maxLayerPixels else {
+                if compositor, !loggedCapMiss.contains(w.id) { loggedCapMiss.insert(w.id); log("compositor model: visible window \(w.id) (\(w.app ?? "?")) is over the layer caps (\(maxWindowLayers) layers, \(maxLayerPixels / 1_000_000) MP): not shown") }
+                continue
+            }
             out.append(w); pixels += w.frame.area
         }
         return out
@@ -886,7 +959,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let planned = screenLocked ? [] : plannedLayers(in: s.windows, displayPixels: t.pixelWidth * t.pixelHeight)
         for w in planned { if let f = plannedFrames[w.id], f != w.frame { recentFrames.append((f, now)) } }
         for w in planned where excludedFrom[w.id] != nil { exposedSince[w.id] = nil }   // excluded: the wait is over
-        for w in planned where (layers[w.id]?.exposed ?? false) && excludedFrom[w.id] == nil {
+        for w in planned where !compositor && (layers[w.id]?.exposed ?? false) && excludedFrom[w.id] == nil {
             let since = exposedSince[w.id] ?? now; exposedSince[w.id] = since
             if Clock.elapsed(since: since, now: now) > 5_000_000_000 {
                 unexcludable.insert(w.id)
@@ -926,7 +999,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         // Layers no longer planned (window gone, minimized, dropped out of the cap): capture stops; the
         // pixels stay for a while in case it comes right back (a Space switch, a restore).
-        for (id, l) in layers where id != 0 && !plannedIDs.contains(id) {
+        for (id, l) in layers where id != 0 && id != ControlMessage.WindowInfo.overlayID && !plannedIDs.contains(id) {
             if let cap = l.capturer { l.capturer = nil; Task { await cap.stop() } }
             if screenLocked { l.absentSince = 0; continue }   // paused, not gone: kept for the unlock
             if l.absentSince == 0 { l.absentSince = now }
@@ -991,6 +1064,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         updateDisplayHidden(now: now)
         if !needCatalog.isEmpty {
             catalog.ensure(needCatalog) { [weak self] in self?.queue.async { guard let self, let s = self.windows?.current else { return }; self.reconcileLayers(s, now: Clock.nowNanos()) } }
+        }
+        // The compositor model: the display stream is the desktop alone; only the overlay's exclusion follows the windows.
+        if compositor {
+            reconcileCompositor(s, needCatalog: &needCatalog)
+            if !needCatalog.isEmpty { catalog.ensure(needCatalog) { [weak self] in self?.queue.async { guard let self, let s = self.windows?.current else { return }; self.reconcileLayers(s, now: Clock.nowNanos()) } } }
+            return
         }
         // The display stream leaves out exactly the layers the viewer shows (exposed): a layer the viewer
         // does not hold yet stays in the display picture (the client draws it as a cut-out meanwhile).
@@ -1082,6 +1161,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let visible = list.compactMap { w in layers[w.id].map { (w, $0) } }.filter { _, l in l.visibleFraction > 0.001 && !ordered.contains { $0 === l } }
         ordered += visible.sorted { a, b in Double(a.0.frame.area) * a.1.visibleFraction > Double(b.0.frame.area) * b.1.visibleFraction }.map(\.1)
         for w in list { if let l = layers[w.id], !ordered.contains(where: { $0 === l }) { ordered.append(l) } }
+        if compositor, let ov = layers[ControlMessage.WindowInfo.overlayID] { ordered.insert(ov, at: 0) }   // the menu bar, the Dock, menus first
         ordered.append(d)
         return ordered
     }
@@ -1115,7 +1195,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
         let new = frameView(pb)
         guard new.width == layer.width, new.height == layer.height else { return }   // a stale frame around a resize
-        if !layer.isDisplay, new.width >= 8, new.height >= 8 {
+        if !layer.isDisplay, layer.id != ControlMessage.WindowInfo.overlayID, new.width >= 8, new.height >= 8 {
             // Show Desktop: a pushed-aside window is captured blank; the layer keeps its last real picture (it slides with its
             // frame) and the frames after the return match it again.
             let pts = [(new.width / 2, new.height / 2), (new.width / 4, new.height / 2), (new.width * 3 / 4, new.height / 2), (new.width / 2, new.height / 4), (new.width / 2, new.height * 3 / 4)]
@@ -1814,6 +1894,26 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func currentList() -> [ControlMessage.WindowInfo] {
         guard let s = windows?.current else { return publishedWindows }
         let displayArea = display?.bounds.area ?? 1
+        if compositor {
+            // Every normal window is a layer once it has a picture; everything above the normal level is drawn by the
+            // overlay layer (listed first, on top), so nothing is a cut-out of the desktop. Layers are published as verified
+            // (the desktop under them is clean), so older viewers' guards let the desktop through.
+            var out: [ControlMessage.WindowInfo] = []
+            if !screenLocked, let ov = layers[ControlMessage.WindowInfo.overlayID], ov.exposed, let d = display {
+                out.append(.init(id: ControlMessage.WindowInfo.overlayID, pid: 0, title: "", frame: d.bounds, z: -1, level: ControlMessage.WindowInfo.overlayLevel,
+                                 layered: true, app: "Mirage overlay", excludedFrom: 1))
+            }
+            return out + s.windows.map { w in
+                var w = w
+                let exposed = !screenLocked && w.windowLevel == 0 && (layers[w.id]?.exposed ?? false)
+                w.layered = exposed
+                if exposed, let l = layers[w.id], let r = w.scrollRect { w.scrollRect = l.local(r) }
+                w.cutout = nil
+                w.excludedFrom = exposed ? 1 : nil
+                w.opaque = exposed && !(layers[w.id]?.opaque ?? true) ? false : nil
+                return w
+            }
+        }
         return s.windows.map { w in
             var w = w
             // A window is a layer for the viewer only once the display stream excludes it: until then (and for good,
@@ -2223,6 +2323,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var lastUnderlayRefill: UInt64 = 0
     private var statUnderlayTiles = 0, statUnderlayBytes = 0
     private func underlayStep(_ d: Layer, now: UInt64) {
+        guard !compositor else { return }   // the display layer is the desktop itself
         // Guarded tiles no window covers any more (a window just left them: Show Desktop, a move) are what the viewer shows
         // right now: they take the underlay at once, on 40 % of the tile budget. Tiles under layers wait for 2 s without
         // motion, on 10 %. Nothing goes where any window in the current list is, a layer or a window the desktop picture
