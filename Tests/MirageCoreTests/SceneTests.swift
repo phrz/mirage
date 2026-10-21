@@ -54,6 +54,28 @@ final class SceneTests: XCTestCase {
         XCTAssertTrue(plan.entries.first { $0.id == 7 }!.visible)
     }
 
+    /// Nothing outside the remote display: a window partly off it (phrz's Claude window at x -584; Show Desktop slides
+    /// every window to the edges), its shadow and a drag displacement are clipped at the display edge, and the letterbox
+    /// around the picture stays the clear colour.
+    func testLayersAreClippedToTheDisplay() throws {
+        guard let ctx = MetalContext() else { throw XCTSkip("no Metal device") }
+        let bg = Compositor(context: ctx); bg.configure(width: 400, height: 300)
+        solid(bg, PixelRect(x: 0, y: 0, width: 400, height: 300), bgra: (255, 0, 0, 255))            // desktop: blue
+        let win = Compositor(context: ctx); win.layerID = 7; win.hasAlpha = true; win.configure(width: 200, height: 100)
+        solid(win, PixelRect(x: 0, y: 0, width: 200, height: 100), bgra: (0, 0, 255, 255))          // window: red
+        let w = ControlMessage.WindowInfo(id: 7, pid: 3, title: "off the left edge", frame: PixelRect(x: -120, y: 100, width: 200, height: 100), z: 0, level: 0, layered: true)
+        let plan = LayerScenePlan.plan([w], hasCanvas: { $0 == 7 }, display: PixelRect(x: 0, y: 0, width: 400, height: 300), shadowMargin: 48)
+        // The display letterboxed: 100 px bars left and right of a 400x300 picture in a 600x300 drawable.
+        let t = target(ctx, 600, 300)
+        let drag = Predictor.Displacement(kind: .drag, windowID: 7, rect: PixelRect(x: 0, y: 0, width: 200, height: 100), dx: -60, dy: 0)
+        let scene = LayerScene(background: bg, items: plan.sceneItems(pxPerPoint: 1, canvas: { $0 == 7 ? win : nil }),
+                               displacements: [.init(layerID: 7, displacement: drag)], bandColors: [:])
+        SceneRenderer.render(scene, context: ctx, target: t, dest: CGRect(x: 100, y: 0, width: 400, height: 300))
+        XCTAssertEqual(pixel(ctx, t, 110, 150).r, 255, "the dragged window's on-screen part is drawn")
+        for x in [5, 50, 95] { let p = pixel(ctx, t, x, 150); XCTAssertEqual([p.r, p.g, p.b], [0, 0, 0], "letterbox at x \(x) untouched") }
+        let right = pixel(ctx, t, 550, 150); XCTAssertEqual([right.r, right.g, right.b], [0, 0, 0])
+    }
+
     func testMenuCutoutDrawsOnlyWhereItOverlapsALayer() throws {
         guard let ctx = MetalContext() else { throw XCTSkip("no Metal device") }
         let bg = Compositor(context: ctx); bg.configure(width: 400, height: 300)

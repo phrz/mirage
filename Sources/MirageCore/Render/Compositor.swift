@@ -818,12 +818,17 @@ public enum SceneRenderer {
         func uv(_ r: PixelRect, in c: Compositor) -> SIMD4<Float> {
             SIMD4(Float(r.x) / Float(c.width), Float(r.y) / Float(c.height), Float(r.maxX) / Float(c.width), Float(r.maxY) / Float(c.height))
         }
+        // Nothing is drawn outside the remote display (macOS shows nothing there): every scissor is clipped to the display
+        // layer's rect. A window partly off the display (phrz's Claude window at x -584, Show Desktop sliding every window to
+        // the edges) was drawn into the letterbox around the picture.
+        let clip = SIMD4<Float>(max(0, Float(dest.minX)), max(0, Float(dest.minY)), min(dw, Float(dest.maxX)), min(dh, Float(dest.maxY)))
         func scissor(_ p: SIMD4<Float>) {
-            let x0 = min(Int(dw), max(0, Int(p.x))), y0 = min(Int(dh), max(0, Int(p.y)))
-            let x1 = min(Int(dw), max(0, Int(p.z))), y1 = min(Int(dh), max(0, Int(p.w)))
+            let x0 = Int(max(clip.x, min(clip.z, p.x)).rounded(.down)), y0 = Int(max(clip.y, min(clip.w, p.y)).rounded(.down))
+            let x1 = Int(max(clip.x, min(clip.z, p.z)).rounded(.up)), y1 = Int(max(clip.y, min(clip.w, p.w)).rounded(.up))
             re.setScissorRect(MTLScissorRect(x: x0, y: y0, width: max(0, x1 - x0), height: max(0, y1 - y0)))
         }
-        let fullScissor = SIMD4<Float>(0, 0, dw, dh)
+        let fullScissor = clip
+        scissor(fullScissor)
         let sampler = abs(sx - 1) < 0.001 && abs(sy - 1) < 0.001 ? context.nearestSampler : context.linearSampler
         let display = PixelRect(x: 0, y: 0, width: bg.width, height: bg.height)
         func drawQuad(_ tex: MTLTexture, dst: SIMD4<Float>, src: SIMD4<Float>, alpha: Float?) {
