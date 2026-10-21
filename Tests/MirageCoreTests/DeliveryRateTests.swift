@@ -93,6 +93,6 @@ final class DeliveryRateTests: XCTestCase {
         var now: UInt64 = 1_000 * ms
         for _ in 0..<200 { rc.streamAcked(bytes: 10_000, now: now); now += 10 * ms }   // 8 Mbps
         XCTAssertEqual(Double(rc.deliveryKbps), 8_000, accuracy: 800)
-        XCTAssertEqual(Double(rc.inflightCapBytes), 2 * 8_000_000 / 8 * 0.2, accuracy: 40_000, "2 × 1 MB/s × 200 ms")
+        XCTAssertEqual(Double(rc.inflightCapBytes), (rc.inStartup ? 3 : 2) * 8_000_000 / 8 * 0.2, accuracy: 40_000, "2 × (3 × in startup) 1 MB/s × 200 ms")
     }
 }

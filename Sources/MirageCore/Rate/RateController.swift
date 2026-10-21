@@ -407,12 +407,13 @@ public struct RateController {
     public var deliveryCeilingKbps: Int {
         deliveryKbps > 0 ? min(maxKbps, max(tuning.minKbps, Int(Double(deliveryKbps) * deliveryGain))) : maxKbps
     }
-    /// Stream data the host may keep unacked: 2 × the bandwidth-delay product (delivery rate × min RTT), at least 32 KB,
-    /// and 64 KB until there is an estimate.
+    /// Stream data the host may keep unacked: 2 × the bandwidth-delay product (delivery rate × min RTT), 3 × in startup, at
+    /// least 32 KB, and 64 KB until there is an estimate. (At 2 × in startup, a round trip the link's queue inflates allowed
+    /// ~25 % growth per window, which read as "no growth": startup ended at 1.4 Mbps of Fast 4G's 8.1 on mac-daddy.)
     public var inflightCapBytes: Int {
         guard deliveryKbps > 0 else { return 64_000 }
         let bdp = Double(deliveryKbps) * 1000 / 8 * minRttMs / 1000
-        return max(32_000, Int(2 * bdp))
+        return max(32_000, Int((inStartup ? 3 : 2) * bdp))
     }
 
     private var lastIdleNanos: UInt64 = 0
