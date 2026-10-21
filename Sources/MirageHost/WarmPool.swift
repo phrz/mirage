@@ -69,7 +69,7 @@ public final class WarmPool: @unchecked Sendable {
 
     private var tun = Tunables.defaults
     private func enabled() -> Bool {
-        tun = Tunables.load(from: (try? Store())?.url("tunables.json")).tunables
+        tun = Tunables.load(from: Tunables.hostFileURL(try? Store())).tunables
         return tun[.warmCapture] >= 0.5
     }
 

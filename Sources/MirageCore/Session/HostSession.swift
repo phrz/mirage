@@ -25,7 +25,7 @@ public enum HostSession {
     /// `tunables.json` in the store directory, read each time (retuned without a restart).
     static func sendTunables(_ out: ConnectionOutput, _ req: ControlMessage.StreamRequest, _ ctx: HostContext) {
         guard req.tunablesVersion != nil else { return }
-        let (t, error) = Tunables.load(from: ctx.store.url("tunables.json"))
+        let (t, error) = Tunables.load(from: Tunables.hostFileURL(ctx.store))
         if let error { ctx.log(error) }
         out.sendControl(.tunables(t))
     }
@@ -128,7 +128,7 @@ public enum HostSession {
                 guard authenticated != nil else { throw MirageError.protocolViolation("streamRequest before auth") }
                 // Automatic bitrate (BitratePolicy): 0, or an older viewer's unchosen 800, becomes the host's ceiling and the
                 // controller probes up to it; the streamer sees the resolved request. The throttle shapes this connection.
-                let hostMax = Int(Tunables.load(from: ctx.store.url("tunables.json")).tunables[.autoMaxKbps])
+                let hostMax = Int(Tunables.load(from: Tunables.hostFileURL(ctx.store)).tunables[.autoMaxKbps])
                 let req = BitratePolicy.resolved(asked, hostMaxKbps: hostMax)
                 let bitrate = BitratePolicy.describe(asked, hostMaxKbps: hostMax)
                 if let line = conn.setThrottle(asked.throttle) { ctx.log("[\(remote)] \(line)") }

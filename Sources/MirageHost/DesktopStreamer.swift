@@ -494,7 +494,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var loggedChrome: [PixelRect]?
 
     private func loadHostTunables() {
-        let (t, error) = Tunables.load(from: (try? Store())?.url("tunables.json"))
+        let (t, error) = Tunables.load(from: Tunables.hostFileURL(try? Store()))
         hostTunables = t
         if let error { log(error) }
     }
@@ -510,7 +510,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     static let compositorEnv = ProcessInfo.processInfo.environment["MIRAGE_COMPOSITOR"]
     static func compositorWanted() -> Bool {
         if let e = compositorEnv { return e != "0" }
-        return Tunables.load(from: (try? Store())?.url("tunables.json")).tunables[.compositorModel] >= 0.5
+        return Tunables.load(from: Tunables.hostFileURL(try? Store())).tunables[.compositorModel] >= 0.5
     }
     /// The windows the overlay leaves out: the desktop-level ones, every normal window on the display, and floating app
     /// windows (they are layers).

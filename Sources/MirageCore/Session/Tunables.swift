@@ -105,6 +105,13 @@ public struct Tunables: Codable, Equatable, Sendable {
         return t
     }
 
+    /// The host's tunables file: `tunables.json` in its store, or the file MIRAGE_TUNABLES names (a test host on another port
+    /// with its own tunables, the store's keys and pairings shared).
+    public static func hostFileURL(_ store: Store?) -> URL? {
+        if let p = ProcessInfo.processInfo.environment["MIRAGE_TUNABLES"], !p.isEmpty { return URL(fileURLWithPath: (p as NSString).expandingTildeInPath) }
+        return store?.url("tunables.json")
+    }
+
     /// The host's tunables: the defaults overridden by a `{"key": number}` JSON file (nil or unreadable: the defaults).
     public static func load(from url: URL?) -> (tunables: Tunables, error: String?) {
         guard let url, let d = try? Data(contentsOf: url) else { return (defaults, nil) }
