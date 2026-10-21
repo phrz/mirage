@@ -1244,7 +1244,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func sendPlaceholders() {
         guard let t = target else { return }
         // Half the stream's width in the compositor model: the windows' stage-1 stills are cut from it (M-FIVE).
-        let shotW = compositor ? max(800, t.pixelWidth / 2) : 800, shotH = max(1, shotW * t.pixelHeight / max(1, t.pixelWidth))
+        // Full size in the compositor model: each not-yet-captured window's cut becomes its layer's first frame, so its
+        // lossless blocks go at once (ScreenCaptureKit starts window captures one after another, ~0.75 s apart: the last
+        // window's lossless waited ~6 s on mac-daddy). 800 px otherwise (only the desktop placeholder).
+        let shotW = compositor ? t.pixelWidth : 800, shotH = max(1, shotW * t.pixelHeight / max(1, t.pixelWidth))
         Task { [weak self] in
             let c = SCStreamConfiguration()
             c.width = shotW; c.height = shotH; c.showsCursor = false
@@ -1307,6 +1310,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             sendTileMessage(.tiles(.init(header: header(layer: id, nanos: now), refinement: false, staged: true, tiles: [.init(rect: l.bounds, format: .lossy, data: data)])), captureNanos: now)
             l.stillSent = true; l.cutStill = true
             if stage1Active { stage1Staged.insert(id) } else { sendTileMessage(.commit(layer: id), captureNanos: now); l.exposed = true }
+            // At full size the cut is the window's visible pixels: its first frame. Lossless refinement plans from it now;
+            // the window's own capture, when it delivers, is diffed against it (only real differences go).
+            if k >= 0.999, r.width == l.width, r.height == l.height, let pb = makeFrame(cut, width: r.width, height: r.height) {
+                var tr = l.tracker
+                tr.markVideo(Array(0..<tr.tileCount), now: now)
+                l.tracker = tr
+                l.lastFrame = pb
+                l.announced = true
+                l.fresh = .blocks(remaining: planBlocks(l))
+            }
             sent += 1; bytes += data.count
         }
         if sent > 0 { log("placeholders and stage-1 cuts: the desktop and \(sent - 1) windows, \(bytes) bytes"); checkStage1(now: Clock.nowNanos()); publishWindows(now: Clock.nowNanos(), full: false) }
@@ -1945,6 +1958,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard foveaActive, let l = locus(in: layer) else { return nil }
         let t = layer.tracker
         return (min(t.cols - 1, max(0, l.x / TileTracker.tile)), min(t.rows - 1, max(0, l.y / TileTracker.tile)))
+    }
+
+    /// A BGRA pixel buffer holding `px` (a stage-1 cut used as a layer's first frame).
+    private func makeFrame(_ px: [UInt8], width: Int, height: Int) -> CVPixelBuffer? {
+        var pb: CVPixelBuffer?
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+        guard CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pb) == kCVReturnSuccess, let pb else { return nil }
+        CVPixelBufferLockBaseAddress(pb, []); defer { CVPixelBufferUnlockBaseAddress(pb, []) }
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
+        let stride = CVPixelBufferGetBytesPerRow(pb)
+        px.withUnsafeBytes { src in for y in 0..<height { memcpy(base.advanced(by: y * stride), src.baseAddress!.advanced(by: y * width * 4), width * 4) } }
+        return pb
     }
 
     // MARK: Stage 1, coherent stills presented together (DESIGN M-FIVE)
