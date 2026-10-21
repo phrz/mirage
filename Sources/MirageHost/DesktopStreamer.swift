@@ -488,6 +488,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         _ = try await ov.start(req, target: t, excluding: excl) { [weak self] pb, nanos, _ in self?.queue.async { self?.captured(pb, nanos, dirtyRects: [], layerID: ControlMessage.WindowInfo.overlayID) } }
         queue.async { self.overlayExcludedIDs = Set(excl.map(\.windowID)); self.desktopLevelIDs = Set(excl.filter { $0.windowLayer < 0 }.map(\.windowID)) }
         compositorSinceNanos = Clock.nowNanos()
+        queue.async { self.placeholdersDone = false }
         log("compositor model: desktop-only display layer, overlay layer above the normal level (\(excl.count) windows left out of it)")
         return ov
     }
@@ -1047,6 +1048,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if l.absentSince == 0 { l.absentSince = now }
             else if Clock.elapsed(since: l.absentSince, now: now) > layerRetainNanos { layers[id] = nil; ax?.forget(id); log("layer \(id) released") }
         }
+        if compositor, !placeholdersDone, !planned.isEmpty, hostTunables[.placeholders] >= 1 { placeholdersDone = true; sendPlaceholders() }
         // Compositor model: a shown window whose own capture has not delivered within 400 ms (a new window, one uncovered
         // again) is cut from the full display capture until it does, so its rectangle always has its window.
         if compositor {
@@ -1200,6 +1202,63 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// full display capture (the composited screen, nothing left out), started while any layer needs it. Soft, and partly
     /// covered where a window is in front, but still a layer: never baked into the desktop.
     private var fallbackLayers = Set<UInt32>()
+    // MARK: Placeholders (DESIGN §3.0b)
+
+    private var placeholdersDone = false
+    /// Every visible window at once: one small screenshot of the composited display, each planned window that has no picture
+    /// yet cut from it (windows in front left transparent) and sent as a 32-px still with its layer's announcement. The
+    /// viewer draws it upscaled (soft) until the window's own still replaces it. Without it, windows appeared one by one as
+    /// their captures started (~0.6 s apart on mac-daddy; the last ~5 s after the first on Japan bus).
+    private func sendPlaceholders() {
+        guard let t = target else { return }
+        let shotW = 800, shotH = max(1, 800 * t.pixelHeight / max(1, t.pixelWidth))
+        Task { [weak self] in
+            let c = SCStreamConfiguration()
+            c.width = shotW; c.height = shotH; c.showsCursor = false
+            guard let img = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(display: t.display, excludingWindows: []), configuration: c) else { return }
+            var px = [UInt8](repeating: 0, count: shotW * shotH * 4)
+            let ok = px.withUnsafeMutableBytes { buf -> Bool in
+                guard let ctx = CGContext(data: buf.baseAddress, width: shotW, height: shotH, bitsPerComponent: 8, bytesPerRow: shotW * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return false }
+                ctx.draw(img, in: CGRect(x: 0, y: 0, width: shotW, height: shotH)); return true
+            }
+            guard ok else { return }
+            self?.queue.async { self?.placeholders(from: px, width: shotW, height: shotH, streamWidth: t.pixelWidth) }
+        }
+    }
+    private func placeholders(from px: [UInt8], width sw: Int, height sh: Int, streamWidth: Int) {
+        guard let s = windows?.current else { return }
+        let k = Double(sw) / Double(max(1, streamWidth))
+        var sent = 0, bytes = 0
+        for (id, l) in layers where !l.isDisplay && id != ControlMessage.WindowInfo.overlayID && !l.announced && !l.exposed && plannedFrames[id] != nil {
+            guard s.byID[id] != nil else { continue }
+            // The window's rect in the screenshot, and the covered parts transparent.
+            let r = PixelRect(x: Int(Double(l.frame.x) * k), y: Int(Double(l.frame.y) * k), width: max(1, Int(Double(l.width) * k)), height: max(1, Int(Double(l.height) * k)))
+            let shot = PixelRect(x: 0, y: 0, width: sw, height: sh)
+            let vis = r.intersection(shot)
+            guard !vis.isEmpty else { continue }
+            var cut = [UInt8](repeating: 0, count: r.width * r.height * 4)
+            for y in 0..<vis.height {
+                let srcOff = ((vis.y + y) * sw + vis.x) * 4, dstOff = ((vis.y - r.y + y) * r.width + (vis.x - r.x)) * 4
+                cut.replaceSubrange(dstOff..<dstOff + vis.width * 4, with: px[srcOff..<srcOff + vis.width * 4])
+            }
+            for f in fallbackCovers(of: id, frame: l.frame) {
+                let fr = PixelRect(x: Int(Double(f.x) * k), y: Int(Double(f.y) * k), width: Int((Double(f.width) * k).rounded(.up)), height: Int((Double(f.height) * k).rounded(.up))).intersection(r)
+                guard !fr.isEmpty else { continue }
+                for y in 0..<fr.height { let o = ((fr.y - r.y + y) * r.width + (fr.x - r.x)) * 4; for i in o..<o + fr.width * 4 { cut[i] = 0 } }
+            }
+            let long = max(r.width, r.height)
+            let ow = max(4, r.width * 32 / max(1, long)), oh = max(4, r.height * 32 / max(1, long))
+            guard let data = cut.withUnsafeBytes({ TileCodec.encodeLossy(base: $0.baseAddress!, width: r.width, height: r.height, stride: r.width * 4, outWidth: ow, outHeight: oh, quality: 40) }) else { continue }
+            let now = Clock.nowNanos()
+            sendTileMessage(.reset(layer: id, width: l.width, height: l.height), captureNanos: now)
+            sendTileMessage(.tiles(.init(header: header(layer: id, nanos: now), refinement: false, tiles: [.init(rect: l.bounds, format: .lossy, data: data)])), captureNanos: now)
+            l.exposed = true
+            sent += 1; bytes += data.count
+        }
+        if sent > 0 { log("placeholders: \(sent) windows at once, \(bytes) bytes"); publishWindows(now: Clock.nowNanos(), full: false) }
+    }
+
     /// Layers cut from the full display capture only until their own capture delivers.
     private var pendingFallback = Set<UInt32>()
     /// When the compositor model's layers were set up for this stream.
