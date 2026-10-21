@@ -220,6 +220,20 @@ final class ScenarioRunner {
             session.log("scenario passive: idle, nothing injected")
             return
         }
+        if name == "linkswitch" {
+            // The rate controller both ways (M-FIVE): Fast 4G, then Japan bus from 30 s, then Fast 4G again from 60 s, idle
+            // (the host's 5 s rate lines show the target following the link; the viewer only changes the throttle).
+            await MainActor.run { session.setThrottle(.fast4G) }
+            session.log("scenario linkswitch: Fast 4G")
+            try? await Task.sleep(for: .seconds(30))
+            await MainActor.run { session.setThrottle(.japanBus4G) }
+            session.log("scenario linkswitch: Japan bus 4G")
+            try? await Task.sleep(for: .seconds(30))
+            await MainActor.run { session.setThrottle(.fast4G) }
+            session.log("scenario linkswitch: Fast 4G again")
+            try? await Task.sleep(for: .seconds(30))
+            return
+        }
         if name == "keys" {
             // Input-integrity run: N scripted keystrokes at 20 keys/s. Only against a host that records
             // input instead of injecting it (HostStatus.inputSink), whatever is frontmost there.
