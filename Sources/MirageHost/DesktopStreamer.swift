@@ -1409,7 +1409,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             layer.pendingVideoTiles.formUnion(plan.video)
             layer.pendingVideoRegion = layer.pendingVideoRegion.union(plan.videoRegion)
             layer.pendingWholeFrame = layer.pendingWholeFrame || plan.wholeFrame
-            layer.videoActiveNanos = now; videoActiveNanos = now
+            layer.videoActiveNanos = now
+            // Only video that matters moves the budget to video (tiles 45 % of the target instead of 90 %): an animated Dock
+            // icon held the tile budget at 360 of 800 kbps on mac-daddy, the full picture unfinished after 108 s. Small video
+            // still gets the remainder (at least 100 kbps).
+            if MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount) { videoActiveNanos = now }
         }
         layer.tracker = tracker
         layer.lastFrame = pb
