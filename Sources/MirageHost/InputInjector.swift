@@ -28,6 +28,9 @@ final class InputInjector {
     /// the streamer freezes refinement while this is recent, before the pixels even show it.
     private var _motionHintNanos: UInt64 = 0
     var motionHintNanos: UInt64 { locusLock.lock(); defer { locusLock.unlock() }; return _motionHintNanos }
+    private var _lastInputNanos: UInt64 = 0
+    /// When the last key, button or scroll came in (bare pointer moves excluded).
+    var lastInputNanos: UInt64 { locusLock.lock(); defer { locusLock.unlock() }; return _lastInputNanos }
 
     /// `MIRAGE_INPUT_SINK=/path`: every input the host would inject is appended to that file as one JSON
     /// line and *nothing* is posted to the HID tap. The loopback integrity tests compare that file with
@@ -121,6 +124,8 @@ final class InputInjector {
         case .scroll: noteMotion()
         default: break
         }
+        // Input of any kind but a bare pointer move: the small-region rule (TileTracker `flicker`) stands aside meanwhile.
+        if case .mouseMove = msg, buttonsDown.isEmpty {} else { locusLock.lock(); _lastInputNanos = Clock.nowNanos(); locusLock.unlock() }
         if let seq = msg.inputSeq {
             seqLock.lock()
             injected.append((seq, Clock.nowNanos()))

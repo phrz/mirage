@@ -362,4 +362,24 @@ final class TileSchedulerTests: XCTestCase {
         guard case .tiles(let t)? = got.first?.message else { return XCTFail() }
         XCTAssertTrue(t.tiles.isEmpty, "the unknown tile is dropped, the message (and its ack) survives")
     }
+
+    /// An animated Dock icon (3 tiles changing every 80 ms) is a small region, not video and not lossless at every change:
+    /// with the input quiet it goes to `flicker` (the small-animation path) after its fourth change; with input flowing
+    /// (typing) the same pattern stays lossless.
+    func testASmallBusyRegionIsFlickerWhileInputIsQuiet() {
+        var t = TileTracker(width: 640, height: 384)
+        let icon = [12, 13, 22]
+        var flicker: [Int] = [], lossless = 0
+        for k in 0..<10 {
+            let p = t.classify(dirty: icon, now: UInt64(k) * 80_000_000 + 1_000_000_000, smallRegions: true)
+            XCTAssertTrue(p.video.isEmpty, "too small to be video")
+            if k >= 3 { flicker = p.flicker } else { lossless += p.lossless.count }
+        }
+        XCTAssertEqual(flicker, icon)
+        XCTAssertEqual(lossless, 9, "lossless for its first three changes only")
+        var typing = TileTracker(width: 640, height: 384)
+        var sent = 0
+        for k in 0..<10 { let p = typing.classify(dirty: icon, now: UInt64(k) * 80_000_000 + 1_000_000_000); sent += p.lossless.count; XCTAssertTrue(p.flicker.isEmpty) }
+        XCTAssertEqual(sent, 30, "with input flowing it stays lossless")
+    }
 }

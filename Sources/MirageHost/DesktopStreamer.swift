@@ -1532,7 +1532,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // still owing an update (held back by the rate limit, shown through video, a correction) goes whole, or what the
         // earlier change left stays wrong while the tile counts as sent (a vacated Dock tooltip "…aude" for ~12 s on mac-daddy).
         for i in Array(tightBoxes.keys) where !tracker.isCrisp(i) { tightBoxes[i] = nil }
-        var plan = tracker.classify(dirty: dirty, now: now, copyGate: Clock.elapsed(since: layer.copyGateNanos, now: now) < 300_000_000 && layer.copyGateNanos > 0)
+        let inputQuiet = Clock.elapsed(since: injector?.lastInputNanos ?? 0, now: now) > 1_000_000_000
+        var plan = tracker.classify(dirty: dirty, now: now, copyGate: Clock.elapsed(since: layer.copyGateNanos, now: now) < 300_000_000 && layer.copyGateNanos > 0, smallRegions: inputQuiet)
         var withCopy: [Int] = []
         if !copyRegion.isEmpty {
             // The scroll's new content: rate-limited ones (classify held them back) go now too.
@@ -1559,9 +1560,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // a capped rate (host tunables, default 3 fps q50, ~40 kbps for an icon), refined lossless once it stops (classify left
         // the tiles pending). As video, one Dock icon took ~230 kbps of an 800 kbps link on mac-daddy, and its frames were the
         // rate controller's only delay samples: they read a queue that was not there and held the target at 150 kbps.
-        if !plan.video.isEmpty, !plan.wholeFrame, !MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount, screenTiles: display?.tracker.tileCount ?? 0) {
-            let small = plan.video.filter { !layer.occludedTiles.contains($0) }
-            plan.video = []; plan.videoRegion = .zero
+        let smallVideo = !plan.video.isEmpty && !plan.wholeFrame && !MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount, screenTiles: display?.tracker.tileCount ?? 0)
+        if smallVideo || !plan.flicker.isEmpty {
+            let small = ((smallVideo ? plan.video : []) + plan.flicker).filter { !layer.occludedTiles.contains($0) }
+            if smallVideo { plan.video = []; plan.videoRegion = .zero }
             let interval = UInt64(1e9 / hostTunables[.smallAnimationFps])
             if !small.isEmpty, Clock.elapsed(since: layer.smallAnimNanos, now: now) >= interval {
                 layer.smallAnimNanos = now

@@ -78,13 +78,19 @@ public struct TileTracker {
         /// Bounding rect (tile-snapped) of `video`, or the whole frame.
         public var videoRegion: PixelRect = .zero
         public var wholeFrame = false
+        /// Tiles changing all the time in a region too small to be video (under `sustainedClusterTiles`: an animated Dock
+        /// icon, a spinner): for the small-animation path (lossy, a few fps), refined once they stop. Only with `smallRegions`.
+        public var flicker: [Int] = []
     }
 
     /// Records this capture's dirty tiles and classifies them.
     /// `copyGate`: a copy-rect explained at least half of this layer's change in this frame or the last 300 ms: then
     /// nothing is motion (a scroll's unexplained frames, momentum steps and exposed strips stay copy-rect + lossless;
     /// experiments/byterace: scroll 675 → 209 kbps at 2000 kbps and 291 → 209 at 600, text crisp instead of soft 93 %).
-    public mutating func classify(dirty: [Int], now: UInt64, copyGate: Bool = false) -> Plan {
+    /// `smallRegions`: frequently dirty tiles outside any video cluster go to `flicker` instead of lossless (the host passes
+    /// false while input flows, so typed text stays lossless at once). Without it such a region went lossless up to 12.5
+    /// times a second: an animated Dock icon took ~550 kbps of 800 on mac-daddy and starved refinement.
+    public mutating func classify(dirty: [Int], now: UInt64, copyGate: Bool = false, smallRegions: Bool = false) -> Plan {
         var plan = Plan()
         guard !dirty.isEmpty else { return plan }
         // History update.
@@ -117,7 +123,11 @@ public struct TileTracker {
             plan.videoRegion = boundingRect(Array(videoSet))
         }
         plan.video = videoSet.sorted()
-        for i in plan.video {
+        if smallRegions, !copyGate {
+            plan.flicker = dirty.filter { !videoSet.contains($0) && Int(cells[$0].hits) >= tuning.sustainedHits }
+            videoSet.formUnion(plan.flicker)
+        }
+        for i in videoSet {
             // A tile that moves again while queued for refinement is dropped and re-queued: its old place
             // in the oldest-first order would otherwise let a region that kept moving jump the queue
             // (review: a 1003-tile backlog during a drag).
