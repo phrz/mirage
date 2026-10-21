@@ -47,29 +47,67 @@ final class WindowTracker {
         lock.lock(); learned = [:]; axRects = [:]; chromeInsets = nil; lock.unlock()
     }
 
-    /// The menu bar and Dock insets in points (top, bottom, left, right), from NSScreen on the main queue every 2 s.
+    /// The menu bar and Dock insets in points (top, bottom, left, right) from NSScreen, and the Dock's own frame (global points,
+    /// top-left origin) from Accessibility, refreshed on the main queue every 2 s.
     private var chromeInsets: (top: Double, bottom: Double, left: Double, right: Double)?
+    private var dockFrame: CGRect?
     private var chromeAskedNanos: UInt64 = 0
-    /// The desktop's always-visible chrome (menu bar, Dock) in stream pixels (DesktopChrome). Until NSScreen has answered:
-    /// a 24-pt menu bar.
+    /// The desktop's always-visible chrome (menu bar, Dock) in stream pixels (DesktopChrome). The menu bar from NSScreen (a
+    /// 24-pt bar until it answers). The Dock from, in order: its Accessibility list's frame (exact; visibleFrame in the
+    /// launchd agent left the Dock out on mac-daddy, auto-hide off, and its window list has only a full-screen window), the
+    /// visibleFrame insets, then its preferences (orientation, tile size; none while it auto-hides).
     func chromeRects(width: Int, height: Int) -> [PixelRect] {
         let now = Clock.nowNanos()
         lock.lock()
         let insets = chromeInsets ?? (24, 0, 0, 0)
+        let dock = dockFrame
         let ask = now &- chromeAskedNanos > 2_000_000_000
         if ask { chromeAskedNanos = now }
         let id = displayID, ppp = pxPerPoint
         lock.unlock()
         if ask {
             DispatchQueue.main.async { [weak self] in
-                guard let screen = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id }) else { return }
-                let f = screen.frame, v = screen.visibleFrame   // bottom-left origin, y up
-                let i = (top: Double(max(0, f.maxY - v.maxY)), bottom: Double(max(0, v.minY - f.minY)), left: Double(max(0, v.minX - f.minX)), right: Double(max(0, f.maxX - v.maxX)))
                 guard let self else { return }
-                self.lock.lock(); self.chromeInsets = i; self.lock.unlock()
+                var i = (top: 24.0, bottom: 0.0, left: 0.0, right: 0.0)
+                if let screen = NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id }) {
+                    let f = screen.frame, v = screen.visibleFrame   // bottom-left origin, y up
+                    i = (top: Double(max(0, f.maxY - v.maxY)), bottom: Double(max(0, v.minY - f.minY)), left: Double(max(0, v.minX - f.minX)), right: Double(max(0, f.maxX - v.maxX)))
+                }
+                let d = Self.axDockFrame()
+                self.lock.lock(); self.chromeInsets = i; self.dockFrame = d; self.lock.unlock()
             }
         }
-        return DesktopChrome.bands(width: width, height: height, pxPerPoint: ppp, top: insets.top, bottom: insets.bottom, left: insets.left, right: insets.right)
+        var rects = DesktopChrome.bands(width: width, height: height, pxPerPoint: ppp, top: insets.top, bottom: 0, left: 0, right: 0)
+        let display = PixelRect(x: 0, y: 0, width: width, height: height)
+        if let d = dock, !toPixels(d).intersection(display).isEmpty {
+            rects.append(toPixels(d).intersection(display))
+        } else if insets.bottom > 0 || insets.left > 0 || insets.right > 0 {
+            rects += DesktopChrome.bands(width: width, height: height, pxPerPoint: ppp, top: 0, bottom: insets.bottom, left: insets.left, right: insets.right)
+        } else {
+            let prefs = UserDefaults(suiteName: "com.apple.dock")
+            if let band = DesktopChrome.dockBand(orientation: prefs?.string(forKey: "orientation"), tileSize: prefs?.object(forKey: "tilesize") as? Double,
+                                                 autohide: prefs?.bool(forKey: "autohide") ?? false, width: width, height: height, pxPerPoint: ppp) { rects.append(band) }
+        }
+        return rects
+    }
+
+    /// The Dock's icon list frame from Accessibility (global points, top-left origin), nil if unavailable.
+    private static func axDockFrame() -> CGRect? {
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return nil }
+        let app = AXUIElementCreateApplication(dock.processIdentifier)
+        var children: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXChildrenAttribute as CFString, &children) == .success, let list = children as? [AXUIElement] else { return nil }
+        for e in list {
+            var role: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(e, kAXRoleAttribute as CFString, &role) == .success, (role as? String) == (kAXListRole as String) else { continue }
+            var pos: CFTypeRef?, size: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(e, kAXPositionAttribute as CFString, &pos) == .success,
+                  AXUIElementCopyAttributeValue(e, kAXSizeAttribute as CFString, &size) == .success else { continue }
+            var p = CGPoint.zero, sz = CGSize.zero
+            guard AXValueGetValue(pos as! AXValue, .cgPoint, &p), AXValueGetValue(size as! AXValue, .cgSize, &sz), sz.width > 0, sz.height > 0 else { continue }
+            return CGRect(origin: p, size: sz)
+        }
+        return nil
     }
 
     func toPixels(_ r: CGRect) -> PixelRect {

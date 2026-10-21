@@ -109,6 +109,18 @@ public enum DesktopChrome {
         if right > 0 { let w = min(width, px(right)); out.append(PixelRect(x: width - w, y: 0, width: w, height: height)) }
         return out.filter { !$0.isEmpty }
     }
+
+    /// The Dock's band from its preferences when nothing better is known: `orientation` (bottom unless "left"/"right"),
+    /// `tileSize` points (48 by default) plus 32 pt of margins; nil while it auto-hides.
+    public static func dockBand(orientation: String?, tileSize: Double?, autohide: Bool, width: Int, height: Int, pxPerPoint: Double) -> PixelRect? {
+        guard !autohide else { return nil }
+        let px = min(max(width, height), Int(((tileSize ?? 48) + 32) * pxPerPoint))
+        switch orientation {
+        case "left": return PixelRect(x: 0, y: 0, width: min(width, px), height: height)
+        case "right": return PixelRect(x: width - min(width, px), y: 0, width: min(width, px), height: height)
+        default: return PixelRect(x: 0, y: height - min(height, px), width: width, height: min(height, px))
+        }
+    }
 }
 
 /// Show Desktop pushes the windows to the screen edges, and ScreenCaptureKit then delivers their captures blank (alpha 0

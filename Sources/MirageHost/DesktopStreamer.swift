@@ -425,7 +425,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let s = windows?.sample(captureSeq: captureSeq, now: now, force: true) { reconcileLayers(s.sample, now: now) }
         ensureUnderlay(t)
         loadHostTunables()
+        loggedChrome = nil   // logged again once known for this stream
     }
+    private var loggedChrome: [PixelRect]?
 
     private func loadHostTunables() {
         let (t, error) = Tunables.load(from: (try? Store())?.url("tunables.json"))
@@ -2769,7 +2771,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if InputInjector.consoleLocked() != self.screenLocked, let cur = self.windows?.current { self.reconcileLayers(cur, now: tnow); self.publishWindows(now: tnow, full: false) }
             if Clock.elapsed(since: self.lastAuditNanos, now: tnow) >= 5_000_000_000 { self.lastAuditNanos = tnow; self.sendAudit(now: tnow); self.sendWindowAudits(now: tnow) }
             let front: (app: String, id: UInt32, title: String) = self.windows?.frontmost() ?? (app: "", id: 0, title: "")
-            let status = ControlMessage.HostStatus(consoleLocked: self.screenLocked || InputInjector.consoleLocked(), frontmostApp: front.app, frontmostWindowID: front.id, frontmostWindowTitle: front.title, inputSink: InputInjector.sinkPath != nil, viewers: Self.liveCount(), chrome: self.display.flatMap { d in self.windows?.chromeRects(width: d.width, height: d.height) })
+            let chrome = self.display.flatMap { d in self.windows?.chromeRects(width: d.width, height: d.height) }
+            if let chrome, chrome != self.loggedChrome {
+                self.loggedChrome = chrome
+                self.log("desktop chrome (menu bar, Dock): " + chrome.map { "\($0.x),\($0.y) \($0.width)x\($0.height)" }.joined(separator: " | "))
+            }
+            let status = ControlMessage.HostStatus(consoleLocked: self.screenLocked || InputInjector.consoleLocked(), frontmostApp: front.app, frontmostWindowID: front.id, frontmostWindowTitle: front.title, inputSink: InputInjector.sinkPath != nil, viewers: Self.liveCount(), chrome: chrome)
             // On change, and every 10 s regardless (sparse when idle; the viewer's keepalive is its own datagram).
             if status != self.lastHostStatus || Clock.elapsed(since: self.lastHostStatusNanos, now: tnow) > 10_000_000_000 {
                 self.lastHostStatus = status; self.lastHostStatusNanos = tnow

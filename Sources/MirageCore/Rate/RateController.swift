@@ -62,13 +62,25 @@ public struct RateController {
     public var minRttMs: Double { minRTTNanos.isFinite ? minRTTNanos / 1e6 : srttNanos / 1e6 }
     public var tier: LinkTier { tiers.tier }
     public var policy: LinkTier.Policy { tier.policy }
-    private var ackedFrames = 0, lostFrames = 0
+    /// Frames acked and frames given up (the loss parity and NACKs could not repair), over the last 10 s.
+    private var frameEvents: [(nanos: UInt64, lost: Bool)] = []
+    private mutating func noteFrame(lost: Bool, now: UInt64) {
+        frameEvents.append((now, lost))
+        frameEvents.removeAll { now &- $0.nanos > 10_000_000_000 }
+    }
     /// Fragment loss reported by the viewer (fragments that needed parity or a NACK), over a 10 s window.
     private var fragmentSamples: [(nanos: UInt64, lost: Int, total: Int)] = []
     public private(set) var fragmentLossPercent = 0.0
     /// Frames given up (unrecovered loss). Needs a few dozen frames before it means anything (one lost
     /// keyframe out of two is not "50 % loss").
-    public var frameLossPercent: Double { ackedFrames + lostFrames < 30 ? 0 : Double(lostFrames) * 100 / Double(ackedFrames + lostFrames) }
+    /// Residual loss over the last 10 s: only with at least 3 frames given up among at least 50. One stray frame of the few a
+    /// mostly still desktop sends (small animations go as tiles) held 2.5 % for over a minute and the tier at Extreme on
+    /// mac-daddy, a link whose 2–3 % raw loss parity and NACKs repaired.
+    public var frameLossPercent: Double {
+        let lost = frameEvents.reduce(0) { $0 + ($1.lost ? 1 : 0) }
+        guard lost >= 3, frameEvents.count >= 50 else { return 0 }
+        return Double(lost) * 100 / Double(frameEvents.count)
+    }
     /// The higher of the two, for display. The tier (§3.9: "> 2 % loss → Extreme") is driven by the loss the
     /// recovery layer could *not* hide (`frameLossPercent`): 5 % raw loss that parity and NACKs repair at
     /// 30 fps is not an Extreme link. The raw fragment rate sizes the parity groups instead.
@@ -133,7 +145,7 @@ public struct RateController {
     /// `recovered`: the frame needed parity or a NACK, so its arrival time says nothing about the path's
     /// queue (a NACK round trip is not queuing delay); it counts as acked and nothing else.
     public mutating func frameAcked(sentNanos: UInt64, firstReceived: UInt64, lastReceived: UInt64, fragments: Int, bytes: Int, now: UInt64, rttNanos: Double?, recovered: Bool = false) {
-        if recovered { ackedFrames += 1; return }
+        if recovered { noteFrame(lost: false, now: now); return }
         ackedBytes.append((now, bytes)); ackedBytes.removeAll { now &- $0.nanos > 1_000_000_000 }
         if let rtt = rttNanos {
             // srtt only: the minimum RTT (the tier's input) comes from the delay probes. A video frame's RTT is measured
@@ -150,7 +162,7 @@ public struct RateController {
             let kbps = Double(bytes) * 8 / (Double(lastReceived - firstReceived) / 1e9) / 1000
             rateSamples.append((now, kbps))
         }
-        ackedFrames += 1
+        noteFrame(lost: false, now: now)
         rateSamples.removeAll { now - $0.nanos > 10_000_000_000 }
         if !rateSamples.isEmpty {
             // Windowed max over 10 s, trimmed: the 90th percentile is more robust to bursts than the max.
@@ -242,7 +254,7 @@ public struct RateController {
     }
 
     public mutating func lossDetected(now: UInt64) {
-        lostFrames += 1
+        noteFrame(lost: true, now: now)
         if Double(Clock.elapsed(since: lastDecreaseNanos, now: now)) > srttNanos {
             targetKbps = max(tuning.minKbps, Int(Double(targetKbps) * tuning.lossDecrease))
             lastDecreaseNanos = now; probing = true; underSince = 0; lastLinkDecreaseNanos = now
@@ -299,7 +311,6 @@ public struct RateController {
         }
         if targetKbps >= ceiling { probing = false }
         targetKbps = min(targetKbps, max(ceiling, tuning.minKbps))
-        if ackedFrames + lostFrames > 200 { ackedFrames /= 2; lostFrames /= 2 }   // sliding loss window
         // The link, not the cap, is holding the target down when the target sits well under the cap
         // after a delay- or loss-driven decrease in the last few seconds.
         let limitedByLink = targetKbps < maxKbps * 8 / 10 && lastLinkDecreaseNanos > 0 && Clock.elapsed(since: lastLinkDecreaseNanos, now: now) < 5_000_000_000
