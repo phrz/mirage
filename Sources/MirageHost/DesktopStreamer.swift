@@ -2815,7 +2815,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 // nothing about capacity either (it reads 1.25× our own budget), so it gives no rate sample.
                 let left = max(f.sentNanos, min(f.paceEndNanos, now))
                 let rtt = Double(now &- left)
-                let paced = f.paceEndNanos > f.sentNanos &+ 2_000_000
+                // Paced = more than one 2 ms batch (FrameAssembler.paceOffsets). `> sent + 2 ms` let a two-batch train through
+                // (its end is 2 ms after a start taken just before `sentNanos`): its spread read our own pacing, and the
+                // ceiling (0.7 × that "capacity") held an automatic-bitrate loopback stream at 4.6 Mbps.
+                let paced = f.paceEndNanos > f.sentNanos &+ 1_000_000
                 let recovered = (ack.fragmentsLost ?? 0) > 0
                 if !recovered { srttNanos = srttNanos * 0.8 + rtt * 0.2 }
                 rc?.frameAcked(sentNanos: left, firstReceived: ack.firstReceivedNanos ?? ack.receivedNanos, lastReceived: ack.receivedNanos,

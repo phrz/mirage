@@ -215,8 +215,10 @@ public enum ControlMessage: Codable, Equatable {
         /// True when this connection resumed the session named by the client's token: the host kept
         /// the stream state and the client keeps its picture and predictions; a masked keyframe follows.
         public var resumed: Bool?
-        public init(hostName: String, sessionID: String, resumeToken: Data? = nil, resumed: Bool? = nil) {
-            self.hostName = hostName; self.sessionID = sessionID; self.resumeToken = resumeToken; self.resumed = resumed
+        /// The host's build, for the viewer's About ("0.1 (1), built 2026-10-21 14:03Z"). nil from older hosts.
+        public var hostBuild: String?
+        public init(hostName: String, sessionID: String, resumeToken: Data? = nil, resumed: Bool? = nil, hostBuild: String? = nil) {
+            self.hostName = hostName; self.sessionID = sessionID; self.resumeToken = resumeToken; self.resumed = resumed; self.hostBuild = hostBuild
         }
     }
     public struct Reject: Codable, Equatable {
@@ -276,7 +278,7 @@ public enum ControlMessage: Codable, Equatable {
         /// Requested stream size in pixels; the host fits the display's aspect ratio inside it.
         public var width: Int
         public var height: Int
-        /// Target bitrate in kbit/s.
+        /// The bitrate cap in kbit/s; 0 = automatic (the host probes up to what the link sustains). See `BitratePolicy`.
         public var bitrateKbps: Int
         /// Capture rate ceiling.
         public var maxFPS: Int
@@ -292,9 +294,15 @@ public enum ControlMessage: Codable, Equatable {
         public var holdsPicture: Bool?
         /// The Tunables schema the viewer reads (nil: an older viewer, sent no `tunables` message).
         public var tunablesVersion: Int?
-        public init(width: Int, height: Int, bitrateKbps: Int = 800, maxFPS: Int = 30, displayID: UInt32? = nil, snapNative: Bool? = nil, holdsPicture: Bool? = nil, tunablesVersion: Int? = nil) {
+        /// The viewer knows automatic bitrate: `bitrateKbps` is the person's cap, 0 = automatic. nil (older viewers): their
+        /// 800 was a compiled-in default, not a choice, and the host reads it as automatic (`BitratePolicy`).
+        public var explicitBitrate: Bool?
+        /// A simulated link for testing (developer setting): the host shapes its downstream to it. nil = the real link.
+        public var throttle: NetworkThrottle?
+        public init(width: Int, height: Int, bitrateKbps: Int = 0, maxFPS: Int = 30, displayID: UInt32? = nil, snapNative: Bool? = nil, holdsPicture: Bool? = nil, tunablesVersion: Int? = nil,
+                    explicitBitrate: Bool? = nil, throttle: NetworkThrottle? = nil) {
             self.width = width; self.height = height; self.bitrateKbps = bitrateKbps; self.maxFPS = maxFPS; self.displayID = displayID; self.snapNative = snapNative
-            self.holdsPicture = holdsPicture; self.tunablesVersion = tunablesVersion
+            self.holdsPicture = holdsPicture; self.tunablesVersion = tunablesVersion; self.explicitBitrate = explicitBitrate; self.throttle = throttle
         }
     }
     public struct StreamInfo: Codable, Equatable {

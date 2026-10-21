@@ -118,6 +118,10 @@ public struct RateController {
 
     public init(initialKbps: Int, maxKbps: Int, nativePixels: Int) {
         targetKbps = min(initialKbps, maxKbps); self.maxKbps = maxKbps; self.nativePixels = nativePixels
+        // Startup: a target under the ceiling (an automatic-bitrate stream starts at 800 under a 50 Mbps ceiling) probes up
+        // multiplicatively (×`probeIncrease` per RTT once the queue has been clear for `probeAfterNanos`) until the link's
+        // delay or loss pushes back, as after any decrease; the additive 8 %/s alone took a minute to reach a LAN's rate.
+        probing = targetKbps < maxKbps
         // Lossy-first: start on the tiny rung whatever the target, so the first picture is one small
         // keyframe; the ladder climbs from there with its hysteresis as the target allows.
         rung = Self.tinyRung

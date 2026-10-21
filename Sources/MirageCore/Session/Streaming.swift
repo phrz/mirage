@@ -60,6 +60,27 @@ public final class HostConnection: @unchecked Sendable {
     /// A newer connection took this session over: do not stop the streamer when this one ends.
     public var superseded = false
     public var lastRequest: ControlMessage.StreamRequest?
+    /// The viewer's simulated link (`StreamRequest.throttle`): everything this connection sends goes through it. nil = the real link.
+    public var shaper: LinkShaper? { lock.lock(); defer { lock.unlock() }; return _shaper }
+    private var _shaper: LinkShaper?
+    /// Applies a request's throttle: a new or updated downstream shaper, or none. Returns a line to log when it changed.
+    @discardableResult
+    public func setThrottle(_ t: NetworkThrottle?) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        switch (t, _shaper) {
+        case (nil, nil): return nil
+        case (nil, .some): _shaper = nil; return "network throttle off"
+        case (.some(let t), nil): _shaper = LinkShaper(profile: t, upstream: false, label: "mirage.host.shaper"); return "network throttle \(t.name): \(t.summary) (downstream shaped here)"
+        case (.some(let t), .some(let s)):
+            guard s.profile != t else { return nil }
+            s.update(t, upstream: false); return "network throttle \(t.name): \(t.summary) (downstream shaped here)"
+        }
+    }
+    /// A datagram to the viewer from the session itself (ping echoes, input acks), through the throttle when there is one.
+    public func sendDatagram(_ d: Data, on flow: MessageStream) {
+        let send = { flow.connection.send(content: d, completion: .contentProcessed { _ in }) }
+        if let s = shaper { s.send(bytes: d.count, channel: LinkShaper.Channel.datagrams, reliable: false, send) } else { send() }
+    }
 
     init(id: UUID) { self.id = id }
 
@@ -250,8 +271,19 @@ public final class ControlSender: @unchecked Sendable {
     private let lock = NSLock()
 
     public init(stream: MessageStream, log: @escaping @Sendable (String) -> Void) { self.stream = stream; self.log = log }
+    /// A simulated link (`NetworkThrottle`): each message is sent when it would have arrived. Read on every send.
+    public var shaper: (() -> LinkShaper?)?
 
     public func send(_ message: ControlMessage) {
+        if let s = shaper?() {
+            let bytes = (try? Frame.encode(message).count) ?? 64
+            s.send(bytes: bytes, channel: LinkShaper.Channel.control, reliable: true) { [self] in enqueue(message) }
+            return
+        }
+        enqueue(message)
+    }
+
+    private func enqueue(_ message: ControlMessage) {
         lock.lock()
         pending.append(message)
         if task == nil {
@@ -280,8 +312,13 @@ final class ConnectionOutput: StreamOutput, @unchecked Sendable {
     let log: @Sendable (String) -> Void
     let maxDatagramSize: Int
 
-    init(flow: MessageStream, tiles: MessageStream?, fastTiles: MessageStream?, control: MessageStream, log: @escaping @Sendable (String) -> Void) {
+    /// The connection whose throttle (`HostConnection.shaper`) every send goes through.
+    weak var link: HostConnection?
+
+    init(flow: MessageStream, tiles: MessageStream?, fastTiles: MessageStream?, control: MessageStream, link: HostConnection? = nil, log: @escaping @Sendable (String) -> Void) {
         self.flow = flow; self.tiles = tiles; self.fastTiles = fastTiles; self.control = ControlSender(stream: control, log: log); self.log = log
+        self.link = link
+        self.control.shaper = { [weak link] in link?.shaper }
         let m = flow.connection.maximumDatagramSize
         maxDatagramSize = m > 0 ? min(m, VideoFragment.datagramSize) : VideoFragment.datagramSize
         if LossInjector.shared.isActive { log("TEST: dropping datagrams on purpose: \(LossInjector.shared.description)") }
@@ -289,17 +326,24 @@ final class ConnectionOutput: StreamOutput, @unchecked Sendable {
 
     func sendDatagram(_ data: Data) {
         if LossInjector.shared.shouldDrop() { return }   // test-only (MIRAGE_TEST_LOSS / MIRAGE_TEST_BURST_MS)
-        flow.connection.send(content: data, completion: .contentProcessed { [log] err in
-            if let err { log("datagram send: \(err)") }
-        })
+        let send = { [flow, log] in
+            flow.connection.send(content: data, completion: .contentProcessed { err in
+                if let err { log("datagram send: \(err)") }
+            })
+        }
+        if let s = link?.shaper { s.send(bytes: data.count, channel: LinkShaper.Channel.datagrams, reliable: false, send) } else { send() }
     }
 
     func sendControl(_ message: ControlMessage) { control.send(message) }
 
     func sendTiles(_ data: Data, fast: Bool) {
         // Network.framework queues sends in order on one connection; no await needed for ordering.
-        ((fast ? fastTiles : nil) ?? tiles)?.connection.send(content: data, completion: .contentProcessed { [log] err in
-            if let err { log("tile send: \(err)") }
-        })
+        guard let stream = (fast ? fastTiles : nil) ?? tiles else { return }
+        let send = { [log] in
+            stream.connection.send(content: data, completion: .contentProcessed { err in
+                if let err { log("tile send: \(err)") }
+            })
+        }
+        if let s = link?.shaper { s.send(bytes: data.count, channel: stream === fastTiles ? LinkShaper.Channel.fastTiles : LinkShaper.Channel.tiles, reliable: true, send) } else { send() }
     }
 }

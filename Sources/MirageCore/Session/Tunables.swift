@@ -32,6 +32,9 @@ public struct Tunables: Codable, Equatable, Sendable {
         // Host only: 1 = the compositor model (DESIGN "The compositor model"): a desktop-only display layer, an overlay layer
         // for everything above the normal level, every normal window a layer. 0 = the seam design.
         case compositorModel
+        // Host only: an automatic-bitrate stream's ceiling in kbit/s (BitratePolicy): the controller starts at 800 and probes
+        // up to whatever the link sustains, never above this.
+        case autoMaxKbps
 
         /// Compiled-in default and the bounds a host value is clamped to.
         public var spec: (default: Double, min: Double, max: Double) {
@@ -56,6 +59,7 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .smallAnimationFps: return (3, 0.5, 15)
             case .smallAnimationQuality: return (50, 10, 90)
             case .compositorModel: return (0, 0, 1)
+            case .autoMaxKbps: return (50_000, 1_000, 200_000)
             }
         }
     }

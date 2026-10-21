@@ -95,13 +95,15 @@ public enum HostSession {
             case DatagramType.ping.rawValue:
                 if let p = DatagramPing.decode(d), p.echoNanos != 0 {
                     conn.streamer?.handle(probeEcho: p.sentNanos, receivedNanos: p.echoNanos)   // the viewer's reply to a host delay probe
+                } else if conn.shaper != nil {
+                    conn.sendDatagram(DatagramPing.echo(d), on: flow)   // through the simulated link, as everything else
                 } else {
                     try await flow.sendRaw(DatagramPing.echo(d))   // the viewer's keepalive: RTT, loss and clock offset
                 }
             case DatagramType.input.rawValue:
                 // Input with redundancy (see InputPacket): the streamer applies it once and says what to ack.
                 guard conn.deviceID != nil, let p = InputPacket.decode(d), let ack = conn.streamer?.handle(inputPacket: p) else { continue }
-                try await flow.sendRaw(ack.encode())
+                if conn.shaper != nil { conn.sendDatagram(ack.encode(), on: flow) } else { try await flow.sendRaw(ack.encode()) }
             default: continue
             }
         }
@@ -122,8 +124,14 @@ public enum HostSession {
                 guard authenticated != nil else { throw MirageError.protocolViolation("ping before auth") }
                 p.echoNanos = Clock.nowNanos()
                 if let output { output.sendControl(.pong(p)) } else { try await stream.send(.pong(p)) }
-            case .streamRequest(let req):
+            case .streamRequest(let asked):
                 guard authenticated != nil else { throw MirageError.protocolViolation("streamRequest before auth") }
+                // Automatic bitrate (BitratePolicy): 0, or an older viewer's unchosen 800, becomes the host's ceiling and the
+                // controller probes up to it; the streamer sees the resolved request. The throttle shapes this connection.
+                let hostMax = Int(Tunables.load(from: ctx.store.url("tunables.json")).tunables[.autoMaxKbps])
+                let req = BitratePolicy.resolved(asked, hostMaxKbps: hostMax)
+                let bitrate = BitratePolicy.describe(asked, hostMaxKbps: hostMax)
+                if let line = conn.setThrottle(asked.throttle) { ctx.log("[\(remote)] \(line)") }
                 conn.lastRequest = req
                 if let s = conn.streamer, let out = output, conn.flow === out.flow, conn.tiles === out.tiles {
                     do { out.sendControl(.streamInfo(try await s.update(req))); Self.sendTunables(out, req, ctx) }
@@ -140,13 +148,13 @@ public enum HostSession {
                     let tiles = await conn.waitForTiles(timeout: .seconds(5))
                     if tiles == nil { ctx.log("[\(remote)] no tile stream; lossless tiles disabled") }
                     let fast = await conn.waitForFastTiles(timeout: .seconds(2))
-                    let out = ConnectionOutput(flow: flow, tiles: tiles, fastTiles: fast, control: stream, log: ctx.log)
+                    let out = ConnectionOutput(flow: flow, tiles: tiles, fastTiles: fast, control: stream, link: conn, log: ctx.log)
                     output = out
                     if resuming, let s = conn.streamer {
                         conn.resumed = false
                         do {
                             let info = try await s.resume(req, output: out)
-                            ctx.log("[\(remote)] resumed \(info.displayName) \(info.width)x\(info.height) @ \(req.bitrateKbps) kbps")
+                            ctx.log("[\(remote)] resumed \(info.displayName) \(info.width)x\(info.height), bitrate \(bitrate)")
                             out.sendControl(.streamInfo(info)); Self.sendTunables(out, req, ctx)
                         } catch {
                             ctx.log("[\(remote)] resume failed: \(error); starting over")
@@ -160,7 +168,7 @@ public enum HostSession {
                         let info = try await s.start(req, output: out)
                         conn.streamer = s
                         if let v = pendingInterest { s.handle(input: .viewInterest(v)) }
-                        ctx.log("[\(remote)] streaming \(info.displayName) \(info.width)x\(info.height) @ \(req.bitrateKbps) kbps, datagrams ≤\(out.maxDatagramSize)")
+                        ctx.log("[\(remote)] streaming \(info.displayName) \(info.width)x\(info.height), bitrate \(bitrate), datagrams ≤\(out.maxDatagramSize)")
                         out.sendControl(.streamInfo(info)); Self.sendTunables(out, req, ctx)
                     } catch {
                         await s.stop()
@@ -226,7 +234,7 @@ public enum HostSession {
             conn.streamer = claimed.streamer; conn.resumed = true; conn.lastRequest = claimed.request; resumed = true
         }
         let token = resumed ? conn.resumeToken! : await ctx.connections.issueToken(for: conn.id, deviceID: device.id)
-        try await stream.send(.welcome(.init(hostName: ctx.identity.name, sessionID: session, resumeToken: token, resumed: resumed)))
+        try await stream.send(.welcome(.init(hostName: ctx.identity.name, sessionID: session, resumeToken: token, resumed: resumed, hostBuild: BuildInfo.current)))
         ctx.log("[\(remote)] authenticated \(device.name) (\(device.id.prefix(12)))\(resumed ? ", resuming its session" : hello.resumeToken != nil ? " (resume token unknown or expired: new session)" : "")")
         return device
     }
