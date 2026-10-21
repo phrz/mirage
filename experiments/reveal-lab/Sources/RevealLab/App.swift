@@ -82,6 +82,7 @@ struct SliderRow: View {
     }
 }
 
+
 struct ControlPanel: View {
     @ObservedObject var s: LabSettings
     func has(_ kp: PartialKeyPath<FillParams>) -> Bool { s.style.knobs.contains(kp) }
@@ -94,18 +95,18 @@ struct ControlPanel: View {
                         SliderRow(title: "Bandwidth", value: $s.bandwidthRows, range: 100...20000, step: 100) { "\(Int($0)) rows/s" }
                         SliderRow(title: "Host margin", value: $s.marginPt, range: 0...600, step: 10) { "\(Int($0)) pt" }
                         SliderRow(title: "Host frame interval", value: $s.hostFrameMs, range: 0...250, step: 5) { $0 == 0 ? "continuous" : "\(Int($0)) ms" }
+                        SliderRow(title: "Chunk (boundary advances by)", value: $s.chunkPt, range: 8...128, step: 8) { "\(Int($0)) pt" }
                     }.padding(4)
                 }
                 GroupBox(s.style.subtitle) {
                     VStack(spacing: 6) {
-                        if has(\.blurOffset) { SliderRow(title: "Blur radius (offset)", value: s.binding(\.blurOffset), range: 0.25...6) }
-                        if has(\.passes) { SliderRow(title: "Kawase passes", value: s.binding(\.passes), range: 1...6, step: 1) { "\(Int($0))" } }
-                        if has(\.divisor) { SliderRow(title: "Resolution divisor", value: s.binding(\.divisor), range: 1...8, step: 1) { "1/\(Int($0))" } }
+                        if has(\.blurOffset) { SliderRow(title: s.style == .pullPush ? "Softening radius" : "Blur radius (offset)", value: s.binding(\.blurOffset), range: 0.25...6) }
+                        if has(\.passes) { SliderRow(title: s.style == .pullPush ? "Softening passes" : "Kawase passes", value: s.binding(\.passes), range: 1...6, step: 1) { "\(Int($0))" } }
+                        if has(\.divisor) { SliderRow(title: "Fill resolution", value: s.binding(\.divisor), range: 3...8, step: 1) { "1/\(Int($0))" } }
                         if has(\.smearRows) { SliderRow(title: "Smear rows (N)", value: s.binding(\.smearRows), range: 2...200, step: 1) { "\(Int($0)) pt" } }
                         if has(\.tileRows) { SliderRow(title: "Tile rows repeated", value: s.binding(\.tileRows), range: 16...300, step: 1) { "\(Int($0)) pt" } }
                         if has(\.tileShift) { SliderRow(title: "Repeat offset", value: s.binding(\.tileShift), range: 0...60, step: 1) { "\(Int($0)) pt" } }
-                        if has(\.feather) { SliderRow(title: "Edge feather (outside)", value: s.binding(\.feather), range: 0...80, step: 1) { "\(Int($0)) pt" } }
-                        if has(\.innerFeather) { SliderRow(title: "Feather inside known edge", value: s.binding(\.innerFeather), range: 0...48, step: 1) { "\(Int($0)) pt" } }
+                        if has(\.innerFeather) { SliderRow(title: "Feather (truth → fill, inside)", value: s.binding(\.innerFeather), range: 0...64, step: 1) { "\(Int($0)) pt" } }
                         if has(\.ext) { SliderRow(title: "Extension length", value: s.binding(\.ext), range: 20...1000, step: 10) { "\(Int($0)) pt" } }
                         if has(\.vignette) { SliderRow(title: "Vignette", value: s.binding(\.vignette), range: 0...1) }
                         if has(\.desat) { SliderRow(title: "Desaturation", value: s.binding(\.desat), range: 0...1) }
@@ -114,7 +115,8 @@ struct ControlPanel: View {
                         if has(\.rim) { SliderRow(title: "Glass rim", value: s.binding(\.rim), range: 0...1) }
                         if has(\.warpAmp) { SliderRow(title: "Blob motion amplitude", value: s.binding(\.warpAmp), range: 0...40, step: 1) { $0 == 0 ? "off" : "\(Int($0)) pt" } }
                         if has(\.warpSpeed) { SliderRow(title: "Blob motion speed", value: s.binding(\.warpSpeed), range: 0...2) }
-                        SliderRow(title: "Crossfade", value: s.binding(\.crossfadeMs), range: 0...1000, step: 10) { "\(Int($0)) ms" }
+                        SliderRow(title: "Reveal time (boundary spring)", value: s.binding(\.crossfadeMs), range: 20...1000, step: 10) { "\(Int($0)) ms" }
+                        SliderRow(title: "Fill smoothing (EMA)", value: $s.fillSmoothMs, range: 10...600, step: 10) { "\(Int($0)) ms" }
                     }.padding(4)
                 }
                 HStack {
@@ -125,22 +127,38 @@ struct ControlPanel: View {
                 }
                 Toggle("Show known/unknown boundary", isOn: $s.showBoundary).toggleStyle(.checkbox).font(.system(size: 11))
                 if s.showBoundary {
-                    Text("green: edge of delivered content · yellow tint: rows still crossfading in · blue dashes: host-confirmed viewport · pink: unknown (fill)")
+                    Text("green: displayed boundary (spring) · yellow: edge of delivered content · blue dashes: host-confirmed viewport · pink: unknown (fill)")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                 }
-                GroupBox("GPU (this Mac)") {
-                    VStack(alignment: .leading, spacing: 3) {
-                        stat("Fill pass", String(format: "%.3f ms avg · p95 %.3f", s.fillMs, s.fillP95))
-                        stat("Fill dispatches", "\(s.dispatches)")
-                        stat("Composite", String(format: "%.3f ms avg", s.compositeMs))
-                        stat("iPhone 15 est.", String(format: "%.3f ms (budget 0.5)", s.iphoneEstimate))
-                        stat("Unknown rows", String(format: "%.0f%% of view", s.unknownFraction * 100))
-                        Text("\(s.drawablePx). Fill = edge average + base + blur/pyramid + temporal blend (one command buffer); composite = the full-screen pass that also shades the fill. The iPhone estimate scales fill time by \(s.gpuCores)/5 GPU cores and by iPhone 15 pixels (1179×2556) over this view's; it is rough, and wrong where fixed per-dispatch cost dominates. Light loads run at low GPU clocks, so these are pessimistic.")
-                            .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
-                }
+                StatsBoxes(st: s.stats)
             }
             .padding(10)
+        }
+    }
+}
+
+struct StatsBoxes: View {
+    @ObservedObject var st: LabStats
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            GroupBox("Smoothness") {
+                VStack(alignment: .leading, spacing: 3) {
+                    stat("Frame time", String(format: "%.2f ms avg · max %.2f", st.s.frameAvgMs, st.s.frameMaxMs))
+                    stat("Hitches (>1.5 frames)", "\(st.s.hitches) of last 240")
+                    stat("Boundary velocity", String(format: "%.0f pt/s", st.s.boundaryVel))
+                    stat("Max |Δv| per frame", String(format: "%.1f pt/s", st.s.boundaryDvMax))
+                    stat("Unknown rows", String(format: "%.0f%% of view", st.s.unknownFraction * 100))
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
+            }
+            GroupBox("GPU (this Mac)") {
+                VStack(alignment: .leading, spacing: 3) {
+                    stat("Fill recompute", String(format: "%.3f ms · %.0f/s · %d dispatches", st.s.recomputeMs, st.s.recomputeHz, st.s.dispatches))
+                    stat("Fill EMA (per frame)", String(format: "%.3f ms", st.s.emaMs))
+                    stat("Composite (per frame)", String(format: "%.3f ms", st.s.compositeMs))
+                    Text("\(st.s.drawablePx). The fill is recomputed in content space only when delivered content or a fill parameter changes, then eased into a cache every frame; the composite shades the ramp, effects and boundary. \(st.s.gpuCores)-core GPU; light loads run at low clocks, so these are pessimistic.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(4)
+            }
         }
     }
     func stat(_ k: String, _ v: String) -> some View {
@@ -150,17 +168,22 @@ struct ControlPanel: View {
 
 final class FlippedView: NSView { override var isFlipped: Bool { true } }
 
+/// Hosts the Metal view under a transparent scroll view, and drives drawing from a display link at the display's
+/// refresh rate (120 Hz on ProMotion), passing each frame's target presentation time to the renderer.
 final class LabContainerView: NSView {
     let mtk: MTKView
     let scroll: NSScrollView
     var onWindow: ((NSWindow) -> Void)?
+    var onTick: ((CFTimeInterval, CFTimeInterval) -> Void)?
+    private var link: CADisplayLink?
     init(device: MTLDevice) {
         mtk = MTKView(frame: .zero, device: device)
         scroll = NSScrollView(frame: .zero)
         super.init(frame: .zero)
         mtk.colorPixelFormat = .bgra8Unorm
         mtk.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
-        mtk.preferredFramesPerSecond = 120
+        mtk.isPaused = true
+        mtk.enableSetNeedsDisplay = false
         mtk.autoresizingMask = [.width, .height]
         scroll.drawsBackground = false
         scroll.contentView.drawsBackground = false
@@ -176,7 +199,21 @@ final class LabContainerView: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
     override func layout() { super.layout(); mtk.frame = bounds; scroll.frame = bounds }
-    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); if let w = window { onWindow?(w) } }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let w = window else { link?.invalidate(); link = nil; return }
+        onWindow?(w)
+        if link == nil {
+            let l = displayLink(target: self, selector: #selector(tick(_:)))
+            l.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
+            l.add(to: .main, forMode: .common)
+            link = l
+        }
+    }
+    @objc private func tick(_ l: CADisplayLink) {
+        onTick?(l.targetTimestamp, l.targetTimestamp - l.timestamp)
+        mtk.draw()
+    }
 }
 
 struct MetalContainer: NSViewRepresentable {
@@ -186,7 +223,9 @@ struct MetalContainer: NSViewRepresentable {
         let r = context.coordinator
         let v = LabContainerView(device: r.device)
         v.mtk.delegate = r
+        v.mtk.framebufferOnly = settings.recordPath == nil   // the recorder blits from the drawable
         r.scrollView = v.scroll
+        v.onTick = { [weak r] ts, dur in r?.nextTimestamp = ts; if dur > 0 { r?.linkDuration = dur } }
         v.onWindow = { w in
             let id = w.windowNumber
             print("WINDOW_ID \(id)"); fflush(stdout)

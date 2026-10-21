@@ -29,35 +29,37 @@ enum FillStyle: Int, CaseIterable, Identifiable {
     var knobs: Set<PartialKeyPath<FillParams>> {
         let blur: Set<PartialKeyPath<FillParams>> = [\.blurOffset, \.passes, \.divisor]
         let look: Set<PartialKeyPath<FillParams>> = [\.ext, \.vignette, \.desat, \.grain, \.warpAmp, \.warpSpeed]
+        let common: Set<PartialKeyPath<FillParams>> = [\.innerFeather, \.crossfadeMs]
         switch self {
-        case .flat: return [\.crossfadeMs]
-        case .kawase, .mirror: return blur.union(look).union([\.feather, \.innerFeather, \.crossfadeMs])
-        case .smear: return blur.union(look).union([\.smearRows, \.crossfadeMs])
-        case .frosted: return blur.union(look).union([\.feather, \.innerFeather, \.tint, \.rim, \.crossfadeMs])
-        case .aware: return blur.union(look).union([\.feather, \.innerFeather, \.tileRows, \.tileShift, \.crossfadeMs])
-        case .pullPush: return [\.divisor, \.innerFeather, \.ext, \.vignette, \.desat, \.grain, \.warpAmp, \.warpSpeed, \.crossfadeMs]
+        case .flat: return common.union([\.divisor])
+        case .kawase, .mirror, .pullPush: return blur.union(look).union(common)
+        case .smear: return blur.union(look).union(common).union([\.smearRows])
+        case .frosted: return blur.union(look).union(common).union([\.tint, \.rim])
+        case .aware: return blur.union(look).union(common).union([\.tileRows, \.tileShift])
         }
     }
 }
 
 struct FillParams: Equatable {
     var blurOffset = 1.5      // Kawase sample offset multiplier ("radius")
-    var passes = 4.0          // Kawase down/up passes
-    var divisor = 4.0         // base resolution divisor (4 = quarter)
-    var feather = 16.0        // pt beyond the edge where sharp extension blends into blur
-    var innerFeather = 0.0    // pt inside the known edge where truth fades into the fill
+    var passes = 4.0          // Kawase down/up passes (pull-push: softening passes after the pyramid)
+    var divisor = 4.0         // fill resolution divisor of the truth's pixels (4 = quarter)
+    var innerFeather = 24.0   // pt inside the boundary over which truth fades into the fill
     var ext = 260.0           // extension length, pt
     var vignette = 0.4
     var desat = 0.25
     var grain = 0.0
-    var crossfadeMs = 180.0
+    var crossfadeMs = 180.0   // reveal time: the boundary's critically damped spring settles in about this long
     var tint = 0.0
     var rim = 0.0
     var smearRows = 48.0
-    var tileRows = 120.0
+    var tileRows = 118.0
     var tileShift = 14.0
     var warpAmp = 0.0         // pt; 0 = off
     var warpSpeed = 0.25
+
+    /// Parameters that change the recomputed (content-space) fill; others only affect the composite.
+    var recomputeKey: [Double] { [blurOffset, passes, divisor, ext, smearRows, tileRows, tileShift] }
 }
 
 final class LabSettings: ObservableObject {
@@ -67,41 +69,63 @@ final class LabSettings: ObservableObject {
     @Published var bandwidthRows = 4000.0   // content rows (pt) per second
     @Published var marginPt = 120.0          // host sends this much beyond the confirmed viewport
     @Published var hostFrameMs = 50.0        // host frame interval; rows of one frame arrive together
+    @Published var chunkPt = 32.0            // host sends whole chunks (a 64 px tile row); the boundary advances by chunks
+    @Published var fillSmoothMs = 150.0      // EMA time constant of the fill colours
     @Published var showBoundary = false
     @Published var frozen = false
     @Published var params: [Int: FillParams]
 
-    // Stats, published a few times a second.
-    @Published var fillMs = 0.0
-    @Published var fillP95 = 0.0
-    @Published var compositeMs = 0.0
-    @Published var iphoneEstimate = 0.0
-    @Published var gpuCores = 0
-    @Published var drawablePx = ""
-    @Published var unknownFraction = 0.0
-    @Published var dispatches = 0
+    /// Stats live in their own object so publishing them re-renders only the stats boxes.
+    let stats = LabStats()
 
     // Automation (command line).
     var autoReplay = false
     var freezeAt: Double? = nil
+    var flingScale = 1.0
     var replayRequest = 0
     var resetRequest = 0
     var winIdFile: String? = nil
     var logTimings = false
+    var frameLog: String? = nil
+    var recordPath: String? = nil
+    var recordSeconds = 8.0
 
     init() {
         var p: [Int: FillParams] = [:]
-        p[FillStyle.flat.rawValue] = FillParams(crossfadeMs: 120)
+        p[FillStyle.flat.rawValue] = FillParams(innerFeather: 0, crossfadeMs: 120)
         p[FillStyle.kawase.rawValue] = FillParams()
         p[FillStyle.mirror.rawValue] = FillParams()
         p[FillStyle.smear.rawValue] = FillParams(blurOffset: 1.5, passes: 4, ext: 240, vignette: 0.3, desat: 0.2, smearRows: 48)
-        p[FillStyle.frosted.rawValue] = FillParams(blurOffset: 2, passes: 4, feather: 20, ext: 320, vignette: 0.15, desat: 0.1, grain: 0.35, crossfadeMs: 220, tint: 0.35, rim: 0.5)
-        p[FillStyle.aware.rawValue] = FillParams(blurOffset: 1.0, passes: 2, feather: 12, ext: 420, vignette: 0.25, desat: 0.2, tileRows: 118, tileShift: 14)
-        p[FillStyle.pullPush.rawValue] = FillParams(divisor: 4, innerFeather: 20, ext: 360, vignette: 0.2, desat: 0.15, grain: 0.0, crossfadeMs: 220, warpAmp: 10, warpSpeed: 0.25)
+        p[FillStyle.frosted.rawValue] = FillParams(blurOffset: 2, passes: 4, innerFeather: 28, ext: 320, vignette: 0.15, desat: 0.1, grain: 0.35, crossfadeMs: 220, tint: 0.35, rim: 0.25)
+        p[FillStyle.aware.rawValue] = FillParams(blurOffset: 1.0, passes: 2, ext: 420, vignette: 0.25, desat: 0.2, tileRows: 118, tileShift: 14)
+        p[FillStyle.pullPush.rawValue] = FillParams(blurOffset: 1.0, passes: 2, divisor: 4, innerFeather: 32, ext: 360, vignette: 0.2, desat: 0.15, grain: 0.0, crossfadeMs: 220, warpAmp: 10, warpSpeed: 0.25)
         params = p
         parseArguments()
     }
+}
 
+struct StatsSnapshot: Equatable {
+    var recomputeMs = 0.0
+    var recomputeHz = 0.0
+    var emaMs = 0.0
+    var compositeMs = 0.0
+    var frameAvgMs = 0.0
+    var frameMaxMs = 0.0
+    var hitches = 0
+    var boundaryVel = 0.0
+    var boundaryDvMax = 0.0
+    var gpuCores = 0
+    var drawablePx = ""
+    var unknownFraction = 0.0
+    var dispatches = 0
+}
+
+/// One published snapshot (one change notification per publish), so stats cost the frame loop nothing.
+final class LabStats: ObservableObject {
+    @Published var s = StatsSnapshot()
+}
+
+extension LabSettings {
     var current: FillParams { params[style.rawValue] ?? FillParams() }
 
     func binding(_ kp: WritableKeyPath<FillParams, Double>) -> Binding<Double> {
@@ -120,9 +144,13 @@ final class LabSettings: ObservableObject {
         if let v = value("--latency"), let d = Double(v) { latencyMs = d }
         if let v = value("--bandwidth"), let d = Double(v) { bandwidthRows = d }
         if let v = value("--freeze-at"), let d = Double(v) { freezeAt = d }
+        if let v = value("--fling-scale"), let d = Double(v) { flingScale = d }
         if let v = value("--winid-file") { winIdFile = v }
+        if let v = value("--frame-log") { frameLog = v }
+        if let v = value("--record") { recordPath = v }
+        if let v = value("--record-seconds"), let d = Double(v) { recordSeconds = d }
         if a.contains("--replay") { autoReplay = true }
-        if a.contains("--log-timings") { logTimings = true }
         if a.contains("--boundary") { showBoundary = true }
+        if a.contains("--log-timings") { logTimings = true }
     }
 }
