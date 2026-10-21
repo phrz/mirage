@@ -470,7 +470,9 @@ final class ViewerSession: @unchecked Sendable {
         if let dir = FrameRecorder.directory, let context {
             let rec = FrameRecorder(dir: dir)
             let ft = DispatchSource.makeTimerSource(queue: videoQueue)
-            ft.schedule(deadline: .now() + .milliseconds(200), repeating: .milliseconds(200))
+            // MIRAGE_TEST_FRAMES_MS: the interval (the M-FIVE connect test records at 100 ms from the start of the stream).
+            let ms = ProcessInfo.processInfo.environment["MIRAGE_TEST_FRAMES_MS"].flatMap { Int($0) } ?? 200
+            ft.schedule(deadline: .now(), repeating: .milliseconds(max(20, ms)))
             ft.setEventHandler { [weak self] in
                 guard let self, let sc = self.scene(pxPerPoint: 2) else { return }
                 let rects = self.arrangedWindows().filter { $0.isLayered && (self.layerViews[$0.id]?.compositor.width ?? 0) > 0 }.map { ($0.id, $0.frame) }
