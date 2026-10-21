@@ -245,10 +245,17 @@ carrying the matching input sequence is presented, the prediction is reconciled 
 never a jump. Predictions move complete content only.
 
 **Revealed unknown areas** (a scroll's lead, a moved window's vacated area before the desktop there arrives, a pan into the
-unseen): phrz's "dreamy" fill, like iOS 27's photo outpainting. The known edge rows or columns are extended (clamp or
-mirror), blurred heavily (a dual Kawase blur, 4 passes at quarter resolution) with a slight soft vignette toward the unknown
-side, and crossfaded to the truth when it lands. It replaces today's edge-colour band. Metal, both viewers; budget ≤ 0.5 ms
-of GPU per frame on an iPhone 15.
+unseen): phrz's "dreamy" fill, modelled on Apple's Photos Extend placeholder, which is a mask-aware push-pull pyramid fill
+(its kernels are named inward_fill_down / inward_fill_up), not an edge-extend and blur:
+- *Pull:* from the known pixels (premultiplied by a coverage mask: 1 known, 0 unknown) down a mip pyramid, each level a 2×2
+  premultiplied average carrying its coverage, to the coarsest level (everything covered there).
+- *Push:* back up, each level's unknown part filled from the coarser level, blended by (1 − coverage), so known pixels stay
+  and the unknown gets a smooth, colour-true continuation of what surrounds it.
+- *Feather:* a band of ~24–48 px inside the known edge crossfades known into filled, so no seam shows.
+- *Optional:* a slow, low-amplitude domain warp over the filled area (alive, not static).
+- Crossfaded to the truth when it lands. It replaces today's edge-colour band. Metal on both viewers (a compute pass per
+  pyramid level); budget ≤ 0.5 ms of GPU per frame on an iPhone 15. A Reveal Lab prototype is comparing styles; its winning
+  parameters (band width, warp amplitude and speed) go here.
 
 **Acceptance: the glitch metric** (connectcheck extended), over recorded viewer frames during scroll, drag, Show Desktop and
 typing scenarios on Fast 4G and Japan bus:
