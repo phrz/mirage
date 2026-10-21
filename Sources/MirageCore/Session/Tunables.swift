@@ -29,6 +29,9 @@ public struct Tunables: Codable, Equatable, Sendable {
         // Host only: a small animation (under 2 % of a layer: a bouncing Dock icon, a spinner) goes as lossy half-size tiles at
         // this rate and quality instead of video.
         case smallAnimationFps, smallAnimationQuality
+        // Host only: 1 = the compositor model (DESIGN "The compositor model"): a desktop-only display layer, an overlay layer
+        // for everything above the normal level, every normal window a layer. 0 = the seam design.
+        case compositorModel
 
         /// Compiled-in default and the bounds a host value is clamped to.
         public var spec: (default: Double, min: Double, max: Double) {
@@ -52,6 +55,7 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .levelFadeMs: return (220, 0, 2000)
             case .smallAnimationFps: return (3, 0.5, 15)
             case .smallAnimationQuality: return (50, 10, 90)
+            case .compositorModel: return (0, 0, 1)
             }
         }
     }

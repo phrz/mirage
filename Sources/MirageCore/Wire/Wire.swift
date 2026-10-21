@@ -384,6 +384,11 @@ public enum ControlMessage: Codable, Equatable {
         /// Whether this window hides what is behind it (layered and not marked transparent).
         public var hidesBehind: Bool { isLayered && (opaque ?? true) }
         public var isLayered: Bool { layered ?? false }
+        /// The compositor model's overlay layer (the menu bar, the Dock, menus, popovers: everything above the normal level,
+        /// one full-display layer on top): a synthetic window with this id and level. Not a window to hit-test.
+        public static let overlayID: UInt32 = 0xFFFF_FF00
+        public static let overlayLevel = 1000
+        public var isOverlay: Bool { id == Self.overlayID }
         public var windowLevel: Int { level ?? 0 }
     }
     /// Host → client window list. A full list carries `windows`; a delta carries only the windows that

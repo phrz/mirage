@@ -27,6 +27,13 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
     init(queue: DispatchQueue) { self.queue = queue }
 
+    /// What this stream captures (the compositor model, DESIGN "The compositor model"): the whole display minus the layers
+    /// (`display`, the seam design), only the desktop-level windows (`desktop`: wallpaper, desktop icons, widgets; never an
+    /// app window), or everything above the normal level (`overlay`: the menu bar, the Dock, menus, popovers, tooltips,
+    /// notifications) on a clear background, for a layer of its own on top of the window layers.
+    enum Source { case display, desktop, overlay }
+    var source: Source = .display
+
     /// Resolves the display and the stream size (display aspect fitted into the request).
     static func resolve(_ req: ControlMessage.StreamRequest) async throws -> Target {
         var content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
@@ -83,8 +90,14 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         self.onFrame = onFrame
         self.target = t
         excluded = excluding
-        let filter = try await Self.displayFilter(t.display, excluding: excluding)
-        let s = SCStream(filter: filter, configuration: Self.configuration(for: t, maxFPS: req.maxFPS), delegate: self)
+        let filter = source == .desktop ? try await Self.desktopFilter(t.display) : try await Self.displayFilter(t.display, excluding: excluding)
+        let config = Self.configuration(for: t, maxFPS: req.maxFPS)
+        if source == .overlay {
+            // Clear where no overlay window is (the window layers show through), and the menus' own shadows kept.
+            config.backgroundColor = CGColor.clear
+            config.ignoreShadowsDisplay = false
+        }
+        let s = SCStream(filter: filter, configuration: config, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await s.startCapture()
         stream = s
@@ -131,6 +144,22 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// on the display is left out, black), for screenshots of a client against a person's own Mac. Pair it with
     /// MIRAGE_LAYER_APPS naming the same app so no other window becomes a layer. Fails closed: no such app, no capture.
     static let testOnlyApp = ProcessInfo.processInfo.environment["MIRAGE_TEST_ONLY_APP"]
+
+    /// The desktop alone: the display's desktop-level windows (window layer below zero: the wallpaper, the desktop icons and
+    /// widgets). No app window can ever be in it.
+    static func desktopFilter(_ display: SCDisplay) async throws -> SCContentFilter {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        let desk = content.windows.filter { $0.windowLayer < 0 && $0.frame.intersects(display.frame) }
+        guard !desk.isEmpty else { throw MirageError.transport("no desktop-level windows on display \(display.displayID)") }
+        return SCContentFilter(display: display, including: desk)
+    }
+    /// Re-reads the desktop-level windows (a widget added or removed) and applies them; desktop sources only.
+    func refreshDesktop(log: @escaping (String) -> Void) {
+        guard source == .desktop, let stream, let t = target else { return }
+        Task {
+            do { try await stream.updateContentFilter(Self.desktopFilter(t.display)) } catch { log("desktop filter update failed: \(error)") }
+        }
+    }
 
     /// The display picture's filter: the display minus `excluding` (window layers), or under MIRAGE_TEST_ONLY_APP that app only.
     static func displayFilter(_ display: SCDisplay, excluding: [SCWindow]) async throws -> SCContentFilter {

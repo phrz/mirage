@@ -1501,7 +1501,8 @@ final class ViewerSession: @unchecked Sendable {
     func window(at x: Int, _ y: Int) -> ControlMessage.WindowInfo? {
         let display = compositor.map { $0.width * $0.height } ?? 0
         return arrangedWindows().first { w in
-            w.frame.contains(x, y) && (w.isLayered || w.windowLevel == 0 || w.frame.area * 10 < display * 6)
+            // (The compositor model's overlay layer covers the whole display: never the window under a point.)
+            !w.isOverlay && w.frame.contains(x, y) && (w.isLayered || w.windowLevel == 0 || w.frame.area * 10 < display * 6)
         }
     }
 
