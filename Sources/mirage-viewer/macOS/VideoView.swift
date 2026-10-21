@@ -244,6 +244,7 @@ final class VideoNSView: NSView {
         case .layerTitleBar(let id, let frame):
             // A window layer's title bar: hold the click until the pointer moves (a local drag) or the button is released.
             layerDrag = (id, frame, p, false, event)
+            session.pressTitleBar(windowID: id)
         case .displayTitleBar(let id, let frame):
             // A window the display layer still carries: the press goes, and starts a predicted (copy-rect) drag.
             let seq = button(event, 0, down: true)

@@ -1581,6 +1581,12 @@ final class ViewerSession: @unchecked Sendable {
         guard let c = compositor, c.width > 0, c.height > 0 else { return nil }
         return WindowDragLimits.host(display: PixelRect(x: 0, y: 0, width: c.width, height: c.height), windows: windowsSnapshot(), pxPerPoint: scenePxPerPoint)
     }
+    /// A press on a window layer's title bar raises it at once, here and on the host, as macOS does on the press (not when
+    /// the drag starts): the window is in front on both sides before it moves over another.
+    func pressTitleBar(windowID: UInt32) {
+        sendWindowCommand(.init(id: windowID, action: .raise))
+        localRaise(windowID: windowID, inputSeq: lastInputSeqSent())
+    }
     func beginLayerDrag(windowID: UInt32) {
         guard let f = arrangedWindows().first(where: { $0.id == windowID })?.frame else { return }
         let limits = windowDragLimits()

@@ -35,7 +35,13 @@ final class AXWindows {
         }
         switch c.action {
         case .raise:
+            // As a click on its title bar would: the window to the front of its app and the app to the front. AXRaise alone
+            // orders the window within its app only, and a background agent's `activate()` is ignored since macOS 14, so
+            // another app's window stayed in front on the host and the viewer's locally raised window dropped behind it
+            // mid-drag (phrz, 08:2xZ). The app's AXFrontmost and the window's AXMain do it from here.
             let r = AXUIElementPerformAction(elem, kAXRaiseAction as CFString)
+            AXUIElementSetAttributeValue(elem, kAXMainAttribute as CFString, kCFBooleanTrue)
+            AXUIElementSetAttributeValue(AXUIElementCreateApplication(target.pid), kAXFrontmostAttribute as CFString, kCFBooleanTrue)
             NSRunningApplication(processIdentifier: target.pid)?.activate()
             if r != .success { cache[target.id] = nil }
             return r == .success

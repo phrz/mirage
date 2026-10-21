@@ -847,6 +847,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         switch target {
         case .layerTitleBar(let id, let frame):
             layerDrag = (id, frame, p, false)
+            session.pressTitleBar(windowID: id)
         case .displayTitleBar(let id, let frame):
             let seq = button(0, down: true)
             drag = (id, frame); session.beginDrag(windowID: id, frame: frame, pointer: p, inputSeq: seq)
