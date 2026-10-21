@@ -801,7 +801,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Whatever was in flight is treated as lost: unacked tile messages have their rects queued for a
     /// lossless resend, unacked video frames are forgotten (the resume keyframe replaces them).
     public func suspend() async {
-        queue.sync { Self.savePriorDelivery(self.rc?.deliveryKbps ?? 0, for: self.output?.peerID, network: self.request?.networkFingerprint) }   // the next connect starts there
+        queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.request?.networkFingerprint) }   // the next connect starts there
         // The session is cut loose first (output, timers, captures detached), then the captures are stopped, each within 3 s:
         // ScreenCaptureKit's stopCapture can fail to return, and awaiting it before the cut left a suspended streamer
         // capturing, refining and sending into the dead connection for good (mac-daddy 2026-10-21: a second streamer
@@ -959,7 +959,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     public func stop() async {
-        queue.sync { Self.savePriorDelivery(self.rc?.deliveryKbps ?? 0, for: self.output?.peerID, network: self.request?.networkFingerprint) }
+        queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.request?.networkFingerprint) }
         // Cut loose first, then stop the captures within 3 s each (suspend()).
         let (cap, caps): (ScreenCapturer?, [WindowCapturer]) = await withCheckedContinuation { c in
             queue.async {

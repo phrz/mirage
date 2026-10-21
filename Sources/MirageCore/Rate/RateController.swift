@@ -118,6 +118,7 @@ public struct RateController {
 
     public init(initialKbps: Int, maxKbps: Int, nativePixels: Int) {
         targetKbps = min(initialKbps, maxKbps); self.maxKbps = maxKbps; self.nativePixels = nativePixels
+        self.initialKbps = max(1, min(initialKbps, maxKbps))
         // Startup: a target under the ceiling (an automatic-bitrate stream starts at 800 under a 50 Mbps ceiling) probes up
         // multiplicatively (×`probeIncrease` per RTT once the queue has been clear for `probeAfterNanos`) until the link's
         // delay or loss pushes back, as after any decrease; the additive 8 %/s alone took a minute to reach a LAN's rate.
@@ -417,10 +418,14 @@ public struct RateController {
     }
     private var deliveryWindowNanos: UInt64 { max(1_500_000_000, UInt64(4 * srttNanos)) }
 
-    /// The delivery-rate ceiling on the target (the cap until there is an estimate).
+    /// The delivery-rate ceiling on the target; before any estimate, 4 x the start (the doubling startup otherwise reached
+    /// the 50 Mbps cap in ~150 ms on a 20 Mbps link, before a single window of acks).
     public var deliveryCeilingKbps: Int {
-        deliveryKbps > 0 ? min(maxKbps, max(tuning.minKbps, Int(Double(deliveryKbps) * deliveryGain))) : maxKbps
+        deliveryKbps > 0 ? min(maxKbps, max(tuning.minKbps, Int(Double(deliveryKbps) * deliveryGain))) : min(maxKbps, max(tuning.minKbps, initialKbps * 4))
     }
+    /// The highest delivery estimate measured from acks this session (never a seed): what careful resume may start from.
+    public private(set) var measuredPeakKbps = 0
+    private var initialKbps = 800
     /// Stream data the host may keep unacked: 2 × the bandwidth-delay product (delivery rate × min RTT), 3 × in startup, at
     /// least 32 KB, and 64 KB until there is an estimate. (At 2 × in startup, a round trip the link's queue inflates allowed
     /// ~25 % growth per window, which read as "no growth": startup ended at 1.4 Mbps of Fast 4G's 8.1 on mac-daddy.)
@@ -491,6 +496,7 @@ public struct RateController {
             let sorted = deliverySamples.map(\.kbps).sorted()
             let i = inStartup ? sorted.count - 1 : min(sorted.count - 1, sorted.count * 3 / 4)
             deliveryKbps = max(1, Int(sorted[i]))
+            measuredPeakKbps = max(measuredPeakKbps, deliveryKbps)
         }
         // Startup ends when three rounds bring less than 25 % growth. A round is one delivery window: the estimate cannot
         // grow faster than its window moves (rounds of one srtt ended startup within half a second on Fast 4G).

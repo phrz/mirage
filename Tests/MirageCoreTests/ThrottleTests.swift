@@ -174,6 +174,7 @@ final class ThrottleTests: XCTestCase {
                 switch e.e {
                 case .ack(let sent, let first, let last, let n, let bytes):
                     rc.frameAcked(sentNanos: sent, firstReceived: first, lastReceived: last, fragments: n, bytes: bytes, now: now, rttNanos: Double(now - sent))
+                    rc.streamAcked(bytes: bytes, receivedNanos: last, now: now)   // as the host does for every acked frame
                 case .lost: rc.lossDetected(now: now)
                 case .probe(let sent, let received): rc.probeSample(sentNanos: sent, receivedNanos: received, now: now)
                 }
