@@ -9,6 +9,7 @@ final class InputInjector {
     private var displayBounds: CGRect
     private var buttonsDown: Set<Int> = []
     private var lastPos: CGPoint
+    private var draggedSinceDown = false
     /// Precise scrolls: one axis per gesture, whole points (ScrollShaper). Every precise scroll goes through it, finger
     /// travel and momentum alike (a touch client's momentum is more precise scroll messages; nothing carries a phase),
     /// in input-sink mode too.
@@ -146,11 +147,20 @@ final class InputInjector {
         switch msg {
         case .mouseMove(let m):
             let p = point(m.x, m.y); lastPos = p
+            if !buttonsDown.isEmpty { draggedSinceDown = true }
             let type: CGEventType = buttonsDown.isEmpty ? .mouseMoved : mouseType(down: nil, button: buttonsDown.min()!)
             guard let e = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: p, mouseButton: cgButton(buttonsDown.min() ?? 0)) else { return }
             e.post(tap: .cghidEventTap)
         case .mouseButton(let m):
-            let p = point(m.x, m.y); lastPos = p
+            let p = point(m.x, m.y)
+            // After a drag, one more drag event at the release point before the release: injected window drags stopped ~26 px
+            // short of the pointer (mac-daddy), the release arriving right behind the last moves.
+            if !m.down, draggedSinceDown, m.button < 2,
+               let d = CGEvent(mouseEventSource: source, mouseType: m.button == 1 ? .rightMouseDragged : .leftMouseDragged, mouseCursorPosition: p, mouseButton: cgButton(m.button)) {
+                d.flags = CGEventFlags(rawValue: m.modifiers)
+                d.post(tap: .cghidEventTap)
+            }
+            lastPos = p; draggedSinceDown = false
             guard let e = CGEvent(mouseEventSource: source, mouseType: mouseType(down: m.down, button: m.button), mouseCursorPosition: p, mouseButton: cgButton(m.button)) else { return }
             e.setIntegerValueField(.mouseEventClickState, value: Int64(max(1, m.clickCount)))
             if m.button >= 2 { e.setIntegerValueField(.mouseEventButtonNumber, value: Int64(m.button)) }
