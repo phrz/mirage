@@ -159,6 +159,9 @@ final class InputInjector {
                let d = CGEvent(mouseEventSource: source, mouseType: m.button == 1 ? .rightMouseDragged : .leftMouseDragged, mouseCursorPosition: p, mouseButton: cgButton(m.button)) {
                 d.flags = CGEventFlags(rawValue: m.modifiers)
                 d.post(tap: .cghidEventTap)
+                // A frame's time for the window server to apply it before the release ends the drag (on the input queue,
+                // after a drag only): with the release right behind, drops still landed 2-8 px short (mac-daddy).
+                usleep(16_000)
             }
             lastPos = p; draggedSinceDown = false
             guard let e = CGEvent(mouseEventSource: source, mouseType: mouseType(down: m.down, button: m.button), mouseCursorPosition: p, mouseButton: cgButton(m.button)) else { return }
