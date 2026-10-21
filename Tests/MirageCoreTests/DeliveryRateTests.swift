@@ -122,6 +122,8 @@ final class DeliveryRateTests: XCTestCase {
         let kbps = RateController.trainRate(r, packetBytes: 1240)!
         XCTAssertEqual(Double(kbps), 8_100, accuracy: 400, "the burst's rate, not 40 packets over ~251 ms (1.6 Mbps)")
         XCTAssertNil(RateController.trainRate([0, 10 * ms, 20 * ms, 30 * ms], packetBytes: 1240), "no burst: no estimate")
+        let clump: [UInt64] = (0..<5).map { UInt64($0) * 20_000 } + (0..<5).map { 3 * ms + UInt64($0) * 20_000 }
+        XCTAssertNil(RateController.trainRate(clump, packetBytes: 1240), "a clump stamped together is not a rate")
     }
 
     /// Careful resume: the last estimate on this network gives 0.75 × it at once, out of startup (1.1 × delivery from the

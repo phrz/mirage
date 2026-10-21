@@ -2024,8 +2024,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard let kbps = RateController.trainRate(r, packetBytes: Self.trainSize + 40) else {
             log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read"); return
         }
-        // A cross-check that can only raise the start (careful resume and the doubling startup lead).
-        rc?.seedFromProbe(kbps: kbps)
+        // A cross-check that can only raise the start (careful resume and the doubling startup lead), and by at most 4 x the
+        // start rate: receive-side batching can still flatter a burst.
+        rc?.seedFromProbe(kbps: min(kbps, 4 * Int(hostTunables[.startKbps])))
         log("connect probe: \(r.count) of \(Self.trainCount) echoes: \(kbps) kbps from the densest burst; target \(rc?.targetKbps ?? 0) kbps")
         applyBudget(now: Clock.nowNanos())
     }

@@ -455,7 +455,9 @@ public struct RateController {
         for i in 1...received.count {
             if i == received.count || received[i] - received[i - 1] > 5_000_000 {
                 let n = i - start, span = Double(received[i - 1] - received[start])
-                if n >= 4, span >= 1_000_000 { best = max(best, Double((n - 1) * packetBytes) * 8 / (span / 1e9) / 1000) }
+                // At least 10 packets over 4 ms: the viewer reads datagrams in batches, and a short clump stamped together read
+                // a 20 Mbps link as 231 Mbps on mac-daddy.
+                if n >= 10, span >= 4_000_000 { best = max(best, Double((n - 1) * packetBytes) * 8 / (span / 1e9) / 1000) }
                 start = i
             }
         }
