@@ -157,6 +157,64 @@ In the compositor model nothing is ever baked:
   covered where a window is in front, never baked into the desktop. `MIRAGE_TEST_FALLBACK=<app name>` forces it for that
   app's windows.
 
+### 3.0 M-FIVE: The first five seconds (milestone, phrz 2026-10-21; supersedes the connect sequence elsewhere)
+
+phrz, connecting over a ~20 Mbps café link (seam design): "I stared at a lossy page for far too long, then all the windows
+snapped in gradually over the next fifteen or so seconds… it just flickers in from a very noisy start. I feel very far from
+the original product idea of Mirage being an Apple-esque very clean remote desktop." The connect is the product. Built on
+the compositor model (§3.0a), whose layers make a per-window sequence possible.
+
+**Targets** (from the first byte of the handshake, measured on the viewer's presented frames):
+
+| link | coherent picture (every visible layer recognisable) | crisp (every visible layer lossless) |
+|---|---|---|
+| ~20 Mbps, ~30 ms | ≤ 0.5 s | ≤ 2 s |
+| 1 Mbps (Fast 4G uplink-ish, constrained) | ≤ 1 s | ≤ 10 s |
+| Japan bus (650 kbps, 420 ms RTT, 0.85 % loss) | ≤ 1.5 s | best effort, no flicker on the way |
+
+**No flicker (hard rule).** On connect each region (the desktop, each window) changes appearance at most three times:
+placeholder → coherent lossy → lossless. Each change is a whole-region crossfade (`crossfadeMs`), never tiles popping one by
+one, never noise, black, or garbage. The viewer stages every update of a layer and presents it atomically. Live content (a
+clock ticking, a video playing, someone typing) is not connect flicker and is exempt; the tests use still content.
+
+**The sequence.**
+- **(0) Placeholders, instantly** (§3.0b), for the desktop *and* every visible window at its real frame, in one message
+  right after the handshake, ahead of any picture. On a reconnect with the tile cache (§3.0c), the cached pixels paint
+  instead wherever the host's tile ids match. The viewer draws placeholders soft (upscaled with a blur), so nothing reads
+  as noise.
+- **(1) One coherent lossy picture per layer, all at once.** The host sizes every visible layer's still from the measured
+  bandwidth so that all of them together arrive in ~0.5 s (the budget split by visible area; a covered part costs nothing),
+  sends all of them before any lossless byte, and marks the set. The viewer holds each still until the set is complete
+  (or 0.7 s have passed) and crossfades every layer from its placeholder in the same frame. No HEVC ladder (tiny keyframe
+  and rung climb) for the desktop: it gets a still like any window. This stage replaces today's "tiny keyframe first, then
+  ladder climb" and the per-window stills that arrive one by one as captures start.
+- **(2) Lossless per layer.** Each layer's lossless level is staged and crossfaded in when that layer's level is complete
+  (the existing level machinery, now the only path for connect refinement); visible windows first by visible area, the
+  desktop's visible part with them, hidden parts after. Partial levels never show.
+- Captures: every visible window's own capture starts at stream start in parallel (not one after another), and until it
+  delivers, stage (1) uses the stream-start screenshot's cut of that window (the composited screen at its frame, front
+  windows masked) at the stage-1 size. Neither a placeholder nor a cut is ever replaced by a later cut (no alternation).
+
+**Bandwidth at connect.** No 800 kbps start and creep. During the handshake the host sends a packet-train probe (~40
+datagrams of 1.2 KB back to back, ~48 KB, repeated once if the first is short); the viewer echoes first and last arrival
+times; the host's first target is 0.7 × (bytes / spread), clamped to the cap, and the delivery-rate controller (§3.4) takes
+over from there. Stage (1)'s budget uses this estimate.
+
+**Acceptance test (gates every deploy to phrz).** A `connect` scenario with a still screen (the bench plus a Finder window on
+/tmp/mtb2), run on shaped links (Fast 4G, ~20 Mbps, Japan bus) with the frame recorder at 10 fps from the first byte:
+- time-to-coherent: first frame where every measured region differs from its placeholder state by less than a threshold
+  from the final lossless picture's low-pass version;
+- time-to-crisp: first frame where every measured region matches the final picture within the lossless threshold;
+- flicker count per region: the number of appearance changes (mean absolute difference between consecutive frames over the
+  region above a threshold, merged across a crossfade's frames) up to time-to-crisp. Pass: ≤ 3 per region, targets met, no
+  frame with a black or garbage region (a region whose difference to the final picture rises after it fell).
+The viewer also logs each stage per layer (placeholder, coherent, lossless) with its time, and the host logs the probe's
+estimate, so a failure says where it came from.
+
+**Order of work.** Spec (this) → placeholders in both models, with the desktop's → probe → stage (1) set and barrier on the
+viewer → stage (2) per-layer only → parallel capture starts → the acceptance test, which then gates deploys. The tile cache
+(§3.0c) follows.
+
 ### 3.0b Placeholders: every window at once, then sharp (design, phrz 2026-10-21)
 
 phrz: on slow links windows must not pop in one at a time; a compact stand-in while they load. Today each window's first
