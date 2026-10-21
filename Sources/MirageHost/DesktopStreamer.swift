@@ -1865,6 +1865,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// level of its visible part takes more than about a second at the current tile rate (on a fast link the
     /// lossless level follows the still directly: two steps).
     private func intermediateWorthwhile(_ l: Layer) -> Bool {
+        // The middle level is the whole layer: for a window mostly covered it is mostly bytes nobody sees (Japan bus on
+        // mac-daddy: 240 KB of middle levels for windows 6–25 % visible, ~3 s of a 650 kbps link in the fresh picture). Its
+        // visible tiles go as blocks instead.
+        guard l.visibleFraction >= 0.5 else { return false }
         let visible = l.tracker.tileCount - l.occludedTiles.count
         let losslessBytes = Double(visible * 64 * 64) * 0.5        // UI at 2x: ~0.5 B/px lossless
         let rate = Double(max(100, lastBudget.tileKbps) * 1000 / 8)
