@@ -2112,6 +2112,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Then the desktop's menu bar and Dock: on screen whatever the windows do, they waited at the first picture's lowest
         // rung behind every window's levels and the desktop's centre-first blocks (~45 s after a connect on an iPhone).
         if let d = display, !unifiedView, chromeStep(d, now: now) { return }
+        // The desktop a window just uncovered (or under windows, when idle) from the window-free underlay (own budget).
+        if let d = display { underlayStep(d, now: now) }
         // The rest yields while changed pixels use most of the link (the menu bar and Dock above do not: a desktop with a few
         // animating apps kept them at the lowest rung for 20 s on mac-daddy).
         guard !pacer.yields(now: now, tileBytesPerSecond: Double(lastBudget.tileKbps * 1000 / 8)) else { return }
@@ -2122,7 +2124,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // window (field run: a window's last uncovered column waited 14 s behind the desktop's blocks).
         // The upgrade of uncovered q75 underlay runs on its own 15 % budget alongside the rest (not only when all
         // else is idle: a desktop with an animating app would starve it).
-        if let d = display { upgradeStep(d, now: now); underlayStep(d, now: now) }
+        if let d = display { upgradeStep(d, now: now) }
         let windowLayers = ordered.filter { !$0.isDisplay }
         if refineStep(windowLayers, now: now) { return }
         if let d = display { _ = refineStep([d], now: now) }
@@ -2218,11 +2220,21 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var lastUnderlayRefill: UInt64 = 0
     private var statUnderlayTiles = 0, statUnderlayBytes = 0
     private func underlayStep(_ d: Layer, now: UInt64) {
-        let rate = Double(lastBudget.tileKbps * 1000 / 8) * 0.10
+        // Guarded tiles no layer covers any more (a window just left them: Show Desktop, a move) or that may hold window
+        // pixels (taint) are what the viewer shows right now: they take the underlay at once, on 40 % of the tile budget. The
+        // rest (under windows) waits for 2 s without motion, on 10 %. (Show Desktop on mac-daddy: a window drawn from the
+        // desktop picture left its pixels in the viewer's desktop canvas, and the guard held its old place for ~2 s.)
+        let covering = Array(displayGuard.current.values)
+        let urgent = d.occludedTiles.filter { i in
+            let r = d.tracker.rect(of: i)
+            return d.taint.tainted.contains(i) || !covering.contains { $0.intersects(r) }
+        }
+        let idle = Clock.elapsed(since: lastMotionNanos, now: now) > 2_000_000_000
+        let rate = Double(lastBudget.tileKbps * 1000 / 8) * (urgent.isEmpty ? 0.10 : 0.40)
         underlayTokens = min(rate * 0.5, underlayTokens + Double(now &- (lastUnderlayRefill == 0 ? now : lastUnderlayRefill)) / 1e9 * rate)
         lastUnderlayRefill = now
         // Viewers of this build or later only (they announce tunables, and let window-free tiles past their guard).
-        guard request?.tunablesVersion != nil, underlayTokens > 0, !unifiedView, Clock.elapsed(since: lastMotionNanos, now: now) > 2_000_000_000,
+        guard request?.tunablesVersion != nil, underlayTokens > 0, !unifiedView, idle || !urgent.isEmpty,
               !d.occludedTiles.isEmpty, let (pb, _) = underlay?.frame else { return }
         CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
         let u = frameView(pb)
@@ -2243,7 +2255,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         var take: [Int] = [], hashes: [Int: UInt64] = [:]
         var est = 0.0
-        for i in d.occludedTiles.sorted() where !d.tracker.isCrisp(i) {
+        let candidates = urgent.sorted() + (idle ? d.occludedTiles.subtracting(urgent).filter { !d.tracker.isCrisp($0) }.sorted() : [])
+        for i in candidates {
             let rr = region(d.tracker.rect(of: i))
             let h = hash(rr)
             guard underlaySent[i] != h else { continue }
@@ -2260,6 +2273,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         underlayTokens -= est
         for (i, h) in hashes { underlaySent[i] = h }
+        // The viewer holds window-free pixels there now; the real desktop follows once the guard releases them (pending).
+        d.taint.clear(take)
+        d.tracker.defer(take, now: now, delayNanos: 3_600_000_000_000, direct: false)
         let hdr = header(layer: 0, nanos: now)
         tileQueue.async { [weak self] in
             guard let self else { return }

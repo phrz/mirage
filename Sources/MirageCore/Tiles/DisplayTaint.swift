@@ -32,5 +32,7 @@ public struct DisplayTaint: Equatable {
 
     /// The viewer reports it holds no clean pixels for these tiles.
     public mutating func mark(_ tiles: [Int]) { tainted.formUnion(tiles) }
+    /// The viewer holds window-free pixels for these tiles now (the desktop underlay).
+    public mutating func clear(_ tiles: [Int]) { tainted.subtract(tiles) }
     public mutating func reset() { tainted = [] }
 }
