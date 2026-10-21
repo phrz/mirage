@@ -129,6 +129,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var tileTokens: Double = 0
     private var tileMsgSeq: UInt32 = 0
     private var tileSent: [UInt32: (nanos: UInt64, bytes: Int, refinement: Int, block: Int?, layer: UInt32, rects: [PixelRect])] = [:]
+    /// Tile-stream bytes sent and not yet acked (RateController.inflightCapBytes bounds refinement by it).
+    private var tileInflightBytes = 0
     private var lastBudget = RateController.Budget(tileKbps: 0, videoKbps: 0)
     private var refineTimer: DispatchSourceTimer?
     private var rateTimer: DispatchSourceTimer?
@@ -622,11 +624,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         queue.async {
             guard let sent = self.tileSent.removeValue(forKey: tileAck.msgSeq) else { return }
             let now = Clock.nowNanos()
+            self.tileInflightBytes = max(0, self.tileInflightBytes - sent.bytes)
+            self.rc?.streamAcked(bytes: sent.bytes, now: now)
             self.refinementInFlight = max(0, self.refinementInFlight - sent.refinement)
             if sent.block != nil, self.pacer.acked(msgSeq: tileAck.msgSeq) { self.refine(now: now) }
             self.rc?.delaySample(sentNanos: sent.nanos, receivedNanos: tileAck.receivedNanos, bytes: sent.bytes, now: now)
             // Prune by age (a big refinement block legitimately outlives dozens of interactive acks).
-            for (k, v) in self.tileSent where Clock.elapsed(since: v.nanos, now: now) > 20_000_000_000 { self.tileSent[k] = nil; self.refinementInFlight = max(0, self.refinementInFlight - v.refinement) }
+            for (k, v) in self.tileSent where Clock.elapsed(since: v.nanos, now: now) > 20_000_000_000 { self.tileSent[k] = nil; self.refinementInFlight = max(0, self.refinementInFlight - v.refinement); self.tileInflightBytes = max(0, self.tileInflightBytes - v.bytes) }
         }
     }
 
@@ -773,7 +777,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     resent += tiles.count
                 }
                 if resent > 0 { self.log("suspend: \(resent) tiles of unacked tile messages queued for resend") }
-                self.tileSent = [:]; self.refinementInFlight = 0; self.pacer.reset()
+                self.tileSent = [:]; self.refinementInFlight = 0; self.tileInflightBytes = 0; self.pacer.reset()
                 for l in self.layers.values { l.stagedOpenSince = nil }   // the viewer drops staged levels on the resume reset
                 for l in self.layers.values {
                     switch l.fresh {
@@ -2298,7 +2302,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         case .reset, .commit: rects = []
         }
         queue.async {
-            self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes, block, layer, rects); self.refinementInFlight += refinementBytes
+            self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes, block, layer, rects); self.refinementInFlight += refinementBytes; self.tileInflightBytes += d.count
             if let block { self.pacer.sent(id: block, msgSeq: seq, bytes: d.count, now: Clock.nowNanos()) }
             if refinementBytes == 0 { self.secInteractiveBytes += d.count }
         }
@@ -2329,7 +2333,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // flight at most (so it cannot build the queue the next keystroke would wait in).
         // Sustained motion: refinement sends nothing and its queue is frozen (the blocks too). Video has
         // the whole target meanwhile; refinement resumes 300 ms after the motion stops, locus first.
-        guard !motionSustained(now) else { return }
+        guard !motionSustained(now) else {
+            // Video under half its budget (a small moving region) is the picture's rate, not the link's.
+            if let rc, rc.recentVideoKbps * 2 < lastBudget.videoKbps { self.rc?.noteIdle(now: now) }
+            return
+        }
+        // In flight: at most twice the bandwidth-delay product the acks show (RateController). A still screen gives the
+        // controller no video delay to back off on; refinement then queued megabytes in QUIC's buffers on phrz's 4G, acks
+        // came seconds late, and parts of windows stayed lossy. Changed pixels above are not held by this.
+        if let rc, tileInflightBytes >= rc.inflightCapBytes { return }
         let ordered = layersByPriority()
         // Fresh pictures: the display's ladder gates everything until its base is acked; window stills
         // and lossless blocks go one at a time, locus layer first.
@@ -2356,7 +2368,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let d = display { upgradeStep(d, now: now) }
         let windowLayers = ordered.filter { !$0.isDisplay }
         if refineStep(windowLayers, now: now) { return }
-        if let d = display { _ = refineStep([d], now: now) }
+        if let d = display, refineStep([d], now: now) { return }
+        // Nothing to refine with budget and room in flight: the acks that follow say what we sent, not what the link carries.
+        if tileTokens > 0 { rc?.noteIdle(now: now) }
     }
 
     /// One scroll capture's diagnostics: wheel delta, the detector's candidates (shift, verified fraction), and where and how the
@@ -2860,6 +2874,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         var layer: Layer? = nil
         if let f = unacked.removeValue(forKey: ack.seq) ?? recentlyPurged.removeValue(forKey: ack.seq) {
             layer = layers[f.layer]
+            if !ack.lost { rc?.streamAcked(bytes: f.bytes, now: now) }   // delivery rate: video bytes count with the tiles
             // Loss acks come after the assembler's timeout; they say nothing about the path's RTT.
             if !ack.lost {
                 // RTT and one-way delay are measured from when the frame's last datagram left the pacer, not
@@ -3062,6 +3077,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                        statCaptures, capMs, statDirtyTiles, statDiffPruned, rc?.targetKbps ?? 0, rc?.capacityKbps ?? 0, rc?.queueMs ?? 0, rc?.rung ?? 0, srttNanos / 1e6,
                        unacked.count, statSkippedBudget, statDropped, statLost, enc, statInput)
                 + (statNacks > 0 ? " nacks \(statNacks) resent \(statNackResent)" : "") + " fresh \(d?.fresh.description ?? "-")"
+                + " delivery \(rc?.deliveryKbps ?? 0) kbps\(rc?.inStartup ?? false ? " (startup)" : "") tile-inflight \(tileInflightBytes / 1000)/\((rc?.inflightCapBytes ?? 0) / 1000) KB"
                 + String(format: " control %.0f kbps effort %@ fovea %@%@", Double(statControlBytes) * 8 / 5 / 1000, effortLevel, foveaActive ? "on" : "off", statFoveaTiles > 0 ? " (\(statFoveaTiles) tiles)" : "")
                 + String(format: " delay src %@ age %d ms tile-backlog %.0f ms motion %@ interactive %.0f kbps stale-dropped %d", rc?.lastSampleSource ?? "none", Int((rc?.sampleAgeNanos(now: Clock.nowNanos()) ?? 0) / 1_000_000), rc?.tileDelayMs ?? 0, motionSustained(Clock.nowNanos()) ? "yes" : "no", interactiveKbpsEWMA, statStaleDropped)
                 + " | layers \(windowLayers.count) (\(windowLayers.filter { $0.capturer != nil }.count) capturing, \(windowLayers.filter { $0.encoder != nil }.count) encoders, \(windowLayers.filter { !$0.exposed }.count) pending) stills \(statStills) occluded \(statOccluded) window-cmds \(statWindowCommands) taint-resent \(statTaintResent) exclusion-lag \(statExclusionLag)"

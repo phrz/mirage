@@ -745,6 +745,14 @@ refinement budget. What the host counts as delivered must be what the viewer sho
   with lossless refinement always at the current scale.
 - Target budgets at 1 Mbps: idle 0 kbps; typing <100 kbps; document scroll ~700 kbps video
   then ~1 s of refinement; video playback ~700 kbps at reduced scale.
+- **Delivery rate, with or without video** (after phrz on 4G, 2026-10-21: a still screen's target climbed to the 50 Mbps
+  cap with no video delay to stop it, refinement queued megabytes in QUIC's buffers, and parts of windows stayed lossy).
+  Every acked byte counts (tile messages, blocks, video frames): bytes acked over max(1 s, 3 × srtt), windowed max over
+  10 s; samples taken while the host had nothing to send (`noteIdle`) only raise it. The target stays under 2 × that in
+  startup (until three windows bring no 25 % growth) and 1.25 × after, and refinement keeps tile-stream bytes in flight
+  under 2 × the bandwidth-delay product (delivery rate × min RTT, at least 32 KB). Changed pixels are not held by the
+  in-flight cap. Shaped-link tests (Fast 4G, Slow 4G, Japan bus; still screen, endless and 3 MB backlogs): the target
+  settles at 1.2–1.6 × the link, the link stays busy, acks stay under 2 s, the backlog drains.
 
 ### 3.5 Latency hiding ("GUI mosh"), in order of payoff/risk
 

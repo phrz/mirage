@@ -221,15 +221,16 @@ public struct RateController {
         guard lastSampleNanos > 0, !owdEWMA.isNaN, baseOWD.isFinite else { return }
         let age = Double(now &- lastSampleNanos) / 1e9
         if age > 1 {
-            // No video for a second: you cannot congest a link you are not sending video on, and the
-            // reliable streams are bounded by their own budget. The estimate decays to zero and the
-            // target floats back toward the cap (×1.25 per second), so the next motion starts near it.
+            // No video for a second: the video queue estimate decays to zero and the target floats back toward the
+            // ceiling (×1.25 per second), so the next motion starts near it. The ceiling includes what the link has
+            // been seen to deliver (`deliveryCeilingKbps`): without it, a still screen's target climbed to the 50 Mbps
+            // cap on phrz's 4G with no signal to stop it, and refinement queued far more than the link could carry.
             let dt = min(age - 1, 5)
             let factor = exp(-dt)
             owdEWMA = baseOWD + (owdEWMA - baseOWD) * factor
             queueMs = max(0, (owdEWMA - baseOWD) / 1e6)
             if age > 2 { lastSampleSource = "idle" }
-            let ceiling = capacityKbps > 0 ? min(maxKbps, max(tuning.minKbps, Int(Double(capacityKbps) * tuning.capacityFraction))) : maxKbps
+            let ceiling = ceilingKbps()
             if targetKbps < ceiling, now &- lastIncreaseNanos >= 900_000_000 {
                 targetKbps = min(ceiling, Int(Double(targetKbps) * tuning.probeIncrease)); lastIncreaseNanos = now
                 if targetKbps >= ceiling { probing = false }
@@ -261,7 +262,7 @@ public struct RateController {
         noteFrame(lost: true, now: now)
         if Double(Clock.elapsed(since: lastDecreaseNanos, now: now)) > srttNanos {
             targetKbps = max(tuning.minKbps, Int(Double(targetKbps) * tuning.lossDecrease))
-            lastDecreaseNanos = now; probing = true; underSince = 0; lastLinkDecreaseNanos = now
+            lastDecreaseNanos = now; probing = true; underSince = 0; lastLinkDecreaseNanos = now; inStartup = false
         }
     }
 
@@ -281,8 +282,14 @@ public struct RateController {
         return (probeRTT - minRTTNanos) / 1e6 < tuning.overuseMs
     }
 
+    /// The highest target the estimates allow: the cap, 0.7 × the video trains' capacity, and the delivery-rate ceiling.
+    private func ceilingKbps() -> Int {
+        let trains = capacityKbps > 0 ? min(maxKbps, max(tuning.minKbps, Int(Double(capacityKbps) * tuning.capacityFraction))) : maxKbps
+        return max(tuning.minKbps, min(trains, deliveryCeilingKbps))
+    }
+
     private mutating func adjust(now: UInt64) {
-        let ceiling = capacityKbps > 0 ? min(maxKbps, max(tuning.minKbps, Int(Double(capacityKbps) * tuning.capacityFraction))) : maxKbps
+        let ceiling = ceilingKbps()
         ackedBytes.removeAll { now &- $0.nanos > 1_000_000_000 }
         let videoFlowing = recentVideoKbps * 5 >= targetKbps
         if queueMs > tuning.overuseMs, videoFlowing, videoDelayCredible {
@@ -301,7 +308,7 @@ public struct RateController {
                 // multiplicatively, one step per RTT, until the ceiling (then the slow additive rule again).
                 targetKbps = min(ceiling, Int(Double(targetKbps) * tuning.probeIncrease))
                 lastProbeNanos = now; lastIncreaseNanos = now
-                if targetKbps >= ceiling { probing = false }
+                if targetKbps >= ceiling, !inStartup { probing = false }
             } else if Double(Clock.elapsed(since: lastDecreaseNanos, now: now)) > 2 * srttNanos {
                 if lastIncreaseNanos == 0 { lastIncreaseNanos = now }
                 let dt = Double(Clock.elapsed(since: lastIncreaseNanos, now: now)) / 1e9
@@ -313,7 +320,8 @@ public struct RateController {
         } else {
             underSince = 0
         }
-        if targetKbps >= ceiling { probing = false }
+        // (In startup the delivery ceiling rises as acks show more: reaching it does not end the probe.)
+        if targetKbps >= ceiling, !inStartup { probing = false }
         targetKbps = min(targetKbps, max(ceiling, tuning.minKbps))
         // The link, not the cap, is holding the target down when the target sits well under the cap
         // after a delay- or loss-driven decrease in the last few seconds.
@@ -371,4 +379,76 @@ public struct RateController {
 
     public var srttMs: Double { srttNanos / 1e6 }
     public var hasCapacityEstimate: Bool { capacityKbps > 0 }
+
+    // MARK: Delivery rate (BBR-style, every byte the viewer acks)
+
+    /// Video delay only signals congestion while video flows; a still screen sends tiles and blocks on reliable streams,
+    /// whose queue the host cannot see (it is in QUIC's buffers and the path). So the controller also measures what the
+    /// link delivers: bytes acked over the last max(1 s, 3 × srtt; shorter windows read the clumps of acks behind a retransmission as rate), every message (tiles, blocks, video frames). Its
+    /// windowed maximum over 10 s is the bottleneck rate; app-limited samples (the host had nothing to send, `noteIdle`)
+    /// only raise it. The target stays at or under `deliveryGain` × that rate (2 in startup, until three rounds bring no
+    /// 25 % growth, then 1.25), and the host keeps stream data in flight under `inflightCapBytes`.
+    private var ackLog: [(nanos: UInt64, bytes: Int)] = []
+    private var firstAckNanos: UInt64 = 0
+    private var deliverySamples: [(nanos: UInt64, kbps: Double)] = []
+    /// The bottleneck rate estimate in kbit/s (0 until the first full window of acks).
+    public private(set) var deliveryKbps = 0
+    public private(set) var inStartup = true
+    private var startupBestKbps = 0.0
+    private var startupRoundStart: UInt64 = 0
+    private var startupFlatRounds = 0
+    private var lastDeliveryAdjust: UInt64 = 0
+    public var deliveryGain: Double { inStartup ? 2.0 : 1.25 }
+    private var deliveryWindowNanos: UInt64 { max(1_000_000_000, UInt64(3 * srttNanos)) }
+
+    /// The delivery-rate ceiling on the target (the cap until there is an estimate).
+    public var deliveryCeilingKbps: Int {
+        deliveryKbps > 0 ? min(maxKbps, max(tuning.minKbps, Int(Double(deliveryKbps) * deliveryGain))) : maxKbps
+    }
+    /// Stream data the host may keep unacked: 2 × the bandwidth-delay product (delivery rate × min RTT), at least 32 KB,
+    /// and 64 KB until there is an estimate.
+    public var inflightCapBytes: Int {
+        guard deliveryKbps > 0 else { return 64_000 }
+        let bdp = Double(deliveryKbps) * 1000 / 8 * minRttMs / 1000
+        return max(32_000, Int(2 * bdp))
+    }
+
+    private var lastIdleNanos: UInt64 = 0
+    /// The host had budget and room in flight but nothing to send (no backlog, no changes): acks soon after say what the
+    /// host sent, not what the link can carry.
+    public mutating func noteIdle(now: UInt64) { lastIdleNanos = now }
+
+    /// Bytes the viewer acked (a tile message, a block, a video frame).
+    public mutating func streamAcked(bytes: Int, now: UInt64) {
+        guard bytes > 0 else { return }
+        if firstAckNanos == 0 { firstAckNanos = now }
+        let w = deliveryWindowNanos
+        ackLog.append((now, bytes))
+        if let f = ackLog.first, now &- f.nanos > w { ackLog.removeAll { now &- $0.nanos > w } }
+        // A full window of acks first: the opening burst of acks says nothing about the rate.
+        guard now &- firstAckNanos >= w else { return }
+        let acked = ackLog.reduce(0) { $0 + $1.bytes }
+        let kbps = Double(acked) * 8 / (Double(w) / 1e9) / 1000
+        // App-limited: the host ran out of things to send during the window these acks answer (shifted by an RTT). Held
+        // back by the in-flight cap is not app-limited: that is the link's rate.
+        let appLimited = lastIdleNanos > 0 && now &- lastIdleNanos < w + UInt64(srttNanos)
+        deliverySamples.removeAll { now &- $0.nanos > 10_000_000_000 }
+        if !appLimited || kbps > Double(deliveryKbps) { deliverySamples.append((now, kbps)) }
+        if let m = deliverySamples.map(\.kbps).max() { deliveryKbps = max(1, Int(m)) }
+        // Startup ends when three rounds bring less than 25 % growth. A round is one delivery window: the estimate cannot
+        // grow faster than its window moves (rounds of one srtt ended startup within half a second on Fast 4G).
+        if inStartup {
+            if startupRoundStart == 0 { startupRoundStart = now }
+            if now &- startupRoundStart >= w {
+                startupRoundStart = now
+                if Double(deliveryKbps) >= startupBestKbps * 1.25 { startupBestKbps = Double(deliveryKbps); startupFlatRounds = 0 }
+                else if !appLimited { startupFlatRounds += 1; if startupFlatRounds >= 3 { inStartup = false } }
+            }
+        }
+        if now &- lastDeliveryAdjust >= 100_000_000 {
+            lastDeliveryAdjust = now
+            if targetKbps > deliveryCeilingKbps { targetKbps = deliveryCeilingKbps }
+            adjust(now: now)
+        }
+    }
 }
