@@ -287,7 +287,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             d.underLayer = under
         }
         // Desktop under two or more shown windows only shows if both move: its underlay waits until one window covers it.
-        var hidden = compositor ? doubly : displayGuard.guardedTiles(d.tracker, now: now).union(doubly)
+        // (Compositor model: nothing is held back. Desktop under two windows was, and Show Desktop, which moves every window at
+        // once, revealed it as an empty canvas until refined: the black square of the fallback A/B run.)
+        var hidden = compositor ? [] : displayGuard.guardedTiles(d.tracker, now: now).union(doubly)
         if unifiedView {
             // Unified: the display layer is shown only as menus, popovers, tooltips (cut-out-safe windows above the normal
             // level, known here, so a new menu costs no extra round trip) and the rects the viewer asks for (status items).
@@ -1781,6 +1783,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let px = b.x + b.width / 2, py = b.y + b.height / 2
             return l.underlayEdge.filter { $0.contains(px, py) }.map { min(px - $0.x, $0.maxX - px, py - $0.y, $0.maxY - py) }.min() ?? 0
         }
+        // Compositor model: the desktop's fresh picture is what can be seen; the desktop under windows (clean, but hidden)
+        // follows at underlay quality through per-tile refinement, after every window (it made the full picture 6 s later).
+        if compositor && l.isDisplay { blocks.removeAll(where: hiddenUnder) }
         blocks.sort { a, b in
             let ha = hiddenUnder(a), hb = hiddenUnder(b)
             if ha != hb { return !ha }
