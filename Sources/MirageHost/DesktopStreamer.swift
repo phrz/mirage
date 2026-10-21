@@ -1243,7 +1243,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// their captures started (~0.6 s apart on mac-daddy; the last ~5 s after the first on Japan bus).
     private func sendPlaceholders() {
         guard let t = target else { return }
-        let shotW = 800, shotH = max(1, 800 * t.pixelHeight / max(1, t.pixelWidth))
+        // Half the stream's width in the compositor model: the windows' stage-1 stills are cut from it (M-FIVE).
+        let shotW = compositor ? max(800, t.pixelWidth / 2) : 800, shotH = max(1, shotW * t.pixelHeight / max(1, t.pixelWidth))
         Task { [weak self] in
             let c = SCStreamConfiguration()
             c.width = shotW; c.height = shotH; c.showsCursor = false
@@ -1265,14 +1266,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // The desktop's: the whole screen (the seam design's desktop picture carries the windows, so this stands in for
         // all of it); in the compositor model with the normal windows left transparent (they have their own). 64 px long.
         if let d = display, d.fresh != .done {
-            var shot = px
-            if compositor {
-                for w in s.windows where w.windowLevel == 0 || Self.isFloatingAppWindow(w) {
-                    let r = PixelRect(x: Int(Double(w.frame.x) * k), y: Int(Double(w.frame.y) * k), width: Int((Double(w.frame.width) * k).rounded(.up)), height: Int((Double(w.frame.height) * k).rounded(.up))).intersection(PixelRect(x: 0, y: 0, width: sw, height: sh))
-                    guard !r.isEmpty else { continue }
-                    for y in r.y..<r.maxY { let o = (y * sw + r.x) * 4; for i in o..<o + r.width * 4 { shot[i] = 0 } }
-                }
-            }
+            // The whole screen in both models: in the compositor model the windows' stage-1 stills land over it a moment later.
+            let shot = px
             let ow = 64, oh = max(4, 64 * sh / max(1, sw))
             if let data = shot.withUnsafeBytes({ TileCodec.encodeLossy(base: $0.baseAddress!, width: sw, height: sh, stride: sw * 4, outWidth: ow, outHeight: oh, quality: 40) }) {
                 let now = Clock.nowNanos()
@@ -1299,16 +1294,22 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 guard !fr.isEmpty else { continue }
                 for y in 0..<fr.height { let o = ((fr.y - r.y + y) * r.width + (fr.x - r.x)) * 4; for i in o..<o + fr.width * 4 { cut[i] = 0 } }
             }
-            let long = max(r.width, r.height)
-            let ow = max(4, r.width * 32 / max(1, long)), oh = max(4, r.height * 32 / max(1, long))
-            guard let data = cut.withUnsafeBytes({ TileCodec.encodeLossy(base: $0.baseAddress!, width: r.width, height: r.height, stride: r.width * 4, outWidth: ow, outHeight: oh, quality: 40) }) else { continue }
+            // M-FIVE stage 1: the window's coherent still, cut from the stream-start screenshot (its own capture starts ~0.6 s
+            // after the previous window's), sized to its share of the 0.5 s budget, staged behind the barrier. Its own capture
+            // then goes straight to lossless (no second still: at most three changes).
+            let rateBytes = Double(lastBudget.tileKbps * 1000 / 8)
+            let budget = max(4_000, rateBytes * 0.5 * l.visibleFraction * Double(l.frame.area) / Double(max(1, display?.bounds.area ?? 1)))
+            let scale = min(1.0, (budget / 0.1 / Double(r.width * r.height)).squareRoot())
+            let ow = max(16, Int(Double(r.width) * scale)), oh = max(16, Int(Double(r.height) * scale))
+            guard let data = cut.withUnsafeBytes({ TileCodec.encodeLossy(base: $0.baseAddress!, width: r.width, height: r.height, stride: r.width * 4, outWidth: ow, outHeight: oh, quality: 60) }) else { continue }
             let now = Clock.nowNanos()
             sendTileMessage(.reset(layer: id, width: l.width, height: l.height), captureNanos: now)
-            sendTileMessage(.tiles(.init(header: header(layer: id, nanos: now), refinement: false, tiles: [.init(rect: l.bounds, format: .lossy, data: data)])), captureNanos: now)
-            l.exposed = true
+            sendTileMessage(.tiles(.init(header: header(layer: id, nanos: now), refinement: false, staged: true, tiles: [.init(rect: l.bounds, format: .lossy, data: data)])), captureNanos: now)
+            l.stillSent = true; l.cutStill = true
+            if stage1Active { stage1Staged.insert(id) } else { sendTileMessage(.commit(layer: id), captureNanos: now); l.exposed = true }
             sent += 1; bytes += data.count
         }
-        if sent > 0 { log("placeholders: \(sent) windows at once, \(bytes) bytes"); publishWindows(now: Clock.nowNanos(), full: false) }
+        if sent > 0 { log("placeholders and stage-1 cuts: the desktop and \(sent - 1) windows, \(bytes) bytes"); checkStage1(now: Clock.nowNanos()); publishWindows(now: Clock.nowNanos(), full: false) }
     }
 
     /// Layers cut from the full display capture only until their own capture delivers (off: see reconcileLayers).
@@ -1541,9 +1542,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if !layer.isDisplay {
                 layer.announced = true
                 log("layer \(layer.id): first frame \(layer.width)x\(layer.height) after \((Clock.elapsed(since: layer.createdNanos, now: now)) / 1_000_000) ms; announced")
-                sendTileMessage(.reset(layer: layer.id, width: layer.width, height: layer.height), captureNanos: nanos)
+                // A stage-1 cut already stands for it (announced with it; a second `.reset` would discard it if still staged).
+                if !layer.cutStill { sendTileMessage(.reset(layer: layer.id, width: layer.width, height: layer.height), captureNanos: nanos) }
                 tracker.markVideo(dirty, now: now)
-                layer.fresh = .still
+                layer.fresh = layer.cutStill ? .blocks(remaining: []) : .still
+                if layer.cutStill { layer.tracker = tracker; layer.fresh = .blocks(remaining: planBlocks(layer)) }
                 layer.tracker = tracker
                 layer.lastFrame = pb
                 refine(now: now)
@@ -2016,7 +2019,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // M-FIVE: the desktop's first picture is a still like every window's (no tiny keyframe and ladder climb: the
             // "very noisy start"), presented with the others behind the stage-1 barrier.
             display?.fresh = .still
-            for l in layers.values { l.stillSent = false }
+            for l in layers.values { l.stillSent = false; l.cutStill = false }
             stage1Active = true; stage1Staged = []; stage1Deadline = Clock.nowNanos() + 700_000_000
             log("fresh picture (\(trigger.rawValue)\(detail)): stage 1, one coherent still per visible layer, presented together")
             return
