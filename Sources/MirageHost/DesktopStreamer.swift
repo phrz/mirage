@@ -1455,9 +1455,42 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard l.capturer != nil else { return }
         l.awaitingOwnSince = 0
         // How far the window's snapshot was from its own first frame (the snapshot filter's correctness; M-FIVE).
-        if let snap = l.snapshotFrame { l.snapshotFrame = nil; log("layer \(l.id): snapshot vs own first frame: \(Self.meanDifference(snap, pb).map { String(format: "%.2f levels", $0) } ?? "sizes differ")") }
+        if let snap = l.snapshotFrame {
+            l.snapshotFrame = nil
+            log("layer \(l.id): snapshot vs own first frame: \(Self.meanDifference(snap, pb).map { String(format: "%.2f levels", $0) } ?? "sizes differ")\(Self.differenceCluster(snap, pb).map { "; " + $0 } ?? "")")
+            // Test only (MIRAGE_TEST_SNAPSHOT_DUMP=dir): the bench window's snapshot and own first frame as PNGs, never another window's.
+            if let dir = Self.snapshotDumpDir, windows?.current?.byID[l.id]?.title.contains("Mirage Test Bench") == true {
+                for (name, f) in [("snapshot", snap), ("own", pb)] {
+                    if let img = CGImage.fromBGRA(f), let d = CGImageDestinationCreateWithURL(URL(fileURLWithPath: "\(dir)/bench-\(l.id)-\(name).png") as CFURL, "public.png" as CFString, 1, nil) { CGImageDestinationAddImage(d, img, nil); CGImageDestinationFinalize(d) }
+                }
+            }
+        }
         if pendingFallback.remove(l.id) != nil { l.forceFullDiff = true }
         captured(pb, nanos, dirtyRects: [], layerID: l.id)
+    }
+    static let snapshotDumpDir = ProcessInfo.processInfo.environment["MIRAGE_TEST_SNAPSHOT_DUMP"]
+    /// Where two same-size frames differ: 32-px cells whose mean difference is over 8 levels, their count, bounding box
+    /// (in the window's pixels) and the worst cell; a capture badge drawn into one of them shows as a small cluster.
+    static func differenceCluster(_ a: CVPixelBuffer, _ b: CVPixelBuffer) -> String? {
+        let w = CVPixelBufferGetWidth(a), h = CVPixelBufferGetHeight(a)
+        guard w == CVPixelBufferGetWidth(b), h == CVPixelBufferGetHeight(b), w >= 32, h >= 32 else { return nil }
+        CVPixelBufferLockBaseAddress(a, .readOnly); CVPixelBufferLockBaseAddress(b, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(a, .readOnly); CVPixelBufferUnlockBaseAddress(b, .readOnly) }
+        guard let pa = CVPixelBufferGetBaseAddress(a), let pb = CVPixelBufferGetBaseAddress(b) else { return nil }
+        let sa = CVPixelBufferGetBytesPerRow(a), sb = CVPixelBufferGetBytesPerRow(b)
+        var hot = 0, total = 0, box = PixelRect.zero, worst = 0.0, worstAt = (0, 0)
+        for cy in stride(from: 0, to: h - 31, by: 32) { for cx in stride(from: 0, to: w - 31, by: 32) {
+            var sum = 0
+            for y in stride(from: cy, to: cy + 32, by: 2) {
+                let ra = pa.advanced(by: y * sa).assumingMemoryBound(to: UInt8.self), rb = pb.advanced(by: y * sb).assumingMemoryBound(to: UInt8.self)
+                for x in stride(from: cx * 4, to: (cx + 32) * 4, by: 8) { for c in 0..<4 { sum += abs(Int(ra[x + c]) - Int(rb[x + c])) } }
+            }
+            let m = Double(sum) / (16 * 16 * 4)
+            total += 1
+            if m > worst { worst = m; worstAt = (cx, cy) }
+            if m > 8 { hot += 1; box = box.isEmpty ? PixelRect(x: cx, y: cy, width: 32, height: 32) : box.union(PixelRect(x: cx, y: cy, width: 32, height: 32)) }
+        } }
+        return String(format: "%d of %d cells over 8 levels", hot, total) + (hot > 0 ? " in \(box.x),\(box.y) \(box.width)x\(box.height)" : "") + String(format: ", worst %.1f at %d,%d (window %dx%d)", worst, worstAt.0, worstAt.1, w, h)
     }
     /// Mean absolute difference per channel (B, G, R, A) between two BGRA frames of the same size, sampled; nil otherwise.
     static func meanDifference(_ a: CVPixelBuffer, _ b: CVPixelBuffer) -> Double? {
