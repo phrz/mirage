@@ -88,6 +88,8 @@ final class Layer {
     /// The layer's on-display part in its own coordinates (from the last occlusion pass) and whether to crop again.
     var onScreenLocal: PixelRect?
     var needsCrop = false
+    /// When this layer's last small animation went out (lossy tiles at the capped rate).
+    var smallAnimNanos: UInt64 = 0
     var backdropDirty = false
     var backdropHeldNanos: UInt64 = 0
     /// Window picture audit: where its slow sweep continues.

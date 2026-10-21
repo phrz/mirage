@@ -32,4 +32,18 @@ final class TunablesTests: XCTestCase {
         var p = Predictor(); t.apply(to: &p); XCTAssertEqual(p.scrollLeadFraction, 0.5)
         XCTAssertEqual(t.levelFadeNanos, 100_000_000)
     }
+
+    func testTheHostFile() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("tun-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("tunables.json")
+        XCTAssertEqual(Tunables.load(from: url).tunables[.smallAnimationFps], 3, "no file: the defaults")
+        try Data(#"{"smallAnimationFps": 6, "pinchRatio": 0.2}"#.utf8).write(to: url)
+        let (t, e) = Tunables.load(from: url)
+        XCTAssertNil(e); XCTAssertEqual(t[.smallAnimationFps], 6); XCTAssertEqual(t[.pinchRatio], 0.2)
+        try Data("not json".utf8).write(to: url)
+        let bad = Tunables.load(from: url)
+        XCTAssertNotNil(bad.error); XCTAssertEqual(bad.tunables[.smallAnimationQuality], 50)
+    }
 }

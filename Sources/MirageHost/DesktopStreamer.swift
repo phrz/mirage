@@ -424,6 +424,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         beginFreshPicture(trigger)
         if let s = windows?.sample(captureSeq: captureSeq, now: now, force: true) { reconcileLayers(s.sample, now: now) }
         ensureUnderlay(t)
+        loadHostTunables()
+    }
+
+    private func loadHostTunables() {
+        let (t, error) = Tunables.load(from: (try? Store())?.url("tunables.json"))
+        hostTunables = t
+        if let error { log(error) }
     }
 
     /// The desktop-only capture (DesktopUnderlay) for this display, at half the stream size; restarted with the stream.
@@ -783,6 +790,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.setLive(true)
                     self.capturer = cap
                     self.ensureUnderlay(t)
+                    self.loadHostTunables()
                     self.lastExcludedIDs = Set(excluded.map(\.windowID))
                     let old = self.target
                     self.target = t
@@ -1323,6 +1331,21 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if plan.video.count != videoBefore { if plan.video.isEmpty { plan.videoRegion = .zero; plan.wholeFrame = false } else if !plan.wholeFrame { plan.videoRegion = tracker.boundingRect(plan.video) } }
             withCopy.append(contentsOf: w.filter { !withCopy.contains($0) })
         }
+        // A small animation (under 2 % of the layer: a bouncing Dock icon, a spinner) is not worth video: lossy half-size tiles at
+        // a capped rate (host tunables, default 3 fps q50, ~40 kbps for an icon), refined lossless once it stops (classify left
+        // the tiles pending). As video, one Dock icon took ~230 kbps of an 800 kbps link on mac-daddy, and its frames were the
+        // rate controller's only delay samples: they read a queue that was not there and held the target at 150 kbps.
+        if !plan.video.isEmpty, !plan.wholeFrame, !MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount) {
+            let small = plan.video.filter { !layer.occludedTiles.contains($0) }
+            plan.video = []; plan.videoRegion = .zero
+            let interval = UInt64(1e9 / hostTunables[.smallAnimationFps])
+            if !small.isEmpty, Clock.elapsed(since: layer.smallAnimNanos, now: now) >= interval {
+                layer.smallAnimNanos = now
+                if layer.isDisplay { displaySent(small) }
+                tileTokens -= Double(submitLossless(layer: layer, tiles: small, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: Float(hostTunables[.smallAnimationQuality])))
+                statSmallAnimTiles += small.count
+            }
+        }
         // Motion bookkeeping for the refinement freeze: classified video, copy-rects, or the input stream.
         // Sustained motion freezes all refinement, so only motion that matters counts: copy-rects, or video over at least 2 %
         // of the layer. A bouncing Dock icon (192x192 px, 9 tiles) froze every layer's refinement for 2 min on mac-daddy.
@@ -1713,6 +1736,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Large refinement items (blocks, window stills and middle levels) in flight across all layers, and when refinement
     /// yields to changed pixels (RefinementPacer).
     private var pacer = RefinementPacer()
+    /// The host's own tunables (small-animation caps), from tunables.json in the store directory at each stream start.
+    private var hostTunables = Tunables.defaults
+    private var statSmallAnimTiles = 0
 
     /// Sends the next large lossless block of a layer (pipelined: RefinementPacer), within budget.
     private func freshStep(_ l: Layer, now: UInt64) {

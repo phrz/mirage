@@ -25,12 +25,9 @@ public enum HostSession {
     /// `tunables.json` in the store directory, read each time (retuned without a restart).
     static func sendTunables(_ out: ConnectionOutput, _ req: ControlMessage.StreamRequest, _ ctx: HostContext) {
         guard req.tunablesVersion != nil else { return }
-        let url = ctx.store.url("tunables.json")
-        var overrides: [String: Double] = [:]
-        if let d = try? Data(contentsOf: url) {
-            if let o = try? JSONDecoder().decode([String: Double].self, from: d) { overrides = o } else { ctx.log("tunables.json: not a {\"key\": number} object; defaults sent") }
-        }
-        out.sendControl(.tunables(Tunables.host(overrides: overrides)))
+        let (t, error) = Tunables.load(from: ctx.store.url("tunables.json"))
+        if let error { ctx.log(error) }
+        out.sendControl(.tunables(t))
     }
 
     public static func handle(connection: NWConnection, connectionID: UUID, remote: String, ctx: HostContext) async {

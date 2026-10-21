@@ -26,6 +26,9 @@ public struct Tunables: Codable, Equatable, Sendable {
         case scrollLeadFraction
         // Fades (Compositor): a refinement tile's crossfade and a presentation level's commit, in ms.
         case crossfadeMs, levelFadeMs
+        // Host only: a small animation (under 2 % of a layer: a bouncing Dock icon, a spinner) goes as lossy half-size tiles at
+        // this rate and quality instead of video.
+        case smallAnimationFps, smallAnimationQuality
 
         /// Compiled-in default and the bounds a host value is clamped to.
         public var spec: (default: Double, min: Double, max: Double) {
@@ -47,6 +50,8 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .scrollLeadFraction: return (1.0 / 3, 0, 1)
             case .crossfadeMs: return (220, 0, 2000)
             case .levelFadeMs: return (220, 0, 2000)
+            case .smallAnimationFps: return (3, 0.5, 15)
+            case .smallAnimationQuality: return (50, 10, 90)
             }
         }
     }
@@ -66,6 +71,13 @@ public struct Tunables: Codable, Equatable, Sendable {
         var t = defaults
         for (k, v) in overrides where v.isFinite { t.values[k] = v }
         return t
+    }
+
+    /// The host's tunables: the defaults overridden by a `{"key": number}` JSON file (nil or unreadable: the defaults).
+    public static func load(from url: URL?) -> (tunables: Tunables, error: String?) {
+        guard let url, let d = try? Data(contentsOf: url) else { return (defaults, nil) }
+        guard let o = try? JSONDecoder().decode([String: Double].self, from: d) else { return (defaults, "\(url.lastPathComponent): not a {\"key\": number} object; defaults used") }
+        return (host(overrides: o), nil)
     }
 
     // MARK: Applying
