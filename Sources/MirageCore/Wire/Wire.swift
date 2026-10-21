@@ -117,6 +117,8 @@ public enum ControlMessage: Codable, Equatable {
     // Desktop streaming (M1).
     case streamRequest(StreamRequest)
     case streamInfo(StreamInfo)
+    /// Host → viewer: numbers the viewer uses for local behaviour (Tunables); only to viewers whose request carried `tunablesVersion`.
+    case tunables(Tunables)
     case streamStop
     case frameAck(FrameAck)
     case cursorShape(CursorShape)
@@ -288,9 +290,11 @@ public enum ControlMessage: Codable, Equatable {
         /// picture current with a masked keyframe and diffs; `false` (an app relaunched with a saved resume token holds
         /// nothing) makes the host send every layer's picture afresh instead (ResumePicture). nil (older viewers): held.
         public var holdsPicture: Bool?
-        public init(width: Int, height: Int, bitrateKbps: Int = 800, maxFPS: Int = 30, displayID: UInt32? = nil, snapNative: Bool? = nil, holdsPicture: Bool? = nil) {
+        /// The Tunables schema the viewer reads (nil: an older viewer, sent no `tunables` message).
+        public var tunablesVersion: Int?
+        public init(width: Int, height: Int, bitrateKbps: Int = 800, maxFPS: Int = 30, displayID: UInt32? = nil, snapNative: Bool? = nil, holdsPicture: Bool? = nil, tunablesVersion: Int? = nil) {
             self.width = width; self.height = height; self.bitrateKbps = bitrateKbps; self.maxFPS = maxFPS; self.displayID = displayID; self.snapNative = snapNative
-            self.holdsPicture = holdsPicture
+            self.holdsPicture = holdsPicture; self.tunablesVersion = tunablesVersion
         }
     }
     public struct StreamInfo: Codable, Equatable {

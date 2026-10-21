@@ -148,7 +148,14 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         self.session = session
         metalLayer.device = session.compositor?.device ?? session.context?.device
         session.onChange = { [weak self] in DispatchQueue.main.async { self?.forceRedraw = true } }
+        // The host's tunables (DESIGN §3.0): touch thresholds and the zoom limit come from the host, not from this build.
+        session.onTunables = { [weak self] t in self?.apply(t) }
+        apply(session.tunables)
         if UserDefaults.standard.string(forKey: "demo") != nil { Task { @MainActor in await self.runDemo() } }
+    }
+    private func apply(_ t: Tunables) {
+        t.apply(to: &direct)
+        t.apply(to: &viewport)
     }
     /// Asks the screen to show or hide the on-screen keyboard (its toggle state lives in SwiftUI).
     var onKeyboardRequest: ((Bool) -> Void)?
@@ -669,7 +676,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
     private func classifyTwoFingers(_ g: UIGestureRecognizer) {
         guard multi == .undecided, g.numberOfTouches == 2 else { return }
         let a = g.location(ofTouch: 0, in: self), b = g.location(ofTouch: 1, in: self)
-        guard var k = twoFinger else { twoFinger = TwoFingerClassifier(a, b); return }
+        guard var k = twoFinger else { var n = TwoFingerClassifier(a, b); session?.tunables.apply(to: &n); twoFinger = n; return }
         let d = k.update(a, b, time: CACurrentMediaTime())
         twoFinger = k
         switch d {

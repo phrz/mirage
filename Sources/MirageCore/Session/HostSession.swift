@@ -21,6 +21,18 @@ public struct HostContext: Sendable {
 
 /// Handles one incoming stream or datagram flow on the host.
 public enum HostSession {
+    /// The viewer's tunables (Tunables), after every streamInfo, to viewers that asked for them: the defaults overridden by
+    /// `tunables.json` in the store directory, read each time (retuned without a restart).
+    static func sendTunables(_ out: ConnectionOutput, _ req: ControlMessage.StreamRequest, _ ctx: HostContext) {
+        guard req.tunablesVersion != nil else { return }
+        let url = ctx.store.url("tunables.json")
+        var overrides: [String: Double] = [:]
+        if let d = try? Data(contentsOf: url) {
+            if let o = try? JSONDecoder().decode([String: Double].self, from: d) { overrides = o } else { ctx.log("tunables.json: not a {\"key\": number} object; defaults sent") }
+        }
+        out.sendControl(.tunables(Tunables.host(overrides: overrides)))
+    }
+
     public static func handle(connection: NWConnection, connectionID: UUID, remote: String, ctx: HostContext) async {
         let stream = MessageStream(connection: connection, queue: DispatchQueue(label: "mirage.host.stream"))
         stream.adoptStarted()
@@ -117,7 +129,7 @@ public enum HostSession {
                 guard authenticated != nil else { throw MirageError.protocolViolation("streamRequest before auth") }
                 conn.lastRequest = req
                 if let s = conn.streamer, let out = output, conn.flow === out.flow, conn.tiles === out.tiles {
-                    do { out.sendControl(.streamInfo(try await s.update(req))) }
+                    do { out.sendControl(.streamInfo(try await s.update(req))); Self.sendTunables(out, req, ctx) }
                     catch { ctx.log("[\(remote)] stream update failed: \(error)"); out.sendControl(.reject(.init(reason: "cannot reconfigure stream: \(error)"))) }
                 } else {
                     let resuming = conn.resumed && conn.streamer != nil && output == nil
@@ -138,7 +150,7 @@ public enum HostSession {
                         do {
                             let info = try await s.resume(req, output: out)
                             ctx.log("[\(remote)] resumed \(info.displayName) \(info.width)x\(info.height) @ \(req.bitrateKbps) kbps")
-                            out.sendControl(.streamInfo(info))
+                            out.sendControl(.streamInfo(info)); Self.sendTunables(out, req, ctx)
                         } catch {
                             ctx.log("[\(remote)] resume failed: \(error); starting over")
                             conn.streamer = nil; await s.stop()
@@ -152,7 +164,7 @@ public enum HostSession {
                         conn.streamer = s
                         if let v = pendingInterest { s.handle(input: .viewInterest(v)) }
                         ctx.log("[\(remote)] streaming \(info.displayName) \(info.width)x\(info.height) @ \(req.bitrateKbps) kbps, datagrams ≤\(out.maxDatagramSize)")
-                        out.sendControl(.streamInfo(info))
+                        out.sendControl(.streamInfo(info)); Self.sendTunables(out, req, ctx)
                     } catch {
                         await s.stop()
                         let why = HostPermissionHint.explain(error)

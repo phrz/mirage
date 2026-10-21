@@ -114,6 +114,10 @@ final class ViewerSession: @unchecked Sendable {
     var layerMemoryBudget = 768 << 20
     /// Called (on the video queue) whenever the picture changed and should be presented.
     var onChange: (() -> Void)?
+    /// The host's tunables (defaults until it sends them): gesture thresholds, prediction lead, fades (DESIGN §3.0).
+    private(set) var tunables = Tunables.defaults
+    /// Called on the main queue when the host's tunables arrive (the iOS view applies its touch thresholds).
+    var onTunables: ((Tunables) -> Void)?
 
     // Clock sync: hostNanos ≈ localNanos + offset. Guarded by statsLock together with the counters below.
     private var clockOffset: Double = 0
@@ -473,7 +477,7 @@ final class ViewerSession: @unchecked Sendable {
 
     func requestStream(width: Int, height: Int) {
         Task { @MainActor in
-            var req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: model.bitrateKbps, maxFPS: 30, snapNative: Self.snapNative ? true : nil)
+            var req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: model.bitrateKbps, maxFPS: 30, snapNative: Self.snapNative ? true : nil, tunablesVersion: Tunables.schemaVersion)
             if req == lastRequest { return }
             guard let sender else { pendingRequest = req; log("stream request \(width)x\(height) queued until connected"); return }
             lastRequest = req; lastRequestSent = req
@@ -537,6 +541,12 @@ final class ViewerSession: @unchecked Sendable {
             case .cursorPosition(let p):
                 if probeLog { log(String(format: "host cursor at (%.3f, %.3f)", p.x, p.y)) }
                 Task { @MainActor in model.remoteCursor = p.visible ? CGPoint(x: p.x, y: p.y) : nil }
+            case .tunables(let t):
+                tunables = t
+                predictorLock.lock(); t.apply(to: &predictor); predictorLock.unlock()
+                videoQueue.async { for c in [self.compositor].compactMap({ $0 }) + self.layerViews.values.map(\.compositor) { c.crossfadeNanos = t.crossfadeNanos } }
+                log("host tunables v\(t.version): \(t.values.count) values")
+                DispatchQueue.main.async { self.onTunables?(t) }
             case .windowList(let list):
                 if let d = try? Frame.encode(msg) { statsLock.lock(); sControlBytes += d.count; statsLock.unlock() }
                 hostWindowList(list, now: Clock.nowNanos())
@@ -678,7 +688,7 @@ final class ViewerSession: @unchecked Sendable {
     private func ensureLayerView(_ id: UInt32) -> LayerView? {
         if let v = layerViews[id] { return v }
         guard let context else { return nil }
-        let v = LayerView(id: id, context: context)
+        let v = LayerView(id: id, context: context); v.compositor.crossfadeNanos = tunables.crossfadeNanos
         v.lastSeenInListNanos = Clock.nowNanos()
         layerViews[id] = v
         return v
@@ -778,7 +788,7 @@ final class ViewerSession: @unchecked Sendable {
         case .commit(let layer):
             guard let v = layerView(layer) else { break }
             let staged = v.compositor.stagedTiles
-            v.compositor.commitStaged()
+            v.compositor.commitStaged(durationNanos: tunables.levelFadeNanos)
             if layer != 0 { measureCorner(v) }
             if staged > 0 { v.step("commit", now: now) }
             let c = v.compositor

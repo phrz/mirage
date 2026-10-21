@@ -6,6 +6,8 @@ import Foundation
 /// host update that already reflects a prediction's input retires it, and a mismatch drops the
 /// window's confidence (predictions tracked but not shown) until one is confirmed again.
 public struct Predictor {
+    /// A scroll's rubber-band lead as a fraction of the scroll view (Tunables.scrollLeadFraction).
+    public var scrollLeadFraction = 1.0 / 3
     public enum Kind: Equatable, Sendable { case scroll, drag }
 
     public struct Prediction: Equatable, Sendable {
@@ -216,7 +218,7 @@ public struct Predictor {
             let kind = w.predictions.last!.kind
             let rect = w.predictions.last!.rect
             var dx = w.predictions.reduce(0) { $0 + $1.remX }, dy = w.predictions.reduce(0) { $0 + $1.remY }
-            if kind == .scroll { dx = Self.rubberBand(dx, limit: rect.width / 3); dy = Self.rubberBand(dy, limit: rect.height / 3) }
+            if kind == .scroll { dx = Self.rubberBand(dx, limit: Int(Double(rect.width) * scrollLeadFraction)); dy = Self.rubberBand(dy, limit: Int(Double(rect.height) * scrollLeadFraction)) }
             if dx != 0 || dy != 0 { out.append(Displacement(kind: kind, windowID: id, rect: rect, dx: dx, dy: dy)) }
         }
         return out.sorted { $0.windowID < $1.windowID }
