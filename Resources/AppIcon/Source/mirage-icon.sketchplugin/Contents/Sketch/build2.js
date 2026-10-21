@@ -264,13 +264,12 @@ function onRun(context) {
   var page = doc.selectedPage; page.name = 'Icon';
 
   var A = new Artboard({ name: 'Mirage 1024', parent: page, frame: new Rectangle(0, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
-  buildIcon(A, { window: false, cursorScale: 3.3, cursorX: 432, cursorY: HORIZON - 95 * 3.3 - 2 * 3.3 - 3, features: { sky: true, sand: true }, tex: 'form' }); // keyline miter at the tail reaches ~2 px past the stroke width
+  buildIcon(A, { window: false, cursorScale: 4.3, cursorX: 400, cursorY: HORIZON - 95 * 4.3 - 2 * 4.3 - 3, features: { sky: true, sand: true }, tex: 'form-wide', band: 96, reflBoost: 1.3 }); // keyline miter at the tail reaches ~2 px past the stroke width
   dbg('A built');
-  // Compact variant for small sizes: bigger pointer, taller mirage sheet, stronger reflection
-  var C = new Artboard({ name: 'Mirage 1024 (compact)', parent: page, frame: new Rectangle(1224, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
-  buildIcon(C, { window: false, cursorScale: 4.3, cursorX: 400, cursorY: HORIZON - 95 * 4.3 - 2 * 4.3 - 3, features: { sky: true, sand: true }, tex: 'form-wide', band: 96, reflBoost: 1.3 });
-  dbg('C built');
   var variants = new sketch.Page({ name: 'Variants', parent: doc });
+  // Previous, wider framing kept as a variant for reference
+  var Wv = new Artboard({ name: 'Mirage 1024 (wide framing)', parent: variants, frame: new Rectangle(1224, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
+  buildIcon(Wv, { window: false, cursorScale: 3.3, cursorX: 432, cursorY: HORIZON - 95 * 3.3 - 2 * 3.3 - 3, features: { sky: true, sand: true }, tex: 'form' });
   var B = new Artboard({ name: 'Mirage 1024 (window variant)', parent: variants, frame: new Rectangle(0, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
   buildIcon(B, { window: true, cursorScale: 2.4, cursorX: 560, cursorY: 400 });
   dbg('B built');
