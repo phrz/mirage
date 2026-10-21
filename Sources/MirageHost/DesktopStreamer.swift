@@ -1359,7 +1359,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         var sent = 0, bytes = 0
         // The desktop's: the whole screen (the seam design's desktop picture carries the windows, so this stands in for
         // all of it); in the compositor model with the normal windows left transparent (they have their own). 64 px long.
-        if let d = display, d.fresh != .done {
+        // Not over a still already sent: with warm captures the desktop's own still can land before this screenshot returns,
+        // and the 64-px placeholder then replaced it (a regression on the viewer, wm1 20 Mbps run).
+        if let d = display, d.fresh != .done, !d.stillSent {
             // The whole screen in both models: in the compositor model the windows' stage-1 stills land over it a moment later.
             let shot = px
             let ow = 64, oh = max(4, 64 * sh / max(1, sw))
