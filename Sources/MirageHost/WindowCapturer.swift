@@ -95,6 +95,19 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// `others`: every window ScreenCaptureKit lists except this one and its child windows.
     /// Window capture starts in progress (all instances).
     static let starting = AtomicCounter()
+    /// One frame now, with exactly the stream's filter and configuration (the same pixels its frames will have), from a
+    /// screenshot: ScreenCaptureKit starts window streams one after another (~0.75 s each on mac-daddy, measured: eight
+    /// started at once, done one by one), so the stream's first frame can be seconds away (M-FIVE).
+    func snapshot(excluding others: [SCWindow]) async -> CVPixelBuffer? {
+        let (f, cfg): (SCContentFilter, SCStreamConfiguration) = queue.sync {
+            for w in others where w.windowID != windowID { excluded[w.windowID] = w }
+            return (filter(), configuration())
+        }
+        let t0 = Clock.nowNanos()
+        guard let sb = try? await SCScreenshotManager.captureSampleBuffer(contentFilter: f, configuration: cfg), let pb = CMSampleBufferGetImageBuffer(sb) else { return nil }
+        hostLog("capture \(windowID): snapshot in \(Clock.elapsed(since: t0, now: Clock.nowNanos()) / 1_000_000) ms")
+        return pb
+    }
     func start(excluding others: [SCWindow], onFrame: @escaping (CVPixelBuffer, UInt64) -> Void) async throws {
         self.onFrame = onFrame
         let (f, cfg, ids, k): (SCContentFilter, SCStreamConfiguration, Set<UInt32>, ConfigKey) = queue.sync {

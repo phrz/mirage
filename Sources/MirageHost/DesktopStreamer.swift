@@ -1229,6 +1229,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard let l, l.capturer === cap else { return }; l.capturer = nil; self?.log("layer \(l.id) capture stopped: \(err.map { "\($0)" } ?? "ok")")
             if let err { self?.useFallback(l, why: "its own capture stopped (\(err))") }
         } }
+        // The window's first frame from a snapshot with the stream's own filter, while ScreenCaptureKit queues the stream.
+        if compositor {
+            Task { [weak self] in
+                guard let pb = await cap.snapshot(excluding: others) else { return }
+                let nanos = Clock.nowNanos()
+                self?.queue.async { guard let self, l.capturer === cap, l.lastFrame == nil else { return }; self.captured(pb, nanos, dirtyRects: [], layerID: l.id) }
+            }
+        }
         Task { [weak self] in
             do { try await cap.start(excluding: others) { [weak self] pb, nanos in self?.queue.async { self?.ownFrame(pb, nanos, layer: l) } } }
             catch { self?.queue.async { if l.capturer === cap { l.capturer = nil }; self?.log("layer \(l.id) capture failed: \(error)"); self?.useFallback(l, why: "its own capture failed") } }
