@@ -112,9 +112,13 @@ TestFlight, and once the app ships, every viewer change is an app update for eve
   store directory (`{"pinchRatio": 0.2}`), read at every stream start, so a retune needs neither an app update nor a host
   restart. New viewer behaviour that has a number in it gets a key (`Tunables.Key`), not a literal.
 - **Exceptions are written down.** The scene renderer clips every layer to the display rect in the viewer (bf7e8a8), as a
-  safety net. The host crops too: a window layer's tiles wholly off the display are sent transparent once (one small solid
-  message) and stay pending until they come back on screen, so viewers without the clip show nothing outside the display
-  either; only a tile straddling the edge keeps its pixels there (cropping it would resend it at every crossing).
+  safety net. For viewers without the clip (no tunables: builds before 0d0651f) the host crops too: a window layer's tiles
+  wholly off the display are sent transparent once and stay pending until they come back on screen. Not for viewers that
+  clip: blanked tiles come back only as fast as they are resent, and on phrz's iPhone Show Desktop left the returning Finder
+  window full of holes until they were.
+- **The underlay goes only where no window is** (UnderlayRule): never under a window the desktop picture carries (a window
+  that is not a layer is drawn from those very tiles), under layers only when idle, and at once only where a window just
+  left and none covers now.
 - **The desktop underlay is the host's.** Under a layered window whose exclusion from the display stream is not verified,
   the desktop cannot be read from the display stream, and the viewer held nothing there: Show Desktop revealed a flat fill.
   The host keeps a second capture of only the desktop-level windows (wallpaper, desktop icons and widgets; half size, one

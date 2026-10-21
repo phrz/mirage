@@ -146,3 +146,23 @@ public struct WindowBlanking: Equatable {
 public enum MotionGate {
     public static func counts(videoTiles: Int, layerTiles: Int) -> Bool { videoTiles > 0 && videoTiles * 50 >= max(1, layerTiles) }
 }
+
+/// Which guarded desktop tiles may take the window-free underlay (DesktopUnderlay). The underlay is the desktop with no
+/// window at all, so it must never land where the viewer's desktop picture shows a window: a window the display stream
+/// carries (not a layer of its own: unexcludable, or not planned) is drawn from those very tiles. phrz on mac-daddy after
+/// 5440d44: Show Desktop left a desktop-carried Finder window a mosaic of wallpaper, its chrome and sidebar gone.
+public enum UnderlayRule {
+    /// `layered`: frames of windows shown as their own layers; `carried`: frames of windows the desktop picture shows
+    /// (normal windows and menus that are not layers; never desktop-sized shields or the Dock's full-screen window).
+    /// Returns the tiles to fill now (no window over them at all: a window just left) and those that may be filled when
+    /// idle (under layers only, which hide them).
+    public static func candidates(guarded: Set<Int>, tracker: TileTracker, layered: [PixelRect], carried: [PixelRect]) -> (urgent: [Int], underLayers: [Int]) {
+        var urgent: [Int] = [], under: [Int] = []
+        for i in guarded.sorted() {
+            let r = tracker.rect(of: i)
+            if carried.contains(where: { $0.intersects(r) }) { continue }
+            if layered.contains(where: { $0.intersects(r) }) { under.append(i) } else { urgent.append(i) }
+        }
+        return (urgent, under)
+    }
+}

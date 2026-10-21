@@ -115,4 +115,21 @@ final class RefinementPacerTests: XCTestCase {
         XCTAssertTrue(MotionGate.counts(videoTiles: 1450, layerTiles: 1450), "a full-screen change")
         XCTAssertTrue(MotionGate.counts(videoTiles: 5, layerTiles: 200), "a small window's own animation is a large part of it")
     }
+
+    /// The underlay never lands where a window is: not under a window the desktop picture carries (phrz's Finder mosaic after
+    /// 5440d44), only under layers when idle, and at once only where no window is at all.
+    func testUnderlayOnlyWhereNoWindowIs() {
+        let t = TileTracker(width: 640, height: 384)                    // 10 x 6 tiles of 64 px
+        let all = Set(0..<t.tileCount)
+        let finder = PixelRect(x: 64, y: 64, width: 192, height: 128)    // carried by the desktop picture (not a layer)
+        let layer = PixelRect(x: 384, y: 64, width: 128, height: 128)    // a layer
+        let (urgent, under) = UnderlayRule.candidates(guarded: all, tracker: t, layered: [layer], carried: [finder])
+        let touching = { (r: PixelRect) in Set(t.tiles(covering: [r])) }
+        XCTAssertTrue(Set(urgent).isDisjoint(with: touching(finder)), "nothing under the desktop-carried window")
+        XCTAssertTrue(Set(under).isDisjoint(with: touching(finder)))
+        XCTAssertTrue(Set(urgent).isDisjoint(with: touching(layer)), "under a layer: not urgent")
+        XCTAssertEqual(Set(under), touching(layer).subtracting(touching(finder)), "under the layer when idle")
+        XCTAssertEqual(Set(urgent), all.subtracting(touching(finder)).subtracting(touching(layer)), "vacated desktop: at once")
+        XCTAssertEqual(UnderlayRule.candidates(guarded: [], tracker: t, layered: [], carried: []).urgent, [])
+    }
 }

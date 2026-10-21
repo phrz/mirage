@@ -1052,7 +1052,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// straddling the edge keeps its pixels (the viewer's own clip covers that sliver).
     private func cropOffDisplay(_ l: Layer, onScreen: PixelRect, now: UInt64) {
         l.needsCrop = false
-        guard !l.isDisplay, !unifiedView, l.announced else { return }
+        // Only for viewers that do not clip to the display themselves (no tunables: builds before 0d0651f). Blanked tiles come
+        // back only as fast as they are resent: on phrz's iPhone (which clips) Show Desktop left the returning Finder window
+        // full of holes, the desktop showing through behind its icons, its chrome and sidebar partly missing.
+        guard request?.tunablesVersion == nil, !l.isDisplay, !unifiedView, l.announced else { return }
         var off = Set<Int>()
         for i in 0..<l.tracker.tileCount where l.tracker.rect(of: i).intersection(onScreen).isEmpty { off.insert(i) }
         let newlyOff = off.subtracting(l.blankedOffDisplay).sorted()
@@ -2220,15 +2223,21 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var lastUnderlayRefill: UInt64 = 0
     private var statUnderlayTiles = 0, statUnderlayBytes = 0
     private func underlayStep(_ d: Layer, now: UInt64) {
-        // Guarded tiles no layer covers any more (a window just left them: Show Desktop, a move) or that may hold window
-        // pixels (taint) are what the viewer shows right now: they take the underlay at once, on 40 % of the tile budget. The
-        // rest (under windows) waits for 2 s without motion, on 10 %. (Show Desktop on mac-daddy: a window drawn from the
-        // desktop picture left its pixels in the viewer's desktop canvas, and the guard held its old place for ~2 s.)
-        let covering = Array(displayGuard.current.values)
-        let urgent = d.occludedTiles.filter { i in
-            let r = d.tracker.rect(of: i)
-            return d.taint.tainted.contains(i) || !covering.contains { $0.intersects(r) }
-        }
+        // Guarded tiles no window covers any more (a window just left them: Show Desktop, a move) are what the viewer shows
+        // right now: they take the underlay at once, on 40 % of the tile budget. Tiles under layers wait for 2 s without
+        // motion, on 10 %. Nothing goes where any window in the current list is, a layer or a window the desktop picture
+        // carries (UnderlayRule: 5440d44 filled a desktop-carried Finder window with wallpaper on phrz's iPhone).
+        let list = currentList()
+        let displayArea = d.width * d.height
+        let layeredFrames = list.filter(\.isLayered).map(\.frame)
+        let carried = list.filter { w in
+            !w.isLayered && w.windowLevel >= 0 && w.app != "Dock" && w.frame.area * 10 < displayArea * 9 && (w.windowLevel == 0 || Self.cutoutSafe(w, displayArea: displayArea))
+        }.map(\.frame)
+        let (urgent, underLayers) = UnderlayRule.candidates(guarded: d.occludedTiles, tracker: d.tracker, layered: layeredFrames, carried: carried)
+        // A window back over tiles that took the underlay: they owe that window's pixels again, as a direct change (sent as
+        // soon as the guard lets them go).
+        let recovered = underlaySent.keys.filter { i in let r = d.tracker.rect(of: i); return carried.contains { $0.intersects(r) } }
+        if !recovered.isEmpty { for i in recovered { underlaySent[i] = nil }; d.tracker.markDirect(recovered, now: now) }
         let idle = Clock.elapsed(since: lastMotionNanos, now: now) > 2_000_000_000
         let rate = Double(lastBudget.tileKbps * 1000 / 8) * (urgent.isEmpty ? 0.10 : 0.40)
         underlayTokens = min(rate * 0.5, underlayTokens + Double(now &- (lastUnderlayRefill == 0 ? now : lastUnderlayRefill)) / 1e9 * rate)
@@ -2255,7 +2264,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         var take: [Int] = [], hashes: [Int: UInt64] = [:]
         var est = 0.0
-        let candidates = urgent.sorted() + (idle ? d.occludedTiles.subtracting(urgent).filter { !d.tracker.isCrisp($0) }.sorted() : [])
+        let candidates = urgent + (idle ? underLayers.filter { !d.tracker.isCrisp($0) } : [])
         for i in candidates {
             let rr = region(d.tracker.rect(of: i))
             let h = hash(rr)
