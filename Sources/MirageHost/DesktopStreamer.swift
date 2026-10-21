@@ -1982,7 +1982,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // Tiles nobody can see (a window layer covers that part of the display, another window covers that part
             // of this one) are left out of the block; they are sent when uncovered.
             let all = l.tracker.tiles(covering: [rect])
-            let visible = all.filter { !l.occludedTiles.contains($0) }
+            var visible = all.filter { !l.occludedTiles.contains($0) }
+            // Compositor model: the desktop under a shown window is left for per-tile refinement after the fresh picture. The
+            // plan is made before any window shows (nothing is under a window then), and those blocks went out inside the
+            // fresh picture: 2.2 MB of hidden desktop on mac-daddy, the full picture at 56 s instead of 30.
+            if compositor && l.isDisplay { visible.removeAll { l.underLayer.contains($0) } }
             l.fresh = .blocks(remaining: remaining)
             guard !visible.isEmpty else { return }
             let rects = visible.count == all.count ? [rect] : l.tracker.mergedRects(visible)
