@@ -93,6 +93,8 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     /// `others`: every window ScreenCaptureKit lists except this one and its child windows.
+    /// Window capture starts in progress (all instances).
+    static let starting = AtomicCounter()
     func start(excluding others: [SCWindow], onFrame: @escaping (CVPixelBuffer, UInt64) -> Void) async throws {
         self.onFrame = onFrame
         let (f, cfg, ids, k): (SCContentFilter, SCStreamConfiguration, Set<UInt32>, ConfigKey) = queue.sync {
@@ -101,7 +103,12 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
         let s = SCStream(filter: f, configuration: cfg, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+        // Timing (M-FIVE): window captures' first frames came ~0.75 s apart; how long each start takes, and how many overlap.
+        let t0 = Clock.nowNanos()
+        let inFlight = Self.starting.add(1)
+        defer { _ = Self.starting.add(-1) }
         try await s.startCapture()
+        hostLog("capture \(windowID): startCapture took \(Clock.elapsed(since: t0, now: Clock.nowNanos()) / 1_000_000) ms (\(inFlight) starting at once)")
         queue.sync { stream = s; appliedFilter = ids; appliedConfig = k; needFull = true; apply() }
     }
 
@@ -231,4 +238,13 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) { onStop?(error) }
+}
+
+
+/// A small thread-safe counter.
+final class AtomicCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    /// Adds `d` and returns the new value.
+    func add(_ d: Int) -> Int { lock.lock(); defer { lock.unlock() }; value += d; return value }
 }
