@@ -21,6 +21,19 @@ final class LayerWireTests: XCTestCase {
         XCTAssertEqual(f.layerID, 4242)
     }
 
+    /// Desktop underlay tiles carry the window-free bit (flags bit 2); the refinement and staged bits are unchanged.
+    func testWindowFreeTilesRoundTrip() throws {
+        let h = TileMessage.Header(captureSeq: 5, inputSeq: 6, windowID: 0, captureNanos: 7)
+        let tile = TileMessage.Tile(rect: PixelRect(x: 64, y: 128, width: 128, height: 64), format: .lossy, data: Data([9, 9, 9]))
+        let under = TileMessage.tiles(.init(header: h, refinement: true, windowFree: true, tiles: [tile]))
+        let plain = TileMessage.tiles(.init(header: h, refinement: true, staged: true, tiles: [tile]))
+        var p = TileStreamParser()
+        let got = try p.feed(under.encode(msgSeq: 1) + plain.encode(msgSeq: 2))
+        XCTAssertEqual(got.map(\.message), [under, plain])
+        if case .tiles(let t) = got[0].message { XCTAssertTrue(t.windowFree); XCTAssertTrue(t.refinement); XCTAssertFalse(t.staged) }
+        if case .tiles(let t) = got[1].message { XCTAssertFalse(t.windowFree); XCTAssertTrue(t.staged) }
+    }
+
     func testWindowListAndCommandRoundTrip() throws {
         let w = ControlMessage.WindowInfo(id: 1, pid: 2, title: "t", frame: PixelRect(x: -10, y: 20, width: 300, height: 200), z: 0, level: 0, layered: true, app: "Bench")
         let list = ControlMessage.WindowList(captureSeq: 3, windows: [w], inputSeq: 77)

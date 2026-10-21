@@ -111,9 +111,16 @@ TestFlight, and once the app ships, every viewer change is an app update for eve
   to its key's bounds and ignores keys it does not know. The host sends its defaults overridden by `tunables.json` in its
   store directory (`{"pinchRatio": 0.2}`), read at every stream start, so a retune needs neither an app update nor a host
   restart. New viewer behaviour that has a number in it gets a key (`Tunables.Key`), not a literal.
-- **Exceptions are written down.** The scene renderer clips every layer to the display rect in the viewer (bf7e8a8). The host
-  cannot crop a window layer to the display without re-announcing it at a new size at every crossing of a display edge (a
-  whole layer resend per frame of a Show Desktop slide), and the display rect is host-given already (the stream size).
+- **Exceptions are written down.** The scene renderer clips every layer to the display rect in the viewer (bf7e8a8), as a
+  safety net. The host crops too: a window layer's tiles wholly off the display are sent transparent once (one small solid
+  message) and stay pending until they come back on screen, so viewers without the clip show nothing outside the display
+  either; only a tile straddling the edge keeps its pixels there (cropping it would resend it at every crossing).
+- **The desktop underlay is the host's.** Under a layered window whose exclusion from the display stream is not verified,
+  the desktop cannot be read from the display stream, and the viewer held nothing there: Show Desktop revealed a flat fill.
+  The host keeps a second capture of only the desktop-level windows (wallpaper, desktop icons and widgets; half size, one
+  frame every 2 s), window-free by construction, and when nothing has moved for 2 s it sends those tiles (lossy, on 10 % of
+  the tile budget) with the window-free flag. The viewer's guard lets them through; they stay pending on the host, so the
+  real desktop follows once a window uncovers them.
 
 ### 3.1 Transport and security
 

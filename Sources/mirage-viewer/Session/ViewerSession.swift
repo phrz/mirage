@@ -708,7 +708,8 @@ final class ViewerSession: @unchecked Sendable {
         case .tiles(let t):
             guard let v = layerView(t.header.windowID) else { sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: t.header.captureNanos, receivedNanos: now, bytes: bytes))); return }
             var candidates = t.tiles
-            if v.id == 0 {
+            // Window-free desktop pixels (the host's desktop-only capture) pass the guard: nothing of a window can be in them.
+            if v.id == 0, !t.windowFree {
                 let n = candidates.count
                 let dropped = candidates.filter { !viewerGuard.allows($0.rect, now: now) }
                 candidates.removeAll { !viewerGuard.allows($0.rect, now: now) }

@@ -423,6 +423,26 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         sendTileMessage(.reset(layer: 0, width: w, height: h), captureNanos: now)
         beginFreshPicture(trigger)
         if let s = windows?.sample(captureSeq: captureSeq, now: now, force: true) { reconcileLayers(s.sample, now: now) }
+        ensureUnderlay(t)
+    }
+
+    /// The desktop-only capture (DesktopUnderlay) for this display, at half the stream size; restarted with the stream.
+    private var underlay: DesktopUnderlay?
+    private var underlayFor: (display: CGDirectDisplayID, w: Int, h: Int)?
+    private func ensureUnderlay(_ t: ScreenCapturer.Target) {
+        let w = t.pixelWidth / 2, h = t.pixelHeight / 2
+        if underlay != nil, let f = underlayFor, f.display == t.display.displayID, f.w == w, f.h == h { return }
+        let old = underlay
+        let u = DesktopUnderlay(log: log)
+        underlay = u; underlayFor = (t.display.displayID, w, h); underlaySent = [:]
+        let display = t.display
+        let desk = catalog.all.filter { $0.windowLayer < 0 && $0.frame.intersects(display.frame) }
+        let log = self.log
+        Task {
+            if let old { await Self.bounded("desktop underlay", log: log) { await old.stop() } }
+            do { try await u.start(display: display, desktopWindows: desk, width: w, height: h); log("desktop underlay: \(desk.count) desktop-level windows at \(w)x\(h), every 2 s") }
+            catch { log("desktop underlay unavailable: \(error)") }
+        }
     }
 
     private func rebuildEncoder(_ l: Layer) throws {
@@ -665,6 +685,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let now = Clock.nowNanos()
                 let cap = self.capturer
                 let caps = self.layers.values.compactMap { l in let w = l.capturer; l.capturer = nil; return w }
+                let und = self.underlay; self.underlay = nil; self.underlayFor = nil
+                if let und { Task { await Self.bounded("desktop underlay", log: self.log) { await und.stop() } } }
                 self.cursor?.stop(); self.cursor = nil
                 self.statTimer?.cancel(); self.statTimer = nil
                 self.refineTimer?.cancel(); self.refineTimer = nil
@@ -760,6 +782,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.output = output
                     self.setLive(true)
                     self.capturer = cap
+                    self.ensureUnderlay(t)
                     self.lastExcludedIDs = Set(excluded.map(\.windowID))
                     let old = self.target
                     self.target = t
@@ -804,6 +827,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             queue.async {
                 let cap = self.capturer
                 let caps = self.layers.values.compactMap { l in let w = l.capturer; l.capturer = nil; return w }
+                let und = self.underlay; self.underlay = nil; self.underlayFor = nil
+                if let und { Task { await Self.bounded("desktop underlay", log: self.log) { await und.stop() } } }
                 self.cursor?.stop(); self.cursor = nil
                 self.statTimer?.cancel(); self.statTimer = nil
                 self.refineTimer?.cancel(); self.refineTimer = nil
@@ -924,6 +949,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let rd = r.offset(l.frame.x, l.frame.y)
                 if covering.contains(where: { $0.intersection(rd) == rd }) { occluded.insert(i) }
             }
+            l.onScreenLocal = onScreen
+            cropOffDisplay(l, onScreen: onScreen, now: now)
             let exposedNow = l.occludedTiles.subtracting(occluded)
             if !exposedNow.isEmpty {
                 let n = l.tracker.expedite(in: l.bounds, now: now, only: exposedNow)
@@ -1007,6 +1034,24 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             do { try await cap.start(excluding: others) { [weak self] pb, nanos in self?.queue.async { self?.captured(pb, nanos, dirtyRects: [], layerID: l.id) } } }
             catch { self?.queue.async { if l.capturer === cap { l.capturer = nil }; self?.log("layer \(l.id) capture failed: \(error)") } }
         }
+    }
+
+    /// Host-side crop (DESIGN §3.0): a window layer's tiles wholly off the display are sent transparent once (one small solid
+    /// message), so every viewer, builds without the display clip included, shows nothing outside the display there. They
+    /// stay pending as direct changes; the uncover path resends them when they come back on screen. Tile-aligned: a tile
+    /// straddling the edge keeps its pixels (the viewer's own clip covers that sliver).
+    private func cropOffDisplay(_ l: Layer, onScreen: PixelRect, now: UInt64) {
+        l.needsCrop = false
+        guard !l.isDisplay, !unifiedView, l.announced else { return }
+        var off = Set<Int>()
+        for i in 0..<l.tracker.tileCount where l.tracker.rect(of: i).intersection(onScreen).isEmpty { off.insert(i) }
+        let newlyOff = off.subtracting(l.blankedOffDisplay).sorted()
+        l.blankedOffDisplay = off
+        guard !newlyOff.isEmpty else { return }
+        let clear = l.tracker.mergedRects(newlyOff).map { TileMessage.Tile(rect: $0, format: .solid, data: Data([0, 0, 0, 0])) }
+        sendTileMessage(.tiles(.init(header: header(layer: l.id, nanos: now), refinement: false, tiles: clear)), captureNanos: now)
+        l.tracker.defer(newlyOff, now: now, delayNanos: 3_600_000_000_000, direct: true)
+        if debugLayers { log("layer \(l.id): \(newlyOff.count) tiles off the display sent transparent") }
     }
 
     /// Layers in the order refinement serves them (DESIGN §3.3): the window under the pointer, the focused (frontmost normal-level) window, then
@@ -1606,6 +1651,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     return
                 }
                 self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: true, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: block, layer: layerID) }
+                // The level covers the whole layer, off-display part included: cropped again on the next tick (after it on the stream).
+                if let l = self.layers[layerID] { l.blankedOffDisplay = []; l.needsCrop = true }
                 self.tileTokens -= Double(data.count) - targetBytes
                 self.statTileBytes += data.count; self.statTileRects += 1; self.secTileBytes += data.count
                 if let l = self.layers[layerID] { if backdrop { l.account.backdrop += data.count } else { l.account.still += data.count } }
@@ -1950,6 +1997,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let estimate = Int(targetBytes)
         let layerID = layer.id
         let block = pacer.start(layer: layer.id, estimate: estimate, now: nanos)
+        layer.blankedOffDisplay = []; layer.needsCrop = true   // the still covers the whole layer: cropped again next tick
         tileQueue.async { [weak self] in
             guard let self else { return }
             let data = d.withUnsafeBytes { TileCodec.encodeLossy(base: $0.baseAddress!, width: rect.width, height: rect.height, stride: rect.width * 4, outWidth: ow, outHeight: oh, quality: 60) }
@@ -2038,7 +2086,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // window (field run: a window's last uncovered column waited 14 s behind the desktop's blocks).
         // The upgrade of uncovered q75 underlay runs on its own 15 % budget alongside the rest (not only when all
         // else is idle: a desktop with an animating app would starve it).
-        if let d = display { upgradeStep(d, now: now) }
+        if let d = display { upgradeStep(d, now: now); underlayStep(d, now: now) }
         let windowLayers = ordered.filter { !$0.isDisplay }
         if refineStep(windowLayers, now: now) { return }
         if let d = display { _ = refineStep([d], now: now) }
@@ -2122,6 +2170,76 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         d.tracker.sent(lossless: take, now: now)
         d.upgradePending.subtract(take)
         d.account.upgrade += bytes
+    }
+
+    /// The desktop under windows the viewer has never seen, sent ahead from the desktop-only capture (DesktopUnderlay): lossy,
+    /// at half size, window-free (the viewer's guard lets it through), on its own 10 % of the tile budget and only when nothing
+    /// moved for 2 s. Desktop tiles the host guards (a layered window is or just was there) and the viewer does not hold crisp
+    /// are the candidates; a tile is sent again only when its picture in the underlay changed. The tiles stay pending, so the
+    /// real desktop follows when a window uncovers them; until then Show Desktop reveals this instead of a flat fill.
+    private var underlaySent: [Int: UInt64] = [:]
+    private var underlayTokens = 0.0
+    private var lastUnderlayRefill: UInt64 = 0
+    private var statUnderlayTiles = 0, statUnderlayBytes = 0
+    private func underlayStep(_ d: Layer, now: UInt64) {
+        let rate = Double(lastBudget.tileKbps * 1000 / 8) * 0.10
+        underlayTokens = min(rate * 0.5, underlayTokens + Double(now &- (lastUnderlayRefill == 0 ? now : lastUnderlayRefill)) / 1e9 * rate)
+        lastUnderlayRefill = now
+        // Viewers of this build or later only (they announce tunables, and let window-free tiles past their guard).
+        guard request?.tunablesVersion != nil, underlayTokens > 0, !unifiedView, Clock.elapsed(since: lastMotionNanos, now: now) > 2_000_000_000,
+              !d.occludedTiles.isEmpty, let (pb, _) = underlay?.frame else { return }
+        CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        let u = frameView(pb)
+        let sx = Double(u.width) / Double(d.width), sy = Double(u.height) / Double(d.height)
+        guard sx > 0.2, sy > 0.2 else { return }
+        func region(_ r: PixelRect) -> PixelRect {
+            let x0 = Int(Double(r.x) * sx), y0 = Int(Double(r.y) * sy)
+            let x1 = min(u.width, Int((Double(r.maxX) * sx).rounded(.up))), y1 = min(u.height, Int((Double(r.maxY) * sy).rounded(.up)))
+            return PixelRect(x: x0, y: y0, width: max(1, x1 - x0), height: max(1, y1 - y0))
+        }
+        func hash(_ r: PixelRect) -> UInt64 {
+            var h: UInt64 = 1469598103934665603
+            for y in Swift.stride(from: r.y, to: r.maxY, by: 2) {
+                let row = u.base.advanced(by: y * u.stride).assumingMemoryBound(to: UInt32.self)
+                for x in Swift.stride(from: r.x, to: r.maxX, by: 2) { h = (h ^ UInt64(row[x] & 0xF0F0F0)) &* 1099511628211 }
+            }
+            return h
+        }
+        var take: [Int] = [], hashes: [Int: UInt64] = [:]
+        var est = 0.0
+        for i in d.occludedTiles.sorted() where !d.tracker.isCrisp(i) {
+            let rr = region(d.tracker.rect(of: i))
+            let h = hash(rr)
+            guard underlaySent[i] != h else { continue }
+            take.append(i); hashes[i] = h; est += Double(rr.area) * 0.15
+            if est >= underlayTokens || take.count >= 48 { break }
+        }
+        guard !take.isEmpty else { return }
+        var jobs: [(PixelRect, PixelRect, Data)] = []
+        for r in d.tracker.mergedRects(take) {
+            let rr = region(r)
+            var data = Data(count: rr.width * rr.height * 4)
+            data.withUnsafeMutableBytes { dst in for y in 0..<rr.height { memcpy(dst.baseAddress!.advanced(by: y * rr.width * 4), u.base.advanced(by: (rr.y + y) * u.stride + rr.x * 4), rr.width * 4) } }
+            jobs.append((r, rr, data))
+        }
+        underlayTokens -= est
+        for (i, h) in hashes { underlaySent[i] = h }
+        let hdr = header(layer: 0, nanos: now)
+        tileQueue.async { [weak self] in
+            guard let self else { return }
+            let tiles: [TileMessage.Tile] = jobs.compactMap { r, rr, data in
+                data.withUnsafeBytes { p in TileCodec.encodeLossy(base: p.baseAddress!, width: rr.width, height: rr.height, stride: rr.width * 4, outWidth: rr.width, outHeight: rr.height, quality: 70, alpha: false) }
+                    .map { TileMessage.Tile(rect: r, format: .lossy, data: $0) }
+            }
+            guard !tiles.isEmpty else { return }
+            let bytes = tiles.reduce(0) { $0 + $1.data.count }
+            self.send(tile: .tiles(.init(header: hdr, refinement: true, windowFree: true, tiles: tiles)), captureNanos: now, fast: false, refinementBytes: bytes, layer: 0)
+            self.queue.async {
+                self.underlayTokens -= Double(bytes) - est
+                self.statUnderlayTiles += take.count; self.statUnderlayBytes += bytes
+                self.layers[0]?.account.underlay += bytes
+            }
+        }
     }
 
     /// Changed pixels the rate limit held back (a tile changed again within 80 ms) are a direct change, not refinement:
@@ -2343,6 +2461,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if recovery { l.lastRecoveryWasLTR = l.wantLTRRefresh && !l.keyframeArmed }
         l.keyframeArmed = false; l.wantLTRRefresh = false
 
+        // Host-side crop: a window layer's tiles off the display stay transparent on the viewer (cropOffDisplay).
+        if !l.isDisplay, !l.blankedOffDisplay.isEmpty { tiles.subtract(l.blankedOffDisplay) }
         // Build the mask over the region's tile grid.
         let grid = TileMask.grid(for: region)
         var mask = TileMask(cols: grid.cols, rows: grid.rows)
@@ -2559,6 +2679,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 // An encoder idle for 10 s is released (another layer may want one).
                 if !l.isDisplay, l.encoder != nil, !l.encoding, Clock.elapsed(since: l.encoderUseNanos, now: now) > 10_000_000_000, !l.hasVideoPending { l.encoder = nil; l.scaled = nil; l.transfer = nil; l.canvas = nil }
             }
+            for l in self.layers.values where l.needsCrop { if let r = l.onScreenLocal { self.cropOffDisplay(l, onScreen: r, now: now) } }
             self.updateDisplayHidden(now: now)
             self.scheduleTaintedResends(now: now)
             self.refine(now: now)

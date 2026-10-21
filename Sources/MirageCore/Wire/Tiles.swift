@@ -85,8 +85,13 @@ public enum TileMessage: Equatable, Sendable {
         /// Part of a layer's next presentation level: the client writes them off-screen and shows them only on
         /// the layer's `commit` (a lossless pass assembled whole, never block by block).
         public var staged: Bool
+        /// Desktop pixels from the host's desktop-only capture (DesktopUnderlay): no window can be in them, so the viewer's
+        /// guard lets them through under layered windows. Older viewers ignore the bit (and their guard drops the tiles).
+        public var windowFree: Bool
         public var tiles: [Tile]
-        public init(header: Header, refinement: Bool, staged: Bool = false, tiles: [Tile]) { self.header = header; self.refinement = refinement; self.staged = staged; self.tiles = tiles }
+        public init(header: Header, refinement: Bool, staged: Bool = false, windowFree: Bool = false, tiles: [Tile]) {
+            self.header = header; self.refinement = refinement; self.staged = staged; self.windowFree = windowFree; self.tiles = tiles
+        }
         public var bytes: Int { tiles.reduce(0) { $0 + $1.data.count } }
     }
     public struct CopyRect: Equatable, Sendable {
@@ -107,7 +112,7 @@ public enum TileMessage: Equatable, Sendable {
         case .tiles(let t):
             kind = .tiles
             t.header.write(to: &body)
-            body.append((t.refinement ? 1 : 0) | (t.staged ? 2 : 0))
+            body.append((t.refinement ? 1 : 0) | (t.staged ? 2 : 0) | (t.windowFree ? 4 : 0))
             body.appendBE(UInt16(t.tiles.count))
             for tile in t.tiles {
                 tile.rect.write(to: &body)
@@ -144,7 +149,7 @@ public enum TileMessage: Equatable, Sendable {
         case .tiles:
             guard r.remaining >= 24 + 1 + 2, let h = Header.read(&r) else { return nil }
             let flags = r.readByte()
-            let refinement = flags & 1 != 0, staged = flags & 2 != 0
+            let refinement = flags & 1 != 0, staged = flags & 2 != 0, windowFree = flags & 4 != 0
             let n: UInt16 = r.read()
             var tiles: [Tile] = []
             tiles.reserveCapacity(Int(n))
@@ -162,7 +167,7 @@ public enum TileMessage: Equatable, Sendable {
                 }
                 r.offset += Int(len)
             }
-            return .tiles(Tiles(header: h, refinement: refinement, staged: staged, tiles: tiles))
+            return .tiles(Tiles(header: h, refinement: refinement, staged: staged, windowFree: windowFree, tiles: tiles))
         case .copyRect:
             guard r.remaining >= 24 + 8 + 4, let h = Header.read(&r), let rect = PixelRect.read(&r) else { return nil }
             let dx: Int16 = r.read(), dy: Int16 = r.read()

@@ -83,6 +83,11 @@ final class Layer {
     /// Drops the blank captures Show Desktop produces (WindowBlanking).
     var blanking = WindowBlanking()
     var blankDropped = 0
+    /// Tiles wholly off the display that the viewer was sent transparent (host-side crop, DESIGN §3.0).
+    var blankedOffDisplay = Set<Int>()
+    /// The layer's on-display part in its own coordinates (from the last occlusion pass) and whether to crop again.
+    var onScreenLocal: PixelRect?
+    var needsCrop = false
     var backdropDirty = false
     var backdropHeldNanos: UInt64 = 0
     /// Window picture audit: where its slow sweep continues.
