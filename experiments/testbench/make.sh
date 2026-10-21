@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")/../.."
 APP=.build/MirageTestBench.app
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS"
-swiftc -O -framework AppKit -o "$APP/Contents/MacOS/MirageTestBench" experiments/testbench/testbench.swift
+swiftc -O -parse-as-library -framework AppKit -o "$APP/Contents/MacOS/MirageTestBench" experiments/testbench/testbench.swift experiments/testbench/scenes.swift
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

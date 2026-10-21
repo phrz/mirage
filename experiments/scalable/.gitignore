@@ -1,0 +1,3 @@
+.build/
+corpus/out/
+results/tiles.csv

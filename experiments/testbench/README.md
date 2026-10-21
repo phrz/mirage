@@ -9,3 +9,10 @@ messages and local predictions the GUI would send: 6 keys/s into the text, 30 Hz
 of 30 pt, title-bar drags of 6×3 px per 16 ms. The JSON gets `watchedKbps` (lossless bytes that
 landed inside that window), `crispMs` per burst (last lossless tile touching the window after
 the burst, provided no video touched it later), copy-rect and prediction counters.
+
+`--scene NAME [--dark] [--seed N] [--seconds S]` shows one of the synthetic scenes in `scenes.swift` (text,
+terminal, vibrancy, controls, mixed, photos, code, chat, documents, spreadsheet, dashboard, icons, gradients,
+noise-photo, wallpaper) in a still 1100×750 window, ordered front without activating, that quits itself after S
+seconds (default 30). Vibrancy blends within the window over the bench's own gradients, so nothing behind the window
+is ever sampled. `experiments/scalable/corpus/capture.sh` captures these windows (and only them) as a codec corpus;
+`experiments/scalable/corpus/render.swift` draws the same scenes offscreen.

@@ -103,6 +103,23 @@ final class App: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ n: Notification) {
         installMenus()
         let screen = NSScreen.screens.first!
+        // `--scene NAME [--dark] [--seed N] [--seconds S]`: a still 1100×750 window showing one of the synthetic
+        // scenes in scenes.swift (codec corpus for experiments/scalable), ordered front without activating; it
+        // quits itself after S seconds (default 30).
+        if let i = CommandLine.arguments.firstIndex(of: "--scene"), i + 1 < CommandLine.arguments.count {
+            let name = CommandLine.arguments[i + 1]
+            func arg(_ k: String) -> Int? { CommandLine.arguments.firstIndex(of: k).flatMap { Int(CommandLine.arguments[$0 + 1]) } }
+            NSApp.appearance = NSAppearance(named: CommandLine.arguments.contains("--dark") ? .darkAqua : .aqua)
+            let size = NSSize(width: 1100, height: 750)
+            let w = NSWindow(contentRect: NSRect(origin: NSPoint(x: screen.frame.minX + 200, y: screen.frame.maxY - 120 - size.height), size: size),
+                             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            w.title = "Mirage Test Bench — \(name) (codec corpus, started by Claude, closes itself)"
+            w.contentView = SceneFactory.make(name, size: size, seed: UInt64(arg("--seed") ?? 1)) ?? NSView(frame: NSRect(origin: .zero, size: size))
+            w.orderFrontRegardless()
+            window = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(arg("--seconds") ?? 30)) { NSApp.terminate(nil) }
+            return
+        }
         // `--overlay`: a full-screen, fully transparent, click-through window at the floating level, like the
         // overlays some utilities keep on screen (the M3.1 field regression: a viewer that drew such a window as
         // a cut-out of the display layer painted the desktop over every window layer).
@@ -312,7 +329,12 @@ final class MotionView: NSView {
         ("frame \(t)" as NSString).draw(at: NSPoint(x: 16, y: bounds.height - 48), withAttributes: attrs)
     }
 }
-let app = NSApplication.shared
-app.setActivationPolicy(.regular)
-let d = App(); app.delegate = d
-app.run()
+@main enum Main {
+    static let delegate = App()
+    static func main() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.regular)
+        app.delegate = delegate
+        app.run()
+    }
+}
