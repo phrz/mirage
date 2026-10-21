@@ -1231,6 +1231,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if pendingFallback.remove(l.id) != nil { l.forceFullDiff = true }
         captured(pb, nanos, dirtyRects: [], layerID: l.id)
     }
+    /// Frames of the windows in front of `id` that overlap it (its own child windows, and desktop-sized transparent windows
+    /// such as the Dock's, excepted), in stream pixels.
+    private func fallbackCovers(of id: UInt32, frame: PixelRect) -> [PixelRect] {
+        guard let s = windows?.current, let i = s.windows.firstIndex(where: { $0.id == id }) else { return [] }
+        let own = Set(s.children[id] ?? [])
+        let displayArea = display?.bounds.area ?? Int.max
+        return s.windows[..<i].filter { !own.contains($0.id) && $0.windowLevel >= 0 && $0.frame.area * 10 < displayArea * 9 && $0.frame.intersects(frame) }.map(\.frame)
+    }
     private func fallbackFrame(_ pb: CVPixelBuffer, _ nanos: UInt64) {
         fallbackLayers = fallbackLayers.filter { layers[$0] != nil }
         pendingFallback = pendingFallback.filter { layers[$0] != nil }
@@ -1264,6 +1272,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if !r.isEmpty {
                 for y in 0..<r.height {
                     memcpy(dst.advanced(by: (r.y - l.frame.y + y) * ds + (r.x - l.frame.x) * 4), src.base.advanced(by: (r.y + y) * src.stride + r.x * 4), r.width * 4)
+                }
+                // Where a window in front covers this one, the composited screen shows that window, not this one: those
+                // pixels are left transparent. Kept, they were the front window's picture inside this layer, a ghost of
+                // it once it moved away (a fallback-cut window's corner on the desktop during Show Desktop, mac-daddy).
+                for f in fallbackCovers(of: id, frame: l.frame) {
+                    let c = f.intersection(r)
+                    guard !c.isEmpty else { continue }
+                    for y in 0..<c.height { memset(dst.advanced(by: (c.y - l.frame.y + y) * ds + (c.x - l.frame.x) * 4), 0, c.width * 4) }
                 }
             }
             CVPixelBufferUnlockBaseAddress(out, [])
