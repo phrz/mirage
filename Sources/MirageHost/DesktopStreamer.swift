@@ -2351,7 +2351,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // In flight: at most twice the bandwidth-delay product the acks show (RateController). A still screen gives the
         // controller no video delay to back off on; refinement then queued megabytes in QUIC's buffers on phrz's 4G, acks
         // came seconds late, and parts of windows stayed lossy. Changed pixels above are not held by this.
-        if let rc, tileInflightForCap >= rc.inflightCapBytes { return }
+        if let rc, tileInflightForCap >= rc.inflightCapBytes { self.rc?.noteCapped(now: now); return }
         let ordered = layersByPriority()
         // Fresh pictures: the display's ladder gates everything until its base is acked; window stills
         // and lossless blocks go one at a time, locus layer first.

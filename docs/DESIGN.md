@@ -750,7 +750,8 @@ refinement budget. What the host counts as delivered must be what the viewer sho
   Every acked byte counts (tile messages, blocks, video frames): bytes acked over max(1 s, 3 × srtt), windowed max over
   10 s (max in startup, 75th percentile after: retransmissions land in clumps), on the viewer's receive times (acks
   return over the uplink in clumps); samples taken while the host had nothing to send (`noteIdle`) only raise it. The target stays under 2 × that in
-  startup (until three windows bring no 25 % growth, or three with nothing to send) and 1.25 × after, and refinement keeps tile-stream bytes in flight
+  startup (until three windows held by the in-flight cap bring no 25 % growth, or three with nothing to send) and
+  1.25 × after, and refinement keeps tile-stream bytes in flight
   under 2 × the bandwidth-delay product (delivery rate × min RTT; 3 × in startup; at least 32 KB). Changed pixels are not held by the
   in-flight cap. Shaped-link tests (Fast 4G, Slow 4G, Japan bus; still screen, endless and 3 MB backlogs): the target
   settles at 1.2–1.3 × the link, the link stays busy, acks stay under 2 s, the backlog drains. Blocks are at most half

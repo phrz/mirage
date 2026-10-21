@@ -417,6 +417,9 @@ public struct RateController {
     }
 
     private var lastIdleNanos: UInt64 = 0
+    private var lastCappedNanos: UInt64 = 0
+    /// The host held stream data back because `inflightCapBytes` was reached.
+    public mutating func noteCapped(now: UInt64) { lastCappedNanos = now }
     /// The host had budget and room in flight but nothing to send (no backlog, no changes): acks soon after say what the
     /// host sent, not what the link can carry.
     public mutating func noteIdle(now: UInt64) { lastIdleNanos = now }
@@ -456,11 +459,15 @@ public struct RateController {
             if startupRoundStart == 0 { startupRoundStart = now }
             if now &- startupRoundStart >= w {
                 startupRoundStart = now
+                // A round counts as flat only if the in-flight cap held sending back during it (`noteCapped`): the link
+                // had all it could take and did not deliver more. The host holding back for its own reasons (the fresh
+                // picture's ladder waiting for acks) counted as flat and ended startup at 1.1 Mbps of Fast 4G's 8.1.
+                let capped = lastCappedNanos > 0 && now &- lastCappedNanos < w
                 if Double(deliveryKbps) >= startupBestKbps * 1.25 { startupBestKbps = Double(deliveryKbps); startupFlatRounds = 0; startupIdleRounds = 0 }
-                else if !appLimited { startupFlatRounds += 1; if startupFlatRounds >= 3 { inStartup = false } }
+                else if capped { startupFlatRounds += 1; if startupFlatRounds >= 3 { inStartup = false } }
                 // Nothing left to send for three windows (the backlog drained): no growth will be seen; startup ends there
                 // too (it held the 2 × gain for good on a Fast 4G run, the target at 20 Mbps on an 8.1 Mbps link).
-                else { startupIdleRounds += 1; if startupIdleRounds >= 3 { inStartup = false } }
+                else if appLimited { startupIdleRounds += 1; if startupIdleRounds >= 3 { inStartup = false } }
             }
         }
         if now &- lastDeliveryAdjust >= 100_000_000 {

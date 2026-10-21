@@ -30,10 +30,13 @@ final class DeliveryRateTests: XCTestCase {
             // A trickle of small changes all the time (a clock, a caret), and the backlog as blocks.
             var sends: [Int] = []
             if t % 200 == 0 { sends.append(1200) }
-            while backlog > 0, tokens > 0, inflight < rc.inflightCapBytes {
+            // The host holding back for its own reasons for the first 3 s (the fresh picture's ladder waits for acks).
+            let held = t < 3000 && t % 1000 > 100
+            if backlog > 0, tokens > 0, !held, inflight >= rc.inflightCapBytes { rc.noteCapped(now: now) }
+            while backlog > 0, tokens > 0, !held, inflight < rc.inflightCapBytes {
                 let b = min(20_000, backlog); backlog -= b; tokens -= Double(b); inflight += b; sends.append(b)
             }
-            if backlog == 0, tokens > 0, inflight < rc.inflightCapBytes { rc.noteIdle(now: now) }
+            if backlog == 0, tokens > 0, !held, inflight < rc.inflightCapBytes { rc.noteIdle(now: now) }
             for b in sends {
                 if b == 1200 { inflight += b }
                 maxInflight = max(maxInflight, inflight)
