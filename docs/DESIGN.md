@@ -215,6 +215,54 @@ estimate, so a failure says where it came from.
 viewer → stage (2) per-layer only → parallel capture starts → the acceptance test, which then gates deploys. The tile cache
 (§3.0c) follows.
 
+### 3.0 TRUTH: Transactional presentation (design, phrz approved 2026-10-21; after M-FIVE's connect test passes)
+
+M-FIVE's barrier made the connect clean; everything after the connect still lands piece by piece: tiles of one capture
+arriving over several messages and presenting as they come, video and lossless tiles of the same moment on separate
+paths, a moved window and the desktop it uncovered on separate layers. The viewer is split into two layers with one rule
+each.
+
+**(a) Truth: only complete host frames.** Every update the host makes from one capture (tiles, copy-rects, a level, video,
+a layer's frame or stacking change) belongs to that capture, and the viewer presents a capture's changes to a layer all at
+once or not at all; until then the previous complete frame stays.
+- *Wire.* Every tile message, copy-rect and window-list delta already carries the capture sequence it belongs to. The host
+  ends each capture's output with `frameEnd(captureSeq, layers: [id], deps: [captureSeq])` on the tile stream: the layers it
+  touched and, for a window move, the desktop capture whose uncovered tiles must land with it (cross-layer). Old viewers would
+  fail to decode an unknown tile message, so it goes only to viewers that announce `transactionalVersion` (as with tunables).
+- *Viewer.* Updates are applied to a staging copy of each layer as they arrive (the existing staged levels, generalised from
+  refinement to every update); `frameEnd` presents all the named layers' staged changes in one composite, together with the
+  window list as of that capture (frames, stacking).
+- *Video.* A video frame belongs to its capture; it presents with that capture's tiles. A frame lost in the network (parity
+  and NACK failed) leaves the layer at its last complete frame until the next keyframe or recovery frame, as now, but its
+  capture's tiles wait for it no longer than the recovery deadline; the layer then skips to the next complete capture.
+- *Cost.* Truth is delayed by the time a capture's bytes take to arrive after its first byte (a capture's tail), never
+  more. That delay is measured (below) against today's piece-by-piece presentation.
+
+**(b) Prediction: instant, protected (the Mirage difference).** Window drags, scroll offsets, the cursor and typeahead apply
+at once as transforms over the last complete frame, never as pixels of their own: a drag moves the window's whole last
+picture, a scroll shifts the scroll view's last picture, typeahead draws glyphs over the last picture. When the host frame
+carrying the matching input sequence is presented, the prediction is reconciled with a small eased correction (≤ 120 ms),
+never a jump. Predictions move complete content only.
+
+**Revealed unknown areas** (a scroll's lead, a moved window's vacated area before the desktop there arrives, a pan into the
+unseen): phrz's "dreamy" fill, like iOS 27's photo outpainting. The known edge rows or columns are extended (clamp or
+mirror), blurred heavily (a dual Kawase blur, 4 passes at quarter resolution) with a slight soft vignette toward the unknown
+side, and crossfaded to the truth when it lands. It replaces today's edge-colour band. Metal, both viewers; budget ≤ 0.5 ms
+of GPU per frame on an iPhone 15.
+
+**Acceptance: the glitch metric** (connectcheck extended), over recorded viewer frames during scroll, drag, Show Desktop and
+typing scenarios on Fast 4G and Japan bus:
+- *Partial frames:* the viewer's recorder logs, per presented frame and layer, the capture sequences whose changes it shows;
+  a frame where a layer shows part of a capture's changes (some of its tiles, not all; or a window moved without the desktop
+  its move uncovered) is a glitch. Target: zero.
+- *Truth delay:* per capture, the time from its first byte's arrival to its presentation, compared with today's presentation
+  of the same scenario; reported as p50/p95.
+- *Prediction:* drag, scroll and typing feedback stay instant (presented in the frame after the input, as today).
+
+**Order of work.** frameEnd on the wire and per-layer staging for tiles and copy-rects → cross-layer moves (window frame and
+uncovered desktop) → video with its capture → predictions as transforms with eased reconciliation → the dreamy fill → the
+glitch metric, then gating deploys with it as with M-FIVE's connect test.
+
 ### 3.0b Placeholders: every window at once, then sharp (design, phrz 2026-10-21)
 
 phrz: on slow links windows must not pop in one at a time; a compact stand-in while they load. Today each window's first
