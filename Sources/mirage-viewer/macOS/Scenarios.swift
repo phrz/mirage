@@ -202,6 +202,15 @@ final class ScenarioRunner {
 
     func run() async {
         if name == "watch" { await watch(seconds: seconds); return }
+        if name == "closescratch" {
+            // Test cleanup: closes the MirageScratch Finder window through the host's window command (Accessibility).
+            for _ in 0..<100 where scratchWindow() == nil { try? await Task.sleep(for: .milliseconds(100)) }
+            guard let w = scratchWindow() else { session.log("scenario closescratch: no MirageScratch window"); return }
+            session.sendWindowCommand(.init(id: w.id, action: .close))
+            for _ in 0..<50 { try? await Task.sleep(for: .milliseconds(100)); if scratchWindow() == nil { break } }
+            session.log("scenario closescratch: \(scratchWindow() == nil ? "closed" : "still open")")
+            return
+        }
         if name == "passive" {
             // No input, no focus change: the chrome after the connect, then idle (the host's log shows idle refinement).
             for _ in 0..<100 where (session.compositor?.width ?? 0) == 0 { try? await Task.sleep(for: .milliseconds(100)) }
