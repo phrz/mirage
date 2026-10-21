@@ -24,7 +24,6 @@ public final class WarmPool: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var refreshing = false
     private var log: (@Sendable (String) -> Void)?
-    static let maxWindows = 12
 
     /// Starts the upkeep (every 3 s: the visible windows, the lock). Idempotent.
     public func start(log: @escaping @Sendable (String) -> Void) {
@@ -68,8 +67,10 @@ public final class WarmPool: @unchecked Sendable {
         return (type as String) == kIOPMACPowerKey
     }
 
+    private var tun = Tunables.defaults
     private func enabled() -> Bool {
-        Tunables.load(from: (try? Store())?.url("tunables.json")).tunables[.warmCapture] >= 0.5
+        tun = Tunables.load(from: (try? Store())?.url("tunables.json")).tunables
+        return tun[.warmCapture] >= 0.5
     }
 
     /// The pool's state, for the log line a stream start writes.
@@ -141,14 +142,16 @@ public final class WarmPool: @unchecked Sendable {
                     self.desk = nil; self.overlay = nil
                 }
                 let normals = content.windows.filter { $0.windowLayer == 0 && $0.isOnScreen && $0.frame.width >= 32 && $0.frame.height >= 32 && $0.frame.intersects(display.frame) }
-                let keep = Array(normals.sorted { $0.frame.width * $0.frame.height > $1.frame.width * $1.frame.height }.prefix(Self.maxWindows))
+                let keep = Array(normals.sorted { $0.frame.width * $0.frame.height > $1.frame.width * $1.frame.height }.prefix(Int(self.tun[.warmWindows])))
                 let keepIDs = Set(keep.map(\.windowID))
                 for (id, e) in self.entries where !keepIDs.contains(id) { self.entries[id] = nil; Task { await e.cap.stop() } }
                 // The display's native scale: the capture is taken there in any case (WindowCapturer.nativeScale), so no scaling.
                 let pxPerPoint = CGDisplayCopyDisplayMode(display.displayID).map { $0.width > 0 ? Double($0.pixelWidth) / Double($0.width) : 2 } ?? 2
                 for w in keep where self.entries[w.windowID] == nil {
-                    let width = Int((w.frame.width * pxPerPoint).rounded()), height = Int((w.frame.height * pxPerPoint).rounded())
+                    let k = self.tun[.warmScale]
+                    let width = Int((w.frame.width * pxPerPoint * k).rounded()), height = Int((w.frame.height * pxPerPoint * k).rounded())
                     let cap = WindowCapturer(window: w, display: display, pointFrame: w.frame, width: width, height: height, fps: 1, queue: self.queue)
+                    if k < 0.99 || self.tun[.warmIndependent] >= 0.5 { cap.warm = .init(independent: self.tun[.warmIndependent] >= 0.5) }
                     self.entries[w.windowID] = Entry(cap: cap, last: nil)
                     let others = content.windows.filter { $0.windowID != w.windowID }
                     let id = w.windowID

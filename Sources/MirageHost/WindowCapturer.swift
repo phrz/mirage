@@ -60,6 +60,7 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private var poolSize = (0, 0)
     /// Captured pixel size: native when the layer's scale differs from it, else the layer size.
     private var captureSize: (Int, Int) {
+        if warm != nil { return (width, height) }   // the warm pool's low-cost size, captured as is
         let nw = Int((pointFrame.width * nativeScale).rounded()), nh = Int((pointFrame.height * nativeScale).rounded())
         if abs(nw - width) <= 2 && abs(nh - height) <= 2 { return (width, height) }
         return (max(2, nw) & ~1, max(2, nh) & ~1)
@@ -89,8 +90,15 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     private func filter() -> SCContentFilter {
-        SCContentFilter(display: display, excludingWindows: Array(excluded.values))
+        if warm?.independent == true { return SCContentFilter(desktopIndependentWindow: window) }
+        return SCContentFilter(display: display, excludingWindows: Array(excluded.values))
     }
+
+    /// The warm pool's low-cost mode (WarmPool, tunables warmScale/warmIndependent): captured at the given (small) size as
+    /// is, optionally with the window-alone filter; adoption switches to the stream's own filter and size.
+    struct Warm { var independent: Bool }
+    var warm: Warm?
+    private var adoptedNanos: UInt64 = 0
 
     /// `others`: every window ScreenCaptureKit lists except this one and its child windows.
     /// Window capture starts in progress (all instances).
@@ -126,7 +134,10 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     /// On `queue`: a running capture changes hands (the warm pool's, taken over by a streamer): frames go to `onFrame` now.
-    func adopt(onFrame: @escaping (CVPixelBuffer, UInt64) -> Void) { self.onFrame = onFrame; needFull = true }
+    func adopt(onFrame: @escaping (CVPixelBuffer, UInt64) -> Void) {
+        self.onFrame = onFrame; needFull = true; adoptedNanos = Clock.nowNanos()
+        if warm != nil { warm = nil; appliedFilter = [UInt32.max]; appliedConfig = nil; edgeOpaque = nil }   // the stream's own filter and size at the next apply
+    }
 
     /// On `queue`: the window's current frame (global points), pixel size and frame interval.
     func follow(pointFrame f: CGRect, width: Int, height: Int, fps: Int) {
@@ -202,6 +213,7 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         }
         needFull = false
         frames += 1
+        if adoptedNanos > 0 { hostLog("capture \(windowID): first frame \(Clock.elapsed(since: adoptedNanos, now: Clock.nowNanos()) / 1_000_000) ms after adoption"); adoptedNanos = 0 }
         if size.0 == width && size.1 == height { onFrame?(pb, Clock.nowNanos()) }
         else if let out = scaled(pb) { onFrame?(out, Clock.nowNanos()) }
     }

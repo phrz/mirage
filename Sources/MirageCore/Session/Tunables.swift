@@ -48,6 +48,9 @@ public struct Tunables: Codable, Equatable, Sendable {
         // Host only: 1 = warm host (WarmPool): with no stream, the visible windows' captures keep running at 1 fps, their
         // latest frames in memory (never on disk, dropped on lock, display sleep or battery), adopted at connect; 0 = off.
         case warmCapture
+        // Host only, warm host: how many windows (the largest) are kept warm; their capture size as a fraction of native
+        // (under 1: smaller, cheaper for WindowServer, no usable first frame); 1 = warmed with the window-alone filter.
+        case warmWindows, warmScale, warmIndependent
 
         /// Compiled-in default and the bounds a host value is clamped to.
         public var spec: (default: Double, min: Double, max: Double) {
@@ -78,6 +81,9 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .startKbps: return (2_000, 150, 50_000)
             case .autoMaxKbps: return (50_000, 1_000, 200_000)
             case .warmCapture: return (1, 0, 1)
+            case .warmWindows: return (12, 0, 40)
+            case .warmScale: return (1, 0.02, 1)
+            case .warmIndependent: return (0, 0, 1)
             }
         }
     }
