@@ -131,6 +131,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var tileSent: [UInt32: (nanos: UInt64, bytes: Int, refinement: Int, block: Int?, layer: UInt32, rects: [PixelRect])] = [:]
     /// Tile-stream bytes sent and not yet acked (RateController.inflightCapBytes bounds refinement by it).
     private var tileInflightBytes = 0
+    /// In flight for the cap: what is on the stream plus blocks still being encoded (several were dispatched before the
+    /// first was counted: 1.8 MB in flight against a 480 KB cap on a shaped Fast 4G run).
+    private var tileInflightForCap: Int { tileInflightBytes + pacer.blocks.reduce(0) { $1.msgSeq == nil ? $0 + $1.bytes : $0 } }
+    /// The rate blocks are sized from: the tile budget, and at most half the in-flight cap per block (a block is ~0.25 s of
+    /// it), so one block cannot overrun the cap by itself (375 KB blocks against 480 KB on Fast 4G in startup).
+    private var blockRate: Double {
+        let budget = Double(lastBudget.tileKbps * 1000 / 8)
+        guard let rc else { return budget }
+        return min(budget, Double(rc.inflightCapBytes) * 0.5 / RefinementPacer.blockSeconds)
+    }
     private var lastBudget = RateController.Budget(tileKbps: 0, videoKbps: 0)
     private var refineTimer: DispatchSourceTimer?
     private var rateTimer: DispatchSourceTimer?
@@ -625,7 +635,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard let sent = self.tileSent.removeValue(forKey: tileAck.msgSeq) else { return }
             let now = Clock.nowNanos()
             self.tileInflightBytes = max(0, self.tileInflightBytes - sent.bytes)
-            self.rc?.streamAcked(bytes: sent.bytes, now: now)
+            self.rc?.streamAcked(bytes: sent.bytes, receivedNanos: tileAck.receivedNanos, now: now)
             self.refinementInFlight = max(0, self.refinementInFlight - sent.refinement)
             if sent.block != nil, self.pacer.acked(msgSeq: tileAck.msgSeq) { self.refine(now: now) }
             self.rc?.delaySample(sentNanos: sent.nanos, receivedNanos: tileAck.receivedNanos, bytes: sent.bytes, now: now)
@@ -1808,7 +1818,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// locus (or the centre).
     private func planBlocks(_ l: Layer) -> [PixelRect] {
         let tracker = l.tracker
-        let blockArea = RefinementPacer.blockArea(tileBytesPerSecond: Double(lastBudget.tileKbps * 1000 / 8), layerArea: tracker.width * tracker.height)
+        let blockArea = RefinementPacer.blockArea(tileBytesPerSecond: blockRate, layerArea: tracker.width * tracker.height)
         let side = max(64, (Int(blockArea.squareRoot()) + 63) / 64 * 64)
         let cols = max(1, (tracker.width + side - 1) / side), rows = max(1, (tracker.height + side - 1) / side)
         var blocks: [PixelRect] = []
@@ -2341,7 +2351,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // In flight: at most twice the bandwidth-delay product the acks show (RateController). A still screen gives the
         // controller no video delay to back off on; refinement then queued megabytes in QUIC's buffers on phrz's 4G, acks
         // came seconds late, and parts of windows stayed lossy. Changed pixels above are not held by this.
-        if let rc, tileInflightBytes >= rc.inflightCapBytes { return }
+        if let rc, tileInflightForCap >= rc.inflightCapBytes { return }
         let ordered = layersByPriority()
         // Fresh pictures: the display's ladder gates everything until its base is acked; window stills
         // and lossless blocks go one at a time, locus layer first.
@@ -2412,7 +2422,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let perSecond = Double(lastBudget.tileKbps * 1000 / 8)
         if pacer.expire(now: now, srttNanos: srttNanos) > 0 { log("chrome: block ack timed out; continuing") }
         guard pacer.canStartBlock(tileBytesPerSecond: perSecond), tileTokens > 0 else { return true }
-        let area = RefinementPacer.blockArea(tileBytesPerSecond: perSecond, layerArea: d.width * d.height)
+        let area = RefinementPacer.blockArea(tileBytesPerSecond: min(perSecond, blockRate), layerArea: d.width * d.height)
         var take: [Int] = [], sum = 0.0
         for i in soft { take.append(i); sum += Double(t.rect(of: i).area); if sum >= area { break } }
         CVPixelBufferLockBaseAddress(src, .readOnly); defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
@@ -2874,7 +2884,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         var layer: Layer? = nil
         if let f = unacked.removeValue(forKey: ack.seq) ?? recentlyPurged.removeValue(forKey: ack.seq) {
             layer = layers[f.layer]
-            if !ack.lost { rc?.streamAcked(bytes: f.bytes, now: now) }   // delivery rate: video bytes count with the tiles
+            if !ack.lost { rc?.streamAcked(bytes: f.bytes, receivedNanos: ack.receivedNanos, now: now) }   // delivery rate: video bytes count with the tiles
             // Loss acks come after the assembler's timeout; they say nothing about the path's RTT.
             if !ack.lost {
                 // RTT and one-way delay are measured from when the frame's last datagram left the pacer, not

@@ -16,7 +16,7 @@ final class DeliveryRateTests: XCTestCase {
         var rc = RateController(initialKbps: BitratePolicy.startKbps, maxKbps: 50_000, nativePixels: 3200 * 1800)
         let up = link.direction(upstream: true)
         var downLink = ShaperCore(parameters: link.direction(upstream: false))
-        enum Event { case ack(sent: UInt64, bytes: Int), probe(sent: UInt64, received: UInt64) }
+        enum Event { case ack(sent: UInt64, received: UInt64, bytes: Int), probe(sent: UInt64, received: UInt64) }
         var events: [(at: UInt64, e: Event)] = []
         var targets: [Int] = []
         var backlog = backlogBytes, inflight = 0, maxInflight = 0, delivered = 0, maxDelay = 0.0
@@ -38,7 +38,9 @@ final class DeliveryRateTests: XCTestCase {
                 if b == 1200 { inflight += b }
                 maxInflight = max(maxInflight, inflight)
                 let a = downLink.admit(bytes: b, channel: 1, reliable: true, now: now)!
-                events.append((a + up.oneWayNanos, .ack(sent: now, bytes: b)))
+                // Acks ride the uplink: they come back in clumps (up to 300 ms late), the receive time is what they carry.
+                let clump = UInt64((Int(a / ms) % 300)) * ms
+                events.append((a + up.oneWayNanos + clump, .ack(sent: now, received: a, bytes: b)))
             }
             if t % 1000 == 0 {
                 if let a = downLink.admit(bytes: 32, channel: 0, reliable: false, now: now) { events.append((a + up.oneWayNanos, .probe(sent: now, received: a))) }
@@ -49,11 +51,11 @@ final class DeliveryRateTests: XCTestCase {
             while let e = events.first, e.at <= now {
                 events.removeFirst()
                 switch e.e {
-                case .ack(let sent, let bytes):
+                case .ack(let sent, let received, let bytes):
                     inflight -= bytes; delivered += bytes
                     if t >= (seconds - 20) * 1000 { deliveredTail += bytes }
                     maxDelay = max(maxDelay, Double(now - sent) / 1e6)
-                    rc.streamAcked(bytes: bytes, now: now)
+                    rc.streamAcked(bytes: bytes, receivedNanos: received, now: now)
                 case .probe(let sent, let received): rc.probeSample(sentNanos: sent, receivedNanos: received, now: now)
                 }
             }
@@ -71,7 +73,7 @@ final class DeliveryRateTests: XCTestCase {
         let busy = stillScreen(link: link, seconds: 60, backlogBytes: -1)
         let tail = busy.targets.suffix(20)
         print("\(link.name): targets \(busy.targets) delivered \(Int(busy.deliveredKbps)) kbps, max ack delay \(Int(busy.maxAckDelayMs)) ms, max inflight \(busy.maxInflight)")
-        XCTAssertLessThanOrEqual(Double(tail.max() ?? 0), rate * 1.6, "\(link.name): target near the link, not far above it (\(busy.targets))", file: file, line: line)
+        XCTAssertLessThanOrEqual(Double(tail.max() ?? 0), rate * 1.35, "\(link.name): target near the link, not far above it (\(busy.targets))", file: file, line: line)
         XCTAssertGreaterThanOrEqual(Double(tail.min() ?? 0), rate * 0.5, "\(link.name): target not collapsed (\(busy.targets))", file: file, line: line)
         XCTAssertGreaterThanOrEqual(busy.deliveredKbps, rate * 0.6, "\(link.name): the link is used (\(Int(busy.deliveredKbps)) kbps)", file: file, line: line)
         XCTAssertLessThan(busy.maxAckDelayMs, 5_000, "\(link.name): no ack near the block timeout", file: file, line: line)

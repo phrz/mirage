@@ -384,12 +384,14 @@ public struct RateController {
 
     /// Video delay only signals congestion while video flows; a still screen sends tiles and blocks on reliable streams,
     /// whose queue the host cannot see (it is in QUIC's buffers and the path). So the controller also measures what the
-    /// link delivers: bytes acked over the last max(1 s, 3 × srtt; shorter windows read the clumps of acks behind a retransmission as rate), every message (tiles, blocks, video frames). Its
-    /// windowed maximum over 10 s is the bottleneck rate; app-limited samples (the host had nothing to send, `noteIdle`)
+    /// link delivers: bytes acked over the last max(1 s, 3 × srtt; shorter windows read the clumps of acks behind a retransmission as rate), every message (tiles, blocks, video frames). Over
+    /// 10 s, its samples' max (startup) or 75th percentile (after) is the bottleneck rate; app-limited samples (the host had nothing to send, `noteIdle`)
     /// only raise it. The target stays at or under `deliveryGain` × that rate (2 in startup, until three rounds bring no
     /// 25 % growth, then 1.25), and the host keeps stream data in flight under `inflightCapBytes`.
     private var ackLog: [(nanos: UInt64, bytes: Int)] = []
     private var firstAckNanos: UInt64 = 0
+    private var latestAckNanos: UInt64 = 0
+    private var startupIdleRounds = 0
     private var deliverySamples: [(nanos: UInt64, kbps: Double)] = []
     /// The bottleneck rate estimate in kbit/s (0 until the first full window of acks).
     public private(set) var deliveryKbps = 0
@@ -418,15 +420,20 @@ public struct RateController {
     /// host sent, not what the link can carry.
     public mutating func noteIdle(now: UInt64) { lastIdleNanos = now }
 
-    /// Bytes the viewer acked (a tile message, a block, a video frame).
-    public mutating func streamAcked(bytes: Int, now: UInt64) {
+    /// Bytes the viewer acked (a tile message, a block, a video frame). `receivedNanos`: when the viewer received them (its
+    /// clock); the window is taken on those times when given, since acks come back over the uplink in clumps (Fast 4G's
+    /// 1.35 Mbps up: an 8.1 Mbps link read 10 Mbps on the host's arrival times).
+    public mutating func streamAcked(bytes: Int, receivedNanos: UInt64? = nil, now: UInt64) {
         guard bytes > 0 else { return }
-        if firstAckNanos == 0 { firstAckNanos = now }
+        let t = receivedNanos ?? now
+        if firstAckNanos == 0 || t < firstAckNanos { firstAckNanos = t }
+        latestAckNanos = max(latestAckNanos, t)
         let w = deliveryWindowNanos
-        ackLog.append((now, bytes))
-        if let f = ackLog.first, now &- f.nanos > w { ackLog.removeAll { now &- $0.nanos > w } }
+        ackLog.append((t, bytes))
+        let edge = latestAckNanos &- w
+        if let f = ackLog.first, f.nanos < edge { ackLog.removeAll { $0.nanos < edge } }
         // A full window of acks first: the opening burst of acks says nothing about the rate.
-        guard now &- firstAckNanos >= w else { return }
+        guard latestAckNanos &- firstAckNanos >= w else { return }
         let acked = ackLog.reduce(0) { $0 + $1.bytes }
         let kbps = Double(acked) * 8 / (Double(w) / 1e9) / 1000
         // App-limited: the host ran out of things to send during the window these acks answer (shifted by an RTT). Held
@@ -434,15 +441,25 @@ public struct RateController {
         let appLimited = lastIdleNanos > 0 && now &- lastIdleNanos < w + UInt64(srttNanos)
         deliverySamples.removeAll { now &- $0.nanos > 10_000_000_000 }
         if !appLimited || kbps > Double(deliveryKbps) { deliverySamples.append((now, kbps)) }
-        if let m = deliverySamples.map(\.kbps).max() { deliveryKbps = max(1, Int(m)) }
+        // The windowed max (in startup) or the 75th percentile (after): after a retransmission the ordered stream lands in a
+        // clump, also by receive time, and the max read 1.25 × a lossy 650 kbps link (Japan bus); the median lagged a ramp so
+        // far that startup ended at a fifth of Fast 4G.
+        if !deliverySamples.isEmpty {
+            let sorted = deliverySamples.map(\.kbps).sorted()
+            let i = inStartup ? sorted.count - 1 : min(sorted.count - 1, sorted.count * 3 / 4)
+            deliveryKbps = max(1, Int(sorted[i]))
+        }
         // Startup ends when three rounds bring less than 25 % growth. A round is one delivery window: the estimate cannot
         // grow faster than its window moves (rounds of one srtt ended startup within half a second on Fast 4G).
         if inStartup {
             if startupRoundStart == 0 { startupRoundStart = now }
             if now &- startupRoundStart >= w {
                 startupRoundStart = now
-                if Double(deliveryKbps) >= startupBestKbps * 1.25 { startupBestKbps = Double(deliveryKbps); startupFlatRounds = 0 }
+                if Double(deliveryKbps) >= startupBestKbps * 1.25 { startupBestKbps = Double(deliveryKbps); startupFlatRounds = 0; startupIdleRounds = 0 }
                 else if !appLimited { startupFlatRounds += 1; if startupFlatRounds >= 3 { inStartup = false } }
+                // Nothing left to send for three windows (the backlog drained): no growth will be seen; startup ends there
+                // too (it held the 2 × gain for good on a Fast 4G run, the target at 20 Mbps on an 8.1 Mbps link).
+                else { startupIdleRounds += 1; if startupIdleRounds >= 3 { inStartup = false } }
             }
         }
         if now &- lastDeliveryAdjust >= 100_000_000 {
