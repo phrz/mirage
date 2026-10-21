@@ -141,8 +141,10 @@ public struct RateController {
             // 100 ms and the tier to Normal at srtt 949 ms and 8 % loss (phrz's session, 22:47:45Z).
             srttNanos = srttNanos * 0.8 + rtt * 0.2
         }
-        // One-way delay proxy (receiver clock − host clock); its minimum is the base, the rest is queue.
-        noteOWD(Double(lastReceived) - Double(sentNanos), now: now, source: "video")
+        // One-way delay proxy (receiver clock − host clock); its minimum is the base, the rest is queue. Weighted by the bytes
+        // the frame carried (full weight at 16 KB): a trickle of tiny frames (an animated icon) barely moves the estimate.
+        videoSamples.append((now, bytes)); videoSamples.removeAll { now &- $0.nanos > 1_000_000_000 }
+        noteOWD(Double(lastReceived) - Double(sentNanos), now: now, source: "video", weight: min(1, max(0.05, Double(bytes) / 16_000)))
         // Delivery rate from the datagram train.
         if fragments >= tuning.minTrainFragments, lastReceived > firstReceived, lastReceived - firstReceived >= tuning.minTrainNanos {
             let kbps = Double(bytes) * 8 / (Double(lastReceived - firstReceived) / 1e9) / 1000
@@ -185,6 +187,7 @@ public struct RateController {
         // buffering on an idle link and no baseline could tell). Path delay comes from video acks alone.
         let rtt = Double(now &- sentNanos)
         srttNanos = srttNanos * 0.8 + rtt * 0.2
+        probeRTT = probeRTT.isNaN ? rtt : probeRTT * 0.5 + rtt * 0.5; lastProbeSampleNanos = now
         if minRTTWindowStart == 0 { minRTTWindowStart = now }
         minRTTCandidate = min(minRTTCandidate, rtt); minRTTNanos = min(minRTTNanos, rtt)
         if Clock.elapsed(since: minRTTWindowStart, now: now) > 30_000_000_000 { minRTTNanos = minRTTCandidate; minRTTCandidate = .infinity; minRTTWindowStart = now }
@@ -221,7 +224,7 @@ public struct RateController {
 
     /// Windowed-minimum baseline (20 s, so a route change or an inflated opening is forgotten) and the
     /// smoothed one-way delay above it, which is the queue estimate.
-    private mutating func noteOWD(_ owd: Double, now: UInt64, source: String) {
+    private mutating func noteOWD(_ owd: Double, now: UInt64, source: String, weight: Double = 1) {
         if baseOWDWindowStart == 0 { baseOWDWindowStart = now }
         baseOWDCandidate = min(baseOWDCandidate, owd)
         if owd < baseOWD { baseOWD = owd }
@@ -232,7 +235,7 @@ public struct RateController {
         // last one: 30 fps video samples smooth over ~10 frames, a once-a-second probe on an idle link
         // replaces the estimate almost entirely (sparse samples must not take four seconds to converge).
         let dt = lastSampleNanos > 0 ? Double(now &- lastSampleNanos) / 1e9 : 1
-        let alpha = min(0.95, max(0.1, 1 - exp(-dt / 0.3)))
+        let alpha = min(0.95, max(0.1, 1 - exp(-dt / 0.3))) * weight
         owdEWMA = owdEWMA.isNaN ? owd : owdEWMA * (1 - alpha) + owd * alpha
         queueMs = max(0, (owdEWMA - baseOWD) / 1e6)
         lastSampleSource = source; lastSampleNanos = now
@@ -242,19 +245,38 @@ public struct RateController {
         lostFrames += 1
         if Double(Clock.elapsed(since: lastDecreaseNanos, now: now)) > srttNanos {
             targetKbps = max(tuning.minKbps, Int(Double(targetKbps) * tuning.lossDecrease))
-            lastDecreaseNanos = now; probing = true; underSince = 0
+            lastDecreaseNanos = now; probing = true; underSince = 0; lastLinkDecreaseNanos = now
         }
+    }
+
+    // Delay evidence (mac-daddy 2026-10-21: an animated Dock icon's video acks, ~1.5 KB frames a few times a second, read a
+    // ~140 ms queue the probes did not see, and the target fell to 150 kbps, tier Extreme, with 0 frames lost).
+    private var videoSamples: [(nanos: UInt64, bytes: Int)] = []
+    private var probeRTT: Double = .nan
+    private var lastProbeSampleNanos: UInt64 = 0
+    /// When a decrease the link itself justified last happened (loss, or delay the probes confirm): only those count toward
+    /// "limited by the link" for the tier.
+    private var lastLinkDecreaseNanos: UInt64 = 0
+    /// Enough video in the last second for its delay to push the target down: 5 samples and 24 KB.
+    var videoDelayCredible: Bool { videoSamples.count >= 5 && videoSamples.reduce(0) { $0 + $1.bytes } >= 24_000 }
+    /// The probes (a recent echo, within 3 s) see no queue: their RTT is within the overuse threshold of the minimum.
+    func probesDisagree(now: UInt64) -> Bool {
+        guard !probeRTT.isNaN, lastProbeSampleNanos > 0, now &- lastProbeSampleNanos < 3_000_000_000, minRTTNanos.isFinite else { return false }
+        return (probeRTT - minRTTNanos) / 1e6 < tuning.overuseMs
     }
 
     private mutating func adjust(now: UInt64) {
         let ceiling = capacityKbps > 0 ? min(maxKbps, max(tuning.minKbps, Int(Double(capacityKbps) * tuning.capacityFraction))) : maxKbps
         ackedBytes.removeAll { now &- $0.nanos > 1_000_000_000 }
         let videoFlowing = recentVideoKbps * 5 >= targetKbps
-        if queueMs > tuning.overuseMs, videoFlowing {
+        if queueMs > tuning.overuseMs, videoFlowing, videoDelayCredible {
             underSince = 0
             if Double(Clock.elapsed(since: lastDecreaseNanos, now: now)) > srttNanos {
-                targetKbps = max(tuning.minKbps, Int(Double(targetKbps) * tuning.decrease))
-                lastDecreaseNanos = now; probing = true
+                // Delay the probes do not see holds the target (no increase, no decrease) and is not "the link" for the tier.
+                if !probesDisagree(now: now) {
+                    targetKbps = max(tuning.minKbps, Int(Double(targetKbps) * tuning.decrease))
+                    lastDecreaseNanos = now; probing = true; lastLinkDecreaseNanos = now
+                }
             }
         } else if queueMs < tuning.underuseMs {
             if underSince == 0 { underSince = now }
@@ -280,7 +302,7 @@ public struct RateController {
         if ackedFrames + lostFrames > 200 { ackedFrames /= 2; lostFrames /= 2 }   // sliding loss window
         // The link, not the cap, is holding the target down when the target sits well under the cap
         // after a delay- or loss-driven decrease in the last few seconds.
-        let limitedByLink = targetKbps < maxKbps * 8 / 10 && Clock.elapsed(since: lastDecreaseNanos, now: now) < 5_000_000_000
+        let limitedByLink = targetKbps < maxKbps * 8 / 10 && lastLinkDecreaseNanos > 0 && Clock.elapsed(since: lastLinkDecreaseNanos, now: now) < 5_000_000_000
         tiers.update(rateKbps: targetKbps, limitedByLink: limitedByLink, rttMs: minRttMs, lossPercent: frameLossPercent, now: now)
         updateRung(now: now)
     }
