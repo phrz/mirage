@@ -1336,10 +1336,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             log("fallback capture stopped (no layer needs it)")
             return
         }
+        // While windows move (and 300 ms after), the list's frames lag the screen: a cut then took the window from where it
+        // was a moment ago, other windows' and the desktop's pixels included (a shifted bench with a widget's ghost over it
+        // after each Show Desktop return, mac-daddy). The layers keep their last picture until things settle.
+        let now = Clock.nowNanos()
+        if Clock.elapsed(since: lastWindowsMoveNanos, now: now) < 300_000_000 { return }
         CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
         let src = frameView(pb)
         let screen = PixelRect(x: 0, y: 0, width: src.width, height: src.height)
         for id in live.sorted() {
+            if let l = layers[id], Clock.elapsed(since: l.movedNanos, now: now) < 300_000_000 { continue }
             guard let l = layers[id] else { continue }
             let w = l.width, h = l.height
             if fallbackPools[id].map({ $0.w != w || $0.h != h }) ?? true {
