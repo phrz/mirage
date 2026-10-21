@@ -1080,10 +1080,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // Tiles of the layer fully inside a covering rect (or wholly outside the display) are occluded. A tile across the
             // display's edge is partly visible: counted as occluded, it was never sent again, and a window over the left edge
             // showed a black column after Show Desktop (mac-daddy, compositor, 8249cda).
-            var occluded = Set<Int>()
+            var occluded = Set<Int>(), offDisplay = Set<Int>()
             let onScreen = l.local(w.frame.intersection(displayRect))
             for i in 0..<l.tracker.tileCount {
                 let r = l.tracker.rect(of: i)
+                if r.intersection(onScreen).isEmpty { offDisplay.insert(i) }
                 if r.intersection(onScreen).isEmpty || hiddenHere && unifiedView { occluded.insert(i); continue }
                 let rd = r.offset(l.frame.x, l.frame.y)
                 if covering.contains(where: { $0.intersection(rd) == rd }) { occluded.insert(i) }
@@ -1096,6 +1097,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if debugLayers { log("layer \(l.id): \(exposedNow.count) tiles uncovered on the host, \(n) made due, \(exposedNow.filter { l.tracker.isCrisp($0) }.count) crisp, pending total \(l.tracker.pendingTotal)") }
             }
             l.occludedTiles = occluded
+            // Back on the display (Show Desktop's return): tiles held as a moved window's backdrop are sent now. A window's
+            // tiles are its own, wherever it sits; held until the window went idle, a busy window's first column stayed black
+            // after every Show Desktop round on mac-daddy (its backdrop level was taken mid-slide).
+            let returned = l.offDisplayTiles.subtracting(offDisplay)
+            if compositor, !returned.isEmpty { l.tracker.releaseHeld(returned, now: now) }
+            l.offDisplayTiles = offDisplay
             let fps = l.frontmost ? 30 : (fraction <= 0.001 ? 2 : 10)
             if let cap = l.capturer {
                 // The capture follows the window (sourceRect on its frame) and leaves out every window that comes over it.

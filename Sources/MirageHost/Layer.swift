@@ -28,6 +28,8 @@ final class Layer {
     /// Visible fraction of the window on the host (1 = nothing in front of it); covered tiles are not sent.
     var visibleFraction = 1.0
     var occludedTiles = Set<Int>()
+    /// Tiles wholly off the display at the last occlusion pass.
+    var offDisplayTiles = Set<Int>()
     var frontmost = false
     var absentSince: UInt64 = 0
     /// When the layer's own capture was (re)started and has not delivered since (0: it has, or none is wanted).

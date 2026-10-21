@@ -176,6 +176,13 @@ public struct TileTracker {
             cells[i] = c
         }
     }
+    /// These held tiles become due now (they came back onto the display). Returns how many.
+    @discardableResult
+    public mutating func releaseHeld(_ tiles: Set<Int>, now: UInt64) -> Int {
+        var n = 0
+        for i in tiles where i >= 0 && i < cells.count && cells[i].held { cells[i].held = false; cells[i].pendingSince = now; cells[i].dueNanos = now; n += 1 }
+        return n
+    }
     /// Held tiles become due refinement now (the session went idle). Returns how many.
     @discardableResult
     public mutating func releaseHeld(now: UInt64) -> Int {
