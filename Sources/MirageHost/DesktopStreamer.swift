@@ -1078,7 +1078,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if l.absentSince == 0 { l.absentSince = now }
             else if Clock.elapsed(since: l.absentSince, now: now) > layerRetainNanos { layers[id] = nil; ax?.forget(id); log("layer \(id) released") }
         }
-        if compositor, !placeholdersDone, !planned.isEmpty, hostTunables[.placeholders] >= 1 { placeholdersDone = true; sendPlaceholders() }
         // Compositor model: a shown window whose own capture has not delivered within 400 ms (a new window, one uncovered
         // again) is cut from the full display capture until it does, so its rectangle always has its window.
         // (The 400 ms full-display stopgap for windows whose own capture had not delivered is gone: cut every 100 ms at the
@@ -1263,6 +1262,26 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard let s = windows?.current else { return }
         let k = Double(sw) / Double(max(1, streamWidth))
         var sent = 0, bytes = 0
+        // The desktop's: the whole screen (the seam design's desktop picture carries the windows, so this stands in for
+        // all of it); in the compositor model with the normal windows left transparent (they have their own). 64 px long.
+        if let d = display, d.fresh != .done {
+            var shot = px
+            if compositor {
+                for w in s.windows where w.windowLevel == 0 || Self.isFloatingAppWindow(w) {
+                    let r = PixelRect(x: Int(Double(w.frame.x) * k), y: Int(Double(w.frame.y) * k), width: Int((Double(w.frame.width) * k).rounded(.up)), height: Int((Double(w.frame.height) * k).rounded(.up))).intersection(PixelRect(x: 0, y: 0, width: sw, height: sh))
+                    guard !r.isEmpty else { continue }
+                    for y in r.y..<r.maxY { let o = (y * sw + r.x) * 4; for i in o..<o + r.width * 4 { shot[i] = 0 } }
+                }
+            }
+            let ow = 64, oh = max(4, 64 * sh / max(1, sw))
+            if let data = shot.withUnsafeBytes({ TileCodec.encodeLossy(base: $0.baseAddress!, width: sw, height: sh, stride: sw * 4, outWidth: ow, outHeight: oh, quality: 40) }) {
+                let now = Clock.nowNanos()
+                sendTileMessage(.tiles(.init(header: header(layer: 0, nanos: now), refinement: false, tiles: [.init(rect: d.bounds, format: .lossy, data: data)])), captureNanos: now)
+                sent += 1; bytes += data.count
+            }
+        }
+        // Windows: only in the compositor model (the seam design's desktop placeholder shows them).
+        if !compositor { if sent > 0 { log("placeholders: the desktop at once, \(bytes) bytes") }; return }
         for (id, l) in layers where !l.isDisplay && id != ControlMessage.WindowInfo.overlayID && !l.announced && !l.exposed && plannedFrames[id] != nil {
             guard s.byID[id] != nil else { continue }
             // The window's rect in the screenshot, and the covered parts transparent.
@@ -1989,7 +2008,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Starts the display layer's fresh-picture sequence; the next keyframe is its base.
     private func beginFreshPicture(_ trigger: FreshPictureTrigger, detail: String = "") {
         guard trigger.restartsWholePicture else { return }
-        if trigger == .streamStart || trigger == .viewerEmpty { sendProbeTrain() }
+        if trigger == .streamStart || trigger == .viewerEmpty {
+            sendProbeTrain()
+            if hostTunables[.placeholders] >= 1 { sendPlaceholders() }   // M-FIVE stage 0, both models
+        }
         if compositor {
             // M-FIVE: the desktop's first picture is a still like every window's (no tiny keyframe and ladder climb: the
             // "very noisy start"), presented with the others behind the stage-1 barrier.

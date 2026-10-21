@@ -243,8 +243,10 @@ Japan bus the last window appeared ~5 s after the first.
 - **As built (host only, tunable `placeholders`, on by default in the compositor model):** no new message. A
   placeholder is the window's announcement (`.reset`) plus one 32-px lossy tile covering the layer, i.e. a tiny still;
   the window is published as a layer at once, and its real still (same size: the viewer keeps the pixels) replaces it.
-  Every viewer build shows it. Windows shown later keep the 400 ms full-display stopgap (§3.0a). Not yet: the desktop
-  placeholder under windows, and a soft upscale on the viewer (it draws the 32 px with its normal filtering).
+  Every viewer build shows it. Since M-FIVE step 2: taken first thing at a fresh stream start, in both models; the
+  desktop gets one too (64 px; the whole screen in the seam design, windows left transparent in the compositor model).
+  Windows shown later appear when their own capture delivers (the full-display stopgap is gone). Not yet: a soft
+  upscale on the viewer (it draws the placeholder with its normal filtering).
 
 ### 3.0c Persistent tile cache (design, phrz 2026-10-21; behind a tunable)
 
