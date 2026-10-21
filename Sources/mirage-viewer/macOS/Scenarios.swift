@@ -309,6 +309,35 @@ final class ScenarioRunner {
         case "idle":
             session.resetWatched()
             try? await Task.sleep(for: .seconds(seconds))
+        case "zorder":
+            // Cross-app z-order (phrz: a dragged window fell behind another app's window once it overlapped it). A Finder
+            // window on the bench's own folder (/tmp/mtb2, opened by the run script) sits behind the bench; its title bar is
+            // pressed and it is dragged over the bench. The host's list must put Finder in front, during and after.
+            guard let finder = session.windowsSnapshot().first(where: { $0.app == "Finder" && $0.title == "mtb2" && $0.windowLevel == 0 && $0.isLayered }) else {
+                session.log("scenario zorder: no layered Finder window on mtb2"); return }
+            func front() -> Bool? {
+                let l = session.windowsSnapshot()
+                guard let f = l.first(where: { $0.id == finder.id }), let b = l.first(where: { $0.id == w.id }) else { return nil }
+                return f.z < b.z
+            }
+            session.log("scenario zorder: before: Finder in front \(front().map(String.init) ?? "?")")
+            let t0 = Clock.nowNanos()
+            session.pressTitleBar(windowID: finder.id)
+            session.beginLayerDrag(windowID: finder.id)
+            let target = PixelRect(x: w.frame.x + w.frame.width / 4, y: w.frame.y + 40, width: finder.frame.width, height: finder.frame.height)
+            var frontAt: Double? = nil, lostAfter = false
+            for k in 1...60 {   // 1 s drag toward the bench's middle
+                let f = finder.frame
+                let fx = f.x + (target.x - f.x) * k / 60, fy = f.y + (target.y - f.y) * k / 60
+                session.dragLayer(windowID: finder.id, to: PixelRect(x: fx, y: fy, width: f.width, height: f.height))
+                try? await Task.sleep(for: .milliseconds(16))
+                if let fr = front() { if fr, frontAt == nil { frontAt = Double(Clock.elapsed(since: t0, now: Clock.nowNanos())) / 1e6 }; if !fr, frontAt != nil { lostAfter = true } }
+            }
+            session.endLayerDrag(windowID: finder.id)
+            try? await Task.sleep(for: .seconds(2))
+            let after = front()
+            session.log("scenario zorder: Finder in front on the host after \(frontAt.map { String(format: "%.0f ms", $0) } ?? "never"), \(lostAfter ? "lost it again during the drag" : "kept it"), after the drop: \(after.map(String.init) ?? "?")")
+            session.sendWindowCommand(.init(id: finder.id, action: .close))   // our own test window, closed through Accessibility
         case "showdesktop":
             // Show Desktop (F11, the symbolic hot key): every window slides to the display edges, the desktop shows, and a
             // second press brings them back. Three rounds, the viewer's picture shot at 4 fps (MIRAGE_TEST_BENCH_SHOTS).
