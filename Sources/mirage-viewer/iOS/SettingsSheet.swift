@@ -36,11 +36,7 @@ struct SettingsSheet: View {
                 } footer: {
                     Text("1:1 shows the Mac's pixels at their real size from its top-left corner; pinch or double-tap with two fingers to switch.")
                 }
-                Section("About") {
-                    LabeledContent("Mirage", value: ViewerSettings.appBuild)
-                    LabeledContent("Host", value: model.hostDisplayName ?? model.hostName)
-                    LabeledContent("Host Build", value: model.hostBuild ?? "older host (not reported)")
-                }
+                AboutSettingsSection(model: model)
             }
             .navigationDestination(for: String.self) { route in
                 if route == ThrottlePicker.route { ThrottlePicker(prefs: prefs) }

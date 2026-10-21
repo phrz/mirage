@@ -25,6 +25,9 @@
 		A1B2C3D4E5F6071829304151 /* ViewerSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6071829304152 /* ViewerSettings.swift */; };
 		E179BADF39B60A6D17B7BB75 /* Chrome.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A7BD24766B550945C4E385B /* Chrome.swift */; platformFilters = (macos, ); };
 		ECB3983ACC10C20F61032EB2 /* FrameRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA8357B3AEC263F39103FAC9 /* FrameRecorder.swift */; };
+		B2C3D4E5F607182930415201 /* ScenePresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F607182930415202 /* ScenePresenter.swift */; };
+		B2C3D4E5F607182930415203 /* SessionBanners.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F607182930415204 /* SessionBanners.swift */; };
+		B2C3D4E5F607182930415205 /* ViewerToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F607182930415206 /* ViewerToolbar.swift */; platformFilters = (macos, ); };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -48,6 +51,9 @@
 		A1B2C3D4E5F6071829304152 /* ViewerSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerSettings.swift; sourceTree = "<group>"; };
 		E0D40802ED1D018B7D94046B /* VideoView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoView.swift; sourceTree = "<group>"; };
 		EEEE1C67B65AE477DCDF5D99 /* DesktopUIView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopUIView.swift; sourceTree = "<group>"; };
+		B2C3D4E5F607182930415202 /* ScenePresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScenePresenter.swift; sourceTree = "<group>"; };
+		B2C3D4E5F607182930415204 /* SessionBanners.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionBanners.swift; sourceTree = "<group>"; };
+		B2C3D4E5F607182930415206 /* ViewerToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerToolbar.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -71,6 +77,7 @@
 				11A92A44688F29579B43412B /* Scenarios.swift */,
 				593D553163B75E9D6D807360 /* Unified.swift */,
 				E0D40802ED1D018B7D94046B /* VideoView.swift */,
+				B2C3D4E5F607182930415206 /* ViewerToolbar.swift */,
 			);
 			path = macOS;
 			sourceTree = "<group>";
@@ -121,6 +128,8 @@
 				A1B2C3D4E5F6071829304152 /* ViewerSettings.swift */,
 				325AE3F4F8CE4455604ECEFB /* Platform.swift */,
 				0E1152201D0785134F2ADEBA /* ViewerSession.swift */,
+				B2C3D4E5F607182930415204 /* SessionBanners.swift */,
+				B2C3D4E5F607182930415202 /* ScenePresenter.swift */,
 			);
 			path = Session;
 			sourceTree = "<group>";
@@ -284,6 +293,9 @@
 				AE70D0898558C65B7F6D9A78 /* VideoView.swift in Sources */,
 				50167F44006E2CAD2E8E0337 /* ViewerSession.swift in Sources */,
 				3E6A04A7673B4F5012946E47 /* main.swift in Sources */,
+				B2C3D4E5F607182930415205 /* ViewerToolbar.swift in Sources */,
+				B2C3D4E5F607182930415203 /* SessionBanners.swift in Sources */,
+				B2C3D4E5F607182930415201 /* ScenePresenter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -38,8 +38,8 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
     private var displayLink: CADisplayLink?
     private var lastRequested = (0, 0)
     private var resizeWork: DispatchWorkItem?
-    private var forceRedraw = false
-    private var lastDisplacementCount = 0, lastArrangement = -1
+    private let presenter = ScenePresenter()
+    private var forceRedraw: Bool { get { presenter.forceRedraw } set { presenter.forceRedraw = newValue } }
 
     var pointer = TrackpadPointer()
     private var pointerFromHost = false
@@ -183,20 +183,9 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         applyStartZoom()
         stepZoomAnimation()
         followCaret(dt: dt)
-        guard let session, let comp = session.compositor, comp.width > 0, let context = session.context else { return }
-        guard let scene = session.scene(pxPerPoint: session.pixelsPerPoint) else { return }
-        let arrangement = session.arrangementGeneration
-        var layersDirty = false
-        for it in scene.items { if case .layer(let c, _, _, _) = it, c.needsRender { layersDirty = true; break } }
-        let changed = comp.needsRender || layersDirty || !scene.displacements.isEmpty || lastDisplacementCount != scene.displacements.count || arrangement != lastArrangement || session.hasPendingPredictions || forceRedraw
-        lastDisplacementCount = scene.displacements.count; lastArrangement = arrangement; forceRedraw = false
-        guard changed, let drawable = metalLayer.nextDrawable() else { return }
-        let scale = metalLayer.contentsScale
-        let r = videoRect
-        let dest = CGRect(x: r.minX * scale, y: r.minY * scale, width: r.width * scale, height: r.height * scale)
-        session.lastDest = dest
-        SceneRenderer.render(scene, context: context, to: drawable, dest: dest)
-        drawTypeahead()
+        // The scene's presentation is the Mac viewer's too (`ScenePresenter`); the viewport says where the picture goes.
+        guard let session else { return }
+        if presenter.tick(session, layer: metalLayer, videoRect: videoRect) { drawTypeahead() }
     }
 
     override func layoutSubviews() {
@@ -813,7 +802,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         guard !observeOnly, let session else { return }
         session.typeaheadInvalidateBeforeClick()
         let seq = button(0, down: true, clickCount: count)
-        if let p = streamPixel(), let w = session.window(at: p.0, p.1), w.isLayered, w.windowLevel == 0, modifierFlags == 0 { session.localRaise(windowID: w.id, inputSeq: seq) }
+        if let p = streamPixel(), let id = session.press(at: p.0, p.1, plain: modifierFlags == 0).raises { session.localRaise(windowID: id, inputSeq: seq) }
         button(0, down: false, clickCount: count)
         clearSticky()
     }
@@ -852,16 +841,19 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         session.typeaheadInvalidateBeforeClick()
         pressing = true; lastPanTime = 0
         defer { updateCursorLayer() }   // the hold ring
-        guard let p = streamPixel(), let w = session.window(at: p.0, p.1) else { button(0, down: true); return }
-        let ppp = session.pixelsPerPoint
-        let titleBar = Int(28 * ppp), trafficLights = Int(80 * ppp)
-        if w.isLayered, w.windowLevel == 0, modifierFlags == 0, p.1 < w.frame.y + titleBar, p.0 > w.frame.x + trafficLights {
-            layerDrag = (w.id, w.frame, p, false)
-            return
+        guard let p = streamPixel() else { button(0, down: true); return }
+        // The same rule as the Mac viewer (`WindowHitTest`): the overlay is never hit, only a plain press raises or drags.
+        let target = session.press(at: p.0, p.1, plain: modifierFlags == 0)
+        switch target {
+        case .layerTitleBar(let id, let frame):
+            layerDrag = (id, frame, p, false)
+        case .displayTitleBar(let id, let frame):
+            let seq = button(0, down: true)
+            drag = (id, frame); session.beginDrag(windowID: id, frame: frame, pointer: p, inputSeq: seq)
+        default:
+            let seq = button(0, down: true)
+            if let id = target.raises { session.localRaise(windowID: id, inputSeq: seq) }
         }
-        let seq = button(0, down: true)
-        if !w.isLayered, p.1 < w.frame.y + titleBar { drag = (w.id, w.frame); session.beginDrag(windowID: w.id, frame: w.frame, pointer: p, inputSeq: seq) }
-        else if w.isLayered, w.windowLevel == 0, modifierFlags == 0 { session.localRaise(windowID: w.id, inputSeq: seq) }
     }
 
     /// The pointer moved (already updated) with the button down.

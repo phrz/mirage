@@ -389,8 +389,11 @@ public enum ControlMessage: Codable, Equatable {
         public init(id: UInt32, pid: Int32, title: String, frame: PixelRect, z: Int, scrollRect: PixelRect? = nil, level: Int? = nil, layered: Bool? = nil, app: String? = nil, cutout: Bool? = nil, excludedFrom: UInt32? = nil, opaque: Bool? = nil, controls: PixelRect? = nil) {
             self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect; self.level = level; self.layered = layered; self.app = app; self.cutout = cutout; self.excludedFrom = excludedFrom; self.opaque = opaque; self.controls = controls
         }
-        /// Whether this window hides what is behind it (layered and not marked transparent).
-        public var hidesBehind: Bool { isLayered && (opaque ?? true) }
+        /// Whether this window hides what is behind it (layered and not marked transparent). Never the compositor model's
+        /// overlay layer: it covers the whole display but is transparent but for the menu bar, the Dock and menus (counted
+        /// as opaque, every window and the desktop under it read as hidden: no visible layer in the diagnostics, and the
+        /// unknown-desktop fill and its refresh never applied).
+        public var hidesBehind: Bool { isLayered && !isOverlay && (opaque ?? true) }
         public var isLayered: Bool { layered ?? false }
         /// The compositor model's overlay layer (the menu bar, the Dock, menus, popovers: everything above the normal level,
         /// one full-display layer on top): a synthetic window with this id and level. Not a window to hit-test.

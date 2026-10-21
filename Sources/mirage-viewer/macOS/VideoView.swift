@@ -11,6 +11,8 @@ final class VideoNSView: NSView {
     let cursorLayer = CALayer()
     var session: ViewerSession?
     var model: ViewerModel?
+    /// Where ⌘-shortcuts go (the toolbar's Shortcuts toggle); nil: to the host, as always.
+    var controls: ViewerControls?
     private var blankCursor: NSCursor = {
         let img = NSImage(size: NSSize(width: 1, height: 1), flipped: false) { _ in true }
         return NSCursor(image: img, hotSpot: .zero)
@@ -50,7 +52,7 @@ final class VideoNSView: NSView {
     func attach(_ session: ViewerSession) {
         self.session = session
         metalLayer.device = session.compositor?.device
-        session.onChange = { [weak self] in DispatchQueue.main.async { self?.forceRedraw = true; self?.needsDisplay = true } }
+        session.onChange = { [weak self] in DispatchQueue.main.async { self?.presenter.forceRedraw = true; self?.needsDisplay = true } }
     }
 
     override func viewDidMoveToWindow() {
@@ -62,22 +64,11 @@ final class VideoNSView: NSView {
         displayLink = link
     }
 
+    /// The scene's presentation, shared with iOS (`ScenePresenter`): this view only says where the picture goes.
+    let presenter = ScenePresenter()
     @objc private func tick() {
-        guard let session, let comp = session.compositor, comp.width > 0, let context = session.context else { return }
-        let ppp = MainActor.assumeIsolated { session.pixelsPerPoint }
-        guard let scene = session.scene(pxPerPoint: ppp) else { return }
-        let arrangement = session.arrangementGeneration
-        var layersDirty = false
-        for it in scene.items { if case .layer(let c, _, _, _) = it, c.needsRender { layersDirty = true; break } }
-        let changed = comp.needsRender || layersDirty || !scene.displacements.isEmpty || lastDisplacementCount != scene.displacements.count || arrangement != lastArrangement || session.hasPendingPredictions || forceRedraw
-        lastDisplacementCount = scene.displacements.count; lastArrangement = arrangement; forceRedraw = false
-        guard changed, let drawable = metalLayer.nextDrawable() else { return }
-        let scale = metalLayer.contentsScale
-        let r = videoRect
-        let dest = CGRect(x: r.minX * scale, y: r.minY * scale, width: r.width * scale, height: r.height * scale)
-        session.lastDest = dest
-        SceneRenderer.render(scene, context: context, to: drawable, dest: dest)
-        drawTypeahead()
+        guard let session else { return }
+        if presenter.tick(session, layer: metalLayer, videoRect: videoRect) { drawTypeahead() }
     }
 
     // Typeahead overlay (DESIGN §3.5 item 4): predicted glyphs in the host's font at the predicted caret, underlined until
@@ -113,10 +104,6 @@ final class VideoNSView: NSView {
             l.line.isHidden = g.confirmed
         }
     }
-    private var lastDisplacementCount = 0
-    private var lastArrangement = -1
-    private var forceRedraw = false
-
     override func layout() {
         super.layout()
         CATransaction.begin(); CATransaction.setDisableActions(true)
@@ -248,28 +235,23 @@ final class VideoNSView: NSView {
         session?.typeaheadInvalidateBeforeClick()
         if let d = drag { session?.endDrag(windowID: d.windowID) }
         drag = nil; layerDrag = nil
-        guard !observeOnly else { return }
+        guard !observeOnly, let session else { return }
+        guard let p = streamPixel(event) else { button(event, 0, down: true); return }
+        // The same rule as iOS (`WindowHitTest`): the overlay is never hit, only a plain press on a normal window raises or drags.
         let plain = event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty
-        if let session, let p = streamPixel(event), let w = session.window(at: p.0, p.1) {
-            let ppp = MainActor.assumeIsolated { session.pixelsPerPoint }
-            let titleBar = Int(28 * ppp), trafficLights = Int(80 * ppp)
-            if w.isLayered {
-                // A press on a layered window raises it here at once; on its title bar (right of the traffic
-                // lights) it may be a drag: hold the click until the pointer moves or the button is released.
-                if plain, event.clickCount == 1, p.1 < w.frame.y + titleBar, p.0 > w.frame.x + trafficLights {
-                    layerDrag = (w.id, w.frame, p, false, event)
-                    return
-                }
-                let seq = button(event, 0, down: true)
-                if plain, w.windowLevel == 0 { session.localRaise(windowID: w.id, inputSeq: seq) }
-                return
-            }
+        let target = MainActor.assumeIsolated { session.press(at: p.0, p.1, plain: plain, firstClick: event.clickCount == 1) }
+        switch target {
+        case .layerTitleBar(let id, let frame):
+            // A window layer's title bar: hold the click until the pointer moves (a local drag) or the button is released.
+            layerDrag = (id, frame, p, false, event)
+        case .displayTitleBar(let id, let frame):
+            // A window the display layer still carries: the press goes, and starts a predicted (copy-rect) drag.
             let seq = button(event, 0, down: true)
-            // Title-bar hit test on a window the display layer still carries: a plain left press there starts a predicted (copy-rect) drag.
-            if plain, event.clickCount == 1, p.1 < w.frame.y + titleBar { drag = (w.id, w.frame, p); session.beginDrag(windowID: w.id, frame: w.frame, pointer: p, inputSeq: seq) }
-            return
+            drag = (id, frame, p); session.beginDrag(windowID: id, frame: frame, pointer: p, inputSeq: seq)
+        default:
+            let seq = button(event, 0, down: true)
+            if let id = target.raises { session.localRaise(windowID: id, inputSeq: seq) }
         }
-        button(event, 0, down: true)
     }
     override func mouseUp(with event: NSEvent) {
         if let ld = layerDrag {
@@ -319,9 +301,12 @@ final class VideoNSView: NSView {
     override func keyUp(with event: NSEvent) { if !observeOnly, event.modifierFlags.intersection([.control, .option, .command, .shift]) == [.control, .option, .command] { return }; key(event, down: false) }
     override func flagsChanged(with event: NSEvent) { if !observeOnly { session?.send(.modifiers(.init(keyCode: event.keyCode, modifiers: flags(event)))) } }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        // Swallow ⌘-shortcuts so the viewer's own menu does not eat them; forward to the host.
+        // Swallow ⌘-shortcuts so the viewer's own menu does not eat them; forward to the host. With Send Keyboard Shortcuts
+        // to Mac off, this app's menus get them first (⌘Q, ⌘W, ⌘,); what no menu item takes still goes to the host.
         guard window?.firstResponder === self else { return false }
         if handleLocal(event) { return true }
+        let capture = MainActor.assumeIsolated { controls?.captureShortcuts ?? true }
+        if !capture, event.type == .keyDown, event.modifierFlags.contains(.command), NSApp.mainMenu?.performKeyEquivalent(with: event) == true { return true }
         if event.type == .keyDown { key(event, down: true) } else if event.type == .keyUp { key(event, down: false) }
         return true
     }
@@ -330,10 +315,12 @@ final class VideoNSView: NSView {
 struct VideoView: NSViewRepresentable {
     let session: ViewerSession
     @ObservedObject var model: ViewerModel
+    var controls: ViewerControls? = nil
 
     func makeNSView(context: Context) -> VideoNSView {
         let v = VideoNSView(frame: .zero)
         v.model = model
+        v.controls = controls
         v.attach(session)
         DispatchQueue.main.async { v.window?.makeFirstResponder(v) }
         return v

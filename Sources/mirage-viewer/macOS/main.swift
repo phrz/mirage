@@ -67,7 +67,8 @@ struct Options {
                              keys:N sends N scripted keystrokes to a host in input-sink mode only (input-integrity test)
                   --observe  show the picture but forward no local input (watching a scripted run without disturbing it)
                   --unified  start in Unified mode: every remote window a native window (⌃⌥⌘U switches Desktop ↔ Unified)
-                  ⌃⌥⌘S toggles the stats overlay, ⌃⌥⌘, opens Settings, ⌃⌥⌘Q quits; all other keys go to the host.
+                  ⌃⌥⌘S toggles the stats overlay (off by default; remembered), ⌃⌥⌘, opens Settings, ⌃⌥⌘Q quits; all other keys go
+                  to the host (⌘-shortcuts too, unless View › Send Keyboard Shortcuts to Mac is off).
                 """)
             exit(0)
         }
@@ -87,7 +88,7 @@ struct Options {
 
 /// AppKit shell: one NSWindow hosting the SwiftUI content. (A SwiftUI `App` scene does not
 /// reliably open a window when the executable is launched outside a bundle/LaunchServices.)
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     let options = Options.parse()
     var model: ViewerModel!
     var session: ViewerSession!
@@ -95,7 +96,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var connectWindow: NSWindow?
     var unified: UnifiedController?
     var chrome: NativeChromeController?
-    private var modeItem: NSMenuItem?
+    /// The toolbar's, the View menu's and Settings' state: the stats overlay and where ⌘-shortcuts go (remembered).
+    lazy var controls: ViewerControls = MainActor.assumeIsolated { ViewerControls(remember: options.scenario == nil && !options.observe) }
+    private var toolbar: ViewerToolbar?
+    /// Disconnect (toolbar, menu): the viewer window closes and the connect window comes back, the app stays.
+    private var disconnecting = false
     /// This Mac as a host: the menu-bar item that drives the local `miraged` (Pair a Device…, Allow / Deny).
     var hostMenu: HostMenu?
 
@@ -109,6 +114,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMenu()
+        MainActor.assumeIsolated {
+            controls.onSettings = { [weak self] in self?.showSettings(nil) }
+            controls.onDisconnect = { [weak self] in self?.disconnect() }
+        }
         if options.scenario == nil, ProcessInfo.processInfo.environment["MIRAGE_NO_HOST_MENU"] == nil {
             let m = HostMenu()
             m.onConnectWindow = { [weak self] in MainActor.assumeIsolated { self?.openViewer() } }
@@ -124,6 +133,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if ProcessInfo.processInfo.environment["MIRAGE_NO_ACTIVATE"] == nil { NSApp.activate(ignoringOtherApps: true) }
         MainActor.assumeIsolated {
             if options.host.isEmpty { showConnectWindow() } else { startViewer(host: options.host, pairCode: options.pair) }
+            // Test knob MIRAGE_TEST_OPEN_SETTINGS: the Settings window opens at launch (screenshots without clicking).
+            if ProcessInfo.processInfo.environment["MIRAGE_TEST_OPEN_SETTINGS"] != nil { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.showSettings(nil) } }
         }
     }
 
@@ -171,23 +182,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         session?.stop(); NSApp.terminate(nil)
     }
 
-    /// The GUI entry point: paired hosts, a host field, an optional pairing code.
+    /// The GUI entry point: recent and paired Macs, a new one with its pairing code, Pair a Device… for this Mac as a host.
     @MainActor private func showConnectWindow() {
         let known = (try? Store().knownHosts()) ?? [:]
-        let view = ConnectView(knownHosts: known.map { ($0.key, $0.value.hostName) }.sorted { $0.0 < $1.0 },
-                               lastHost: UserDefaults.standard.string(forKey: "lastHost") ?? "") { [weak self] host, code in
+        let hosts = ConnectView.hosts(known: known.map { ($0.key, $0.value.hostName) }, recent: ViewerSettings.recentHosts())
+        let view = ConnectView(hosts: hosts, lastHost: UserDefaults.standard.string(forKey: "lastHost") ?? "", onPairDevice: { [weak self] in self?.pairDevice() }) { [weak self] host, code in
             self?.connectWindow?.close(); self?.connectWindow = nil
             MainActor.assumeIsolated { self?.startViewer(host: host, pairCode: code) }
         }
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 380),
-                         styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-        w.title = "Mirage"
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 500),
+                         styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
+        w.title = "Connect to a Mac"
+        w.titleVisibility = .hidden
+        w.titlebarAppearsTransparent = true
+        w.isMovableByWindowBackground = true
         w.contentView = NSHostingView(rootView: view)
         w.isReleasedWhenClosed = false
         w.delegate = self
         w.center()
         w.makeKeyAndOrderFront(nil)
         connectWindow = w
+    }
+
+    /// Pair a Device… (the connect window): this Mac's rotating code and QR for another device, as the menu-bar item does.
+    @MainActor private func pairDevice() {
+        if let m = hostMenu, m.isConnected { m.pairDevice(); return }
+        info("This Mac does not accept connections yet.", "Turn on Allow Connections to This Mac in Mirage's menu-bar item, then choose Pair a Device… again.")
     }
 
     /// A `miragerd://pair` link (a scanned QR code, or one clicked): never connects silently. "Pair with <host>?" with the key
@@ -198,7 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NSApp.activate(ignoringOtherApps: true)
             guard let link = PairingLink(url: url) else { return info("That is not a valid Mirage pairing link.", "") }
             guard !link.isExpired() else { return info("That pairing code has expired.", "Codes change every 30 seconds. Show a fresh one on the Mac (Pair a Device… in its menu bar) and scan it again.") }
-            guard session == nil else { return info("Mirage is already connected.", "Quit Mirage, then open the pairing link again.") }
+            guard session == nil else { return info("Mirage is already connected.", "Disconnect, then open the pairing link again.") }
             let alert = NSAlert()
             alert.messageText = "Pair with \(link.hostName)?"
             alert.informativeText = "\(link.address):\(link.port)\nHost key \(PairingLink.fingerprintText(link.keyHash))\n\nThe Mac will ask to allow this device too."
@@ -215,7 +235,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @MainActor private func startViewer(host: String, pairCode: String?, pairLink: PairingLink? = nil) {
-        UserDefaults.standard.set(host, forKey: "lastHost")
+        ViewerSettings.noteConnected(host)
         let prefs = ViewerPreferences.shared
         if let t = options.throttle { prefs.throttle = t }
         model = ViewerModel(bitrateKbps: options.bitrate ?? prefs.bitrateKbps, pixelFactor: options.pixelFactor, throttle: prefs.throttle)
@@ -223,13 +243,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model.statsLog = options.statsLog.map { URL(fileURLWithPath: $0) }
         session = ViewerSession(host: host, port: pairLink?.port ?? options.port, pairCode: pairCode, pairLink: pairLink, model: model)
         prefs.session = session
+        // A scripted run with the window visible: the stats overlay shows the picture being measured (not remembered).
+        if options.scenario != nil { controls.setShowStats(true) }
+        controls.model = model
         if options.scenario != nil { session.inputAutoFlush = true }
-        let content = ContentView(session: session, model: model)
+        let content = ContentView(session: session, model: model, controls: controls)
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: options.window.0, height: options.window.1),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        w.title = "Mirage — \(host)"
+        w.title = host
         w.contentView = NSHostingView(rootView: content)
         w.contentMinSize = NSSize(width: 480, height: 270)
+        w.collectionBehavior.insert(.fullScreenPrimary)
+        // The toolbar: unified with the title bar, the iOS button bar's actions; it hides with the menu bar in full screen.
+        let tb = ViewerToolbar(controls: controls)
+        w.toolbarStyle = .unified
+        w.toolbar = tb.toolbar
+        toolbar = tb
         w.delegate = self
         w.center()
         if options.window == (1280, 720) { w.setFrameAutosaveName("MirageViewer") }
@@ -240,12 +269,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let c = NativeChromeController(session: session, model: model, localMainMenu: menu)
             c.unified = unified; unified?.chrome = c; chrome = c
         }
-        LocalShortcuts.toggleStats = { [weak self] in self?.model.showStats.toggle() }
+        LocalShortcuts.toggleStats = { [weak self] in self?.controls.toggleStats() }
         LocalShortcuts.openSettings = { [weak self] in self?.showSettings(nil) }
         LocalShortcuts.toggleMode = { [weak self] in self?.setUnified(!(self?.model.unified ?? false)) }
         if options.unified { setUnified(true) }
         session.start()
-        // A scripted run with the window visible: the stats overlay shows the picture being measured.
         if let (name, secs) = options.scenario {
             let runner = ScenarioRunner(session: session, name: name, seconds: secs)
             session.scenario = runner
@@ -261,12 +289,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
+    /// Disconnect (toolbar, Connection menu): the session ends, the viewer window closes, the connect window comes back.
+    @MainActor func disconnect() {
+        guard session != nil, let w = window else { return }
+        if model?.unified == true { setUnified(false) }
+        disconnecting = true
+        w.close()   // windowWillClose stops the session
+    }
+
     /// Desktop ↔ Unified, on the same session: the Desktop window hides and every remote window becomes a native one,
     /// or back.
     @MainActor func setUnified(_ on: Bool) {
         guard let model, let unified, model.unified != on else { return }
         model.unified = on
-        modeItem?.state = on ? .on : .off
         if on {
             window.orderOut(nil)
             unified.start()
@@ -286,67 +321,122 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     @objc func toggleDock(_ sender: Any?) { MainActor.assumeIsolated { if let c = chrome { c.dockVisible.toggle() } } }
     @objc func toggleUnified(_ sender: Any?) { MainActor.assumeIsolated { setUnified(!(model?.unified ?? false)) } }
+    @objc func toggleStats(_ sender: Any?) { MainActor.assumeIsolated { controls.toggleStats() } }
+    @objc func toggleShortcuts(_ sender: Any?) { MainActor.assumeIsolated { controls.toggleCaptureShortcuts() } }
+    @objc func disconnectMenu(_ sender: Any?) { MainActor.assumeIsolated { disconnect() } }
+    @objc func newConnection(_ sender: Any?) { MainActor.assumeIsolated { openViewer() } }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        MainActor.assumeIsolated {
+            switch item.action {
+            case #selector(toggleStats(_:)): item.state = controls.showStats ? .on : .off; return true
+            case #selector(toggleShortcuts(_:)): item.state = controls.captureShortcuts ? .on : .off; return true
+            case #selector(toggleUnified(_:)): item.state = model?.unified == true ? .on : .off; return session != nil
+            case #selector(toggleDock(_:)): return model?.unified == true
+            case #selector(disconnectMenu(_:)): return session != nil
+            default: return true
+            }
+        }
+    }
+
+    /// Full screen: the toolbar hides with the menu bar and comes back with it, as in other Mac apps.
+    func window(_ window: NSWindow, willUseFullScreenPresentationOptions proposedOptions: NSApplication.PresentationOptions = []) -> NSApplication.PresentationOptions {
+        proposedOptions.union([.fullScreen, .autoHideMenuBar, .autoHideToolbar])
+    }
 
     func windowWillClose(_ notification: Notification) {
         if (notification.object as? NSWindow) === connectWindow { connectWindow = nil; becomeAccessoryIfIdle(); return }
         guard (notification.object as? NSWindow) === window else { return }
         session?.stop()
-        MainActor.assumeIsolated { ViewerPreferences.shared.session = nil }
-        // Hosting: the viewer closes, the app stays in the menu bar. Otherwise closing the viewer quits, as before.
-        if hostingCompanion { session = nil; window = nil; becomeAccessoryIfIdle() } else { NSApp.terminate(nil) }
+        MainActor.assumeIsolated { ViewerPreferences.shared.session = nil; controls.model = nil }
+        chrome?.stop(); unified?.stop()
+        let back = disconnecting
+        disconnecting = false
+        // Disconnect: back to the connect window. Closing the viewer while hosting: the app stays in the menu bar.
+        // Otherwise closing the viewer quits, as before.
+        if back || hostingCompanion {
+            session = nil; window = nil; model = nil; toolbar = nil; unified = nil; chrome = nil
+            if back { MainActor.assumeIsolated { showConnectWindow() } } else { becomeAccessoryIfIdle() }
+        } else { NSApp.terminate(nil) }
     }
     /// Not in Unified mode: the Desktop window is hidden there, and remote windows come and go with the host's. Never while
     /// hosting (the menu-bar item stays).
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { MainActor.assumeIsolated { !hostingCompanion && !(model?.unified ?? false) && unified?.active != true } }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { MainActor.assumeIsolated { !hostingCompanion && !disconnecting && !(model?.unified ?? false) && unified?.active != true } }
 
     private func installMenu() {
         let main = NSMenu()
+        func item(_ menu: NSMenu, _ title: String, _ action: Selector?, _ key: String = "", _ mods: NSEvent.ModifierFlags = [.command]) -> NSMenuItem {
+            let i = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            i.keyEquivalentModifierMask = mods
+            menu.addItem(i)
+            return i
+        }
         let appItem = NSMenuItem(); main.addItem(appItem)
         let appMenu = NSMenu()
-        let quit = NSMenuItem(title: "Quit Mirage Viewer", action: #selector(quit(_:)), keyEquivalent: "q")
-        quit.keyEquivalentModifierMask = [.control, .option, .command]
-        let unifiedItem = NSMenuItem(title: "Unified Windows", action: #selector(toggleUnified(_:)), keyEquivalent: "u")
-        unifiedItem.keyEquivalentModifierMask = [.control, .option, .command]
-        // ⌘, while the picture has focus goes to the host, as every other key; ⌃⌥⌘, opens Settings there.
-        appMenu.addItem(withTitle: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        _ = item(appMenu, "About Mirage Viewer", #selector(NSApplication.orderFrontStandardAboutPanel(_:)))
         appMenu.addItem(.separator())
-        appMenu.addItem(unifiedItem)
-        appMenu.addItem(withTitle: "Show Remote Dock", action: #selector(toggleDock(_:)), keyEquivalent: "")
+        // ⌘, while the picture has focus goes to the host when shortcuts are sent to the Mac; ⌃⌥⌘, opens Settings there.
+        _ = item(appMenu, "Settings…", #selector(showSettings(_:)), ",")
         appMenu.addItem(.separator())
-        appMenu.addItem(quit)
+        _ = item(appMenu, "Hide Mirage Viewer", #selector(NSApplication.hide(_:)), "h")
+        _ = item(appMenu, "Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option])
+        _ = item(appMenu, "Show All", #selector(NSApplication.unhideAllApplications(_:)))
+        appMenu.addItem(.separator())
+        _ = item(appMenu, "Quit Mirage Viewer", #selector(quit(_:)), "q")
         appItem.submenu = appMenu
+
+        let connItem = NSMenuItem(); main.addItem(connItem)
+        let conn = NSMenu(title: "Connection")
+        _ = item(conn, "Connect to a Mac…", #selector(newConnection(_:)), "n")
+        _ = item(conn, "Disconnect", #selector(disconnectMenu(_:)), "d", [.command, .shift])
+        conn.addItem(.separator())
+        _ = item(conn, "Close Window", #selector(NSWindow.performClose(_:)), "w")
+        connItem.submenu = conn
+
         let editItem = NSMenuItem(); main.addItem(editItem)
         let edit = NSMenu(title: "Edit")   // standard editing shortcuts for the connect window's fields
-        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        _ = item(edit, "Cut", #selector(NSText.cut(_:)), "x")
+        _ = item(edit, "Copy", #selector(NSText.copy(_:)), "c")
+        _ = item(edit, "Paste", #selector(NSText.paste(_:)), "v")
+        _ = item(edit, "Select All", #selector(NSText.selectAll(_:)), "a")
         editItem.submenu = edit
+
         let viewItem = NSMenuItem(); main.addItem(viewItem)
         let view = NSMenu(title: "View")
-        let mode = NSMenuItem(title: "Unified Windows", action: #selector(toggleUnified(_:)), keyEquivalent: "u")
-        mode.keyEquivalentModifierMask = [.control, .option, .command]
-        view.addItem(mode); modeItem = mode
+        _ = item(view, "Show Stats", #selector(toggleStats(_:)), "s", [.control, .option, .command])
+        _ = item(view, "Send Keyboard Shortcuts to Mac", #selector(toggleShortcuts(_:)))
+        view.addItem(.separator())
+        _ = item(view, "Unified Windows", #selector(toggleUnified(_:)), "u", [.control, .option, .command])
+        _ = item(view, "Show Remote Dock", #selector(toggleDock(_:)))
+        view.addItem(.separator())
+        _ = item(view, "Show Toolbar", #selector(NSWindow.toggleToolbarShown(_:)), "t", [.command, .option])
+        _ = item(view, "Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control])
         viewItem.submenu = view
+
         let windowItem = NSMenuItem(); main.addItem(windowItem)
         let windowMenu = NSMenu(title: "Window")
+        _ = item(windowMenu, "Minimize", #selector(NSWindow.performMiniaturize(_:)), "m")
+        _ = item(windowMenu, "Zoom", #selector(NSWindow.performZoom(_:)))
         windowItem.submenu = windowMenu
         NSApp.windowsMenu = windowMenu
         NSApp.mainMenu = main
     }
     @objc func quit(_ sender: Any?) { requestQuit() }
 
-    /// Settings (⌘, from the menu, ⌃⌥⌘, over the picture): the bitrate cap and the network throttle, applied to the
-    /// connected session at once.
+    /// Settings (⌘, from the menu, ⌃⌥⌘, over the picture, the toolbar's gear): iOS's sections, applied to the connected
+    /// session at once.
     private var settingsWindow: NSWindow?
     @objc func showSettings(_ sender: Any?) {
         MainActor.assumeIsolated {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
-            if let w = settingsWindow { w.makeKeyAndOrderFront(nil); return }
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 420), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            if let w = settingsWindow {
+                (w.contentView as? NSHostingView<MacSettingsView>)?.rootView = MacSettingsView(prefs: ViewerPreferences.shared, controls: controls, model: model)
+                w.makeKeyAndOrderFront(nil); return
+            }
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 660), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
             w.title = "Settings"
-            w.contentView = NSHostingView(rootView: MacSettingsView(prefs: ViewerPreferences.shared, model: model))
+            w.contentView = NSHostingView(rootView: MacSettingsView(prefs: ViewerPreferences.shared, controls: controls, model: model))
             w.isReleasedWhenClosed = false
             w.center()
             w.makeKeyAndOrderFront(nil)
@@ -355,151 +445,156 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 }
 
-/// The Mac's Settings window: Connection (bitrate cap; the network throttle under Developer) and About.
+/// The Mac's Settings window, iOS's sections: Connection (bitrate cap; the network throttle under Developer), Input (where
+/// ⌘-shortcuts go: the Mac's counterpart of the touch mode), Display (the stats overlay), About.
 struct MacSettingsView: View {
     @ObservedObject var prefs: ViewerPreferences
+    @ObservedObject var controls: ViewerControls
     let model: ViewerModel?
     var body: some View {
         Form {
             ConnectionSettingsSection(prefs: prefs)
-            Section("About") {
-                LabeledContent("Mirage Viewer", value: ViewerSettings.appBuild)
-                if let model { MacHostAbout(model: model) }
+            Section {
+                Toggle("Send Keyboard Shortcuts to Mac", isOn: Binding(get: { controls.captureShortcuts }, set: { controls.setCaptureShortcuts($0) }))
+            } header: {
+                Text("Input")
+            } footer: {
+                Text("⌘-shortcuts typed over the picture go to the remote Mac. Off, Mirage's menus get them first (⌘Q, ⌘W, ⌘,) and the rest still go to the Mac. ⌃⌥⌘ shortcuts are always Mirage's.")
             }
+            Section {
+                Toggle("Stats Overlay", isOn: Binding(get: { controls.showStats }, set: { controls.setShowStats($0) }))
+            } header: {
+                Text("Display")
+            } footer: {
+                Text("Connection numbers over the picture. Also in the toolbar and View › Show Stats (⌃⌥⌘S).")
+            }
+            AboutSettingsSection(model: model)
         }
         .formStyle(.grouped)
-        .frame(width: 460)
-        .frame(minHeight: 380)
-    }
-}
-private struct MacHostAbout: View {
-    @ObservedObject var model: ViewerModel
-    var body: some View {
-        LabeledContent("Host", value: model.hostDisplayName ?? model.hostName)
-        LabeledContent("Host Build", value: model.hostBuild ?? "older host (not reported)")
+        .frame(width: 480)
+        .frame(minHeight: 620)
     }
 }
 
-/// First window of the app: pick a paired host or enter a new one (with its 6-digit code).
+/// First window of the app: recent and paired Macs, another one by name with its 6-digit code, and Pair a Device… for this
+/// Mac as a host. Recent first; a double click connects.
 struct ConnectView: View {
-    let knownHosts: [(alias: String, name: String)]
-    @State var host: String
+    struct Host: Identifiable, Equatable { var alias: String; var name: String?; var id: String { alias } }
+    let hosts: [Host]
+    /// A Mac from the list, or nil while one is typed below.
+    @State private var selection: String?
+    @State private var address: String
     @State private var code = ""
+    let onPairDevice: () -> Void
     let onConnect: (String, String?) -> Void
 
-    init(knownHosts: [(String, String)], lastHost: String, onConnect: @escaping (String, String?) -> Void) {
-        self.knownHosts = knownHosts.map { (alias: $0.0, name: $0.1) }
-        self._host = State(initialValue: lastHost)
+    init(hosts: [Host], lastHost: String, onPairDevice: @escaping () -> Void, onConnect: @escaping (String, String?) -> Void) {
+        self.hosts = hosts
+        let listed = hosts.contains { $0.alias == lastHost }
+        self._selection = State(initialValue: listed ? lastHost : hosts.first?.alias)
+        self._address = State(initialValue: listed || !hosts.isEmpty ? "" : lastHost)
+        self.onPairDevice = onPairDevice
         self.onConnect = onConnect
     }
 
-    private var isPaired: Bool { knownHosts.contains { $0.alias == host.trimmingCharacters(in: .whitespaces) } }
-    private var canConnect: Bool {
-        let h = host.trimmingCharacters(in: .whitespaces)
-        return !h.isEmpty && (isPaired || PairingCode.normalize(code) != nil)
+    /// Paired Macs, the recently connected ones first (most recent at the top), then the others by name.
+    static func hosts(known: [(alias: String, name: String)], recent: [String]) -> [Host] {
+        let names = Dictionary(known.map { ($0.alias, $0.name) }, uniquingKeysWith: { a, _ in a })
+        let recentPaired = recent.filter { names[$0] != nil }
+        let rest = names.keys.filter { !recentPaired.contains($0) }.sorted()
+        return (recentPaired + rest).map { Host(alias: $0, name: names[$0]) }
     }
 
+    private var typed: String { address.trimmingCharacters(in: .whitespaces) }
+    /// What Connect connects to: the typed address, else the Mac chosen in the list.
+    private var target: String { typed.isEmpty ? (selection ?? "") : typed }
+    private var isPaired: Bool { hosts.contains { $0.alias == target } }
+    private var canConnect: Bool { !target.isEmpty && (isPaired || PairingCode.normalize(code) != nil) }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Mirage").font(.system(size: 26, weight: .semibold))
-                Text("Remote desktop for your Macs over your tailnet.").foregroundStyle(.secondary)
+        VStack(spacing: 0) {
+            VStack(spacing: 6) {
+                Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 72, height: 72)
+                Text("Connect to a Mac").font(.title2.weight(.semibold))
+                Text("Over your network or tailnet.").foregroundStyle(.secondary)
             }
-            if !knownHosts.isEmpty {
-                Text("Paired Macs").font(.headline)
-                VStack(spacing: 0) {
-                    ForEach(knownHosts, id: \.alias) { h in
-                        Button { host = h.alias; code = "" } label: {
-                            HStack {
-                                Image(systemName: "desktopcomputer")
-                                VStack(alignment: .leading) {
-                                    Text(h.name).fontWeight(.medium)
-                                    Text(h.alias).font(.caption).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                if h.alias == host { Image(systemName: "checkmark").foregroundStyle(.tint) }
-                            }
-                            .padding(8).contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .background(h.alias == host ? Color.accentColor.opacity(0.12) : .clear)
-                        .cornerRadius(6)
+            .padding(.top, 34).padding(.bottom, 4)
+            Form {
+                if !hosts.isEmpty {
+                    Section("Recent") {
+                        ForEach(hosts) { h in row(h) }
                     }
                 }
-                .padding(4)
-                .background(.quaternary.opacity(0.4))
-                .cornerRadius(8)
+                Section {
+                    TextField("Name or Address", text: $address, prompt: Text("mac-studio.local or 100.64.0.1"))
+                        .onChange(of: address) { if !typed.isEmpty { selection = nil } }
+                        .onSubmit { connect() }
+                    if !typed.isEmpty && !isPaired {
+                        TextField("Pairing Code", text: $code, prompt: Text("6 digits"))
+                            .onSubmit { connect() }
+                    }
+                } header: {
+                    Text(hosts.isEmpty ? "Add a Mac" : "Another Mac")
+                } footer: {
+                    Text("On that Mac, choose Pair a Device… in Mirage's menu-bar item and type the code it shows. Pairing happens once.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
-            Text(knownHosts.isEmpty ? "Add a Mac" : "Or another Mac").font(.headline)
-            TextField("Host name or address (e.g. mac-daddy)", text: $host)
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { if canConnect { connect() } }
-            if !isPaired {
-                TextField("6-digit code from `miraged pair` on that Mac", text: $code)
-                    .textFieldStyle(.roundedBorder)
-                    .onSubmit { if canConnect { connect() } }
-                Text("Pairing happens once; afterwards this Mac is remembered.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            Spacer()
+            .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
             HStack {
+                Button("Pair a Device…", action: onPairDevice)
+                    .help("Show this Mac's pairing code, for an iPhone, iPad or another Mac to connect to it")
                 Spacer()
                 Button("Connect") { connect() }
                     .keyboardShortcut(.defaultAction)
                     .disabled(!canConnect)
             }
+            .controlSize(.large)
+            .padding(.horizontal, 20).padding(.bottom, 18).padding(.top, 4)
         }
-        .padding(20)
-        .frame(width: 420, height: 380)
+        .frame(width: 460, height: 500)
+        .background(.background)
     }
 
+    private func row(_ h: Host) -> some View {
+        let selected = typed.isEmpty && h.alias == selection
+        return HStack(spacing: 10) {
+            Image(systemName: "desktopcomputer").font(.title3).foregroundStyle(selected ? Color.accentColor : .secondary).frame(width: 24)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(h.name ?? h.alias).fontWeight(.medium)
+                if let n = h.name, n != h.alias { Text(h.alias).font(.caption).foregroundStyle(.secondary) }
+            }
+            Spacer()
+            if selected { Image(systemName: "checkmark").foregroundStyle(.tint).fontWeight(.semibold) }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { choose(h); connect() }
+        .onTapGesture { choose(h) }
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+    private func choose(_ h: Host) { selection = h.alias; address = ""; code = "" }
+
     private func connect() {
-        let h = host.trimmingCharacters(in: .whitespaces)
-        onConnect(h, isPaired ? nil : PairingCode.normalize(code))
+        guard canConnect else { return }
+        onConnect(target, isPaired ? nil : PairingCode.normalize(code))
     }
 }
 
 struct ContentView: View {
     let session: ViewerSession
     @ObservedObject var model: ViewerModel
+    let controls: ViewerControls
     var body: some View {
         ZStack(alignment: .topLeading) {
-            VideoView(session: session, model: model)
+            VideoView(session: session, model: model, controls: controls)
             if model.showStats { StatsOverlay(model: model).padding(8) }
-            if let r = model.reconnecting {
-                VStack { Spacer(); HStack { Spacer()
-                    Text("reconnecting… attempt \(r.attempt), next in \(r.inSeconds) s").font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.white).padding(8).background(.orange.opacity(0.85)).cornerRadius(8).padding(12)
-                } }
-            } else if model.stalledSeconds > 0 {
-                VStack { Spacer(); HStack { Spacer()
-                    Text("no data from the host for \(model.stalledSeconds) s").font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.white).padding(8).background(.orange.opacity(0.85)).cornerRadius(8).padding(12)
-                } }
-            }
-            if model.hostStatus?.consoleLocked == true {
-                // The host's screen is locked: what streams is its lock screen (window layers are paused), not a broken picture.
-                VStack { HStack { Spacer()
-                    Label("\(model.hostName)'s screen is locked. Unlock it to see its windows.", systemImage: "lock.fill")
-                        .font(.system(size: 14, weight: .semibold)).foregroundStyle(.white)
-                        .padding(.horizontal, 14).padding(.vertical, 9).background(.black.opacity(0.75)).cornerRadius(10).padding(.top, 14)
-                    Spacer() }; Spacer() }
-                .allowsHitTesting(false)
-            }
-            if model.inputHeld {
-                VStack { Spacer()
-                    Text("\(model.inputQueued) keystrokes typed while the host was unreachable.  ⌃⌥⌘↩ send them   ⌃⌥⌘⌫ discard")
-                        .font(.system(size: 13, weight: .medium)).foregroundStyle(.white).padding(10).background(.blue.opacity(0.9)).cornerRadius(8).padding(.bottom, 48)
-                }
-            } else if model.inputQueued > 0 || model.inputDropped > 0 {
-                VStack { Spacer(); HStack {
-                    Text("input: \(model.inputQueued) queued" + (model.inputDropped > 0 ? ", \(model.inputDropped) dropped (queue full)" : "")).font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(.white).padding(6).background(.black.opacity(0.6)).cornerRadius(6).padding(12)
-                    Spacer() } }
-            }
-            if let e = model.error {
-                Text(e).foregroundStyle(.white).padding().background(.red.opacity(0.8)).cornerRadius(8).padding(40)
-            }
+            // The connection's state, as iOS shows it (`SessionBanners`); no numbers unless the stats overlay is on.
+            VStack(alignment: .leading) { Spacer(); SessionBanners(session: session, model: model) }
+                .padding(12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .allowsHitTesting(model.inputHeld)
         }
         .background(.black)
     }
@@ -516,6 +611,9 @@ struct StatsOverlay: View {
             Text(String(format: "%@   target %d kbps   capacity %d   queue %.0f ms   rung %d (%.3gx%@)   tile budget %d", s.rate.tier?.name ?? "–", s.rate.targetKbps, s.rate.capacityKbps, s.rate.queueMs, s.rate.rung, s.rate.scale, s.upscaling ? " MetalFX" : "", s.rate.tileBudgetKbps))
             Text(String(format: "video %dx%d   decode %.1f ms   frames %d   lost %d   skipped %d   tile rects %d   copy-rects %d   nacks %d (recovered %d, parity %d)", s.width, s.height, s.decodeMs, s.frames, s.lost, s.dropped, s.tileRects, s.copyRects, s.nacks, s.recoveredByNack, s.recoveredByParity))
             Text(String(format: "predictions shown %d   confirmed %d   mismatched %d   expired %d   layers %d (%d MB)", s.predictions.shown, s.predictions.confirmed, s.predictions.mismatched, s.predictions.expired, s.layers, s.layerMB))
+            if model.inputQueued > 0 || model.inputDropped > 0 {
+                Text("input: \(model.inputQueued) queued" + (model.inputDropped > 0 ? ", \(model.inputDropped) dropped (queue full)" : ""))
+            }
             if let h = model.hostStatus {
                 Text("host: \(h.consoleLocked ? "SCREEN LOCKED" : "unlocked")   front: \(h.frontmostApp) — \(h.frontmostWindowTitle.prefix(40))")
                     .foregroundStyle(h.consoleLocked ? .red : .white)

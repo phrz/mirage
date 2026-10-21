@@ -49,7 +49,7 @@ struct DesktopScreen: View {
             .ignoresSafeArea(.keyboard)   // the picture keeps its size (no re-stream); it lifts above the keyboard instead
             VStack(alignment: .leading, spacing: 8) {
                 Spacer()
-                banners
+                SessionBanners(session: session, model: model)   // the Mac viewer's too
             }
             .padding(10)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -134,36 +134,6 @@ struct DesktopScreen: View {
             .foregroundStyle(on ? Color.accentColor : Color.white)
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())
-    }
-
-    @ViewBuilder private var banners: some View {
-        if let e = model.error {
-            banner(e, color: .red)
-        } else if let r = model.reconnecting {
-            banner("Reconnecting… attempt \(r.attempt), next in \(r.inSeconds) s", color: .orange)
-        } else if model.stalledSeconds > 0 {
-            banner("No data from the host for \(model.stalledSeconds) s", color: .orange)
-        } else if model.streamInfo == nil {
-            banner(model.status, color: .gray)
-        }
-        if model.hostStatus?.consoleLocked == true {
-            banner("\(model.hostName)'s screen is locked. Unlock it to see its windows.", color: .black)
-        }
-        if model.inputHeld {
-            HStack {
-                Text("\(model.inputQueued) keystrokes typed while the host was unreachable.")
-                Button("Send") { session.flushInput() }.buttonStyle(.borderedProminent)
-                Button("Discard", role: .destructive) { session.discardInput() }.buttonStyle(.bordered)
-            }
-            .font(.footnote.weight(.medium)).foregroundStyle(.white).padding(10)
-            .background(.blue.opacity(0.9), in: RoundedRectangle(cornerRadius: 8))
-        }
-    }
-
-    private func banner(_ s: String, color: Color) -> some View {
-        Text(s).font(.footnote.weight(.medium)).foregroundStyle(.white)
-            .padding(.horizontal, 10).padding(.vertical, 6)
-            .background(color.opacity(0.85), in: RoundedRectangle(cornerRadius: 8))
     }
 }
 

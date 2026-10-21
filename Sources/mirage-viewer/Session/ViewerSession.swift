@@ -14,7 +14,8 @@ final class ViewerModel: ObservableObject {
     @Published var status = "connecting…"
     @Published var error: String?
     @Published var stats = Stats()
-    @Published var showStats = true
+    /// The stats overlay (debug numbers): off unless the person turned it on (`ViewerControls` remembers it).
+    @Published var showStats = false
     @Published var cursor: CursorImage?
     @Published var remoteCursor: CGPoint? = nil      // normalized, host-reported
     @Published var streamInfo: ControlMessage.StreamInfo?
@@ -1537,15 +1538,17 @@ final class ViewerSession: @unchecked Sendable {
         return Double(i.width) / Double(i.displayWidth)
     }
 
-    /// Topmost window under a stream-pixel point, as arranged locally. Display-sized windows above the normal level are
-    /// passed over (the Dock's transparent full-screen window at level 20 covers every point on macOS 26+: a press on a
-    /// title bar found it instead of the window, so no title-bar drag or local raise ever started under it).
+    /// Topmost window under a stream-pixel point, as arranged locally (`WindowHitTest`: never the overlay layer, nor a
+    /// display-sized window above the normal level).
     func window(at x: Int, _ y: Int) -> ControlMessage.WindowInfo? {
-        let display = compositor.map { $0.width * $0.height } ?? 0
-        return arrangedWindows().first { w in
-            // (The compositor model's overlay layer covers the whole display: never the window under a point.)
-            !w.isOverlay && w.frame.contains(x, y) && (w.isLayered || w.windowLevel == 0 || w.frame.area * 10 < display * 6)
-        }
+        WindowHitTest.window(at: x, y, in: arrangedWindows(), displayArea: compositor.map { $0.width * $0.height } ?? 0)
+    }
+
+    /// What a press at a stream pixel lands on and may become (a held title-bar press, a local raise, a predicted drag):
+    /// the one rule the Mac and iOS views both follow.
+    @MainActor func press(at x: Int, _ y: Int, plain: Bool, firstClick: Bool = true) -> WindowHitTest.Press {
+        WindowHitTest.press(at: x, y, in: arrangedWindows(), displayArea: compositor.map { $0.width * $0.height } ?? 0,
+                            pxPerPoint: pixelsPerPoint, plain: plain, firstClick: firstClick)
     }
 
     /// The rect a wheel event over `window` should shift (in the window's own coordinates when it is a

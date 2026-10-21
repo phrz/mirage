@@ -158,17 +158,20 @@ Admin: `miraged devices`, `miraged revoke <id-prefix>`, `mirage hosts`, `miraged
 ## View the desktop
 
 ```bash
-.build/MirageViewer.app/Contents/MacOS/mirage-viewer HOST [--bitrate 800] [--scale 1.0]
+.build/MirageViewer.app/Contents/MacOS/mirage-viewer HOST [--bitrate KBPS] [--scale 1.0]
 ```
 
 The viewer requests the stream at its window size (points × backing scale × `--scale`), so
 resize the window to change resolution; the host's tiles are pixel-exact at that size (a
 window smaller than the host display means downscaled text, which costs 2–3x more per tile
-than native, so prefer `--scale` ≥ 1 on a big screen). `⌃⌥⌘U` switches between Desktop and Unified mode, `⌃⌥⌘S` toggles the overlay (RTT, frame
+than native, so prefer `--scale` ≥ 1 on a big screen). `⌃⌥⌘U` switches between Desktop and Unified mode, The window's toolbar (the iOS button bar's actions: where ⌘-shortcuts go,
+stats, Settings, Disconnect) hides with the menu bar in full screen. `⌃⌥⌘S` (or View › Show Stats, or the toolbar)
+toggles the stats overlay, off by default and remembered (RTT, frame
 age, fps, video/tile kbps, the controller's target, capacity and queuing-delay estimates, the
 ladder rung, copy-rects, prediction confirm/mismatch counts), `⌃⌥⌘↑/↓` changes the bitrate
 *cap* by 200 kbps (the controller stays at or below it), `⌃⌥⌘Q` quits. Every other key and
-⌘-shortcut goes to the host. The host cursor is drawn locally at your pointer, so mouse latency
+⌘-shortcut goes to the host (with View › Send Keyboard Shortcuts to Mac off, Mirage's menus take ⌘-shortcuts first).
+The bitrate is automatic unless Settings or `--bitrate` caps it. The host cursor is drawn locally at your pointer, so mouse latency
 is zero; trackpad scrolls and title-bar drags move pixels locally before the host confirms them;
 clicks and typing pay the link RTT.
 

@@ -63,6 +63,12 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v5)],
             linkerSettings: [.linkedFramework("AppKit"), .linkedFramework("SwiftUI"), .linkedFramework("AVFoundation"), .linkedFramework("VideoToolbox")]
         ),
+        // The Mac viewer's own logic (settings migration, the toolbar's state): the executable target, tested in place.
+        .testTarget(
+            name: "MirageViewerTests",
+            dependencies: ["mirage-viewer", "MirageCore"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
         .testTarget(
             name: "MirageCoreTests",
             dependencies: ["MirageCore", "MirageHost"],   // MirageHost: the local control server

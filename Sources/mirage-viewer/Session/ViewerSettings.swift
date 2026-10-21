@@ -14,9 +14,44 @@ enum ViewerSettings {
     static let showStatsKey = "showStatsOnConnect"
     static let startAtOneToOneKey = "startAtOneToOne"
     static let keyAccessoryKey = "keyboardAccessoryRow"
+    /// Mac: ⌘-shortcuts typed over the picture go to the remote Mac (on, the default) or to this app's menus first.
+    static let captureShortcutsKey = "captureKeyboardShortcuts"
+    /// Hosts connected to, most recent first (the connect window's Recent list).
+    static let recentHostsKey = "recentHosts"
+    /// The settings' schema (`migrate`).
+    static let versionKey = "settingsVersion"
+    static let version = 1
+    /// Older builds' bitrate default: their compiled-in 800 kbit/s, read from this key (or written by a launch argument).
+    static let legacyBitrateKey = "bitrate"
+    static let legacyDefaultKbps = 800
 
     /// The caps offered besides Automatic, kbit/s.
     static let capChoices = [300, 500, 800, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000]
+
+    /// Brings settings written by older builds up to date, once:
+    /// - a stored `bitrate` (older builds' key) is removed: its 800 kbit/s was their compiled-in default, not a choice;
+    /// - a stored cap of exactly 800 is that same default carried over (the cap's own key arrived with automatic bitrate):
+    ///   automatic again. A cap chosen after this migration is kept, 800 included.
+    /// A `-bitrate N` launch argument (scripts, simctl) is untouched: it lives in the argument domain, not in the store.
+    static func migrate(_ d: UserDefaults = .standard) {
+        guard d.integer(forKey: versionKey) < version else { return }
+        d.removeObject(forKey: legacyBitrateKey)
+        if d.object(forKey: bitrateKey) != nil, d.integer(forKey: bitrateKey) == legacyDefaultKbps { d.removeObject(forKey: bitrateKey) }
+        d.set(version, forKey: versionKey)
+    }
+
+    /// The stats overlay at connect: as it was last left (off at first).
+    static func showStats(_ d: UserDefaults = .standard) -> Bool { d.bool(forKey: showStatsKey) }
+    static func captureShortcuts(_ d: UserDefaults = .standard) -> Bool { d.object(forKey: captureShortcutsKey) as? Bool ?? true }
+
+    /// Hosts connected to, most recent first.
+    static func recentHosts(_ d: UserDefaults = .standard) -> [String] { d.stringArray(forKey: recentHostsKey) ?? [] }
+    static func noteConnected(_ host: String, _ d: UserDefaults = .standard) {
+        let h = host.trimmingCharacters(in: .whitespaces)
+        guard !h.isEmpty else { return }
+        d.set(Array(([h] + recentHosts(d).filter { $0 != h }).prefix(12)), forKey: recentHostsKey)
+        d.set(h, forKey: "lastHost")
+    }
 
     static func bitrate(_ d: UserDefaults = .standard) -> Int {
         if let launch = d.volatileDomain(forName: UserDefaults.argumentDomain)["bitrate"] { return (launch as? Int) ?? Int("\(launch)") ?? 0 }
@@ -55,18 +90,22 @@ final class ViewerPreferences: ObservableObject {
     static let shared = ViewerPreferences()
 
     /// kbit/s, 0 = automatic. Persisted.
-    @Published var bitrateKbps: Int { didSet { guard bitrateKbps != oldValue else { return }; ViewerSettings.setBitrate(bitrateKbps); session?.setBitrate(bitrateKbps) } }
+    @Published var bitrateKbps: Int { didSet { guard bitrateKbps != oldValue else { return }; ViewerSettings.setBitrate(bitrateKbps, defaults); session?.setBitrate(bitrateKbps) } }
     /// nil = the real link. Persisted only while pinned.
-    @Published var throttle: NetworkThrottle? { didSet { guard throttle != oldValue else { return }; if pinned { ViewerSettings.pin(throttle) }; session?.setThrottle(throttle) } }
+    @Published var throttle: NetworkThrottle? { didSet { guard throttle != oldValue else { return }; if pinned { ViewerSettings.pin(throttle, defaults) }; session?.setThrottle(throttle) } }
     /// Keep the throttle after a relaunch.
-    @Published var pinned: Bool { didSet { ViewerSettings.pin(pinned ? throttle : nil) } }
+    @Published var pinned: Bool { didSet { ViewerSettings.pin(pinned ? throttle : nil, defaults) } }
     /// The custom profile's numbers (kept; they only throttle while Custom is chosen).
-    @Published var custom: NetworkThrottle { didSet { ViewerSettings.setCustomThrottle(custom); if throttle?.name == NetworkThrottle.customName { throttle = custom } } }
+    @Published var custom: NetworkThrottle { didSet { ViewerSettings.setCustomThrottle(custom, defaults); if throttle?.name == NetworkThrottle.customName { throttle = custom } } }
 
     /// The connected session, which the changes go to.
     weak var session: ViewerSession?
+    /// Where they are kept.
+    private let defaults: UserDefaults
 
     init(defaults d: UserDefaults = .standard) {
+        defaults = d
+        ViewerSettings.migrate(d)
         bitrateKbps = ViewerSettings.bitrate(d)
         let pinnedThrottle = ViewerSettings.pinnedThrottle(d)
         throttle = pinnedThrottle; pinned = pinnedThrottle != nil
@@ -218,4 +257,73 @@ struct ThrottlePicker: View {
         .buttonStyle(.plain)
         .accessibilityAddTraits(prefs.throttleChoice == choice ? .isSelected : [])
     }
+}
+
+/// About, shared by the iOS sheet and the Mac Settings window: this app's build, and the host's once connected.
+struct AboutSettingsSection: View {
+    let model: ViewerModel?
+    var body: some View {
+        Section("About") {
+            LabeledContent(appName, value: ViewerSettings.appBuild)
+            if let model { HostAboutRows(model: model) }
+        }
+    }
+    private var appName: String {
+        #if os(macOS)
+        "Mirage Viewer"
+        #else
+        "Mirage"
+        #endif
+    }
+}
+private struct HostAboutRows: View {
+    @ObservedObject var model: ViewerModel
+    var body: some View {
+        LabeledContent("Host", value: model.hostDisplayName ?? model.hostName)
+        LabeledContent("Host Build", value: model.hostBuild ?? "older host (not reported)")
+    }
+}
+
+/// The viewer's controls (the Mac's window toolbar, View menu and Settings; the same actions as iOS's button bar): the
+/// stats overlay, where ⌘-shortcuts go, Settings, Disconnect. One per app; the connected session's model follows it. The
+/// stats overlay (off at first) and the shortcut capture (on at first) are remembered for the next connection and launch;
+/// a scripted run (`remember` false) changes neither.
+@MainActor
+final class ViewerControls: ObservableObject {
+    private let defaults: UserDefaults
+    /// Keep changes for the next launch (false for scripted runs).
+    var remember: Bool
+    /// The stats overlay over the picture.
+    @Published private(set) var showStats: Bool
+    /// ⌘-shortcuts typed over the picture go to the remote Mac; off: to this app's menus first (⌘Q, ⌘W, ⌘,…).
+    @Published private(set) var captureShortcuts: Bool
+    /// The connected session's model: it shows the stats overlay as these controls say.
+    var model: ViewerModel? { didSet { model?.showStats = showStats } }
+    var onSettings: (() -> Void)?
+    var onDisconnect: (() -> Void)?
+
+    init(defaults: UserDefaults = .standard, remember: Bool = true) {
+        self.defaults = defaults; self.remember = remember
+        ViewerSettings.migrate(defaults)
+        showStats = ViewerSettings.showStats(defaults)
+        captureShortcuts = ViewerSettings.captureShortcuts(defaults)
+    }
+
+    func setShowStats(_ on: Bool) {
+        showStats = on
+        model?.showStats = on
+        if remember { defaults.set(on, forKey: ViewerSettings.showStatsKey) }
+    }
+    func toggleStats() { setShowStats(!showStats) }
+
+    func setCaptureShortcuts(_ on: Bool) {
+        captureShortcuts = on
+        if remember { defaults.set(on, forKey: ViewerSettings.captureShortcutsKey) }
+    }
+    func toggleCaptureShortcuts() { setCaptureShortcuts(!captureShortcuts) }
+
+    /// Whether Disconnect does anything now (a session is connected).
+    var connected: Bool { model != nil }
+    func openSettings() { onSettings?() }
+    func disconnect() { onDisconnect?() }
 }

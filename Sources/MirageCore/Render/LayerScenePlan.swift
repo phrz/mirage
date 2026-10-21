@@ -58,7 +58,8 @@ public struct LayerScenePlan: Equatable {
             var ids: [UInt32] = []
             for j in 0..<i {
                 let f = entries[j]
-                let rects: [PixelRect] = f.kind == .layer ? [f.frame] : f.kind == .cutout ? f.clips : []
+                // A transparent layer in front (the compositor model's overlay, a desktop-icons window) hides nothing.
+                let rects: [PixelRect] = f.kind == .layer ? (windows[j].hidesBehind ? [f.frame] : []) : f.kind == .cutout ? f.clips : []
                 let hits = rects.map { $0.intersection(onScreen) }.filter { !$0.isEmpty }
                 if !hits.isEmpty { front += hits; ids.append(f.id) }
             }
