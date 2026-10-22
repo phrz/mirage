@@ -149,14 +149,15 @@ final class DeliveryRateTests: XCTestCase {
         XCTAssertGreaterThan(rc.targetKbps, 2_000, "never lowers")
     }
 
-    /// Before delivery samples the probe bounds the start both ways: a slow reading lowers the ceiling (no startup doubling to
-    /// 5.4 Mbps on a 650 kbps link), a fast one raises the in-flight cap from 64 KB; neither is delivery or a saved peak.
+    /// Before delivery samples a fast probe reading raises the in-flight cap from 64 KB; a slow one changes nothing (it is not
+    /// trusted downward); neither is delivery or a saved peak.
     func testTheProbeBoundsTheStartBeforeDelivery() {
         var slow = RateController(initialKbps: 2_000, maxKbps: 50_000, nativePixels: 3200 * 1800)
         XCTAssertEqual(slow.deliveryCeilingKbps, 8_000)
         XCTAssertEqual(slow.inflightCapBytes, 64_000)
         slow.seedTargetFromProbe(kbps: 621)
-        XCTAssertEqual(slow.deliveryCeilingKbps, 2_000, "a 621 kbps reading: no climb above the start before delivery says so")
+        XCTAssertEqual(slow.deliveryCeilingKbps, 8_000, "a low reading is not trusted downward (a train behind stage 1's traffic reads low)")
+        XCTAssertLessThanOrEqual(slow.inflightCapBytes, 64_000 * 2, "but it does not raise the cap much either")
         XCTAssertLessThanOrEqual(slow.targetKbps, 2_000)
         var fast = RateController(initialKbps: 2_000, maxKbps: 50_000, nativePixels: 3200 * 1800)
         fast.seedTargetFromProbe(kbps: 8_000)

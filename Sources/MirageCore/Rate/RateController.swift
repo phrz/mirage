@@ -425,10 +425,10 @@ public struct RateController {
     public private(set) var probeKbps = 0
     public var deliveryCeilingKbps: Int {
         if deliveryKbps > 0 { return min(maxKbps, max(tuning.minKbps, Int(Double(deliveryKbps) * deliveryGain))) }
-        // Before any delivery sample: 4 x the start, or less when the probe read a slower link (Japan bus: startup doubled the
-        // target to 5.4 Mbps on a 650 kbps link while the probe had read 621 kbps; only the 64 KB cap stopped a queue).
-        let byProbe = probeKbps > 0 ? max(initialKbps, 2 * probeKbps) : Int.max
-        return min(maxKbps, max(tuning.minKbps, min(initialKbps * 4, byProbe)))
+        // Before any delivery sample: 4 x the start. (Not lowered by the probe: sent behind stage 1's traffic, its train read
+        // 878 kbps on a 20 Mbps link on mac-daddy, pinned the start at 2 Mbps and took crisp to 11.4 s. The in-flight cap
+        // before delivery, 64 KB unless the probe allows more, keeps a slow link's queue short instead.)
+        return min(maxKbps, max(tuning.minKbps, initialKbps * 4))
     }
     /// The highest delivery estimate measured from acks this session (never a seed): what careful resume may start from.
     public private(set) var measuredPeakKbps = 0
