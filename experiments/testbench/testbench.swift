@@ -94,6 +94,17 @@ final class App: NSObject, NSApplicationDelegate {
         try? "\(floatingClicks)\n".write(toFile: "/tmp/mtb-clicks.txt", atomically: true, encoding: .utf8)
     }
 
+    /// `--noshadow`: a borderless, opaque window without a shadow (hasShadow false, like a HUD or a widget): the shadow probe
+    /// must find none, and the viewer must draw none.
+    var noShadowWindow: NSWindow?
+    func startNoShadow(near f: NSRect) {
+        let w = NSWindow(contentRect: NSRect(x: f.minX + 40, y: f.minY + 40, width: 260, height: 160), styleMask: [.borderless], backing: .buffered, defer: false)
+        w.title = "Mirage Test Bench noshadow"; w.hasShadow = false; w.isOpaque = true
+        w.backgroundColor = NSColor(calibratedRed: 0.95, green: 0.6, blue: 0.1, alpha: 1)
+        w.orderFrontRegardless()
+        noShadowWindow = w
+    }
+
     func startDockLike(screen: NSScreen, near b: NSRect) {
         let o = NSWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         o.isOpaque = false; o.backgroundColor = .clear; o.hasShadow = false; o.ignoresMouseEvents = true
@@ -299,6 +310,7 @@ final class App: NSObject, NSApplicationDelegate {
             if CommandLine.arguments.contains("--docklike") { startDockLike(screen: screen, near: w.frame) }
             if CommandLine.arguments.contains("--vibrancy") { startVibrancy(screen: screen) }
             if CommandLine.arguments.contains("--floating") { startFloating(near: w.frame) }
+            if CommandLine.arguments.contains("--noshadow") { startNoShadow(near: w.frame) }
             if CommandLine.arguments.contains("--terminal") { startTerminal(tv) }
             updateCaption()
             window = w

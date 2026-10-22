@@ -122,33 +122,31 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// One frame now, with exactly the stream's filter and configuration (the same pixels its frames will have), from a
     /// screenshot: ScreenCaptureKit starts window streams one after another (~0.75 s each on mac-daddy, measured: eight
     /// started at once, done one by one), so the stream's first frame can be seconds away (M-FIVE).
-    /// Whether the window casts a shadow: its window-alone content with shadows reaches beyond its frame and is not transparent
-    /// there. One small screenshot (half scale). Nil when it cannot tell. `detail`: the numbers, for the log.
+    /// Whether the window casts a shadow: the window alone on a clear background (a display filter including only it, shadows
+    /// kept), over its frame plus a 40-pt margin: any alpha in the margin is its shadow. One small screenshot. Nil when it
+    /// cannot tell (no margin on the display, no shot). (The window-alone filter's content rect is the frame itself, shadow or
+    /// not: it read "no shadow" for every window, 02d2267.)
     func shadowProbe() async -> (Bool?, String) {
-        let f = SCContentFilter(desktopIndependentWindow: window)
-        let info = SCShareableContent.info(for: f)
-        let content = info.contentRect, frame = pointFrame
-        let grow = (frame.minX - content.minX, frame.minY - content.minY, content.maxX - frame.maxX, content.maxY - frame.maxY)
-        let detail = String(format: "content %.0fx%.0f vs frame %.0fx%.0f, beyond it %.0f/%.0f/%.0f/%.0f pt", content.width, content.height, frame.width, frame.height, grow.0, grow.1, grow.2, grow.3)
-        // The content rect of the window-alone filter is the frame itself, shadow or not (mac-daddy: every window, the bench
-        // included, read "no shadow" from it and lost its shadow on the viewer): it tells nothing, so unknown (drawn as before).
-        guard max(grow.0, grow.1, grow.2, grow.3) >= 3 else { return (nil, detail + "; content rect is the frame: unknown") }
+        let m: CGFloat = 40
+        let area = pointFrame.insetBy(dx: -m, dy: -m).intersection(display.frame)
+        guard !area.isNull, area.width > pointFrame.width + 8 || area.height > pointFrame.height + 8 else { return (nil, "no margin on the display") }
+        let f = SCContentFilter(display: display, including: [window])
         let c = SCStreamConfiguration()
-        let k = 1.0
-        c.width = max(2, Int(content.width * k)); c.height = max(2, Int(content.height * k)); c.showsCursor = false
-        c.ignoreShadowsSingleWindow = false
-        guard let img = try? await SCScreenshotManager.captureImage(contentFilter: f, configuration: c) else { return (nil, detail + "; no shot") }
-        // The ring outside the frame: any alpha there is shadow.
+        c.sourceRect = area.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+        c.width = max(2, Int(area.width)); c.height = max(2, Int(area.height))
+        c.showsCursor = false; c.ignoreShadowsDisplay = false; c.shouldBeOpaque = false; c.backgroundColor = CGColor.clear
+        guard let img = try? await SCScreenshotManager.captureImage(contentFilter: f, configuration: c) else { return (nil, "no shot") }
         let w = img.width, h = img.height
         var px = [UInt8](repeating: 0, count: w * h * 4)
-        guard let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return (nil, detail) }
+        guard let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return (nil, "no context") }
         ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
-        let sx = Double(w) / content.width, sy = Double(h) / content.height
-        let fx0 = Int((frame.minX - content.minX) * sx), fx1 = Int((frame.maxX - content.minX) * sx)
-        let fy0 = Int((frame.minY - content.minY) * sy), fy1 = Int((frame.maxY - content.minY) * sy)
-        var maxA = 0
-        for y in stride(from: 0, to: h, by: 2) { for x in stride(from: 0, to: w, by: 2) where x < fx0 || x >= fx1 || y < fy0 || y >= fy1 { maxA = max(maxA, Int(px[(y * w + x) * 4 + 3])) } }
-        return (maxA >= 8, detail + "; max alpha outside the frame \(maxA)")
+        let sx = Double(w) / area.width, sy = Double(h) / area.height
+        // The frame inside the shot (CGContext rows run bottom-up).
+        let fx0 = Int((pointFrame.minX - area.minX) * sx), fx1 = Int((pointFrame.maxX - area.minX) * sx)
+        let fy0 = h - Int((pointFrame.maxY - area.minY) * sy), fy1 = h - Int((pointFrame.minY - area.minY) * sy)
+        var maxA = 0, ring = 0
+        for y in stride(from: 0, to: h, by: 2) { for x in stride(from: 0, to: w, by: 2) where x < fx0 || x >= fx1 || y < fy0 || y >= fy1 { ring += 1; maxA = max(maxA, Int(px[(y * w + x) * 4 + 3])) } }
+        return (maxA >= 12, String(format: "max alpha %d in a %.0f-pt margin (%d samples)", maxA, m, ring))
     }
 
     /// `independent`: with the window-alone filter (desktopIndependentWindow) instead of the stream's.
