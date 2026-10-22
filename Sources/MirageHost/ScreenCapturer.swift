@@ -96,6 +96,20 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         if let target { t = target } else { t = try await Self.resolve(req) }
         return try await start(maxFPS: req.maxFPS, target: t, excluding: excluding, onFrame: onFrame)
     }
+    final class StartOnce: @unchecked Sendable { private let lock = NSLock(); private var done = false
+        func claim() -> Bool { lock.lock(); defer { lock.unlock() }; if done { return false }; done = true; return true } }
+    struct StartTimeout: Error, CustomStringConvertible { var seconds: Double; var description: String { "not started after \(seconds) s" } }
+    /// `op` with a deadline: past it, StartTimeout is thrown and a result that still comes goes to `late` (to be stopped).
+    /// ScreenCaptureKit's start has no timeout of its own: once a display start never returned (Fast 4G run, 15:38Z), and
+    /// the stream kept its provisional desktop and had no menu bar or Dock for good.
+    static func bounded<T>(seconds: Double, _ op: @escaping () async throws -> T, late: @escaping (T) -> Void) async throws -> T {
+        let once = StartOnce()
+        return try await withCheckedThrowingContinuation { (c: CheckedContinuation<T, Error>) in
+            Task { do { let v = try await op(); if once.claim() { c.resume(returning: v) } else { late(v) } } catch { if once.claim() { c.resume(throwing: error) } } }
+            Task { try? await Task.sleep(for: .milliseconds(Int(seconds * 1000))); if once.claim() { c.resume(throwing: StartTimeout(seconds: seconds)) } }
+        }
+    }
+
     func start(maxFPS: Int, target t: Target, excluding: [SCWindow] = [], onFrame: @escaping (CVPixelBuffer, UInt64, [PixelRect]) -> Void) async throws -> Target {
         self.onFrame = onFrame
         self.target = t

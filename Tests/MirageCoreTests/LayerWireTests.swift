@@ -95,4 +95,12 @@ final class LayerWireTests: XCTestCase {
         XCTAssertEqual(got.map(\.message), [staged, commit])
         if case .tiles(let t) = got[0].message { XCTAssertTrue(t.staged); XCTAssertTrue(t.refinement) }
     }
+
+    /// Stage 1's commits as one message: the layer set survives the round trip, alongside separate messages in one write.
+    func testCommitSetRoundTrip() throws {
+        let set = TileMessage.commitSet(layers: [0, 400, 10602, 12532])
+        var p = TileStreamParser()
+        let got = try p.feed(set.encode(msgSeq: 5) + TileMessage.commit(layer: 9).encode(msgSeq: 6))
+        XCTAssertEqual(got.map(\.message), [set, .commit(layer: 9)])
+    }
 }

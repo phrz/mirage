@@ -504,12 +504,34 @@ final class ViewerSession: @unchecked Sendable {
         startInputTimer()
     }
 
+    /// Presents a layer's staged level (a commit, alone or in stage 1's set).
+    private func commit(layer: UInt32, now: UInt64) {
+        guard let v = layerView(layer) else { return }
+        let staged = v.compositor.stagedTiles
+        v.compositor.commitStaged(durationNanos: tunables.levelFadeNanos)
+        if layer != 0 { measureCorner(v) }
+        if staged > 0 { v.step("commit", now: now) }
+        let c = v.compositor
+        if c.width > 0, !v.stagedLossless.isEmpty {
+            let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
+            if v.losslessAt.count != cols * rows { v.losslessAt = Array(repeating: 0, count: cols * rows) }
+            for rect in v.stagedLossless {
+                let c0 = max(0, rect.x / 64), c1 = min(cols - 1, (rect.maxX - 1) / 64), r0 = max(0, rect.y / 64), r1 = min(rows - 1, (rect.maxY - 1) / 64)
+                if c1 >= c0, r1 >= r0 { for r in r0...r1 { for cc in c0...c1 { v.losslessAt[r * cols + cc] = now } } }
+            }
+        }
+        v.stagedLossless = []
+        if Self.debugTiles || Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(layer): level committed (\(staged) staged tiles)") }
+        checkLegible()
+    }
+
     // MARK: Stream control
 
     func requestStream(width: Int, height: Int) {
         Task { @MainActor in
             var req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: max(0, model.bitrateKbps), maxFPS: 30, snapNative: Self.snapNative ? true : nil, tunablesVersion: Tunables.schemaVersion,
                                                    explicitBitrate: true, throttle: model.throttle, networkFingerprint: networkFingerprint)
+            req.stageTransaction = true
             if req == lastRequest { return }
             guard let sender else { pendingRequest = req; log("stream request \(width)x\(height) queued until connected"); return }
             lastRequest = req; lastRequestSent = req
@@ -850,24 +872,12 @@ final class ViewerSession: @unchecked Sendable {
             predictor.hostUpdate(inputSeq: c.header.inputSeq, rect: c.rect.union(c.rect.offset(c.dx, c.dy)), now: now)
             predictorLock.unlock()
             sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: c.header.captureNanos, receivedNanos: now, bytes: bytes)))
+        case .commitSet(let ids):
+            // Stage 1 as one transaction: every layer's level presented in the same pass (one message: all or nothing).
+            for id in ids { commit(layer: id, now: now) }
+            if Self.debugTiles || Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present: stage 1 committed together (layers \(ids.map(String.init).joined(separator: " ")))") }
         case .commit(let layer):
-            guard let v = layerView(layer) else { break }
-            let staged = v.compositor.stagedTiles
-            v.compositor.commitStaged(durationNanos: tunables.levelFadeNanos)
-            if layer != 0 { measureCorner(v) }
-            if staged > 0 { v.step("commit", now: now) }
-            let c = v.compositor
-            if c.width > 0, !v.stagedLossless.isEmpty {
-                let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
-                if v.losslessAt.count != cols * rows { v.losslessAt = Array(repeating: 0, count: cols * rows) }
-                for rect in v.stagedLossless {
-                    let c0 = max(0, rect.x / 64), c1 = min(cols - 1, (rect.maxX - 1) / 64), r0 = max(0, rect.y / 64), r1 = min(rows - 1, (rect.maxY - 1) / 64)
-                    if c1 >= c0, r1 >= r0 { for r in r0...r1 { for cc in c0...c1 { v.losslessAt[r * cols + cc] = now } } }
-                }
-            }
-            v.stagedLossless = []
-            if Self.debugTiles || Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(layer): level committed (\(staged) staged tiles)") }
-            checkLegible()
+            commit(layer: layer, now: now)
         case .reset(let layer, let w, let h):
             if layer == 0 {
                 // A fresh stream at the same size keeps the pixels (review M11: the last picture stays until the

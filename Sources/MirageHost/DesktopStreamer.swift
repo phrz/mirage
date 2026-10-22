@@ -532,9 +532,22 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         Task { [weak self] in
             guard let self else { _ = WindowCapturer.displayStartsPending.add(-1); return }
             defer { _ = WindowCapturer.displayStartsPending.add(-1) }
+            // Each start bounded (4 s) and tried up to 3 times: a start that never returns would leave the provisional desktop
+            // and no overlay for the whole session.
+            func attempt(_ what: String, _ op: @escaping () async throws -> (ScreenCapturer, CVPixelBuffer?)) async throws -> (ScreenCapturer, CVPixelBuffer?) {
+                for k in 1...3 {
+                    let s0 = Clock.nowNanos()
+                    do {
+                        let r = try await ScreenCapturer.bounded(seconds: 4, op, late: { r in Task { await r.0.stop() } })
+                        self.log("connect setup: \(what) capture up in \(Clock.elapsed(since: s0, now: Clock.nowNanos()) / 1_000_000) ms\(k > 1 ? " (attempt \(k))" : "")")
+                        return r
+                    } catch let e as ScreenCapturer.StartTimeout where k < 3 { self.log("connect setup: \(what) capture \(e) (attempt \(k)); starting it again") }
+                }
+                throw ScreenCapturer.StartTimeout(seconds: 4)
+            }
             do {
-                async let deskStart = self.startDesktop(req, t, compositor: true, excluding: [])
-                async let overlayStart = self.startOverlay(req, t)
+                async let deskStart = attempt("desktop") { try await self.startDesktop(req, t, compositor: true, excluding: []) }
+                async let overlayStart = attempt("overlay") { try await self.startOverlay(req, t) }
                 let (cap, deskFrame) = try await deskStart
                 let (ov, overlayFrame) = try await overlayStart
                 self.queue.async {
@@ -2429,7 +2442,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // on the in-order stream, and the windows after it came in 460 ms after the desktop on Japan bus (an extra step).
         let ids = stage1Staged.sorted()
         for id in ids { layers[id]?.exposed = true }
-        tileQueue.async { [weak self] in self?.send(commits: ids, captureNanos: now) }
+        let together = request?.stageTransaction == true
+        tileQueue.async { [weak self] in self?.send(commits: ids, together: together, captureNanos: now) }
         log("stage 1: \(stage1Staged.count) stills presented together\(waiting.isEmpty ? "" : " (\(waiting.count) layers not ready by 0.7 s: they follow on their own)")")
         stage1Staged = []
         publishWindows(now: now, full: false)
@@ -3080,7 +3094,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Sends a tile-stream message in order (all sends go through the tile queue). Copy-rects and resets are interactive.
     private func sendTileMessage(_ m: TileMessage, captureNanos: UInt64) {
         var layer: UInt32 = 0
-        switch m { case .tiles(let t): layer = t.header.windowID; case .copyRect(let c): layer = c.header.windowID; case .reset(let l, _, _): layer = l; case .commit(let l): layer = l }
+        switch m { case .tiles(let t): layer = t.header.windowID; case .copyRect(let c): layer = c.header.windowID; case .reset(let l, _, _): layer = l; case .commit(let l): layer = l; case .commitSet: layer = 0 }
         tileQueue.async { [weak self] in self?.send(tile: m, captureNanos: captureNanos, fast: true, refinementBytes: 0, layer: layer) }
     }
     /// On tileQueue.
@@ -3094,7 +3108,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         switch m {
         case .tiles(let t): rects = t.tiles.map(\.rect)
         case .copyRect(let c): rects = [c.rect, c.rect.offset(c.dx, c.dy)]
-        case .reset, .commit: rects = []
+        case .reset, .commit, .commitSet: rects = []
         }
         queue.async {
             self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes, block, layer, rects); self.refinementInFlight += refinementBytes; self.tileInflightBytes += d.count
@@ -3103,15 +3117,20 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
     }
 
-    /// On tileQueue: commits for several layers in one write (they arrive together or not at all).
-    private func send(commits ids: [UInt32], captureNanos: UInt64) {
+    /// On tileQueue: commits for several layers in one write (they arrive together or not at all); `together`: as one
+    /// `commitSet` message, which the viewer presents in one pass.
+    private func send(commits ids: [UInt32], together: Bool, captureNanos: UInt64) {
         guard let out = output, !ids.isEmpty else { return }
         var data = Data(), sent: [(UInt32, Int, UInt32)] = []
-        for id in ids {
+        if together {
+            tileMsgSeq &+= 1
+            let d = TileMessage.commitSet(layers: ids).encode(msgSeq: tileMsgSeq)
+            data.append(d); sent.append((tileMsgSeq, d.count, 0))
+        } else { for id in ids {
             tileMsgSeq &+= 1
             let d = TileMessage.commit(layer: id).encode(msgSeq: tileMsgSeq)
             data.append(d); sent.append((tileMsgSeq, d.count, id))
-        }
+        } }
         out.sendTiles(data, fast: true)
         queue.async {
             let t = Clock.nowNanos()

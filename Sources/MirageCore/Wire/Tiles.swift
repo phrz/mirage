@@ -60,6 +60,10 @@ public enum TileMessage: Equatable, Sendable {
     /// Present the layer's staged level now (everything sent with `staged` since the last commit), in one
     /// crossfade (DESIGN §3.3: progressive whole-picture steps, never block by block).
     case commit(layer: UInt32)
+    /// Several layers' commits as one transaction (stage 1's barrier): presented together, in the same pass, or not at all.
+    /// Separate commits could arrive apart (a loss on one held the rest a round trip), showing the desktop's fill where
+    /// windows are. Only to viewers whose request said `stageTransaction`.
+    case commitSet(layers: [UInt32])
 
     public struct Header: Equatable, Sendable {
         public var captureSeq: UInt32
@@ -101,7 +105,7 @@ public enum TileMessage: Equatable, Sendable {
         public init(header: Header, rect: PixelRect, dx: Int, dy: Int) { self.header = header; self.rect = rect; self.dx = dx; self.dy = dy }
     }
 
-    enum Kind: UInt8 { case tiles = 1, copyRect = 2, reset = 3, commit = 4 }
+    enum Kind: UInt8 { case tiles = 1, copyRect = 2, reset = 3, commit = 4, commitSet = 5 }
     /// Tiles dropped because their format byte was unknown (diagnostics).
     nonisolated(unsafe) public static var skippedUnknownFormats = 0
 
@@ -131,6 +135,9 @@ public enum TileMessage: Equatable, Sendable {
         case .commit(let layer):
             kind = .commit
             body.appendBE(layer)
+        case .commitSet(let layers):
+            kind = .commitSet
+            body.appendBE(UInt16(layers.count)); for l in layers { body.appendBE(l) }
         }
         var d = Data(capacity: 9 + body.count)
         d.append(kind.rawValue); d.appendBE(msgSeq); d.appendBE(UInt32(body.count))
@@ -180,6 +187,11 @@ public enum TileMessage: Equatable, Sendable {
             guard r.remaining >= 4 else { return nil }
             let layer: UInt32 = r.read()
             return .commit(layer: layer)
+        case .commitSet:
+            guard r.remaining >= 2 else { return nil }
+            let n: UInt16 = r.read()
+            guard r.remaining >= 4 * Int(n) else { return nil }
+            return .commitSet(layers: (0..<Int(n)).map { _ in r.read() })
         }
     }
 }

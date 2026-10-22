@@ -311,6 +311,8 @@ public enum ControlMessage: Codable, Equatable {
         /// The viewer's network, hashed (interface type and gateways; no SSID, no addresses in the clear): the host resumes
         /// the last delivery estimate it saw for this pairing on this network (careful resume), else starts afresh.
         public var networkFingerprint: String?
+        /// The viewer reads `TileMessage.commitSet` (stage 1 as one transaction). nil (older viewers): separate commits.
+        public var stageTransaction: Bool?
         public init(width: Int, height: Int, bitrateKbps: Int = 0, maxFPS: Int = 30, displayID: UInt32? = nil, snapNative: Bool? = nil, holdsPicture: Bool? = nil, tunablesVersion: Int? = nil,
                     explicitBitrate: Bool? = nil, throttle: NetworkThrottle? = nil, networkFingerprint: String? = nil) {
             self.width = width; self.height = height; self.bitrateKbps = bitrateKbps; self.maxFPS = maxFPS; self.displayID = displayID; self.snapNative = snapNative
