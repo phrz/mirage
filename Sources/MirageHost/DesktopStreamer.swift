@@ -2599,7 +2599,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         log("stage 1: \(stage1Staged.count) stills presented together\(waiting.isEmpty ? "" : " (\(waiting.count) layers not ready by 0.7 s: they follow on their own)")")
         stage1Staged = []
-        publishWindows(now: now, full: false)
+        // Full, never throttled: the windows become layers on the viewer with this list (exposed). A throttled delta was
+        // dropped when a still had just published one, and the windows showed ~0.9 s after their commit (Japan bus).
+        publishWindows(now: now, full: true)
     }
 
     // MARK: Connect probe (DESIGN M-FIVE)
