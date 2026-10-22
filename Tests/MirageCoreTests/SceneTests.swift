@@ -14,8 +14,14 @@ final class SceneTests: XCTestCase {
         d.usage = [.renderTarget, .shaderRead]; d.storageMode = .shared
         return ctx.device.makeTexture(descriptor: d)!
     }
-    private func pixel(_ ctx: MetalContext, _ t: MTLTexture, _ x: Int, _ y: Int) -> (b: UInt8, g: UInt8, r: UInt8) {
-        let cb = ctx.commandQueue.makeCommandBuffer()!; cb.commit(); cb.waitUntilCompleted()
+    /// Reads one pixel after the GPU has finished. The wait is bounded (10 s): an unbounded waitUntilCompleted stalled one
+    /// test for 250 s on a busy machine; a GPU that does not finish in time skips the test instead.
+    private func pixel(_ ctx: MetalContext, _ t: MTLTexture, _ x: Int, _ y: Int) throws -> (b: UInt8, g: UInt8, r: UInt8) {
+        let cb = ctx.commandQueue.makeCommandBuffer()!
+        let done = DispatchSemaphore(value: 0)
+        cb.addCompletedHandler { _ in done.signal() }
+        cb.commit()
+        if done.wait(timeout: .now() + 10) == .timedOut { throw XCTSkip("the GPU did not finish within 10 s (a busy machine)") }
         var p = [UInt8](repeating: 0, count: 4)
         t.getBytes(&p, bytesPerRow: 4, from: MTLRegionMake2D(x, y, 1, 1), mipmapLevel: 0)
         return (p[0], p[1], p[2])
@@ -40,8 +46,8 @@ final class SceneTests: XCTestCase {
         let overlay = ControlMessage.WindowInfo(id: 2, pid: 2, title: "", frame: PixelRect(x: 0, y: 0, width: 400, height: 300), z: 1, level: 3, cutout: true)
         var w = ControlMessage.WindowInfo(id: 7, pid: 3, title: "bench", frame: PixelRect(x: 50, y: 40, width: 100, height: 80), z: 2, level: 0, layered: true)
         var plan = render(ctx, bg: bg, layers: [7: win], windows: [menubar, overlay, w], into: t)
-        XCTAssertEqual(pixel(ctx, t, 100, 80).r, 255, "window drawn at its frame")
-        XCTAssertEqual(pixel(ctx, t, 300, 200).b, 255, "desktop elsewhere")
+        XCTAssertEqual(try pixel(ctx, t, 100, 80).r, 255, "window drawn at its frame")
+        XCTAssertEqual(try pixel(ctx, t, 300, 200).b, 255, "desktop elsewhere")
         XCTAssertEqual(plan.entries.first { $0.id == 2 }?.kind, .displayOnly, "a desktop-sized window above the normal level is never a cut-out")
         XCTAssertTrue(plan.entries.first { $0.id == 7 }!.visible)
         // The host moves the window (a delta in the list): it is drawn at the new frame, and the old place shows the desktop.
@@ -49,8 +55,8 @@ final class SceneTests: XCTestCase {
         w.frame = PixelRect(x: 250, y: 180, width: 100, height: 80)
         let moved = ControlMessage.WindowList.delta(from: list.windows, to: [menubar, overlay, w], captureSeq: 2)!.apply(to: list.windows)
         plan = render(ctx, bg: bg, layers: [7: win], windows: moved, into: t)
-        XCTAssertEqual(pixel(ctx, t, 300, 220).r, 255, "window drawn at the moved frame")
-        XCTAssertEqual(pixel(ctx, t, 100, 80).b, 255, "old frame shows the desktop")
+        XCTAssertEqual(try pixel(ctx, t, 300, 220).r, 255, "window drawn at the moved frame")
+        XCTAssertEqual(try pixel(ctx, t, 100, 80).b, 255, "old frame shows the desktop")
         XCTAssertTrue(plan.entries.first { $0.id == 7 }!.visible)
     }
 
@@ -71,9 +77,9 @@ final class SceneTests: XCTestCase {
         let scene = LayerScene(background: bg, items: plan.sceneItems(pxPerPoint: 1, canvas: { $0 == 7 ? win : nil }),
                                displacements: [.init(layerID: 7, displacement: drag)], bandColors: [:])
         SceneRenderer.render(scene, context: ctx, target: t, dest: CGRect(x: 100, y: 0, width: 400, height: 300))
-        XCTAssertEqual(pixel(ctx, t, 110, 150).r, 255, "the dragged window's on-screen part is drawn")
-        for x in [5, 50, 95] { let p = pixel(ctx, t, x, 150); XCTAssertEqual([p.r, p.g, p.b], [0, 0, 0], "letterbox at x \(x) untouched") }
-        let right = pixel(ctx, t, 550, 150); XCTAssertEqual([right.r, right.g, right.b], [0, 0, 0])
+        XCTAssertEqual(try pixel(ctx, t, 110, 150).r, 255, "the dragged window's on-screen part is drawn")
+        for x in [5, 50, 95] { let p = try pixel(ctx, t, x, 150); XCTAssertEqual([p.r, p.g, p.b], [0, 0, 0], "letterbox at x \(x) untouched") }
+        let right = try pixel(ctx, t, 550, 150); XCTAssertEqual([right.r, right.g, right.b], [0, 0, 0])
     }
 
     func testMenuCutoutDrawsOnlyWhereItOverlapsALayer() throws {
@@ -87,10 +93,10 @@ final class SceneTests: XCTestCase {
         let menu = ControlMessage.WindowInfo(id: 9, pid: 3, title: "", frame: PixelRect(x: 80, y: 60, width: 60, height: 100), z: 0, level: 101, cutout: true)
         let w = ControlMessage.WindowInfo(id: 7, pid: 3, title: "", frame: PixelRect(x: 50, y: 40, width: 100, height: 80), z: 1, level: 0, layered: true)
         let plan = render(ctx, bg: bg, layers: [7: win], windows: [menu, w], into: t)
-        XCTAssertEqual(pixel(ctx, t, 100, 80).g, 255, "the menu sits above the window")
-        XCTAssertEqual(pixel(ctx, t, 60, 50).r, 255, "the window around it")
+        XCTAssertEqual(try pixel(ctx, t, 100, 80).g, 255, "the menu sits above the window")
+        XCTAssertEqual(try pixel(ctx, t, 60, 50).r, 255, "the window around it")
         XCTAssertEqual(plan.entries.first { $0.id == 9 }?.clips, [PixelRect(x: 80, y: 60, width: 60, height: 100)], "clipped to the overlap with the window and its shadow")
-        XCTAssertEqual(pixel(ctx, t, 100, 150).g, 255, "below the window the display layer shows the menu itself")
+        XCTAssertEqual(try pixel(ctx, t, 100, 150).g, 255, "below the window the display layer shows the menu itself")
     }
 
     func testHostLayeredWithoutCanvasIsReportedNotHidden() {
@@ -130,7 +136,7 @@ final class SceneTests: XCTestCase {
         for frame in [PixelRect(x: 40, y: 40, width: 120, height: 80), PixelRect(x: 97, y: 61, width: 120, height: 80)] {   // at rest, then moved locally
             let w = ControlMessage.WindowInfo(id: 9, pid: 1, title: "", frame: frame, z: 0, level: 0, layered: true)
             _ = render(ctx, bg: bg, layers: [9: win], windows: [w], into: t)
-            let corner = pixel(ctx, t, frame.x + 1, frame.y + 1), inside = pixel(ctx, t, frame.x + 60, frame.y + 40)
+            let corner = try pixel(ctx, t, frame.x + 1, frame.y + 1), inside = try pixel(ctx, t, frame.x + 60, frame.y + 40)
             // The desktop (blue, darkened by the window's own shadow) shows in the transparent corner, never the white
             // the lossy codec left there or the window's grey.
             XCTAssertGreaterThan(Int(corner.b), Int(corner.r) + 60, "desktop shows in the transparent corner at \(frame)")

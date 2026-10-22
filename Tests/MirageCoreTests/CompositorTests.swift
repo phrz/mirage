@@ -4,7 +4,7 @@ import Metal
 
 final class CompositorTests: XCTestCase {
     /// Reads the canvas back as BGRA bytes.
-    private func readback(_ c: Compositor) -> [UInt8] {
+    private func readback(_ c: Compositor) throws -> [UInt8] {
         let tex = c.canvas!
         let stride = tex.width * 4
         let buf = c.device.makeBuffer(length: stride * tex.height, options: .storageModeShared)!
@@ -12,7 +12,7 @@ final class CompositorTests: XCTestCase {
         let blit = cb.makeBlitCommandEncoder()!
         blit.copy(from: tex, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0), sourceSize: MTLSize(width: tex.width, height: tex.height, depth: 1),
                   to: buf, destinationOffset: 0, destinationBytesPerRow: stride, destinationBytesPerImage: stride * tex.height)
-        blit.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        blit.endEncoding(); try cb.commitAndWaitBounded()
         return Array(UnsafeBufferPointer(start: buf.contents().assumingMemoryBound(to: UInt8.self), count: stride * tex.height))
     }
     private func pixel(_ px: [UInt8], _ w: Int, _ x: Int, _ y: Int) -> (UInt8, UInt8, UInt8) { let o = (y * w + x) * 4; return (px[o], px[o+1], px[o+2]) }
@@ -25,13 +25,13 @@ final class CompositorTests: XCTestCase {
         for y in 0..<64 { for x in 0..<64 { let o = (y * 64 + x) * 4; if x < 32 { tile[o+2] = 255 } else { tile[o] = 255 }; tile[o+3] = 255 } }
         let data = tile.withUnsafeBytes { TileCodec.encode(base: $0.baseAddress!, width: 64, height: 64, stride: 256, format: .lossless)! }
         XCTAssertEqual(c.applyTiles([.init(rect: PixelRect(x: 64, y: 0, width: 64, height: 64), format: .lossless, data: data)]), 1)
-        var px = readback(c)
+        var px = try readback(c)
         XCTAssertEqual(pixel(px, 256, 70, 10).2, 255, "red at the tile's left half")
         XCTAssertEqual(pixel(px, 256, 120, 10).0, 255, "blue at the tile's right half")
         XCTAssertEqual(pixel(px, 256, 10, 10).2, 20, "untouched canvas stays dark (clear colour)")
         // Scroll the tile down by 40 px: the copy must survive the overlap.
         c.applyCopyRect(PixelRect(x: 64, y: 0, width: 64, height: 64), dx: 0, dy: 40)
-        px = readback(c)
+        px = try readback(c)
         XCTAssertEqual(pixel(px, 256, 70, 50).2, 255)
         XCTAssertEqual(pixel(px, 256, 120, 100).0, 255)
         XCTAssertEqual(pixel(px, 256, 70, 10).2, 255, "source rows outside the destination keep their pixels")
@@ -51,7 +51,7 @@ final class CompositorTests: XCTestCase {
         var mask = TileMask(cols: 2, rows: 2)
         mask[1, 1] = true
         c.applyVideo(pb!, region: PixelRect(x: 0, y: 0, width: 128, height: 128), mask: mask)
-        let px = readback(c)
+        let px = try readback(c)
         XCTAssertGreaterThan(pixel(px, 128, 100, 100).1, 240, "masked tile is white")
         XCTAssertLessThan(pixel(px, 128, 10, 10).1, 40, "unmasked tile untouched")
     }
@@ -66,7 +66,7 @@ final class CompositorTests: XCTestCase {
         usleep(5_000)
         c.settle()
         XCTAssertFalse(c.hasActiveFades)
-        XCTAssertEqual(pixel(readback(c), 128, 10, 10).2, 255, "the faded-in tile is on the canvas")
+        XCTAssertEqual(pixel(try readback(c), 128, 10, 10).2, 255, "the faded-in tile is on the canvas")
     }
 
     private func solid(_ x: Int, _ y: Int, _ bgra: [UInt8], w: Int = 64, h: Int = 64) -> TileMessage.Tile {
@@ -82,16 +82,16 @@ final class CompositorTests: XCTestCase {
         c.applyTiles([solid(0, 0, red), solid(64, 0, red), solid(128, 0, red)])
         c.applyTiles([solid(0, 0, green), solid(64, 0, green)], staged: true)
         XCTAssertEqual(c.stagedTiles, 2)
-        var px = readback(c)
+        var px = try readback(c)
         XCTAssertEqual(pixel(px, 192, 10, 10).2, 255, "staged pixels are not shown")
         // A direct change on the second staged tile: shown now, and it is what the commit keeps there.
         c.applyTiles([solid(64, 0, blue)])
-        px = readback(c)
+        px = try readback(c)
         XCTAssertEqual(pixel(px, 192, 70, 10).0, 255, "direct change shown at once")
         XCTAssertEqual(pixel(px, 192, 10, 10).2, 255)
         XCTAssertGreaterThan(c.commitStaged(durationNanos: 1_000_000), 0)
         usleep(5_000); c.settle()
-        px = readback(c)
+        px = try readback(c)
         XCTAssertEqual(pixel(px, 192, 10, 10).1, 255, "staged tile presented")
         XCTAssertEqual(pixel(px, 192, 70, 10).0, 255, "the newer direct change survives the commit")
         XCTAssertEqual(pixel(px, 192, 140, 10).2, 255, "untouched tile unchanged")
@@ -109,7 +109,7 @@ final class CompositorTests: XCTestCase {
         XCTAssertTrue(c.hasStaged)
         usleep(40_000); c.settle()   // the fade ends and the deferred commit starts
         usleep(5_000); c.settle()
-        let px = readback(c)
+        let px = try readback(c)
         XCTAssertEqual(pixel(px, 128, 10, 10).1, 255, "staged level presented after the fade")
         XCTAssertEqual(pixel(px, 128, 100, 10).2, 255, "the faded level is on the canvas")
         XCTAssertFalse(c.hasStaged)
@@ -122,10 +122,10 @@ final class CompositorTests: XCTestCase {
         c.applyTiles([solid(0, 0, [0, 0, 255, 255])])
         c.applyTiles([solid(0, 0, [0, 255, 0, 255])], staged: true)
         c.applyCopyRect(PixelRect(x: 0, y: 0, width: 64, height: 64), dx: 0, dy: 128)
-        var px = readback(c)
+        var px = try readback(c)
         XCTAssertEqual(pixel(px, 64, 10, 140).2, 255, "the canvas moved its own (red) pixels")
         c.commitStaged(durationNanos: 1_000_000); usleep(5_000); c.settle()
-        px = readback(c)
+        px = try readback(c)
         XCTAssertEqual(pixel(px, 64, 10, 140).1, 255, "the staged (green) tile is presented where it moved")
     }
 

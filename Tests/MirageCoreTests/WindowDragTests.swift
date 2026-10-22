@@ -83,8 +83,8 @@ final class WindowDragTests: XCTestCase {
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: 400, height: 300, mipmapped: false)
         d.usage = [.renderTarget, .shaderRead]; d.storageMode = .shared
         let t = ctx.device.makeTexture(descriptor: d)!
-        func luma(_ x: Int, _ y: Int) -> Int {
-            let cb = ctx.commandQueue.makeCommandBuffer()!; cb.commit(); cb.waitUntilCompleted()
+        func luma(_ x: Int, _ y: Int) throws -> Int {
+            let cb = ctx.commandQueue.makeCommandBuffer()!; try cb.commitAndWaitBounded()
             var p = [UInt8](repeating: 0, count: 4)
             t.getBytes(&p, bytesPerRow: 4, from: MTLRegionMake2D(x, y, 1, 1), mipmapLevel: 0)
             return Int(p[1])
@@ -94,11 +94,11 @@ final class WindowDragTests: XCTestCase {
             let plan = LayerScenePlan.plan([w], hasCanvas: { _ in true }, display: PixelRect(x: 0, y: 0, width: 400, height: 300), shadowMargin: 48)
             let scene = LayerScene(background: bg, items: plan.sceneItems(pxPerPoint: 1, canvas: { _ in win }), displacements: [], bandColors: [:])
             SceneRenderer.render(scene, context: ctx, target: t, dest: CGRect(x: 0, y: 0, width: 400, height: 300))
-            let below = (1...9).map { luma(frame.x + 100, frame.maxY + $0) }   // the key shadow's offset is 10 px here
+            let below = try (1...9).map { try luma(frame.x + 100, frame.maxY + $0) }   // the key shadow's offset is 10 px here
             XCTAssertTrue(below.allSatisfy { $0 < 200 }, "shadow right under the bottom edge at \(frame): \(below)")
             XCTAssertTrue(zip(below, below.dropFirst()).allSatisfy { $0 <= $1 + 1 }, "darkest at the edge, fading away: \(below)")
-            XCTAssertEqual(luma(frame.x + 100, frame.maxY - 2), 0, "the window itself is not darkened (green 0)")
-            XCTAssertGreaterThan(luma(frame.x + 100, frame.maxY + 60), 240, "the desktop far below is untouched")
+            XCTAssertEqual(try luma(frame.x + 100, frame.maxY - 2), 0, "the window itself is not darkened (green 0)")
+            XCTAssertGreaterThan(try luma(frame.x + 100, frame.maxY + 60), 240, "the desktop far below is untouched")
         }
     }
 }

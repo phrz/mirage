@@ -87,7 +87,7 @@ final class OverlayLayerTests: XCTestCase {
         d.usage = [.renderTarget, .shaderRead]; d.storageMode = .shared
         let t = ctx.device.makeTexture(descriptor: d)!
         SceneRenderer.render(scene, context: ctx, target: t, dest: CGRect(x: 0, y: 0, width: 400, height: 300))
-        let cb = ctx.commandQueue.makeCommandBuffer()!; cb.commit(); cb.waitUntilCompleted()
+        let cb = ctx.commandQueue.makeCommandBuffer()!; try cb.commitAndWaitBounded()
         func px(_ x: Int, _ y: Int) -> [UInt8] {
             var p = [UInt8](repeating: 0, count: 4)
             t.getBytes(&p, bytesPerRow: 4, from: MTLRegionMake2D(x, y, 1, 1), mipmapLevel: 0)

@@ -82,7 +82,7 @@ final class UnifiedLayoutTests: XCTestCase {
         let t = ctx.device.makeTexture(descriptor: d)!
         // A window resized wider than its canvas: canvas at 1:1, the rest the clear colour (transparent).
         SceneRenderer.renderCrop(c, source: PixelRect(x: 0, y: 0, width: 120, height: 80), displacements: [], bandColors: [:], context: ctx, target: t, clear: MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0))
-        let cb = ctx.commandQueue.makeCommandBuffer()!; cb.commit(); cb.waitUntilCompleted()
+        let cb = ctx.commandQueue.makeCommandBuffer()!; try cb.commitAndWaitBounded()
         func px(_ x: Int, _ y: Int) -> [UInt8] { var p = [UInt8](repeating: 0, count: 4); t.getBytes(&p, bytesPerRow: 4, from: MTLRegionMake2D(x, y, 1, 1), mipmapLevel: 0); return p }
         XCTAssertEqual(px(10, 10), [0, 0, 255, 255])
         XCTAssertEqual(px(60, 10), [255, 0, 0, 255])
@@ -91,7 +91,7 @@ final class UnifiedLayoutTests: XCTestCase {
         // A display-layer crop (a menu): the source rect's pixels at the drawable's origin.
         let t2 = ctx.device.makeTexture(descriptor: MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: 20, height: 20, mipmapped: false).with { $0.usage = [.renderTarget, .shaderRead]; $0.storageMode = .shared })!
         SceneRenderer.renderCrop(c, source: PixelRect(x: 45, y: 10, width: 20, height: 20), displacements: [], bandColors: [:], context: ctx, target: t2, clear: MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0))
-        let cb2 = ctx.commandQueue.makeCommandBuffer()!; cb2.commit(); cb2.waitUntilCompleted()
+        let cb2 = ctx.commandQueue.makeCommandBuffer()!; try cb2.commitAndWaitBounded()
         var a = [UInt8](repeating: 0, count: 4), b = [UInt8](repeating: 0, count: 4)
         t2.getBytes(&a, bytesPerRow: 4, from: MTLRegionMake2D(2, 5, 1, 1), mipmapLevel: 0)
         t2.getBytes(&b, bytesPerRow: 4, from: MTLRegionMake2D(8, 5, 1, 1), mipmapLevel: 0)
@@ -108,7 +108,7 @@ final class UnifiedLayoutTests: XCTestCase {
         d.usage = [.renderTarget, .shaderRead]; d.storageMode = .shared
         let t = ctx.device.makeTexture(descriptor: d)!
         SceneRenderer.renderCrop(c, source: PixelRect(x: 0, y: 0, width: 96, height: 48), displacements: [], bandColors: [:], context: ctx, target: t, clear: MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0))
-        let cb = ctx.commandQueue.makeCommandBuffer()!; cb.commit(); cb.waitUntilCompleted()
+        let cb = ctx.commandQueue.makeCommandBuffer()!; try cb.commitAndWaitBounded()
         var p = [UInt8](repeating: 0, count: 4), q = [UInt8](repeating: 0, count: 4)
         t.getBytes(&p, bytesPerRow: 4, from: MTLRegionMake2D(30, 30, 1, 1), mipmapLevel: 0)
         t.getBytes(&q, bytesPerRow: 4, from: MTLRegionMake2D(80, 30, 1, 1), mipmapLevel: 0)
