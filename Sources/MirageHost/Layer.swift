@@ -157,6 +157,8 @@ final class Layer {
     var levelsCommitted = 0
     /// The middle-level decision was made again once the link was known (DesktopStreamer.freshStep).
     var middleRechecked = false
+    /// The desktop's frame is the warm snapshot standing in until its capture delivers (DesktopStreamer.startStreamEarly).
+    var provisional = false
     /// Whether the window casts a shadow (WindowCapturer.shadowProbe, once per layer); nil until known.
     var hasShadow: Bool?
     var shadowProbed = false

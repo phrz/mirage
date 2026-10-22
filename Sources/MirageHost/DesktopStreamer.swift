@@ -403,6 +403,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let cResolve = Clock.nowNanos()
         let comp = Self.compositorWanted()
         let excluded: [SCWindow] = []   // a window stays in the display picture until its own still has landed
+        // Stage 1 does not need the running display captures (its stills: the warm snapshot and the windows' own shots): with a
+        // snapshot, the stream is set up and stage 1 sent now, while the desktop's capture starts (~1.2 s on mac-daddy).
+        if comp, let early = try await startStreamEarly(req, output: output, t: t, c0: c0) { return early }
         async let deskStart = startDesktop(req, t, compositor: comp, excluding: excluded)
         // The window list and the SCWindow catalog, so layers and the overlay's exclusion are right from the first frame.
         await catalog.refreshNow()
@@ -458,6 +461,92 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 } catch { c.resume(throwing: error) }
             }
         }
+    }
+
+    /// Compositor model with a warm snapshot: the stream set up and stage 1 under way at once; the desktop and overlay
+    /// captures attach when they are up. The desktop's first frame is the snapshot scaled to the stream (provisional: its
+    /// still only; lossless blocks wait for the real capture's first frame, which replaces it without a diff). Nil when there
+    /// is no usable snapshot (the captures are then started first, as before).
+    private func startStreamEarly(_ req: ControlMessage.StreamRequest, output: StreamOutput, t: ScreenCapturer.Target, c0: UInt64) async throws -> ControlMessage.StreamInfo? {
+        guard let (snap, _) = queue.sync(execute: { WarmPool.shared.freshSnapshot(displayID: t.display.displayID) }),
+              let provisional = Self.scaledFrame(snap.px, width: snap.width, height: snap.height, toWidth: t.pixelWidth, toHeight: t.pixelHeight) else { return nil }
+        await catalog.refreshNow()
+        let tracker = WindowTracker(displayID: t.display.displayID, streamWidth: t.pixelWidth)
+        let now = Clock.nowNanos()
+        let sample = tracker.sample(captureSeq: 0, now: now, force: true)
+        let info: ControlMessage.StreamInfo = try await withCheckedThrowingContinuation { c in
+            queue.async {
+                do {
+                    self.output = output
+                    self.setLive(true)
+                    self.compositor = true; self.overlay = nil
+                    self.target = t
+                    self.request = req
+                    self.windows = tracker
+                    self.lastExcludedIDs = []
+                    try self.configure(for: t, req: req)
+                    self.injector = InputInjector(displayID: t.display.displayID)
+                    self.ax = AXWindows(log: self.log)
+                    let chrome = NativeChrome(log: self.log, send: { [weak self] m in self?.queue.async { self?.sendControlCounted(m) } })
+                    if InputInjector.sinkPath != nil { chrome.sink = { [weak self] m in self?.injector?.record(m) } }
+                    chrome.toPixels = { [weak tracker] r in tracker.map { $0.toPixels(r) } }
+                    chrome.start()
+                    self.chrome = chrome
+                    let caret = CaretTracker(toPixels: { [weak tracker] r in tracker?.toPixels(r) ?? .zero },
+                                             inputSeq: { [weak self] in self?.injector?.inputSeq(before: Clock.nowNanos()) ?? 0 },
+                                             send: { [weak self] m in self?.queue.async { self?.sendControlCounted(m) } })
+                    caret.start()
+                    self.caret = caret
+                    let cur = CursorMonitor(displayID: t.display.displayID)
+                    cur.onShape = { [weak self] s in self?.output?.sendControl(.cursorShape(s)) }
+                    cur.onPosition = { [weak self] p in self?.output?.sendControl(.cursorPosition(p)) }
+                    cur.start(on: self.queue)
+                    self.cursor = cur
+                    if let s = sample {
+                        let area = t.pixelWidth * t.pixelHeight
+                        for w in s.sample.windows { self.log(String(format: "window %u level %d owner %@ %dx%d at %d,%d%@%@", w.id, w.windowLevel, (w.app ?? "?") as NSString, w.frame.width, w.frame.height, w.frame.x, w.frame.y, Self.cutoutSafe(w, displayArea: area) ? " cut-out" : "", w.title.contains("Mirage Test Bench") ? " (bench)" : "")) }
+                        self.reconcileLayers(s.sample, now: now); self.publishWindows(now: now, full: true)
+                    }
+                    // The desktop's first frame: the snapshot, provisional (its still only).
+                    if let d = self.display { d.provisional = true; self.captured(provisional, Clock.nowNanos(), dirtyRects: [PixelRect(x: 0, y: 0, width: t.pixelWidth, height: t.pixelHeight)], layerID: 0, provisionalFrame: true) }
+                    self.startTimers()
+                    self.log("connect setup: stream up at \(Clock.elapsed(since: c0, now: Clock.nowNanos()) / 1_000_000) ms with the warm snapshot; the display captures start alongside")
+                    c.resume(returning: t.info)
+                } catch { c.resume(throwing: error) }
+            }
+        }
+        // The display captures, attached when up.
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let (cap, deskFrame) = try await self.startDesktop(req, t, compositor: true, excluding: [])
+                let (ov, overlayFrame) = try await self.startOverlay(req, t)
+                self.queue.async {
+                    guard self.output != nil else { Task { await cap.stop(); await ov.stop() }; return }
+                    self.capturer = cap; self.overlay = ov
+                    cap.onStop = { [weak self] err in self?.log("capture stopped: \(err.map { "\($0)" } ?? "ok")") }
+                    self.ensureOverlayLayer()
+                    self.feedWarmFrames(desktop: deskFrame, overlay: overlayFrame, t)
+                    self.log("connect setup: display captures up at \(Clock.elapsed(since: c0, now: Clock.nowNanos()) / 1_000_000) ms")
+                }
+            } catch { self.log("connect setup: display capture failed after the early start: \(error)") }
+        }
+        return info
+    }
+    /// A premultiplied BGRA pixel array scaled into a new pixel buffer.
+    static func scaledFrame(_ px: [UInt8], width: Int, height: Int, toWidth: Int, toHeight: Int) -> CVPixelBuffer? {
+        var out: CVPixelBuffer?
+        CVPixelBufferCreate(nil, toWidth, toHeight, kCVPixelFormatType_32BGRA, [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &out)
+        guard let out else { return nil }
+        CVPixelBufferLockBaseAddress(out, [])
+        defer { CVPixelBufferUnlockBaseAddress(out, []) }
+        let info = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        guard let dst = CGContext(data: CVPixelBufferGetBaseAddress(out), width: toWidth, height: toHeight, bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(out), space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info) else { return nil }
+        var copy = px
+        guard let img = copy.withUnsafeMutableBytes({ b -> CGImage? in CGContext(data: b.baseAddress, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info)?.makeImage() }) else { return nil }
+        dst.interpolationQuality = .medium
+        dst.draw(img, in: CGRect(x: 0, y: 0, width: toWidth, height: toHeight))
+        return out
     }
 
     /// (Re)builds everything that depends on the native stream size, and starts every layer over with a fresh picture.
@@ -1739,8 +1828,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// One captured frame of one layer (on `queue`). `dirtyRects` are SCK's (display layer) or empty
     /// (window layers: the whole frame is a candidate; the diff decides).
-    private func captured(_ pbIn: CVPixelBuffer, _ nanos: UInt64, dirtyRects: [PixelRect], layerID: UInt32) {
+    private func captured(_ pbIn: CVPixelBuffer, _ nanos: UInt64, dirtyRects: [PixelRect], layerID: UInt32, provisionalFrame: Bool = false) {
         guard request != nil, output != nil, let windows, let layer = layers[layerID] else { return }
+        // The desktop's real first frame after a provisional one (the warm snapshot): it replaces it without a diff; the
+        // fresh picture's lossless blocks are read from it from now on.
+        if layer.isDisplay, layer.provisional, !provisionalFrame {
+            layer.provisional = false
+            layer.lastFrame = pbIn
+            log("layer 0: the real desktop frame replaces the provisional one")
+            refine(now: Clock.nowNanos())
+            return
+        }
         // Opaque pure-black pixels in the overlay, outside the menu bar's and the Dock bar's rects, are not on the host's screen:
         // during Show Desktop the Dock's full-screen window held a 70-px band at the left edge that ScreenCaptureKit captured
         // opaque black (intermittently, and in one run it stayed after the windows' return; mac-daddy 2026-10-22, 2 of 12 runs
@@ -2614,6 +2712,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             l.fresh = intermediateWorthwhile(l) ? .intermediate : .blocks(remaining: planBlocks(l))
             statStills += 1
         case .intermediate:
+            if l.provisional { return }   // the warm snapshot stands in for the desktop: its still only
             CVPixelBufferLockBaseAddress(src, .readOnly)
             defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
             let f = frameView(src)
@@ -2622,6 +2721,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             tileTokens -= Double(est)
             l.fresh = .blocks(remaining: planBlocks(l))
         case .blocks(var remaining):
+            if l.provisional { return }   // lossless only from the real capture
             guard !remaining.isEmpty else { l.fresh = .done; if l.isDisplay { log("fresh picture: complete") }; return }
             // The middle-level decision was made with the start rate (the still goes out before the probe answers): once the
             // link is known (the probe, or delivery), it is made again for a window none of whose blocks went out yet.
