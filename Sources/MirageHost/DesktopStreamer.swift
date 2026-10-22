@@ -525,19 +525,25 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 } catch { c.resume(throwing: error) }
             }
         }
-        // The display captures, attached when up.
+        // The display captures, both at once and ahead of the windows' streams (which wait for them: the overlay started
+        // after the desktop came up at 8.7 s, queued behind nine window starts; the menu bar and the Dock were missing until
+        // then on mac-daddy), attached when up.
+        _ = WindowCapturer.displayStartsPending.add(1)
         Task { [weak self] in
-            guard let self else { return }
+            guard let self else { _ = WindowCapturer.displayStartsPending.add(-1); return }
+            defer { _ = WindowCapturer.displayStartsPending.add(-1) }
             do {
-                let (cap, deskFrame) = try await self.startDesktop(req, t, compositor: true, excluding: [])
-                let (ov, overlayFrame) = try await self.startOverlay(req, t)
+                async let deskStart = self.startDesktop(req, t, compositor: true, excluding: [])
+                async let overlayStart = self.startOverlay(req, t)
+                let (cap, deskFrame) = try await deskStart
+                let (ov, overlayFrame) = try await overlayStart
                 self.queue.async {
                     guard self.output != nil else { Task { await cap.stop(); await ov.stop() }; return }
                     self.capturer = cap; self.overlay = ov
                     cap.onStop = { [weak self] err in self?.log("capture stopped: \(err.map { "\($0)" } ?? "ok")") }
                     self.ensureOverlayLayer()
                     self.feedWarmFrames(desktop: deskFrame, overlay: overlayFrame, t)
-                    self.log("connect setup: display captures up at \(Clock.elapsed(since: c0, now: Clock.nowNanos()) / 1_000_000) ms")
+                    self.log("connect setup: desktop and overlay captures up together at \(Clock.elapsed(since: c0, now: Clock.nowNanos()) / 1_000_000) ms")
                 }
             } catch { self.log("connect setup: display capture failed after the early start: \(error)") }
         }
@@ -1455,6 +1461,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // Stream starts wait for the first-frame shots (at most 0.5 s): ScreenCaptureKit serialises starts, and shots queued
             // behind them came 1.65 s late (6 of 11 windows missed stage 1's barrier on 20 Mbps, mac-daddy 11:11Z).
             if shot { let t0 = Clock.nowNanos(); while WindowCapturer.shotsPending.add(0) > 0, Clock.elapsed(since: t0, now: Clock.nowNanos()) < 500_000_000 { try? await Task.sleep(for: .milliseconds(10)) } }
+            // And for the display captures of an early stream start (the overlay carries the menu bar and the Dock), at most 1.5 s.
+            do { let t0 = Clock.nowNanos(); while WindowCapturer.displayStartsPending.add(0) > 0, Clock.elapsed(since: t0, now: Clock.nowNanos()) < 1_500_000_000 { try? await Task.sleep(for: .milliseconds(10)) } }
             do { try await cap.start(excluding: others) { [weak self] pb, nanos in self?.queue.async { self?.ownFrame(pb, nanos, layer: l) } } }
             catch { self?.queue.async { if l.capturer === cap { l.capturer = nil }; self?.log("layer \(l.id) capture failed: \(error)"); self?.useFallback(l, why: "its own capture failed") } }
         }
