@@ -56,6 +56,9 @@ public struct Tunables: Codable, Equatable, Sendable {
         case warmMode, warmSnapshotSeconds
         // Host only: 1 = a window's first-frame snapshot at connect uses the window-alone filter (desktopIndependentWindow).
         case windowShotIndependent
+        // Host only: stage 1's stills together cost this many seconds of the link's rate (M-FIVE; was 0.5: on Japan bus the
+        // stills then arrived 2.3 s after the first picture, behind the probe train and 59 KB of cuts).
+        case stage1Seconds
 
         /// Compiled-in default and the bounds a host value is clamped to.
         public var spec: (default: Double, min: Double, max: Double) {
@@ -91,7 +94,8 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .warmIndependent: return (0, 0, 1)
             case .warmMode: return (0, 0, 1)
             case .warmSnapshotSeconds: return (30, 30, 3600)
-            case .windowShotIndependent: return (0, 0, 1)
+            case .windowShotIndependent: return (1, 0, 1)
+            case .stage1Seconds: return (0.2, 0.05, 2)
             }
         }
     }

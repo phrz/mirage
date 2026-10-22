@@ -1386,7 +1386,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         // Windows: only in the compositor model (the seam design's desktop placeholder shows them).
         if !compositor { if sent > 0 { log("placeholders: the desktop at once, \(bytes) bytes") }; return }
-        for (id, l) in layers where !l.isDisplay && id != ControlMessage.WindowInfo.overlayID && !l.announced && !l.exposed && plannedFrames[id] != nil {
+        // Window-alone first-frame shots (windowShotIndependent, default) bring every window's own picture within ~0.2 s, in
+        // parallel: its still is stage 1 and no cut is needed (the cut's 59 KB went ahead of it, and was a change of its own).
+        let ownShots = hostTunables[.windowShotIndependent] >= 0.5
+        for (id, l) in layers where !ownShots && !l.isDisplay && id != ControlMessage.WindowInfo.overlayID && !l.announced && !l.exposed && plannedFrames[id] != nil {
             guard s.byID[id] != nil else { continue }
             // The window's rect in the screenshot, and the covered parts transparent.
             let r = PixelRect(x: Int(Double(l.frame.x) * k), y: Int(Double(l.frame.y) * k), width: max(1, Int(Double(l.width) * k)), height: max(1, Int(Double(l.height) * k)))
@@ -1407,7 +1410,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // after the previous window's), sized to its share of the 0.5 s budget, staged behind the barrier. Its own capture
             // then goes straight to lossless (no second still: at most three changes).
             let rateBytes = Double(lastBudget.tileKbps * 1000 / 8)
-            let budget = max(4_000, rateBytes * 0.5 * l.visibleFraction * Double(l.frame.area) / Double(max(1, display?.bounds.area ?? 1)))
+            let budget = max(4_000, rateBytes * hostTunables[.stage1Seconds] * l.visibleFraction * Double(l.frame.area) / Double(max(1, display?.bounds.area ?? 1)))
             let scale = min(1.0, (budget / 0.1 / Double(r.width * r.height)).squareRoot())
             let ow = max(16, Int(Double(r.width) * scale)), oh = max(16, Int(Double(r.height) * scale))
             guard let data = cut.withUnsafeBytes({ TileCodec.encodeLossy(base: $0.baseAddress!, width: r.width, height: r.height, stride: r.width * 4, outWidth: ow, outHeight: oh, quality: 60) }) else { continue }
@@ -2111,6 +2114,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// one commit per layer presents them all in the same frame on the viewer (a whole-layer crossfade each), instead of
     /// windows popping in one by one as their captures start.
     private var stage1Active = false
+    private var probeAfterStage1 = false
     /// Stage-1 cuts waiting for the tile budget (layer, lossy still), sent in order by `sendStage1Queue`.
     private var stage1Queue: [(id: UInt32, data: Data)] = []
     private func sendStage1Queue(now: UInt64) {
@@ -2134,6 +2138,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         guard waiting.isEmpty || now >= stage1Deadline else { return }
         stage1Active = false
+        if probeAfterStage1 { probeAfterStage1 = false; sendProbeTrain() }
         for id in stage1Staged.sorted() {
             sendTileMessage(.commit(layer: id), captureNanos: now)
             layers[id]?.exposed = true
@@ -2202,7 +2207,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func beginFreshPicture(_ trigger: FreshPictureTrigger, detail: String = "") {
         guard trigger.restartsWholePicture else { return }
         if trigger == .streamStart || trigger == .viewerEmpty {
-            if hostTunables[.connectProbe] >= 1 { sendProbeTrain() }   // kill switch: tunables.json {"connectProbe": 0}
+            // Compositor model: the probe train follows stage 1 (on Japan bus its 48 KB took 0.6 s of the link ahead of the stills).
+            if hostTunables[.connectProbe] >= 1 { if compositor { probeAfterStage1 = true } else { sendProbeTrain() } }   // kill switch: tunables.json {"connectProbe": 0}
             if hostTunables[.placeholders] >= 1 { sendPlaceholders() }   // M-FIVE stage 0, both models
         }
         if compositor {
@@ -2715,7 +2721,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if compositor, let d = display {
             let visible = layer.isDisplay ? Double(d.tracker.tileCount - d.underLayer.count) / Double(max(1, d.tracker.tileCount)) * Double(d.bounds.area)
                                           : layer.visibleFraction * Double(rect.area)
-            targetBytes = max(4_000, rateBytes * 0.5 * visible / Double(max(1, d.bounds.area)))
+            targetBytes = max(4_000, rateBytes * hostTunables[.stage1Seconds] * visible / Double(max(1, d.bounds.area)))
         } else {
             targetBytes = max(6_000.0, rateBytes * 0.15)
         }
