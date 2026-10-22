@@ -399,8 +399,11 @@ public enum ControlMessage: Codable, Equatable {
         /// the host knows them (macOS 26+ draws them in a child window of their own). Unified mode handles clicks on
         /// them locally (DESIGN §3.8).
         public var controls: PixelRect?
-        public init(id: UInt32, pid: Int32, title: String, frame: PixelRect, z: Int, scrollRect: PixelRect? = nil, level: Int? = nil, layered: Bool? = nil, app: String? = nil, cutout: Bool? = nil, excludedFrom: UInt32? = nil, opaque: Bool? = nil, controls: PixelRect? = nil) {
-            self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect; self.level = level; self.layered = layered; self.app = app; self.cutout = cutout; self.excludedFrom = excludedFrom; self.opaque = opaque; self.controls = controls
+        /// Layered windows: whether the window really casts a shadow (the host captures layers without shadows and the viewer
+        /// draws them; borderless panels, HUDs and widgets have none). False: no shadow; nil: unknown (the viewer draws one).
+        public var shadow: Bool?
+        public init(id: UInt32, pid: Int32, title: String, frame: PixelRect, z: Int, scrollRect: PixelRect? = nil, level: Int? = nil, layered: Bool? = nil, app: String? = nil, cutout: Bool? = nil, excludedFrom: UInt32? = nil, opaque: Bool? = nil, controls: PixelRect? = nil, shadow: Bool? = nil) {
+            self.id = id; self.pid = pid; self.title = title; self.frame = frame; self.z = z; self.scrollRect = scrollRect; self.level = level; self.layered = layered; self.app = app; self.cutout = cutout; self.excludedFrom = excludedFrom; self.opaque = opaque; self.controls = controls; self.shadow = shadow
         }
         /// Whether this window hides what is behind it (layered and not marked transparent). Never the compositor model's
         /// overlay layer: it covers the whole display but is transparent but for the menu bar, the Dock and menus (counted

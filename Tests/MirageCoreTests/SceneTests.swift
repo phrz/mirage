@@ -140,4 +140,19 @@ final class SceneTests: XCTestCase {
             XCTAssertGreaterThan(Int(inside.r), 150, "the window shows inside at \(frame)")
         }
     }
+
+    /// A window the host found shadowless (a borderless panel, a HUD) gets no shadow on the viewer; unknown and true keep one.
+    func testNoShadowWhereTheHostFoundNone() throws {
+        guard let ctx = MetalContext() else { throw XCTSkip("no Metal device") }
+        let canvas = Compositor(context: ctx); canvas.configure(width: 100, height: 80)
+        func shadow(_ s: Bool?) -> Bool {
+            let w = ControlMessage.WindowInfo(id: 7, pid: 1, title: "", frame: PixelRect(x: 50, y: 40, width: 100, height: 80), z: 0, level: 0, layered: true, shadow: s)
+            let plan = LayerScenePlan.plan([w], hasCanvas: { _ in true }, display: PixelRect(x: 0, y: 0, width: 400, height: 300), shadowMargin: 48)
+            for case .layer(_, _, let sh, _) in plan.sceneItems(pxPerPoint: 1, canvas: { _ in canvas }) { return sh != nil }
+            return false
+        }
+        XCTAssertFalse(shadow(false), "the host found none")
+        XCTAssertTrue(shadow(nil), "unknown: drawn as before")
+        XCTAssertTrue(shadow(true))
+    }
 }

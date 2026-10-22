@@ -23,6 +23,8 @@ public struct LayerScenePlan: Equatable {
         /// Whether any part of it is drawn from pixels that contain it.
         public var visible: Bool
         public var why: String?
+        /// The window's shadow as the host knows it (WindowInfo.shadow): false draws none.
+        public var shadow: Bool? = nil
     }
     public var entries: [Entry]   // front to back
 
@@ -37,7 +39,7 @@ public struct LayerScenePlan: Equatable {
             if w.isLayered { kind = hasCanvas(w.id) ? .layer : .missing }
             else if w.cutout ?? false, !(w.windowLevel != 0 && w.frame.intersection(display).area * 10 >= display.area * 9) { kind = .cutout }
             else { kind = .displayOnly }
-            entries.append(Entry(id: w.id, kind: kind, frame: w.frame, level: w.windowLevel, clips: [], coveredBy: [], visible: false, why: nil))
+            entries.append(Entry(id: w.id, kind: kind, frame: w.frame, level: w.windowLevel, clips: [], coveredBy: [], visible: false, why: nil, shadow: w.shadow))
         }
         // Cut-out clips: overlap with layers behind.
         for i in entries.indices where entries[i].kind == .cutout {
@@ -92,7 +94,9 @@ public struct LayerScenePlan: Equatable {
                 guard let c = canvas(e.id) else { continue }
                 let isKey = e.level == 0 && !keyFound
                 if e.level == 0 { keyFound = true }
-                items.append(.layer(c, frame: e.frame, shadow: isKey ? .key(pxPerPoint: ppp) : .inactive(pxPerPoint: ppp), dim: 1))
+                // No shadow where the host found none (a borderless panel, a HUD, a widget): not adding one that is not there.
+                let shadow: LayerScene.Shadow? = e.shadow == false ? nil : isKey ? .key(pxPerPoint: ppp) : .inactive(pxPerPoint: ppp)
+                items.append(.layer(c, frame: e.frame, shadow: shadow, dim: 1))
             case .cutout:
                 guard !e.clips.isEmpty else { continue }
                 // Menus and popovers get a menu shadow, overflow normal windows an inactive one; the dock (20) and menu bar (24, 25) none.

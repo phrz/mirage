@@ -157,6 +157,9 @@ final class Layer {
     var levelsCommitted = 0
     /// The middle-level decision was made again once the link was known (DesktopStreamer.freshStep).
     var middleRechecked = false
+    /// Whether the window casts a shadow (WindowCapturer.shadowProbe, once per layer); nil until known.
+    var hasShadow: Bool?
+    var shadowProbed = false
 
     /// Layer pixel sizes are even (the capture and the HEVC canvas want that); a window layer's canvas is
     /// at most one pixel short of its frame.

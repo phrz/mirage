@@ -1320,6 +1320,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             Task { [weak self] in
                 let pb = await cap.snapshot(excluding: others, independent: independent)
                 _ = WindowCapturer.shotsPending.add(-1)
+                // Then, off the connect's critical path, whether the window has a shadow (the viewer draws none if not).
+                if l.hasShadow == nil, !l.shadowProbed {
+                    l.shadowProbed = true
+                    Task { [weak self] in
+                        // After the windows' stream starts (ScreenCaptureKit serialises starts and shots).
+                        try? await Task.sleep(for: .seconds(2))
+                        let (has, detail) = await cap.shadowProbe()
+                        self?.queue.async { guard let self else { return }; l.hasShadow = has; self.log("layer \(l.id): shadow \(has.map { $0 ? "yes" : "no" } ?? "unknown") (\(detail))"); self.publishWindows(now: Clock.nowNanos(), full: true) }
+                    }
+                }
                 guard let pb else { return }
                 let nanos = Clock.nowNanos()
                 self?.queue.async { guard let self, l.capturer === cap, l.lastFrame == nil else { return }; l.snapshotFrame = pb; self.captured(pb, nanos, dirtyRects: [], layerID: l.id) }
@@ -2663,6 +2673,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 w.cutout = nil
                 w.excludedFrom = exposed ? 1 : nil
                 w.opaque = exposed && !(layers[w.id]?.opaque ?? true) ? false : nil
+                w.shadow = exposed ? layers[w.id]?.hasShadow : nil
                 return w
             }
         }

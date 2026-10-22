@@ -122,6 +122,33 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// One frame now, with exactly the stream's filter and configuration (the same pixels its frames will have), from a
     /// screenshot: ScreenCaptureKit starts window streams one after another (~0.75 s each on mac-daddy, measured: eight
     /// started at once, done one by one), so the stream's first frame can be seconds away (M-FIVE).
+    /// Whether the window casts a shadow: its window-alone content with shadows reaches beyond its frame and is not transparent
+    /// there. One small screenshot (half scale). Nil when it cannot tell. `detail`: the numbers, for the log.
+    func shadowProbe() async -> (Bool?, String) {
+        let f = SCContentFilter(desktopIndependentWindow: window)
+        let info = SCShareableContent.info(for: f)
+        let content = info.contentRect, frame = pointFrame
+        let grow = (frame.minX - content.minX, frame.minY - content.minY, content.maxX - frame.maxX, content.maxY - frame.maxY)
+        let detail = String(format: "content %.0fx%.0f vs frame %.0fx%.0f, beyond it %.0f/%.0f/%.0f/%.0f pt", content.width, content.height, frame.width, frame.height, grow.0, grow.1, grow.2, grow.3)
+        guard max(grow.0, grow.1, grow.2, grow.3) >= 3 else { return (false, detail) }
+        let c = SCStreamConfiguration()
+        let k = 1.0
+        c.width = max(2, Int(content.width * k)); c.height = max(2, Int(content.height * k)); c.showsCursor = false
+        c.ignoreShadowsSingleWindow = false
+        guard let img = try? await SCScreenshotManager.captureImage(contentFilter: f, configuration: c) else { return (nil, detail + "; no shot") }
+        // The ring outside the frame: any alpha there is shadow.
+        let w = img.width, h = img.height
+        var px = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return (nil, detail) }
+        ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
+        let sx = Double(w) / content.width, sy = Double(h) / content.height
+        let fx0 = Int((frame.minX - content.minX) * sx), fx1 = Int((frame.maxX - content.minX) * sx)
+        let fy0 = Int((frame.minY - content.minY) * sy), fy1 = Int((frame.maxY - content.minY) * sy)
+        var maxA = 0
+        for y in stride(from: 0, to: h, by: 2) { for x in stride(from: 0, to: w, by: 2) where x < fx0 || x >= fx1 || y < fy0 || y >= fy1 { maxA = max(maxA, Int(px[(y * w + x) * 4 + 3])) } }
+        return (maxA >= 8, detail + "; max alpha outside the frame \(maxA)")
+    }
+
     /// `independent`: with the window-alone filter (desktopIndependentWindow) instead of the stream's.
     func snapshot(excluding others: [SCWindow], independent: Bool = false) async -> CVPixelBuffer? {
         let (f, cfg): (SCContentFilter, SCStreamConfiguration) = queue.sync {
