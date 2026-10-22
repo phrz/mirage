@@ -1508,7 +1508,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// bar's and the Dock bar's rects): a copy from a small pool, see `captured`. Only the black is the Dock's failed copy of a
     /// pushed window's edge; anything else there (a menu, a tooltip, a magnified icon) stays.
     private var overlayPool: CVPixelBufferPool?, overlayPoolSize = (0, 0)
-    private func overlayCleared(_ pb: CVPixelBuffer, rects: [PixelRect], keep: [PixelRect]) -> CVPixelBuffer? {
+    private var lastOverlayCleared = 0
+    private func overlayCleared(_ pb: CVPixelBuffer, rects: [PixelRect], keep: [PixelRect]) -> (CVPixelBuffer, Int)? {
         let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
         if overlayPool == nil || overlayPoolSize != (w, h) {
             let attrs: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey: w, kCVPixelBufferHeightKey: h, kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
@@ -1519,6 +1520,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard let overlayPool else { return nil }
         CVPixelBufferLockBaseAddress(pb, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        // Read-only scan first: most frames have none, and then nothing is copied.
+        guard let sbase = CVPixelBufferGetBaseAddress(pb) else { return nil }
+        let sstride = CVPixelBufferGetBytesPerRow(pb)
+        var any = false
+        scan: for r in rects {
+            let x0 = max(0, r.x), x1 = min(w, r.maxX), y0 = max(0, r.y), y1 = min(h, r.maxY)
+            guard x1 > x0, y1 > y0 else { continue }
+            for y in y0..<y1 {
+                let row = sbase.advanced(by: y * sstride).assumingMemoryBound(to: UInt8.self)
+                for x in x0..<x1 { let o = x * 4; if row[o + 3] >= 250, row[o] <= 6, row[o + 1] <= 6, row[o + 2] <= 6, !keep.contains(where: { $0.contains(x, y) }) { any = true; break scan } }
+            }
+        }
+        guard any else { return nil }
         var out: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(nil, overlayPool, &out) == kCVReturnSuccess, let out else { return nil }
         CVPixelBufferLockBaseAddress(out, [])
@@ -1526,6 +1540,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard let src = CVPixelBufferGetBaseAddress(pb), let dst = CVPixelBufferGetBaseAddress(out) else { return nil }
         let ss = CVPixelBufferGetBytesPerRow(pb), ds = CVPixelBufferGetBytesPerRow(out)
         for y in 0..<h { memcpy(dst.advanced(by: y * ds), src.advanced(by: y * ss), w * 4) }
+        var cleared = 0
         for r in rects {
             let x0 = max(0, r.x), x1 = min(w, r.maxX), y0 = max(0, r.y), y1 = min(h, r.maxY)
             guard x1 > x0, y1 > y0 else { continue }
@@ -1533,11 +1548,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let row = dst.advanced(by: y * ds).assumingMemoryBound(to: UInt8.self)
                 for x in x0..<x1 where !keep.contains(where: { $0.contains(x, y) }) {
                     let o = x * 4
-                    if row[o + 3] >= 250, row[o] <= 6, row[o + 1] <= 6, row[o + 2] <= 6 { row[o] = 0; row[o + 1] = 0; row[o + 2] = 0; row[o + 3] = 0 }
+                    if row[o + 3] >= 250, row[o] <= 6, row[o + 1] <= 6, row[o + 2] <= 6 { row[o] = 0; row[o + 1] = 0; row[o + 2] = 0; row[o + 3] = 0; cleared += 1 }
                 }
             }
         }
-        return out
+        return (out, cleared)
     }
     /// Mean absolute difference per channel (B, G, R, A) between two BGRA frames of the same size, sampled; nil otherwise.
     static func meanDifference(_ a: CVPixelBuffer, _ b: CVPixelBuffer) -> Double? {
@@ -1676,18 +1691,22 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// (window layers: the whole frame is a candidate; the diff decides).
     private func captured(_ pbIn: CVPixelBuffer, _ nanos: UInt64, dirtyRects: [PixelRect], layerID: UInt32) {
         guard request != nil, output != nil, let windows, let layer = layers[layerID] else { return }
-        // Show Desktop: the Dock's full-screen window (in the overlay) draws the pushed windows' visible edges, and those pixels
-        // were captured opaque black, intermittently (a 70-px band at the left edge over the bench's and the mini player's
-        // edges, mac-daddy 2026-10-22). Those edges are drawn by the windows' own layers (their last picture): while a window
-        // layer is partly off the display, the overlay is cleared over its on-display part (a copy, used for everything after).
+        // Opaque pure-black pixels in the overlay, outside the menu bar's and the Dock bar's rects, are not on the host's screen:
+        // during Show Desktop the Dock's full-screen window held a 70-px band at the left edge that ScreenCaptureKit captured
+        // opaque black (intermittently, and in one run it stayed after the windows' return; mac-daddy 2026-10-22, 2 of 12 runs
+        // after the first fix). Menus, tooltips, popovers and notifications (the overlay's other content) are dark grey with
+        // vibrancy, never pure opaque black; the Dock's icons are inside its rect. Those pixels are made transparent (a copy,
+        // used for everything after), and the count logged, so a false positive would show.
         var pb = pbIn
+        var strips: [PixelRect]
+        // (The display's edge strips only, where Show Desktop pushes windows: scanned read-only, copied only when found.)
         if layerID == ControlMessage.WindowInfo.overlayID, let d = display {
-            // Mostly off the display (under 15 % on it), as Show Desktop leaves them: a window that only runs past the screen's
-            // edge (ChatGPT's 300 px below it) keeps the overlay over it (the Dock).
-            let pushed = layers.values.filter { !$0.isDisplay && $0.id != layerID && !$0.offDisplayTiles.isEmpty }
-                .map { ($0.frame, $0.frame.intersection(d.bounds)) }
-                .filter { !$0.1.isEmpty && $0.1.area * 100 < $0.0.area * 15 }.map(\.1)
-            if !pushed.isEmpty, let copy = overlayCleared(pbIn, rects: pushed, keep: loggedChrome ?? []) { pb = copy }
+            let e = 160, b = d.bounds
+            strips = [PixelRect(x: 0, y: 0, width: e, height: b.height), PixelRect(x: b.width - e, y: 0, width: e, height: b.height),
+                      PixelRect(x: e, y: 0, width: b.width - 2 * e, height: e), PixelRect(x: e, y: b.height - e, width: b.width - 2 * e, height: e)]
+        } else { strips = [] }
+        if !strips.isEmpty, let (copy, n) = overlayCleared(pbIn, rects: strips, keep: loggedChrome ?? []) {
+            if n > 0 { pb = copy; if n != lastOverlayCleared { lastOverlayCleared = n; log("overlay: \(n) opaque black pixels outside the menu bar and the Dock made transparent") } }
         }
         captureSeq &+= 1
         let now = Clock.nowNanos()
