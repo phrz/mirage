@@ -516,7 +516,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// windows (they are layers).
     private func overlayExclusion(_ display: SCDisplay) -> [SCWindow] { Self.overlayExclusion(catalog.all, display) }
     static func overlayExclusion(_ windows: [SCWindow], _ display: SCDisplay) -> [SCWindow] {
-        windows.filter { $0.frame.intersects(display.frame) && ($0.windowLayer <= 0 || floatingLevels.contains($0.windowLayer) && !systemOwners.contains($0.owningApplication?.applicationName ?? "")) }
+        windows.filter { $0.frame.intersects(display.frame) && ($0.windowLayer <= 0 || floatingLevels.contains($0.windowLayer) && !systemOwners.contains($0.owningApplication?.applicationName ?? "") || isProxyOwner($0)) }
+    }
+    /// WindowManager's windows (Show Desktop's edges of the pushed-aside windows, Stage Manager's strips) show other apps'
+    /// windows, which are layers of their own; captured in the overlay they came out opaque black (a 70-px band at the left
+    /// edge over the bench's and the mini player's edges during Show Desktop, mac-daddy 2026-10-22).
+    static func isProxyOwner(_ w: SCWindow) -> Bool { w.owningApplication?.applicationName == "WindowManager" }
+    /// On-screen WindowManager windows right now (CGWindowList: synchronous and cheap).
+    static func onScreenProxyWindowIDs() -> [UInt32] {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return [] }
+        return list.compactMap { w in (w[kCGWindowOwnerName as String] as? String) == "WindowManager" ? (w[kCGWindowNumber as String] as? Int).map(UInt32.init) : nil }
     }
     /// Floating app windows (stay-on-top panels, utility windows: levels 1–19) are layers of their own in the compositor model,
     /// hit-testable like any window. In the overlay (which hit-testing passes over) they could not be clicked (phrz, 08:46Z:
@@ -586,13 +595,29 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         layers[id] = Layer(id: id, width: d.width, height: d.height, frame: d.bounds, now: Clock.nowNanos())
     }
     /// Keeps the overlay's exclusion (new normal windows) and the desktop layer's windows (a widget added) current.
+    private var proxyTried = Set<UInt32>()
     private func reconcileCompositor(_ s: WindowTracker.Sample, needCatalog: inout [UInt32]) {
         guard compositor, let t = target else { return }
         for w in s.windows where w.windowLevel <= 0 && catalog.window(w.id) == nil { needCatalog.append(w.id) }
+        // WindowManager's windows are not in the window list the tracker keeps (normal windows only): on screen and unknown to
+        // the catalog (it lists on-screen windows at its last refresh), they would stay in the overlay. Refreshed for them, and
+        // the exclusion applied again when the refresh is in.
+        // (Once per window id: one that ScreenCaptureKit does not list is not asked for again, or Stage Manager's strips would
+        // refresh the catalog four times a second for good.)
+        let wm = Self.onScreenProxyWindowIDs().filter { catalog.window($0) == nil && !proxyTried.contains($0) }
+        if !wm.isEmpty {
+            proxyTried.formUnion(wm)
+            catalog.ensure(wm) { [weak self] in self?.queue.async { guard let self, let cur = self.windows?.current else { return }; var n: [UInt32] = []; self.reconcileCompositor(cur, needCatalog: &n) } }
+        }
         let excl = overlayExclusion(t.display)
         let ids = Set(excl.map(\.windowID))
         if ids != overlayExcludedIDs, let ov = overlay {
             overlayExcludedIDs = ids
+            if debugLayers {
+                // What the overlay still shows: owner, level and frame of every window it includes (numbers and owners only).
+                let shown = catalog.all.filter { $0.frame.intersects(t.display.frame) && !ids.contains($0.windowID) }
+                log("overlay shows: " + shown.map { "\($0.windowID) \($0.owningApplication?.applicationName ?? "?") L\($0.windowLayer) \(Int($0.frame.minX)),\(Int($0.frame.minY)) \(Int($0.frame.width))x\(Int($0.frame.height))" }.joined(separator: " | "))
+            }
             ov.requestExcluded(excl, log: { [weak self] in self?.log($0) })
         }
         let desk = Set(excl.filter { $0.windowLayer < 0 }.map(\.windowID))
