@@ -2416,11 +2416,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
     }
     private var stage1Staged = Set<UInt32>()
+    /// Stage-1 stills being encoded (marked sent, not yet staged): the barrier waits for them too. Without it the desktop's
+    /// still (encoded last, the largest) missed the set and was committed on its own just after it (gate, ebcebea).
+    private var stage1Encoding = Set<UInt32>()
     private var stage1Deadline: UInt64 = 0
     private func checkStage1(now: UInt64) {
         guard stage1Active else { return }
         let waiting = layers.values.filter { l in
-            !l.stillSent && (l.isDisplay || (plannedFrames[l.id] != nil && l.visibleFraction > 0.002)) && l.id != ControlMessage.WindowInfo.overlayID
+            (!l.stillSent || stage1Encoding.contains(l.id)) && (l.isDisplay || (plannedFrames[l.id] != nil && l.visibleFraction > 0.002)) && l.id != ControlMessage.WindowInfo.overlayID
         }
         guard waiting.isEmpty || now >= stage1Deadline else { return }
         // A window whose still missed the barrier shows its cut from the stream-start shot (soft, never a hole) and is allowed
@@ -2436,6 +2439,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         if !misses.isEmpty { log("stage 1: BARRIER MISS for \(misses.count) windows (\(misses.map(String.init).joined(separator: " "))): shown from their cuts") }
         stage1Cuts = [:]
+        stage1Encoding = []
         stage1Active = false
         sendDeferredProbe("stage 1 presented")
         // One write for all the commits: sent one by one, a loss on one (a retransmit, a round trip) held every later commit
@@ -3054,6 +3058,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         let staged = compositor
         layer.stillSent = true
+        if staged, stage1Active { stage1Encoding.insert(layer.id) }
         // ~0.1 B/px for UI at quality 60 after rescale.
         let area = Double(rect.area)
         let scale = min(1.0, (targetBytes / 0.1 / area).squareRoot())
@@ -3077,6 +3082,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             self.queue.async {
                 self.tileTokens -= Double(data.count - estimate)
                 self.statTileBytes += data.count; self.statTileRects += 1; self.secTileBytes += data.count
+                self.stage1Encoding.remove(layerID)
                 if let l = self.layers[layerID] {
                     l.account.still += data.count
                     // Staged: presented by its commit, with the other stage-1 stills (the barrier) or at once after it.
