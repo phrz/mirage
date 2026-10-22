@@ -1854,24 +1854,47 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// held: until idle; unqueued: soft but nothing will send it), the oldest wait, and where refine() stopped meanwhile.
     /// (phrz, 2026-10-22 23:19Z: menus and desktop files "never past the blur"; the backlog total could not say which tiles
     /// people could see.)
+    /// A layer's visible tiles not crisp, by why (nil when it has nothing visible).
+    private func softTiles(_ l: Layer, now: UInt64) -> (visible: Int, counts: [TileTracker.Soft: Int], oldest: UInt64)? {
+        let hidden = l.occludedTiles.union(l.offDisplayTiles)
+        var visible = 0, counts: [TileTracker.Soft: Int] = [:], oldest: UInt64 = 0
+        for i in 0..<l.tracker.tileCount where !hidden.contains(i) && !(l.isDisplay && l.underLayer.contains(i)) {
+            visible += 1
+            if let (why, since) = l.tracker.soft(i, now: now) { counts[why, default: 0] += 1; if since > 0 { oldest = max(oldest, Clock.elapsed(since: since, now: now)) } }
+        }
+        return visible > 0 ? (visible, counts, oldest) : nil
+    }
+    private func layerName(_ l: Layer) -> String {
+        l.isDisplay ? "desktop" : l.id == ControlMessage.WindowInfo.overlayID ? "overlay" : "\(windows?.current?.byID[l.id]?.app ?? "?") \(l.id)"
+    }
+    /// Every 500 ms: layers not crisp yet that now have no visible soft tile log "crisp at +T s" (always on: what phrz
+    /// judges; level logs past 2 needed debugLayers).
+    private var lastCrispCheck: UInt64 = 0
+    private var streamStartNanos: UInt64 = 0
+    private func crispCheck(now: UInt64) {
+        guard Clock.elapsed(since: lastCrispCheck, now: now) >= 500_000_000, streamStartNanos > 0 else { return }
+        lastCrispCheck = now
+        for l in layers.values where l.crispAt == 0 && l.lastFrame != nil {
+            guard let s = softTiles(l, now: now), s.counts.values.reduce(0, +) == 0 else { continue }
+            l.crispAt = now
+            log("\(layerName(l)) crisp\(l.crispOnce ? " again" : "") at +\(String(format: "%.1f", Double(Clock.elapsed(since: streamStartNanos, now: now)) / 1e9)) s (\(s.visible) visible tiles lossless)")
+            l.crispOnce = true
+        }
+    }
     private func visibilityReport(now: UInt64) {
         var lines: [String] = []
-        let names = Dictionary((windows?.current?.windows ?? []).map { ($0.id, $0.app ?? "?") }, uniquingKeysWith: { a, _ in a })
+        var crispLayers = 0, visibleLayers = 0
         for l in layers.values.sorted(by: { $0.id < $1.id }) {
-            let hidden = l.occludedTiles.union(l.offDisplayTiles)
-            var visible = 0, counts: [TileTracker.Soft: Int] = [:], oldest: UInt64 = 0
-            for i in 0..<l.tracker.tileCount where !hidden.contains(i) && !(l.isDisplay && l.underLayer.contains(i)) {
-                visible += 1
-                if let (why, since) = l.tracker.soft(i, now: now) { counts[why, default: 0] += 1; if since > 0 { oldest = max(oldest, Clock.elapsed(since: since, now: now)) } }
-            }
+            guard let (visible, counts, oldest) = softTiles(l, now: now) else { continue }
+            visibleLayers += 1
             let soft = counts.values.reduce(0, +)
-            guard soft > 0 else { continue }
-            let who = l.isDisplay ? "desktop" : l.id == ControlMessage.WindowInfo.overlayID ? "overlay" : "\(names[l.id] ?? "?") \(l.id)"
-            lines.append("\(who): \(soft) of \(visible) visible soft (\(counts.sorted { $0.value > $1.value }.map { "\($0.key.rawValue) \($0.value)" }.joined(separator: ", "))), oldest \(oldest / 1_000_000_000) s")
+            if soft == 0 { crispLayers += 1; continue }
+            l.crispAt = 0
+            lines.append("\(layerName(l)): \(soft) of \(visible) visible soft (\(counts.sorted { $0.value > $1.value }.map { "\($0.key.rawValue) \($0.value)" }.joined(separator: ", "))), oldest \(oldest / 1_000_000_000) s")
         }
         let gates = refineGates.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
         refineGates = [:]
-        log("visibility: " + (lines.isEmpty ? "every visible tile crisp" : lines.joined(separator: " | ")) + " || refine stopped at: " + gates)
+        log("visibility: crisp: \(crispLayers) of \(visibleLayers) visible layers" + (lines.isEmpty ? "" : " | " + lines.joined(separator: " | ")) + " || refine stopped at: " + gates)
     }
     private func opaqueTile(_ f: ShiftDetector.Frame, _ r: PixelRect) -> Bool {
         let x1 = min(f.width, r.maxX), y1 = min(f.height, r.maxY)
@@ -2746,7 +2769,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             display?.fresh = .still
             for l in layers.values { l.stillSent = false; l.cutStill = false; l.middleRechecked = false }
             stage1Active = true; stage1Staged = []; stage1Deadline = Clock.nowNanos() + 700_000_000
-            if trigger == .streamStart { traceUntil = Clock.nowNanos() + 8_000_000_000; traceNext = 0; traceBytes = statTileBytes; traceCapped = 0 }
+            if trigger == .streamStart { traceUntil = Clock.nowNanos() + 8_000_000_000; traceNext = 0; traceBytes = statTileBytes; traceCapped = 0; streamStartNanos = Clock.nowNanos(); for l in layers.values { l.crispAt = 0; l.crispOnce = false } }
             log("fresh picture (\(trigger.rawValue)\(detail)): stage 1, one coherent still per visible layer, presented together")
             return
         }
@@ -3433,6 +3456,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var refineGates: [String: Int] = [:]
     private func gate(_ g: String) { refineGates[g, default: 0] += 1 }
     private func refine(now: UInt64) {
+        crispCheck(now: now)
         // Whatever follows (a stall anywhere, the probe hold), what is in flight says whether the next acks measure the link.
         if let rc { self.rc?.noteInflight(bytes: tileInflightForCap, linkBusy: lastBudget.videoKbps > 0 && rc.recentVideoKbps * 2 >= lastBudget.videoKbps, now: now) }
         if now < probeHoldUntil { gate("probe-hold"); return }

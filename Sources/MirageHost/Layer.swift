@@ -38,6 +38,9 @@ final class Layer {
     /// tolerance keeps its older pixels here, so slow change (a fade, a gradient drifting) adds up until it is sent
     /// instead of being lost frame by frame (a copy; nil until the second frame, or after a size change or a cache shed).
     var diffRef: CVPixelBuffer?
+    /// When every visible tile of the layer was last found lossless (0: not crisp now); the always-on crisp log.
+    var crispAt: UInt64 = 0
+    var crispOnce = false
     var alphaSent: [Int: UInt64] = [:]
     /// The last plane sent per tile (`.plane` tiles), compared with a tolerance: captured alpha jitters by a level or so.
     var alphaPlanes: [Int: [UInt8]] = [:]
