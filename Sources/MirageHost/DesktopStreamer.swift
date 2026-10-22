@@ -3249,6 +3249,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     private func tryEncode(_ l: Layer, now: UInt64, latest: ShiftDetector.Frame) {
         guard var enc = l.encoder, let req = request, let canvas = ensureCanvas(l) else { return }
+        // Compositor model: the desktop's first picture is its still and lossless blocks. The encoder's start keyframe (no
+        // motion behind it) waits until that is done: on Japan bus it landed first (2.44 s), replaced the composited
+        // placeholder with the desktop alone, and every window vanished until its still arrived 1.3 s later (a fourth change).
+        if compositor, l.isDisplay, l.fresh != .done, l.pendingVideoTiles.isEmpty { return }
         refill()
         purgeStale(now: now)
         if l.encoding { statDropped += 1; return }
