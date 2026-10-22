@@ -258,6 +258,33 @@ final class ScenarioRunner {
             return
         }
         if name == "realapps" { await realApps(); return }
+        // earlydrag: the bench dragged 400 px right with injected input as soon as it is a layer (within ~1 s of the first
+        // picture, while the desktop is still the provisional warm snapshot): the area it leaves must show desktop, never a
+        // ghost of the bench or of any window baked into the snapshot. Logged: the bench's frame before and after.
+        if name == "earlydrag" {
+            for _ in 0..<100 where !(bench()?.isLayered ?? false) || session.hostStatus == nil { try? await Task.sleep(for: .milliseconds(20)) }
+            guard let b = bench(), b.isLayered else { session.log("scenario earlydrag: no bench layer"); return }
+            guard realGuards() else { return }
+            let ppp = await MainActor.run { session.pixelsPerPoint }
+            let px = b.frame.x + b.frame.width / 2, py = b.frame.y + Int(12 * ppp)
+            session.log("scenario earlydrag: bench \(b.id) at \(b.frame.x),\(b.frame.y); dragging 400 px right from \(px),\(py)")
+            var (nx, ny) = normalized(px, py)
+            session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
+            session.send(.mouseButton(.init(button: 0, down: true, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
+            session.pressTitleBar(windowID: b.id); session.beginLayerDrag(windowID: b.id)
+            for k in 1...30 {
+                let dx = 400 * k / 30
+                (nx, ny) = normalized(px + dx, py)
+                session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
+                session.dragLayer(windowID: b.id, to: PixelRect(x: b.frame.x + dx, y: b.frame.y, width: b.frame.width, height: b.frame.height))
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+            session.send(.mouseButton(.init(button: 0, down: false, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
+            session.endLayerDrag(windowID: b.id)
+            try? await Task.sleep(for: .seconds(2))
+            if let a = bench() { session.log("scenario earlydrag: bench now at \(a.frame.x),\(a.frame.y); old rect \(b.frame.x),\(b.frame.y) \(b.frame.width)x\(b.frame.height)") }
+            return
+        }
         // closewindow: closes one window of our own tests through Accessibility (MIRAGE_TEST_CLOSE_WINDOW=<id>; a Finder window
         // on a scratch folder the test opened), and nothing else.
         if name == "closewindow" {

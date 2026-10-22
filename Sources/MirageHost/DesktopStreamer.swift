@@ -468,12 +468,22 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// still only; lossless blocks wait for the real capture's first frame, which replaces it without a diff). Nil when there
     /// is no usable snapshot (the captures are then started first, as before).
     private func startStreamEarly(_ req: ControlMessage.StreamRequest, output: StreamOutput, t: ScreenCapturer.Target, c0: UInt64) async throws -> ControlMessage.StreamInfo? {
-        guard let (snap, _) = queue.sync(execute: { WarmPool.shared.freshSnapshot(displayID: t.display.displayID) }),
-              let provisional = Self.scaledFrame(snap.px, width: snap.width, height: snap.height, toWidth: t.pixelWidth, toHeight: t.pixelHeight) else { return nil }
+        guard let (snap, _) = queue.sync(execute: { WarmPool.shared.freshSnapshot(displayID: t.display.displayID) }) else { return nil }
         await catalog.refreshNow()
         let tracker = WindowTracker(displayID: t.display.displayID, streamWidth: t.pixelWidth)
         let now = Clock.nowNanos()
         let sample = tracker.sample(captureSeq: 0, now: now, force: true)
+        // The snapshot is the composited screen: the windows in it are cut out (they are layers of their own) and filled from
+        // the desktop around them, so a window moved before the real desktop arrives reveals no ghost of itself or others.
+        var px = snap.px
+        let k = Double(snap.width) / Double(max(1, t.pixelWidth))
+        let holes = (sample?.sample.windows ?? []).filter { $0.windowLevel == 0 || Self.isFloatingAppWindow($0) }.map {
+            PixelRect(x: Int(Double($0.frame.x) * k), y: Int(Double($0.frame.y) * k), width: Int((Double($0.frame.width) * k).rounded(.up)), height: Int((Double($0.frame.height) * k).rounded(.up)))
+        }
+        let f0 = Clock.nowNanos()
+        HoleFill.fill(&px, width: snap.width, height: snap.height, holes: holes)
+        log("provisional desktop: \(holes.count) windows cut out of the warm snapshot and filled in \(Clock.elapsed(since: f0, now: Clock.nowNanos()) / 1_000_000) ms")
+        guard let provisional = Self.scaledFrame(px, width: snap.width, height: snap.height, toWidth: t.pixelWidth, toHeight: t.pixelHeight) else { return nil }
         let info: ControlMessage.StreamInfo = try await withCheckedThrowingContinuation { c in
             queue.async {
                 do {
