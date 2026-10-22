@@ -206,12 +206,17 @@ public enum HostSession {
             try await stream.send(.reject(.init(reason: "protocol version \(hello.protocolVersion) unsupported")))
             throw MirageError.protocolViolation("version")
         }
+        // Auth timing (M-FIVE: ~320 ms of a connect is authentication on the viewer's clock): each step, logged with the welcome.
+        let a0 = Clock.nowNanos()
+        func ms() -> UInt64 { Clock.elapsed(since: a0, now: Clock.nowNanos()) / 1_000_000 }
         let hostNonce = DeviceIdentity.nonce()
         let hostTranscript = DeviceIdentity.hostAuthTranscript(tlsFingerprint: ctx.tlsFingerprint, clientNonce: hello.clientNonce, hostNonce: hostNonce, clientID: hello.deviceID)
         try await stream.send(.challenge(.init(hostID: ctx.identity.id, hostName: ctx.identity.name,
                                                hostPublicKey: ctx.identity.publicKey, hostNonce: hostNonce,
                                                hostSignature: try ctx.identity.sign(hostTranscript))))
+        let tChallenge = ms()
         let auth = try await stream.expect("authenticate") { if case .authenticate(let a) = $0 { return a } else { return nil } }
+        let tAuth = ms()
 
         let claimedID = DeviceIdentity.id(forPublicKey: auth.clientPublicKey)
         guard claimedID == hello.deviceID,
@@ -241,6 +246,7 @@ public enum HostSession {
         let token = resumed ? conn.resumeToken! : await ctx.connections.issueToken(for: conn.id, deviceID: device.id)
         try await stream.send(.welcome(.init(hostName: ctx.identity.name, sessionID: session, resumeToken: token, resumed: resumed, hostBuild: BuildInfo.current,
                                              hostModel: DeviceModel.current, hostFamily: DeviceModel.currentFamily?.rawValue)))
+        ctx.log("[\(remote)] auth timing: challenge sent at \(tChallenge) ms, authenticate in at \(tAuth) ms, welcome sent at \(ms()) ms (from the hello)")
         ctx.log("[\(remote)] authenticated \(device.name) (\(device.id.prefix(12)))\(resumed ? ", resuming its session" : hello.resumeToken != nil ? " (resume token unknown or expired: new session)" : "")")
         return device
     }
