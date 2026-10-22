@@ -79,6 +79,9 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         let size = captureSize
         c.width = size.0; c.height = size.1
         c.sourceRect = pointFrame.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+        // The window-alone filter's content is the window itself: its source rect is window-local (the display offset
+        // shifted the picture up and left by the window's position, mac-daddy 02:13Z).
+        if warm?.independent == true { c.sourceRect = CGRect(origin: .zero, size: pointFrame.size) }
         c.pixelFormat = kCVPixelFormatType_32BGRA
         c.showsCursor = false
         c.queueDepth = 3
@@ -110,7 +113,9 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     func snapshot(excluding others: [SCWindow], independent: Bool = false) async -> CVPixelBuffer? {
         let (f, cfg): (SCContentFilter, SCStreamConfiguration) = queue.sync {
             for w in others where w.windowID != windowID { excluded[w.windowID] = w }
-            return (independent ? SCContentFilter(desktopIndependentWindow: window) : filter(), configuration())
+            let cfg = configuration()
+            if independent { cfg.sourceRect = CGRect(origin: .zero, size: pointFrame.size) }   // window-local (see configuration())
+            return (independent ? SCContentFilter(desktopIndependentWindow: window) : filter(), cfg)
         }
         let t0 = Clock.nowNanos()
         guard let sb = try? await SCScreenshotManager.captureSampleBuffer(contentFilter: f, configuration: cfg), let pb = CMSampleBufferGetImageBuffer(sb) else { return nil }
