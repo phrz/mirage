@@ -1850,6 +1850,29 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         return all255 ? (.opaque, []) : all0 ? (.clear, []) : (.plane, plane)
     }
     private var statAlphaMaskBytes = 0, statAlphaMaskTiles = 0, statAlphaPlane = 0, statAlphaClear = 0, statAlphaOpaque = 0
+    /// Every 5 s: per layer with visible tiles not crisp, how many and why they wait (due: owed now; deferred: due later;
+    /// held: until idle; unqueued: soft but nothing will send it), the oldest wait, and where refine() stopped meanwhile.
+    /// (phrz, 2026-10-22 23:19Z: menus and desktop files "never past the blur"; the backlog total could not say which tiles
+    /// people could see.)
+    private func visibilityReport(now: UInt64) {
+        var lines: [String] = []
+        let names = Dictionary((windows?.current?.windows ?? []).map { ($0.id, $0.app ?? "?") }, uniquingKeysWith: { a, _ in a })
+        for l in layers.values.sorted(by: { $0.id < $1.id }) {
+            let hidden = l.occludedTiles.union(l.offDisplayTiles)
+            var visible = 0, counts: [TileTracker.Soft: Int] = [:], oldest: UInt64 = 0
+            for i in 0..<l.tracker.tileCount where !hidden.contains(i) && !(l.isDisplay && l.underLayer.contains(i)) {
+                visible += 1
+                if let (why, since) = l.tracker.soft(i, now: now) { counts[why, default: 0] += 1; if since > 0 { oldest = max(oldest, Clock.elapsed(since: since, now: now)) } }
+            }
+            let soft = counts.values.reduce(0, +)
+            guard soft > 0 else { continue }
+            let who = l.isDisplay ? "desktop" : l.id == ControlMessage.WindowInfo.overlayID ? "overlay" : "\(names[l.id] ?? "?") \(l.id)"
+            lines.append("\(who): \(soft) of \(visible) visible soft (\(counts.sorted { $0.value > $1.value }.map { "\($0.key.rawValue) \($0.value)" }.joined(separator: ", "))), oldest \(oldest / 1_000_000_000) s")
+        }
+        let gates = refineGates.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
+        refineGates = [:]
+        log("visibility: " + (lines.isEmpty ? "every visible tile crisp" : lines.joined(separator: " | ")) + " || refine stopped at: " + gates)
+    }
     private func opaqueTile(_ f: ShiftDetector.Frame, _ r: PixelRect) -> Bool {
         let x1 = min(f.width, r.maxX), y1 = min(f.height, r.maxY)
         guard r.x < x1, r.y < y1 else { return false }
@@ -3406,11 +3429,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Refinement across layers: fresh pictures first (stills and blocks, one in flight), then settled
     /// video tiles and rate-limited sparse tiles, oldest first, locus first, within the tile budget.
     private var probeHoldUntil: UInt64 = 0
+    /// Where refine() stopped, per 5 s (diagnostics: what holds refinement back when visible tiles stay soft).
+    private var refineGates: [String: Int] = [:]
+    private func gate(_ g: String) { refineGates[g, default: 0] += 1 }
     private func refine(now: UInt64) {
         // Whatever follows (a stall anywhere, the probe hold), what is in flight says whether the next acks measure the link.
         if let rc { self.rc?.noteInflight(bytes: tileInflightForCap, linkBusy: lastBudget.videoKbps > 0 && rc.recentVideoKbps * 2 >= lastBudget.videoKbps, now: now) }
-        if now < probeHoldUntil { return }
-        guard display != nil else { return }
+        if now < probeHoldUntil { gate("probe-hold"); return }
+        guard display != nil else { gate("no-display"); return }
         if !stage1Queue.isEmpty { sendStage1Queue(now: now) }
         checkStage1(now: now)
         presentLevels(now: now)
@@ -3426,6 +3452,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Sustained motion: refinement sends nothing and its queue is frozen (the blocks too). Video has
         // the whole target meanwhile; refinement resumes 300 ms after the motion stops, locus first.
         guard !motionSustained(now) else {
+            gate("motion")
             // Video under half its budget (a small moving region) is the picture's rate, not the link's.
             if let rc, rc.recentVideoKbps * 2 < lastBudget.videoKbps { self.rc?.noteIdle(now: now) }
             return
@@ -3441,34 +3468,34 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let rc {
             let cap = rc.inflightCapBytes
             let pendingEncode = pacer.blocks.reduce(0) { $1.msgSeq == nil ? $0 + $1.bytes : $0 }
-            if refinementInFlight + pendingEncode >= cap || tileInflightForCap >= cap * 2 { self.rc?.noteCapped(now: now); traceCapped += 1; return }
+            if refinementInFlight + pendingEncode >= cap || tileInflightForCap >= cap * 2 { self.rc?.noteCapped(now: now); traceCapped += 1; gate("inflight-cap"); return }
         }
         let ordered = layersByPriority()
         // Fresh pictures: the display's ladder gates everything until its base is acked; window stills
         // and lossless blocks go one at a time, locus layer first.
         // (Unified mode shows no desktop: its base may never go out, and must not hold the windows back.)
-        if let d = display, !unifiedView { switch d.fresh { case .base, .climb: return; default: break } }
+        if let d = display, !unifiedView { switch d.fresh { case .base, .climb: gate("display-base"); return; default: break } }
         // Every window's still before any window's lossless blocks: with many large windows (a real desktop)
         // one window's blocks would otherwise hold every other window's first picture back for tens of seconds.
         // During stage 1 every window with a frame gets its still now (encoded in parallel): one a tick queued them ~40 ms apart.
         if stage1Active {
             let ready = ordered.filter { if case .still = $0.fresh { return $0.lastFrame != nil }; return false }
-            if !ready.isEmpty { for l in ready { freshStep(l, now: now, stage1: true) }; return }
+            if !ready.isEmpty { for l in ready { freshStep(l, now: now, stage1: true) }; gate("stage1-stills"); return }
         }
         // Only a layer with a frame to cut its still from (and none sent yet): a window whose stage-1 cut stood in, waiting for
         // its own capture, and the overlay before its first frame held every block back (0.6 s with 315 KB of tokens unused on
         // 20 Mbps, then that window's acks read the link at 760 kbps and pulled the ceiling from 16 Mbps to 1.5).
-        if let l = ordered.first(where: { if case .still = $0.fresh { return $0.lastFrame != nil && !$0.stillSent }; return false }) { freshStep(l, now: now); return }
+        if let l = ordered.first(where: { if case .still = $0.fresh { return $0.lastFrame != nil && !$0.stillSent }; return false }) { freshStep(l, now: now); gate("still"); return }
         // Then the desktop's menu bar and Dock: on screen whatever the windows do, they waited at the first picture's lowest
         // rung behind every window's levels and the desktop's centre-first blocks (~45 s after a connect on an iPhone).
-        if let d = display, !unifiedView, chromeStep(d, now: now) { return }
+        if let d = display, !unifiedView, chromeStep(d, now: now) { gate("chrome"); return }
         // The desktop a window just uncovered (or under windows, when idle) from the window-free underlay (own budget).
         if let d = display { underlayStep(d, now: now) }
         // The rest yields while changed pixels use most of the link (the menu bar and Dock above do not: a desktop with a few
         // animating apps kept them at the lowest rung for 20 s on mac-daddy).
-        guard !pacer.yields(now: now, tileBytesPerSecond: Double(lastBudget.tileKbps * 1000 / 8)) else { return }
+        guard !pacer.yields(now: now, tileBytesPerSecond: Double(lastBudget.tileKbps * 1000 / 8)) else { gate("yield-to-changes"); return }
         // Then every window's middle level (where it gets one), in the same order.
-        if let l = ordered.first(where: { if case .intermediate = $0.fresh { return true }; return false }) { freshStep(l, now: now); return }
+        if let l = ordered.first(where: { if case .intermediate = $0.fresh { return true }; return false }) { freshStep(l, now: now); gate("middle"); return }
         // Then what people can see before what they cannot: window layers (blocks, backlog, per-tile refinement,
         // locus window first) before the display layer, whose fresh picture includes the underlay under every
         // window (field run: a window's last uncovered column waited 14 s behind the desktop's blocks).
@@ -3479,9 +3506,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // The desktop and the windows take turns: windows always first starved the desktop whenever one window had live
         // activity (the Claude app on mac-daddy), and desktop revealed by a moved window stayed black for good.
         refineDesktopFirst.toggle()
-        if refineDesktopFirst, let d = display, refineStep([d], now: now) { return }
-        if refineStep(windowLayers, now: now) { return }
-        if !refineDesktopFirst, let d = display, refineStep([d], now: now) { return }
+        if refineDesktopFirst, let d = display, refineStep([d], now: now) { gate("refined"); return }
+        if refineStep(windowLayers, now: now) { gate("refined"); return }
+        if !refineDesktopFirst, let d = display, refineStep([d], now: now) { gate("refined"); return }
+        gate(tileTokens > 0 ? "nothing-to-do" : "no-tokens")
         // Nothing to refine with budget and room in flight: the acks that follow say what we sent, not what the link carries.
         if tileTokens > 0 { rc?.noteIdle(now: now) }
     }
@@ -4275,6 +4303,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             statStaleDropped = 0; statStills = 0; statOccluded = 0; statWindowCommands = 0; statTaintResent = 0; statExclusionLag = 0
             statControlBytes = 0; statFoveaTiles = 0
             statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0
+            visibilityReport(now: Clock.nowNanos())
             if statAlphaMaskTiles > 0 { log("alpha mask: \(statAlphaMaskTiles) tiles (\(statAlphaPlane) planes, \(statAlphaClear) clear, \(statAlphaOpaque) back to opaque), \(statAlphaMaskBytes) bytes in 5 s") }
             statAlphaMaskTiles = 0; statAlphaMaskBytes = 0; statAlphaPlane = 0; statAlphaClear = 0; statAlphaOpaque = 0
             statTileBytes = 0; statTileRects = 0; statRefineBytes = 0; statCopyRects = 0; statDirtyTiles = 0; statDiffPruned = 0; statTileSkipped = 0

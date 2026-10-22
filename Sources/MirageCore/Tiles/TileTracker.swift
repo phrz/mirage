@@ -52,6 +52,15 @@ public struct TileTracker {
     }
 
     public var tileCount: Int { cols * rows }
+    /// Why a tile is not crisp yet (diagnostics: the visibility report): nil when crisp.
+    public enum Soft: String { case due, deferred, held, unqueued }
+    public func soft(_ i: Int, now: UInt64) -> (Soft, since: UInt64)? {
+        guard i >= 0, i < cells.count, !isCrisp(i) else { return nil }
+        let c = cells[i]
+        if !c.pending { return (.unqueued, c.lastDirtyNanos) }
+        if c.held { return (.held, c.pendingSince) }
+        return (c.dueNanos > now ? .deferred : .due, c.pendingSince)
+    }
     public func rect(of index: Int) -> PixelRect {
         let c = index % cols, r = index / cols
         return PixelRect(x: c * Self.tile, y: r * Self.tile, width: min(Self.tile, width - c * Self.tile), height: min(Self.tile, height - r * Self.tile))
