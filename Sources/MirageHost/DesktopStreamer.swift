@@ -468,12 +468,24 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// still only; lossless blocks wait for the real capture's first frame, which replaces it without a diff). Nil when there
     /// is no usable snapshot (the captures are then started first, as before).
     private func startStreamEarly(_ req: ControlMessage.StreamRequest, output: StreamOutput, t: ScreenCapturer.Target, c0: UInt64) async throws -> ControlMessage.StreamInfo? {
-        guard let (snap, _) = queue.sync(execute: { WarmPool.shared.freshSnapshot(displayID: t.display.displayID) }) else { return nil }
+        guard let (warm, warmAge) = queue.sync(execute: { WarmPool.shared.freshSnapshot(displayID: t.display.displayID) }) else { return nil }
+        // A fresh display shot at the stream request, alongside the setup (~120 ms at half size): the provisional desktop and the
+        // unoccluded windows' stills are cut from it, not from a snapshot up to 30 s old (stale content, and a change of its
+        // own when it moved). The warm snapshot stands in if the shot is not back in time; for window stills only if under 5 s.
+        let shotW = max(800, t.pixelWidth / 2), shotH = max(1, shotW * t.pixelHeight / max(1, t.pixelWidth))
+        let shotTask = Task { await Self.displayShot(t.display, width: shotW, height: shotH) }
         await catalog.refreshNow()
         let tracker = WindowTracker(displayID: t.display.displayID, streamWidth: t.pixelWidth)
         let now = Clock.nowNanos()
         let sample = tracker.sample(captureSeq: 0, now: now, force: true)
-        // The snapshot is the composited screen: the windows in it are cut out (they are layers of their own) and filled from
+        let waitMs = max(0, 200 - Int(Clock.elapsed(since: c0, now: Clock.nowNanos()) / 1_000_000))
+        let shot: [UInt8]? = (try? await ScreenCapturer.bounded(seconds: Double(waitMs) / 1000, { await shotTask.value }, late: { _ in })) ?? nil
+        let snap: (px: [UInt8], width: Int, height: Int)
+        let source: String, cuttable: Bool
+        if let shot { snap = (shot, shotW, shotH); source = "the fresh display shot (\(Clock.elapsed(since: c0, now: Clock.nowNanos()) / 1_000_000) ms into the connect)"; cuttable = true }
+        else { snap = (warm.px, warm.width, warm.height); source = "the warm snapshot (\(warmAge) ms old; the fresh shot not back in \(waitMs) ms)"; cuttable = warmAge < 5_000 }
+        queue.sync { stage1Picture = (snap.px, snap.width, snap.height, source, cuttable) }
+        // The picture is the composited screen: the windows in it are cut out (they are layers of their own) and filled from
         // the desktop around them, so a window moved before the real desktop arrives reveals no ghost of itself or others.
         var px = snap.px
         let k = Double(snap.width) / Double(max(1, t.pixelWidth))
@@ -482,7 +494,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         let f0 = Clock.nowNanos()
         HoleFill.fill(&px, width: snap.width, height: snap.height, holes: holes)
-        log("provisional desktop: \(holes.count) windows cut out of the warm snapshot and filled in \(Clock.elapsed(since: f0, now: Clock.nowNanos()) / 1_000_000) ms")
+        log("provisional desktop: from \(source); \(holes.count) windows cut out and filled in \(Clock.elapsed(since: f0, now: Clock.nowNanos()) / 1_000_000) ms")
         guard let provisional = Self.scaledFrame(px, width: snap.width, height: snap.height, toWidth: t.pixelWidth, toHeight: t.pixelHeight) else { return nil }
         let info: ControlMessage.StreamInfo = try await withCheckedThrowingContinuation { c in
             queue.async {
@@ -1446,7 +1458,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         } }
         // The window's first frame from a snapshot with the stream's own filter, while ScreenCaptureKit queues the stream.
         let shot = compositor && (!cutStands(l) || Self.testCutCheck)
-        if compositor, !shot { log("layer \(l.id): unoccluded in the warm snapshot; its cut is its still (no window-alone shot)") }
+        if compositor, !shot { log("layer \(l.id): unoccluded in the stage-1 picture; its cut is its still (no window-alone shot)") }
         if shot {
             let independent = hostTunables[.windowShotIndependent] >= 0.5
             _ = WindowCapturer.shotsPending.add(1)
@@ -1501,6 +1513,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var placeholdersDone = false
     /// This stream's stage 1 is cut from the warm snapshot (its window layout unchanged since it was taken).
     private var warmStage1 = false
+    /// An early start's stage-1 picture, set before configure (which sends the placeholders from it).
+    private var stage1Picture: (px: [UInt8], w: Int, h: Int, source: String, cuttable: Bool)?
     /// Test (MIRAGE_TEST_CUT_CHECK): unoccluded windows keep their window-alone shot, compared with their cut (logged).
     static let testCutCheck = ProcessInfo.processInfo.environment["MIRAGE_TEST_CUT_CHECK"] != nil
     private var cutCheck: [UInt32: (px: [UInt8], w: Int, h: Int)] = [:]
@@ -1523,9 +1537,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // (Full size, with each cut as the window's first frame, was tried in 26ae000: the window's own capture then differed
         // from the composited cut in most tiles, which went again, and windows changed 4-6 times: 20 Mbps crisp 15.8 s.)
         // Warm host: the idle snapshot, while the window layout is the one it was taken in (no screenshot to wait for).
+        // An early start's picture (a fresh shot, or the warm snapshot): its cuts are window stills only when it is fresh.
+        if let p = stage1Picture {
+            stage1Picture = nil
+            log("placeholders and stage 1 from \(p.source)\(p.cuttable ? "" : "; window stills from their window-alone shots (too old to cut from)")")
+            warmStage1 = p.cuttable
+            queue.async { [weak self] in self?.placeholders(from: p.px, width: p.w, height: p.h, streamWidth: t.pixelWidth) }
+            return
+        }
         if let (snap, age) = WarmPool.shared.freshSnapshot(displayID: t.display.displayID) {
             log("placeholders and stage 1 from the warm snapshot (\(age / 1000) s old)")
-            warmStage1 = true
+            warmStage1 = age < 5_000
             // Next turn of the queue: at stream start this runs inside configure(), before the window list and the layers
             // exist (placeholders() then sent nothing, and only 2 of 13 stills made the stage-1 barrier).
             queue.async { [weak self] in self?.placeholders(from: snap.px, width: snap.width, height: snap.height, streamWidth: t.pixelWidth) }
@@ -1606,6 +1628,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // sent as the tile budget allows (refine), not as one blast.
             if ownShots, !cutStands(l) { stage1Cuts[id] = data; continue }
             if ownShots, Self.testCutCheck { cutCheck[id] = (cut, r.width, r.height) }
+            if ownShots { log("layer \(id): its still is its cut (\(data.count) bytes)") }
             l.cutStill = true
             stage1Queue.append((id, data))
             sent += 1; bytes += data.count
