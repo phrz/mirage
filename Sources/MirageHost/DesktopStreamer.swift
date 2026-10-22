@@ -2729,7 +2729,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let rate = Double(max(100, lastBudget.tileKbps) * 1000 / 8)
         // Windows: only when lossless is more than ~10 s away (a slow link); otherwise still, then lossless (coordinator,
         // 2026-10-22: three steps at most, and the placeholder is gone).
-        return losslessBytes / rate > (l.isDisplay ? 1.0 : 10.0)
+        // The desktop too (coordinator, 2026-10-22): on 20 Mbps its middle level was 378 KB encoded and dropped stale.
+        return losslessBytes / rate > 10.0
     }
 
     /// A window layer's middle level: the whole layer as one lossy WebP at full size (q90 class), sized to ~0.6 s of
@@ -2765,7 +2766,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             self.queue.async {
                 // Stale before it left (the window changed meanwhile): not sent; the lossless level follows (a backdrop
                 // level is tried again once the window is quiet).
-                if let l = self.layers[layerID], l.tracker.changedSince(nanos: nanos, in: [rect]) {
+                // A few live tiles (a clock, a widget, a spinner: up to 2 % of the layer) do not make the whole level stale: it goes,
+                // and they are sent again as direct changes once it has had time to land (after it on the other stream).
+                let changed = self.layers[layerID].map { l in l.tracker.tiles(covering: [rect]).filter { l.tracker.lastDirty($0) > nanos } } ?? []
+                if let l = self.layers[layerID], !changed.isEmpty, changed.count * 50 <= l.tracker.tileCount {
+                    let landNanos = UInt64(Double(data.count) / max(1, Double(self.lastBudget.tileKbps * 1000 / 8)) * 1e9) + 2 * UInt64(max(0, self.srttNanos))
+                    l.tracker.defer(changed, now: Clock.nowNanos(), delayNanos: landNanos, direct: true)
+                } else if let l = self.layers[layerID], !changed.isEmpty {
                     // Its estimate back either way (a dropped middle level kept its charge: the tokens sat at their floor for a
                     // second with nothing sent, delivery read low and the ceiling followed it down).
                     if backdrop { l.backdropDirty = true } else if let block { self.pacer.dropped(id: block) }
@@ -3322,7 +3329,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let ready = ordered.filter { if case .still = $0.fresh { return $0.lastFrame != nil }; return false }
             if !ready.isEmpty { for l in ready { freshStep(l, now: now, stage1: true) }; return }
         }
-        if let l = ordered.first(where: { if case .still = $0.fresh { return true }; return false }) { freshStep(l, now: now); return }
+        // Only a layer with a frame to cut its still from (and none sent yet): a window whose stage-1 cut stood in, waiting for
+        // its own capture, and the overlay before its first frame held every block back (0.6 s with 315 KB of tokens unused on
+        // 20 Mbps, then that window's acks read the link at 760 kbps and pulled the ceiling from 16 Mbps to 1.5).
+        if let l = ordered.first(where: { if case .still = $0.fresh { return $0.lastFrame != nil && !$0.stillSent }; return false }) { freshStep(l, now: now); return }
         // Then the desktop's menu bar and Dock: on screen whatever the windows do, they waited at the first picture's lowest
         // rung behind every window's levels and the desktop's centre-first blocks (~45 s after a connect on an iPhone).
         if let d = display, !unifiedView, chromeStep(d, now: now) { return }
