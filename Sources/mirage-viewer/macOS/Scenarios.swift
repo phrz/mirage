@@ -369,6 +369,26 @@ final class ScenarioRunner {
             if let f = session.windowsSnapshot().first(where: { $0.id == finder.id })?.frame { session.log("scenario zorder: host frame after the drop \(f.x),\(f.y) (aimed at \(target.x),\(target.y))") }
             session.log("scenario zorder: Finder in front on the host after \(frontAt.map { String(format: "%.0f ms", $0) } ?? "never"), \(lostAfter ? "lost it again during the drag" : "kept it"), after the drop: \(after.map(String.init) ?? "?")")
             session.sendWindowCommand(.init(id: finder.id, action: .close))   // our own test window, closed through Accessibility
+        case "floatclick":
+            // A stay-on-top window must take clicks (phrz, compositor model: "stay on top windows are not interactable"). The
+            // bench's --floating panel: it must be a layer, the viewer's own hit test must land on it, and three clicks sent
+            // where a hand would click go to it (the bench counts them in /tmp/mtb-clicks.txt; the run script reads that).
+            guard let p = session.windowsSnapshot().first(where: { $0.title.contains("Mirage Test Bench floating") }) else {
+                session.log("scenario floatclick: no floating panel"); return }
+            let cx = p.frame.x + p.frame.width / 2, cy = p.frame.y + p.frame.height * 2 / 3
+            let hit = session.window(at: cx, cy)
+            session.log("scenario floatclick: panel \(p.id) level \(p.windowLevel) layered \(p.isLayered); hit test at its button: \(hit.map { $0.id == p.id ? "the panel" : "window \($0.id) (\($0.app ?? "?"))" } ?? "nothing (passes over)")")
+            let press = await MainActor.run { session.press(at: cx, cy, plain: true) }
+            session.log("scenario floatclick: a press there is \(press)")
+            for k in 1...3 {
+                let (nx, ny) = normalized(cx, cy)
+                session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
+                session.send(.mouseButton(.init(button: 0, down: true, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
+                try? await Task.sleep(for: .milliseconds(80))
+                session.send(.mouseButton(.init(button: 0, down: false, x: nx, y: ny, clickCount: 1, modifiers: 0)), scripted: true)
+                try? await Task.sleep(for: .seconds(1))
+                session.log("scenario floatclick: click \(k) sent")
+            }
         case "showdesktop":
             // Show Desktop (F11, the symbolic hot key): every window slides to the display edges, the desktop shows, and a
             // second press brings them back. Three rounds, the viewer's picture shot at 4 fps (MIRAGE_TEST_BENCH_SHOTS).

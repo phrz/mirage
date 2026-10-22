@@ -73,6 +73,27 @@ final class App: NSObject, NSApplicationDelegate {
     /// `--docklike`: what the Dock is on macOS 27, one full-screen transparent window at the Dock level (20), click-through,
     /// drawing its own app-name tooltips inside: here two green labels (one clear of the bench, one straddling its left
     /// edge) that fade in, stay 1.5 s, fade out and stay away 2.5 s. No window list change ever announces them.
+    /// `--floating`: a stay-on-top panel (floating level, like a utility or "always on top" window) with a button. Each click
+    /// appends to /tmp/mtb-clicks.txt, so a test can tell whether a remote click reached it (phrz: "stay on top windows are
+    /// not interactable" in the compositor model).
+    var floatingPanel: NSPanel?
+    var floatingClicks = 0
+    func startFloating(near f: NSRect) {
+        let p = NSPanel(contentRect: NSRect(x: f.maxX - 340, y: f.maxY - 260, width: 300, height: 180), styleMask: [.titled, .utilityWindow, .nonactivatingPanel], backing: .buffered, defer: false)
+        p.title = "Mirage Test Bench floating"; p.level = .floating; p.isFloatingPanel = true; p.hidesOnDeactivate = false
+        let b = NSButton(title: "Click me (0)", target: self, action: #selector(floatingClick(_:)))
+        b.frame = NSRect(x: 20, y: 20, width: 260, height: 120); b.bezelStyle = .regularSquare
+        p.contentView?.addSubview(b)
+        try? "0\n".write(toFile: "/tmp/mtb-clicks.txt", atomically: true, encoding: .utf8)
+        p.orderFrontRegardless()
+        floatingPanel = p
+    }
+    @objc func floatingClick(_ sender: NSButton) {
+        floatingClicks += 1
+        sender.title = "Click me (\(floatingClicks))"
+        try? "\(floatingClicks)\n".write(toFile: "/tmp/mtb-clicks.txt", atomically: true, encoding: .utf8)
+    }
+
     func startDockLike(screen: NSScreen, near b: NSRect) {
         let o = NSWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         o.isOpaque = false; o.backgroundColor = .clear; o.hasShadow = false; o.ignoresMouseEvents = true
@@ -277,6 +298,7 @@ final class App: NSObject, NSApplicationDelegate {
             if CommandLine.arguments.contains("--tooltip") { startTooltips(over: w) }
             if CommandLine.arguments.contains("--docklike") { startDockLike(screen: screen, near: w.frame) }
             if CommandLine.arguments.contains("--vibrancy") { startVibrancy(screen: screen) }
+            if CommandLine.arguments.contains("--floating") { startFloating(near: w.frame) }
             if CommandLine.arguments.contains("--terminal") { startTerminal(tv) }
             updateCaption()
             window = w
