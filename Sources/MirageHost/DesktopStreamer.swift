@@ -3252,7 +3252,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Compositor model: the desktop's first picture is its still and lossless blocks. The encoder's start keyframe (no
         // motion behind it) waits until that is done: on Japan bus it landed first (2.44 s), replaced the composited
         // placeholder with the desktop alone, and every window vanished until its still arrived 1.3 s later (a fourth change).
-        if compositor, l.isDisplay, l.fresh != .done, l.pendingVideoTiles.isEmpty { return }
+        // (The first frame marks every tile as video, so "no motion" is: the still not out yet, or most of the layer pending;
+        // after the fresh picture the keyframe goes out with the crisp tiles masked.)
+        if compositor, l.isDisplay, l.fresh != .done {
+            let early: Bool
+            switch l.fresh { case .still, .intermediate: early = true; default: early = false }
+            if early || l.pendingVideoTiles.count * 2 >= l.tracker.tileCount { return }
+        }
         refill()
         purgeStale(now: now)
         if l.encoding { statDropped += 1; return }
