@@ -1445,7 +1445,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if let err { self?.useFallback(l, why: "its own capture stopped (\(err))") }
         } }
         // The window's first frame from a snapshot with the stream's own filter, while ScreenCaptureKit queues the stream.
-        let shot = compositor
+        let shot = compositor && (!cutStands(l) || Self.testCutCheck)
+        if compositor, !shot { log("layer \(l.id): unoccluded in the warm snapshot; its cut is its still (no window-alone shot)") }
         if shot {
             let independent = hostTunables[.windowShotIndependent] >= 0.5
             _ = WindowCapturer.shotsPending.add(1)
@@ -1471,7 +1472,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 }
                 guard let pb else { return }
                 let nanos = Clock.nowNanos()
-                self?.queue.async { guard let self, l.capturer === cap, l.lastFrame == nil else { return }; l.snapshotFrame = pb; self.captured(pb, nanos, dirtyRects: [], layerID: l.id) }
+                self?.queue.async {
+                    guard let self else { return }
+                    if let c = self.cutCheck.removeValue(forKey: l.id) { self.log("layer \(l.id): cut check: \(Self.cutDifference(c.px, w: c.w, h: c.h, pb))") }
+                    guard l.capturer === cap, l.lastFrame == nil else { return }; l.snapshotFrame = pb; self.captured(pb, nanos, dirtyRects: [], layerID: l.id)
+                }
             }
         }
         Task { [weak self] in
@@ -1494,6 +1499,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     // MARK: Placeholders (DESIGN §3.0b)
 
     private var placeholdersDone = false
+    /// This stream's stage 1 is cut from the warm snapshot (its window layout unchanged since it was taken).
+    private var warmStage1 = false
+    /// Test (MIRAGE_TEST_CUT_CHECK): unoccluded windows keep their window-alone shot, compared with their cut (logged).
+    static let testCutCheck = ProcessInfo.processInfo.environment["MIRAGE_TEST_CUT_CHECK"] != nil
+    private var cutCheck: [UInt32: (px: [UInt8], w: Int, h: Int)] = [:]
+    /// A window nothing covers in the warm snapshot (no window, panel or Dock over it, all of it on the display): its cut is
+    /// its own content (minus the shadow), so it is its stage-1 still and its window-alone shot is skipped (coordinator,
+    /// a'). Covered windows wait for their shots: a cut would show the other window's pixels inside their rect.
+    private func cutStands(_ l: Layer) -> Bool {
+        guard compositor, warmStage1, hostTunables[.windowShotIndependent] >= 0.5, !l.isDisplay, l.id != ControlMessage.WindowInfo.overlayID,
+              l.visibleFraction >= 0.999, let d = display, d.bounds.intersection(l.frame) == l.frame else { return false }
+        return fallbackCovers(of: l.id, frame: l.frame).isEmpty
+    }
     /// Every visible window at once: one small screenshot of the composited display, each planned window that has no picture
     /// yet cut from it (windows in front left transparent) and sent as a 32-px still with its layer's announcement. The
     /// viewer draws it upscaled (soft) until the window's own still replaces it. Without it, windows appeared one by one as
@@ -1507,6 +1525,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Warm host: the idle snapshot, while the window layout is the one it was taken in (no screenshot to wait for).
         if let (snap, age) = WarmPool.shared.freshSnapshot(displayID: t.display.displayID) {
             log("placeholders and stage 1 from the warm snapshot (\(age / 1000) s old)")
+            warmStage1 = true
             // Next turn of the queue: at stream start this runs inside configure(), before the window list and the layers
             // exist (placeholders() then sent nothing, and only 2 of 13 stills made the stage-1 barrier).
             queue.async { [weak self] in self?.placeholders(from: snap.px, width: snap.width, height: snap.height, streamWidth: t.pixelWidth) }
@@ -1578,20 +1597,40 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // M-FIVE stage 1: the window's coherent still, cut from the stream-start screenshot (its own capture starts ~0.6 s
             // after the previous window's), sized to its share of the 0.5 s budget, staged behind the barrier. Its own capture
             // then goes straight to lossless (no second still: at most three changes).
-            let rateBytes = Double(lastBudget.tileKbps * 1000 / 8)
-            let budget = max(4_000, rateBytes * hostTunables[.stage1Seconds] * l.visibleFraction * Double(l.frame.area) / Double(max(1, display?.bounds.area ?? 1)))
+            let rateBytes = stage1RateBytes
+            let budget = max(Self.stage1MinBytes, rateBytes * hostTunables[.stage1Seconds] * l.visibleFraction * Double(l.frame.area) / Double(max(1, display?.bounds.area ?? 1)))
             let scale = min(1.0, (budget / 0.1 / Double(r.width * r.height)).squareRoot())
             let ow = max(16, Int(Double(r.width) * scale)), oh = max(16, Int(Double(r.height) * scale))
             guard let data = cut.withUnsafeBytes({ TileCodec.encodeLossy(base: $0.baseAddress!, width: r.width, height: r.height, stride: r.width * 4, outWidth: ow, outHeight: oh, quality: 60) }) else { continue }
             // With window-alone shots: kept for a window that misses the barrier (checkStage1). Without: paced, queued and
             // sent as the tile budget allows (refine), not as one blast.
-            if ownShots { stage1Cuts[id] = data; continue }
+            if ownShots, !cutStands(l) { stage1Cuts[id] = data; continue }
+            if ownShots, Self.testCutCheck { cutCheck[id] = (cut, r.width, r.height) }
             l.cutStill = true
             stage1Queue.append((id, data))
             sent += 1; bytes += data.count
             continue
         }
         if sent > 0 { log("placeholders and stage-1 cuts: the desktop and \(sent - 1) windows, \(bytes) bytes (cuts paced)"); sendStage1Queue(now: Clock.nowNanos()); checkStage1(now: Clock.nowNanos()); publishWindows(now: Clock.nowNanos(), full: false) }
+    }
+
+    /// Cut vs window-alone shot (MIRAGE_TEST_CUT_CHECK): mean and max RGB difference on a 96-wide grid over the window's
+    /// interior (8 % inset: no corners, no edge), where the shot is opaque.
+    static func cutDifference(_ cut: [UInt8], w cw: Int, h ch: Int, _ pb: CVPixelBuffer) -> String {
+        CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pb)?.assumingMemoryBound(to: UInt8.self) else { return "no shot pixels" }
+        let pw = CVPixelBufferGetWidth(pb), ph = CVPixelBufferGetHeight(pb), stride = CVPixelBufferGetBytesPerRow(pb)
+        let gw = 96, gh = max(8, 96 * ch / max(1, cw))
+        var sum = 0, n = 0, mx = 0, big = 0
+        for gy in 0..<gh { for gx in 0..<gw {
+            let fx = 0.08 + 0.84 * (Double(gx) + 0.5) / Double(gw), fy = 0.08 + 0.84 * (Double(gy) + 0.5) / Double(gh)
+            let po = Int(fy * Double(ph)) * stride + Int(fx * Double(pw)) * 4
+            guard base[po + 3] >= 250 else { continue }
+            let co = (Int(fy * Double(ch)) * cw + Int(fx * Double(cw))) * 4
+            let d = max(abs(Int(base[po]) - Int(cut[co])), abs(Int(base[po + 1]) - Int(cut[co + 1])), abs(Int(base[po + 2]) - Int(cut[co + 2])))
+            sum += d; n += 1; mx = max(mx, d); if d > 24 { big += 1 }
+        } }
+        return n == 0 ? "no opaque samples" : String(format: "mean %.1f max %d, %d of %d samples off by > 24 (shot %dx%d, cut %dx%d)", Double(sum) / Double(n), mx, big, n, pw, ph, cw, ch)
     }
 
     /// Layers cut from the full display capture only until their own capture delivers (off: see reconcileLayers).
@@ -2422,6 +2461,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
     }
     private var stage1Staged = Set<UInt32>()
+    /// Stage 1's stills are sized to this rate: the link's, but no more than 800 kbps while nothing has measured it (no probe,
+    /// no delivery: stage 1 goes before the probe). On Japan bus (650 kbps) stills sized to the 1132-2000 kbps start rate took
+    /// 0.43 s to cross the link; at this size ~0.25 s. On a fast link the lossless blocks follow within a second anyway.
+    private var stage1RateBytes: Double {
+        let rate = Double(lastBudget.tileKbps * 1000 / 8)
+        guard let rc, rc.probeKbps == 0, rc.deliveryKbps == 0 else { return rate }
+        return min(rate, 800_000 / 8)
+    }
+    static let stage1MinBytes = 2_500.0
     /// Stage-1 stills being encoded (marked sent, not yet staged): the barrier waits for them too. Without it the desktop's
     /// still (encoded last, the largest) missed the set and was committed on its own just after it (gate, ebcebea).
     private var stage1Encoding = Set<UInt32>()
@@ -2528,6 +2576,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Starts the display layer's fresh-picture sequence; the next keyframe is its base.
     private func beginFreshPicture(_ trigger: FreshPictureTrigger, detail: String = "") {
         guard trigger.restartsWholePicture else { return }
+        warmStage1 = false; cutCheck = [:]   // (set again by sendPlaceholders when the warm snapshot stands)
         if trigger == .streamStart || trigger == .viewerEmpty {
             // Compositor model: the probe train follows stage 1 (on Japan bus its 48 KB took 0.6 s of the link ahead of the stills).
             // Both models: the probe train follows the first picture (compositor: stage 1 presented; seam: the display's base
@@ -2631,6 +2680,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // mac-daddy: 240 KB of middle levels for windows 6–25 % visible, ~3 s of a 650 kbps link in the fresh picture). Its
         // visible tiles go as blocks instead.
         guard l.visibleFraction >= 0.5 else { return false }
+        // Not the overlay: mostly transparent, its chrome goes lossless, and its live menu bar and Dock made every middle level
+        // stale before it left (dropped, its estimate never refunded: 3 x 135 KB of tile-token debt on 20 Mbps).
+        guard l.id != ControlMessage.WindowInfo.overlayID else { return false }
         let visible = l.tracker.tileCount - l.occludedTiles.count
         let losslessBytes = Double(visible * 64 * 64) * 0.5        // UI at 2x: ~0.5 B/px lossless
         let rate = Double(max(100, lastBudget.tileKbps) * 1000 / 8)
@@ -2668,12 +2720,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let ow = max(32, Int(Double(rect.width) * scale)), oh = max(32, Int(Double(rect.height) * scale))
                 return (TileCodec.encodeLossy(base: base, width: rect.width, height: rect.height, stride: rect.width * 4, outWidth: ow, outHeight: oh, quality: 80), 80, ow, oh)
             }
-            guard let data else { self.queue.async { if backdrop { self.layers[layerID]?.backdropDirty = true } else if let block { self.pacer.dropped(id: block) } }; return }
+            guard let data else { self.queue.async { if backdrop { self.layers[layerID]?.backdropDirty = true } else if let block { self.pacer.dropped(id: block) }; self.debit("mid-refund", -targetBytes) }; return }
             self.queue.async {
                 // Stale before it left (the window changed meanwhile): not sent; the lossless level follows (a backdrop
                 // level is tried again once the window is quiet).
                 if let l = self.layers[layerID], l.tracker.changedSince(nanos: nanos, in: [rect]) {
-                    if backdrop { l.backdropDirty = true; self.tileTokens += targetBytes } else if let block { self.pacer.dropped(id: block) }
+                    // Its estimate back either way (a dropped middle level kept its charge: the tokens sat at their floor for a
+                    // second with nothing sent, delivery read low and the ceiling followed it down).
+                    if backdrop { l.backdropDirty = true } else if let block { self.pacer.dropped(id: block) }
+                    self.debit("mid-refund", -targetBytes)
                     return
                 }
                 self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: true, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: block, layer: layerID) }
@@ -2738,11 +2793,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var statSmallAnimTiles = 0
 
     /// Sends the next large lossless block of a layer (pipelined: RefinementPacer), within budget.
-    private func freshStep(_ l: Layer, now: UInt64) {
+    private func freshStep(_ l: Layer, now: UInt64, stage1: Bool = false) {
         // A block whose ack never comes (a viewer that dropped the message, a stale ack) must not freeze the picture:
         // after ~3 RTT + 2 s it stops counting.
         if pacer.expire(now: now, srttNanos: srttNanos) > 0 { log("fresh picture: block ack timed out; continuing") }
-        guard pacer.canStartBlock(tileBytesPerSecond: Double(lastBudget.tileKbps * 1000 / 8)) else { return }
+        guard stage1 || pacer.canStartBlock(tileBytesPerSecond: Double(lastBudget.tileKbps * 1000 / 8)) else { return }
         guard let src = l.lastFrame else { return }
         refillTiles(now: now)
         // One block in flight and budget-limited: it does not yield to motion (that would starve the
@@ -2979,7 +3034,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 }
                 if let (fmt, data) = encoded { out.append(.init(rect: r, format: fmt, data: data)) }
             }
-            guard !out.isEmpty else { self.queue.async { if let block { self.pacer.dropped(id: block) }; settled(self.layers[layerID]) }; return }
+            guard !out.isEmpty else { self.queue.async { if let block { self.pacer.dropped(id: block) }; self.debit("empty-refund", -Double(estimate)); settled(self.layers[layerID]) }; return }
             let bytes = out.reduce(0) { $0 + $1.data.count }
             // Changed pixels go on the stream from here, in order with copy-rects: the hop through `queue` let the next
             // capture's copy-rect overtake them, so the viewer shifted its pixels first and then dropped or misplaced these
@@ -3053,12 +3108,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let rect = layer.bounds
         // M-FIVE stage 1 (compositor model): all the visible layers' stills together take ~0.5 s of the measured rate, each its
         // share of what can be seen; the seam design keeps its old size.
-        let rateBytes = Double(lastBudget.tileKbps * 1000 / 8)
+        let rateBytes = stage1RateBytes
         let targetBytes: Double
         if compositor, let d = display {
             let visible = layer.isDisplay ? Double(d.tracker.tileCount - d.underLayer.count) / Double(max(1, d.tracker.tileCount)) * Double(d.bounds.area)
                                           : layer.visibleFraction * Double(rect.area)
-            targetBytes = max(4_000, rateBytes * hostTunables[.stage1Seconds] * visible / Double(max(1, d.bounds.area)))
+            targetBytes = max(Self.stage1MinBytes, rateBytes * hostTunables[.stage1Seconds] * visible / Double(max(1, d.bounds.area)))
         } else {
             targetBytes = max(6_000.0, rateBytes * 0.15)
         }
@@ -3076,10 +3131,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let layerID = layer.id
         let block = pacer.start(layer: layer.id, estimate: estimate, now: nanos)
         layer.blankedOffDisplay = []; layer.needsCrop = true   // the still covers the whole layer: cropped again next tick
+        // Encoded off the tile queue, all stills at once (they were encoded one after another: 0.3 s for stage 1's eight on
+        // mac-daddy); the tile queue only waits for this one's result, so its place in the stream is kept.
+        let box = StillBox()
+        Self.stillEncoders.async {
+            box.data = d.withUnsafeBytes { TileCodec.encodeLossy(base: $0.baseAddress!, width: rect.width, height: rect.height, stride: rect.width * 4, outWidth: ow, outHeight: oh, quality: 60) }
+            box.done.signal()
+        }
         tileQueue.async { [weak self] in
+            box.done.wait()
             guard let self else { return }
-            let data = d.withUnsafeBytes { TileCodec.encodeLossy(base: $0.baseAddress!, width: rect.width, height: rect.height, stride: rect.width * 4, outWidth: ow, outHeight: oh, quality: 60) }
-            guard let data else { self.queue.async { self.pacer.dropped(id: block) }; return }
+            let data = box.data
+            guard let data else { self.queue.async { self.pacer.dropped(id: block); self.debit("still-refund", -Double(estimate)); self.stage1Encoding.remove(layerID) }; return }
             // On the stream from here, in order with the layer's copy-rects (DESIGN §3.3 ordering invariant). A staged still goes on
             // the fast stream, where its reset and its commit go (sendTileMessage): on the other stream the commit overtook it,
             // stage 1 presented "0 staged tiles" for every window and the stills waited for the next level, 5 s later (20 Mbps
@@ -3102,6 +3165,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         return estimate
     }
+
+    final class StillBox: @unchecked Sendable { var data: Data?; let done = DispatchSemaphore(value: 0) }
+    static let stillEncoders = DispatchQueue(label: "mirage.still-encode", qos: .userInitiated, attributes: .concurrent)
 
     /// Sends a tile-stream message in order (all sends go through the tile queue). Copy-rects and resets are interactive.
     private func sendTileMessage(_ m: TileMessage, captureNanos: UInt64) {
@@ -3210,6 +3276,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let d = display, !unifiedView { switch d.fresh { case .base, .climb: return; default: break } }
         // Every window's still before any window's lossless blocks: with many large windows (a real desktop)
         // one window's blocks would otherwise hold every other window's first picture back for tens of seconds.
+        // During stage 1 every window with a frame gets its still now (encoded in parallel): one a tick queued them ~40 ms apart.
+        if stage1Active {
+            let ready = ordered.filter { if case .still = $0.fresh { return $0.lastFrame != nil }; return false }
+            if !ready.isEmpty { for l in ready { freshStep(l, now: now, stage1: true) }; return }
+        }
         if let l = ordered.first(where: { if case .still = $0.fresh { return true }; return false }) { freshStep(l, now: now); return }
         // Then the desktop's menu bar and Dock: on screen whatever the windows do, they waited at the first picture's lowest
         // rung behind every window's levels and the desktop's centre-first blocks (~45 s after a connect on an iPhone).
