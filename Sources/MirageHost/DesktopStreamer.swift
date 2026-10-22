@@ -593,7 +593,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             loadHostTunables()
             var controller = RateController(initialKbps: min(req.bitrateKbps, Int(hostTunables[.startKbps])), maxKbps: req.bitrateKbps, nativePixels: w * h)
             if let old = rc { controller = RateController(initialKbps: old.targetKbps, maxKbps: req.bitrateKbps, nativePixels: w * h) }
-            else if let k = Self.priorDelivery(for: output?.peerID, network: req.networkFingerprint) {
+            // A simulated link (a test throttle) neither resumes nor saves an estimate: the same pairing and network would carry
+            // one test's rate into the next run (a 20 Mbps run started from Japan bus's 1.5 Mbps) and into a real connect.
+            else if req.throttle == nil, let k = Self.priorDelivery(for: output?.peerID, network: req.networkFingerprint) {
                 controller.resume(fromKbps: k)
                 log("careful resume: this pairing's last estimate on this network \(k) kbps; starting at \(controller.targetKbps) kbps")
             }
@@ -991,7 +993,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// lossless resend, unacked video frames are forgotten (the resume keyframe replaces them).
     public func suspend() async {
         queue.sync { holdWarm(false) }
-        queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.request?.networkFingerprint) }   // the next connect starts there
+        queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.request?.throttle == nil ? self.request?.networkFingerprint : nil) }   // the next connect starts there
         // The session is cut loose first (output, timers, captures detached), then the captures are stopped, each within 3 s:
         // ScreenCaptureKit's stopCapture can fail to return, and awaiting it before the cut left a suspended streamer
         // capturing, refining and sending into the dead connection for good (mac-daddy 2026-10-21: a second streamer
@@ -1153,7 +1155,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     public func stop() async {
         queue.sync { holdWarm(false) }
-        queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.request?.networkFingerprint) }
+        queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.request?.throttle == nil ? self.request?.networkFingerprint : nil) }
         // Cut loose first, then stop the captures within 3 s each (suspend()).
         let (cap, caps): (ScreenCapturer?, [WindowCapturer]) = await withCheckedContinuation { c in
             queue.async {
@@ -2157,7 +2159,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if !small.isEmpty, Clock.elapsed(since: layer.smallAnimNanos, now: now) >= interval {
                 layer.smallAnimNanos = now
                 if layer.isDisplay { displaySent(small) }
-                tileTokens -= Double(submitLossless(layer: layer, tiles: small, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: Float(hostTunables[.smallAnimationQuality])))
+                debit("smallanim", Double(submitLossless(layer: layer, tiles: small, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: Float(hostTunables[.smallAnimationQuality]))))
                 statSmallAnimTiles += small.count
             }
         }
@@ -2204,7 +2206,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let w = Set(withCopy)
             plan.lossless.removeAll { w.contains($0) }
             if layer.isDisplay { displaySent(withCopy) }
-            tileTokens -= Double(submitLossless(layer: layer, tiles: withCopy, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: 60))
+            debit("strip", Double(submitLossless(layer: layer, tiles: withCopy, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: 60)))
             tracker.markVideo(withCopy, now: now)
             statStripLossy += withCopy.count
         }
@@ -2217,7 +2219,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if !near.isEmpty {
                 if layer.isDisplay { displaySent(near) }
                 let bytes = submitLossless(layer: layer, tiles: near, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
-                tileTokens -= Double(bytes)
+                debit("near", Double(bytes))
                 pacer.noteDirect(bytes: bytes, now: now)
                 plan.lossless = far
             }
@@ -2226,7 +2228,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if tileTokens > 0 {
                 if layer.isDisplay { displaySent(plan.lossless) }
                 let bytes = submitLossless(layer: layer, tiles: plan.lossless, from: new, refinement: false, nanos: nanos, tracker: tracker, tight: tightBoxes)
-                tileTokens -= Double(bytes)
+                debit("lossless", Double(bytes))
                 pacer.noteDirect(bytes: bytes, now: now)
             } else if plan.lossless.count >= 12, rc?.policy.videoEnabled ?? true, !(layer.copyGateNanos > 0 && Clock.elapsed(since: layer.copyGateNanos, now: now) < 300_000_000),
                       layer.encoder != nil || ensureEncoder(layer) {
@@ -2379,6 +2381,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var stage1Active = false
     /// Connect trace (M-FIVE: where the time to crisp goes): every 250 ms for 8 s after a stream start's fresh picture.
     private var traceUntil: UInt64 = 0, traceNext: UInt64 = 0, traceCapped = 0, traceBytes = 0
+    /// Tile-token charges since the last trace line, by where they were made (where a connect's budget goes).
+    private var traceDebits: [String: Double] = [:]
+    private func debit(_ site: String, _ bytes: Double) { tileTokens -= bytes; if traceUntil > 0 { traceDebits[site, default: 0] += bytes } }
     private func connectTrace(now: UInt64) {
         guard now < traceUntil, now >= traceNext, let rc else { return }
         traceNext = now + 250_000_000
@@ -2388,8 +2393,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         log(String(format: "trace +%.2f s: target %d ceiling %d delivery %d kbps | in flight %d KB (refine %d KB) cap %d KB, capped %d× | tokens %.0f KB fresh %.0f KB | sent %d KB | %d layers fresh, %d blocks left, %d block(s) encoding",
                    Double(Clock.elapsed(since: traceUntil - 8_000_000_000, now: now)) / 1e9, rc.targetKbps, rc.deliveryCeilingKbps, rc.deliveryKbps,
                    tileInflightBytes / 1000, refinementInFlight / 1000, rc.inflightCapBytes / 1000, traceCapped, tileTokens / 1000, freshTokens / 1000, sent / 1000,
-                   fresh, blocks, pacer.blocks.filter { $0.msgSeq == nil }.count))
-        traceCapped = 0
+                   fresh, blocks, pacer.blocks.filter { $0.msgSeq == nil }.count)
+            + (traceDebits.isEmpty ? "" : " | charged " + traceDebits.sorted { abs($0.value) > abs($1.value) }.map { "\($0.key) \(Int($0.value / 1000))" }.joined(separator: " ") + " KB"))
+        traceCapped = 0; traceDebits = [:]
     }
     private var probeAfterStage1 = false, probeDeadline: UInt64 = 0
     /// On `queue`: the deferred probe train, once the first picture is out (or its deadline passed).
@@ -2410,7 +2416,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard let l = layers[next.id], !l.stillSent || l.cutStill else { continue }
             sendTileMessage(.reset(layer: next.id, width: l.width, height: l.height), captureNanos: now)
             sendTileMessage(.tiles(.init(header: header(layer: next.id, nanos: now), refinement: false, staged: true, tiles: [.init(rect: l.bounds, format: .lossy, data: next.data)])), captureNanos: now)
-            if tileTokens > 0 { tileTokens -= Double(next.data.count) } else { freshTokens -= Double(next.data.count); tileTokens -= Double(next.data.count) }
+            if tileTokens > 0 { debit("cut", Double(next.data.count)) } else { freshTokens -= Double(next.data.count); debit("cut", Double(next.data.count)) }
             l.stillSent = true
             if stage1Active { stage1Staged.insert(next.id) } else { sendTileMessage(.commit(layer: next.id), captureNanos: now); l.exposed = true }
         }
@@ -2673,7 +2679,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: true, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: block, layer: layerID) }
                 // The level covers the whole layer, off-display part included: cropped again on the next tick (after it on the stream).
                 if let l = self.layers[layerID] { l.blankedOffDisplay = []; l.needsCrop = true }
-                self.tileTokens -= Double(data.count) - targetBytes
+                self.debit("mid-trueup", Double(data.count) - targetBytes)
                 self.statTileBytes += data.count; self.statTileRects += 1; self.secTileBytes += data.count
                 if let l = self.layers[layerID] { if backdrop { l.account.backdrop += data.count } else { l.account.still += data.count } }
                 if backdrop { self.statBackdropLevels += 1; self.statBackdropBytes += data.count }
@@ -2750,7 +2756,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             CVPixelBufferLockBaseAddress(src, .readOnly)
             defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
             let est = submitStill(l, from: frameView(src), nanos: now)
-            tileTokens -= Double(est)
+            debit("still", Double(est))
             l.fresh = intermediateWorthwhile(l) ? .intermediate : .blocks(remaining: planBlocks(l))
             statStills += 1
         case .intermediate:
@@ -2760,7 +2766,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let f = frameView(src)
             guard f.width == l.width, f.height == l.height else { return }
             let est = submitIntermediate(l, from: f, nanos: now)
-            tileTokens -= Double(est)
+            debit("mid", Double(est))
             l.fresh = .blocks(remaining: planBlocks(l))
         case .blocks(var remaining):
             if l.provisional { return }   // lossless only from the real capture
@@ -2792,7 +2798,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // A block is part of the layer's lossless level, presented whole on its commit; the underlay (nobody sees
             // it until a window moves) lands at once, so a move uncovers it already there.
             let est = submitRects(l, rects, from: f, refinement: true, nanos: now, photoQuality: underlay ? 75 : 90, staged: !underlay)
-            tileTokens -= Double(est)
+            debit("block", Double(est))
             l.tracker.sent(lossless: visible, now: now)
             let hidden = all.filter { l.occludedTiles.contains($0) && !l.tracker.isCrisp($0) }
             if !hidden.isEmpty { l.tracker.defer(hidden, now: now, delayNanos: 3_600_000_000_000) }
@@ -2986,11 +2992,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if refinement, let l = self.layers[layerID], l.tracker.changedSince(nanos: nanos, in: out.map(\.rect)) {
                     // Not sent: whatever the viewer held there stays, so the desktop tiles count as possibly holding a window.
                     if l.isDisplay { let ts = l.tracker.tiles(covering: out.map(\.rect)); l.taint.sent(ts, tracker: l.tracker, windowAreas: [l.bounds]); l.taintScheduled.subtract(ts) }
-                    self.statStaleDropped += out.count; self.tileTokens += Double(estimate); if let block { self.pacer.dropped(id: block) }; settled(self.layers[layerID]); return
+                    self.statStaleDropped += out.count; self.debit("stale-refund", -Double(estimate)); if let block { self.pacer.dropped(id: block) }; settled(self.layers[layerID]); return
                 }
                 if !early { self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: refinement, staged: staged, tiles: out)), captureNanos: nanos, fast: !refinement, refinementBytes: refinement ? bytes : 0, block: block, layer: layerID) } }
                 settled(self.layers[layerID])
-                self.tileTokens -= Double(bytes - estimate)   // true up the estimate
+                self.debit("trueup", Double(bytes - estimate))   // true up the estimate
                 self.statTileBytes += bytes; self.statTileRects += out.count; self.secTileBytes += bytes
                 if refinement { self.statRefineBytes += bytes }
                 if let l = self.layers[layerID] {
@@ -3080,7 +3086,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // on mac-daddy, f4fb76f).
             self.send(tile: .tiles(.init(header: hdr, refinement: false, staged: staged, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: staged, refinementBytes: data.count, block: block, layer: layerID)
             self.queue.async {
-                self.tileTokens -= Double(data.count - estimate)
+                self.debit("still-trueup", Double(data.count - estimate))
                 self.statTileBytes += data.count; self.statTileRects += 1; self.secTileBytes += data.count
                 self.stage1Encoding.remove(layerID)
                 if let l = self.layers[layerID] {
@@ -3278,7 +3284,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let f = frameView(src)
         guard f.width == d.width, f.height == d.height else { return false }
         displaySent(take)
-        tileTokens -= Double(submitRects(d, t.mergedRects(take), from: f, refinement: true, nanos: now, staged: false))
+        debit("chrome", Double(submitRects(d, t.mergedRects(take), from: f, refinement: true, nanos: now, staged: false)))
         d.tracker.sent(lossless: take, now: now)
         if debugLayers { log("chrome: \(take.count) tiles lossless, \(soft.count - take.count) left") }
         return true
@@ -3432,7 +3438,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             var bytes = 0
             if !changes.isEmpty { bytes += submitLossless(layer: l, tiles: changes, from: f, refinement: false, nanos: now, tracker: l.tracker) }
             if !corrections.isEmpty { bytes += submitLossless(layer: l, tiles: corrections, from: f, refinement: false, nanos: now, tracker: l.tracker, correction: true); l.correctionTiles.subtract(corrections) }
-            tileTokens -= Double(bytes)
+            debit("due", Double(bytes))
             l.tracker.sent(lossless: due, now: now)
             pacer.noteDirect(bytes: bytes, now: now)
             statDirectDue += due.count
@@ -3462,7 +3468,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 guard f.width == l.width, f.height == l.height else { continue }
                 l.backdropDirty = false
                 let bytes = submitIntermediate(l, from: f, nanos: now, backdrop: true)
-                tileTokens -= Double(bytes)
+                debit("backdrop", Double(bytes))
                 pacer.noteDirect(bytes: bytes, now: now)
             } else if Clock.elapsed(since: l.movedNanos, now: now) >= Self.backdropIdleNanos, Clock.elapsed(since: lastMotionNanos, now: now) >= 2_000_000_000, l.tracker.heldCount > 0 {
                 let n = l.tracker.releaseHeld(now: now)
@@ -3535,7 +3541,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if !direct.isEmpty { bytes += submitLossless(layer: l, tiles: direct, from: f, refinement: false, nanos: now, tracker: l.tracker) }
             if !underlayTiles.isEmpty { bytes += submitLossless(layer: l, tiles: underlayTiles, from: f, refinement: true, nanos: now, tracker: l.tracker, photoQuality: 75) }
             if !stagedTiles.isEmpty { bytes += submitLossless(layer: l, tiles: stagedTiles, from: f, refinement: true, nanos: now, tracker: l.tracker, staged: true) }
-            tileTokens -= Double(bytes)
+            debit("refine", Double(bytes))
             l.tracker.sent(lossless: take, now: now)
             return true
         }
