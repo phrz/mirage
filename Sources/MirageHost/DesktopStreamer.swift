@@ -2239,6 +2239,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func sendProbeTrain() {
         guard let out = output else { return }
         trainSent = []; trainReceived = []; trainStartNanos = Clock.nowNanos()
+        // Refinement waits while the train is out (until its echoes are in, 300 ms at most): sent after stage 1, the train's
+        // datagrams were interleaved with refinement blocks and no dense burst was left to read on a fast link (20 Mbps read
+        // 54 Mbps one connect, a whole-train 5.2 Mbps the next).
+        probeHoldUntil = trainStartNanos + 300_000_000
         for _ in 0..<Self.trainCount {
             probeSeq += 1
             let d = DatagramPing.encode(seq: probeSeq, size: Self.trainSize)
@@ -2249,7 +2253,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
     private func trainEcho(receivedNanos: UInt64) {
         trainReceived.append(receivedNanos)
-        if trainReceived.count >= Self.trainCount { finishTrain() }
+        if trainReceived.count >= Self.trainCount { probeHoldUntil = 0; finishTrain() }
     }
     private func finishTrain() {
         guard !trainSent.isEmpty else { return }
@@ -2895,7 +2899,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// Refinement across layers: fresh pictures first (stills and blocks, one in flight), then settled
     /// video tiles and rate-limited sparse tiles, oldest first, locus first, within the tile budget.
+    private var probeHoldUntil: UInt64 = 0
     private func refine(now: UInt64) {
+        if now < probeHoldUntil { return }
         guard display != nil else { return }
         if !stage1Queue.isEmpty { sendStage1Queue(now: now) }
         checkStage1(now: now)
