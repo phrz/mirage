@@ -155,6 +155,8 @@ final class Layer {
     var lastStagedNanos: UInt64 = 0
     var stagedEncoding = 0
     var levelsCommitted = 0
+    /// The middle-level decision was made again once the link was known (DesktopStreamer.freshStep).
+    var middleRechecked = false
 
     /// Layer pixel sizes are even (the capture and the HEVC canvas want that); a window layer's canvas is
     /// at most one pixel short of its frame.

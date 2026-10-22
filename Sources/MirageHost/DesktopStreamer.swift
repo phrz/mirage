@@ -1388,7 +1388,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // all of it); in the compositor model with the normal windows left transparent (they have their own). 64 px long.
         // Not over a still already sent: with warm captures the desktop's own still can land before this screenshot returns,
         // and the 64-px placeholder then replaced it (a regression on the viewer, wm1 20 Mbps run).
-        if let d = display, d.fresh != .done, !d.stillSent {
+        // Compositor model: no placeholder at all (coordinator, 2026-10-22: the first presentation is stage 1's barrier, each
+        // window's first appearance its own still; the composited placeholder was a change of its own, a 4th with the middle
+        // level). Windows that miss the barrier get their cut from this shot then (checkStage1), never a hole.
+        if let d = display, !compositor, d.fresh != .done, !d.stillSent {
             // The whole screen in both models: in the compositor model the windows' stage-1 stills land over it a moment later.
             let shot = px
             let ow = 64, oh = max(4, 64 * sh / max(1, sw))
@@ -1403,7 +1406,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Window-alone first-frame shots (windowShotIndependent, default) bring every window's own picture within ~0.2 s, in
         // parallel: its still is stage 1 and no cut is needed (the cut's 59 KB went ahead of it, and was a change of its own).
         let ownShots = hostTunables[.windowShotIndependent] >= 0.5
-        for (id, l) in layers where !ownShots && !l.isDisplay && id != ControlMessage.WindowInfo.overlayID && !l.announced && !l.exposed && plannedFrames[id] != nil {
+        stage1Cuts = [:]
+        for (id, l) in layers where !l.isDisplay && id != ControlMessage.WindowInfo.overlayID && !l.announced && !l.exposed && plannedFrames[id] != nil {
             guard s.byID[id] != nil else { continue }
             // The window's rect in the screenshot, and the covered parts transparent.
             let r = PixelRect(x: Int(Double(l.frame.x) * k), y: Int(Double(l.frame.y) * k), width: max(1, Int(Double(l.width) * k)), height: max(1, Int(Double(l.height) * k)))
@@ -1428,7 +1432,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let scale = min(1.0, (budget / 0.1 / Double(r.width * r.height)).squareRoot())
             let ow = max(16, Int(Double(r.width) * scale)), oh = max(16, Int(Double(r.height) * scale))
             guard let data = cut.withUnsafeBytes({ TileCodec.encodeLossy(base: $0.baseAddress!, width: r.width, height: r.height, stride: r.width * 4, outWidth: ow, outHeight: oh, quality: 60) }) else { continue }
-            // Paced: queued, and sent as the tile budget allows (refine), not as one blast.
+            // With window-alone shots: kept for a window that misses the barrier (checkStage1). Without: paced, queued and
+            // sent as the tile budget allows (refine), not as one blast.
+            if ownShots { stage1Cuts[id] = data; continue }
             l.cutStill = true
             stage1Queue.append((id, data))
             sent += 1; bytes += data.count
@@ -2224,6 +2230,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
     /// Stage-1 cuts waiting for the tile budget (layer, lossy still), sent in order by `sendStage1Queue`.
     private var stage1Queue: [(id: UInt32, data: Data)] = []
+    /// Compositor model with window-alone shots: each planned window's cut from the stream-start shot, for a barrier miss.
+    private var stage1Cuts: [UInt32: Data] = [:]
     private func sendStage1Queue(now: UInt64) {
         refillTiles(now: now)
         while let next = stage1Queue.first, tileTokens > 0 || freshTokens > 0 {
@@ -2244,6 +2252,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             !l.stillSent && (l.isDisplay || (plannedFrames[l.id] != nil && l.visibleFraction > 0.002)) && l.id != ControlMessage.WindowInfo.overlayID
         }
         guard waiting.isEmpty || now >= stage1Deadline else { return }
+        // A window whose still missed the barrier shows its cut from the stream-start shot (soft, never a hole) and is allowed
+        // its extra step; logged as a miss.
+        var misses: [UInt32] = []
+        for l in waiting where !l.isDisplay {
+            guard let data = stage1Cuts[l.id] else { continue }
+            sendTileMessage(.reset(layer: l.id, width: l.width, height: l.height), captureNanos: now)
+            sendTileMessage(.tiles(.init(header: header(layer: l.id, nanos: now), refinement: false, staged: true, tiles: [.init(rect: l.bounds, format: .lossy, data: data)])), captureNanos: now)
+            l.cutStill = true
+            stage1Staged.insert(l.id)
+            misses.append(l.id)
+        }
+        if !misses.isEmpty { log("stage 1: BARRIER MISS for \(misses.count) windows (\(misses.map(String.init).joined(separator: " "))): shown from their cuts") }
+        stage1Cuts = [:]
         stage1Active = false
         sendDeferredProbe("stage 1 presented")
         for id in stage1Staged.sorted() {
@@ -2335,7 +2356,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // M-FIVE: the desktop's first picture is a still like every window's (no tiny keyframe and ladder climb: the
             // "very noisy start"), presented with the others behind the stage-1 barrier.
             display?.fresh = .still
-            for l in layers.values { l.stillSent = false; l.cutStill = false }
+            for l in layers.values { l.stillSent = false; l.cutStill = false; l.middleRechecked = false }
             stage1Active = true; stage1Staged = []; stage1Deadline = Clock.nowNanos() + 700_000_000
             if trigger == .streamStart { traceUntil = Clock.nowNanos() + 8_000_000_000; traceNext = 0; traceBytes = statTileBytes; traceCapped = 0 }
             log("fresh picture (\(trigger.rawValue)\(detail)): stage 1, one coherent still per visible layer, presented together")
@@ -2430,7 +2451,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let visible = l.tracker.tileCount - l.occludedTiles.count
         let losslessBytes = Double(visible * 64 * 64) * 0.5        // UI at 2x: ~0.5 B/px lossless
         let rate = Double(max(100, lastBudget.tileKbps) * 1000 / 8)
-        return losslessBytes / rate > 1.0
+        // Windows: only when lossless is more than ~10 s away (a slow link); otherwise still, then lossless (coordinator,
+        // 2026-10-22: three steps at most, and the placeholder is gone).
+        return losslessBytes / rate > (l.isDisplay ? 1.0 : 10.0)
     }
 
     /// A window layer's middle level: the whole layer as one lossy WebP at full size (q90 class), sized to ~0.6 s of
@@ -2563,6 +2586,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             l.fresh = .blocks(remaining: planBlocks(l))
         case .blocks(var remaining):
             guard !remaining.isEmpty else { l.fresh = .done; if l.isDisplay { log("fresh picture: complete") }; return }
+            // The middle-level decision was made with the start rate (the still goes out before the probe answers): once the
+            // link is known (the probe, or delivery), it is made again for a window none of whose blocks went out yet.
+            if !l.isDisplay, !l.middleRechecked, l.sentRefine == 0, let rc, rc.probeKbps > 0 || rc.deliveryKbps > 0 {
+                l.middleRechecked = true
+                if intermediateWorthwhile(l) { l.fresh = .intermediate; log("layer \(l.id): middle level after all (the link is slow: \(lastBudget.tileKbps) kbps for tiles)"); return }
+            }
             let rect = remaining.removeFirst()
             CVPixelBufferLockBaseAddress(src, .readOnly)
             defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
