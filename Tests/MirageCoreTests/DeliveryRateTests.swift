@@ -216,4 +216,22 @@ final class DeliveryRateTests: XCTestCase {
             }
         }
     }
+
+    /// A stalled host (nothing sent for 3 s, tokens unused) after the probe seeded 8 Mbps: the trickle's acks are app-limited
+    /// because nothing was in flight, however the stall came about; without the in-flight samples they replace the estimate.
+    func testStalledRefineDoesNotLowerDelivery() {
+        func run(sampleInflight: Bool) -> Int {
+            var rc = RateController(initialKbps: 2_000, maxKbps: 50_000, nativePixels: 3200 * 1800)
+            rc.seedFromProbe(kbps: 8_000)
+            let start: UInt64 = 10_000 * ms
+            for t in 0..<3000 {
+                let now = start + UInt64(t) * ms
+                if sampleInflight { rc.noteInflight(bytes: 1200, now: now) }
+                if t % 200 == 0 { rc.streamAcked(bytes: 1200, receivedNanos: now, now: now) }
+            }
+            return rc.deliveryKbps
+        }
+        XCTAssertGreaterThanOrEqual(run(sampleInflight: true), 8_000)
+        XCTAssertLessThan(run(sampleInflight: false), 1_000, "the control: the stall's acks read the link low")
+    }
 }

@@ -3283,6 +3283,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// video tiles and rate-limited sparse tiles, oldest first, locus first, within the tile budget.
     private var probeHoldUntil: UInt64 = 0
     private func refine(now: UInt64) {
+        // Whatever follows (a stall anywhere, the probe hold), what is in flight says whether the next acks measure the link.
+        if let rc { self.rc?.noteInflight(bytes: tileInflightForCap, linkBusy: lastBudget.videoKbps > 0 && rc.recentVideoKbps * 2 >= lastBudget.videoKbps, now: now) }
         if now < probeHoldUntil { return }
         guard display != nil else { return }
         if !stage1Queue.isEmpty { sendStage1Queue(now: now) }

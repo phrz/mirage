@@ -458,6 +458,23 @@ public struct RateController {
     /// The host had work queued but its own budget (the target's tokens) held it back: acks soon after say what the target
     /// allowed, not what the link carries.
     public mutating func noteBudgetLimited(now: UInt64) { lastBudgetLimitedNanos = now }
+    /// The host's stream bytes in flight, sampled every tick (`linkBusy`: video is using the link meanwhile). A delivery
+    /// window during which they stayed under half the in-flight cap most of the time says what the host sent, not what the
+    /// link carries: app-limited, however the host got there. (Marking it only where refinement found nothing to do missed
+    /// a stall elsewhere: on 20 Mbps one window of acks read 760 kbps and pulled the ceiling from 16 Mbps to 1.5.)
+    public mutating func noteInflight(bytes: Int, linkBusy: Bool = false, now: UInt64) {
+        inflightLog.append((now, !linkBusy && bytes * 2 < inflightCapBytes))
+        let keep = deliveryWindowNanos + 2 * UInt64(srttNanos)
+        if let f = inflightLog.first, now &- f.nanos > keep { inflightLog.removeAll { now &- $0.nanos > keep } }
+    }
+    private var inflightLog: [(nanos: UInt64, under: Bool)] = []
+    /// Most of the window the acks at `now` answer (shifted back an RTT) had little in flight (at least 5 samples).
+    private func underusedWindow(now: UInt64) -> Bool {
+        let hi = now &- UInt64(srttNanos), lo = hi &- deliveryWindowNanos
+        var n = 0, under = 0
+        for s in inflightLog where s.nanos >= lo && s.nanos <= hi { n += 1; if s.under { under += 1 } }
+        return n >= 5 && under * 2 > n
+    }
     private var lastBudgetLimitedNanos: UInt64 = 0
 
     /// The connect-time probe (DESIGN M-FIVE): a packet train's delivery rate. The target starts at 0.7 × it (under the cap)
@@ -522,12 +539,13 @@ public struct RateController {
         let kbps = Double(acked) * 8 / (Double(w) / 1e9) / 1000
         // App-limited: the host ran out of things to send during the window these acks answer (shifted by an RTT). Held
         // back by the in-flight cap is not app-limited: that is the link's rate.
-        let appLimited = lastIdleNanos > 0 && now &- lastIdleNanos < w + UInt64(srttNanos)
+        let pathStressed = (!probeRTT.isNaN && minRTTNanos.isFinite && probeRTT > minRTTNanos * 1.25) || lossPercent > 1
+        // Little in flight for most of the window counts too, unless the path itself says the link is the limit.
+        let appLimited = (lastIdleNanos > 0 && now &- lastIdleNanos < w + UInt64(srttNanos)) || (!pathStressed && underusedWindow(now: now))
         // Held back by its own budget (tokens spent, work queued) counts as app-limited too: on 20 Mbps the fresh picture's
         // block estimates put the budget 426 KB in debt, sending stopped for 0.6 s, and that window's 1.5 Mbps replaced the
         // probe's 8 Mbps (ceiling 2.9 Mbps for 2 s). Not when the path says otherwise: a rising round trip (> 25 % over the
         // minimum) or loss caps the estimate whatever held the host back. Not an idle round for startup.
-        let pathStressed = (!probeRTT.isNaN && minRTTNanos.isFinite && probeRTT > minRTTNanos * 1.25) || lossPercent > 1
         let budgetLimited = !pathStressed && lastBudgetLimitedNanos > 0 && now &- lastBudgetLimitedNanos < w + UInt64(srttNanos)
         deliverySamples.removeAll { now &- $0.nanos > 10_000_000_000 }
         if !(appLimited || budgetLimited) || kbps > Double(deliveryKbps) { deliverySamples.append((now, kbps)) }
