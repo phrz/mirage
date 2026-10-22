@@ -394,17 +394,27 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         do { return try await startStream(req, output: output) } catch { queue.sync { holdWarm(false) }; throw error }
     }
     private func startStream(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
+        // Connect setup, concurrent where it can be (they ran one after the other: 1.26 s of a 20 Mbps connect on mac-daddy):
+        // the desktop's capture starts while the catalog refreshes; the overlay (its exclusion needs the catalog) starts while
+        // the desktop's finishes. Each step's time is logged.
+        let c0 = Clock.nowNanos()
+        func ms(_ t: UInt64) -> UInt64 { Clock.elapsed(since: c0, now: t) / 1_000_000 }
         let t = try await ScreenCapturer.resolve(req)
-        // The window list and the SCWindow catalog come first, so the display stream can exclude the
-        // layered windows from its very first frame (the picture under them is part of the base picture).
+        let cResolve = Clock.nowNanos()
+        let comp = Self.compositorWanted()
+        let excluded: [SCWindow] = []   // a window stays in the display picture until its own still has landed
+        async let deskStart = startDesktop(req, t, compositor: comp, excluding: excluded)
+        // The window list and the SCWindow catalog, so layers and the overlay's exclusion are right from the first frame.
         await catalog.refreshNow()
+        let cCatalog = Clock.nowNanos()
         let tracker = WindowTracker(displayID: t.display.displayID, streamWidth: t.pixelWidth)
         let now = Clock.nowNanos()
         let sample = tracker.sample(captureSeq: 0, now: now, force: true)
-        let comp = Self.compositorWanted()
-        let excluded: [SCWindow] = []   // a window stays in the display picture until its own still has landed
-        let (cap, deskFrame) = try await startDesktop(req, t, compositor: comp, excluding: excluded)
-        let (ov, overlayFrame) = comp ? try await startOverlay(req, t) : (nil, nil)
+        async let overlayStart = comp ? startOverlay(req, t) : (nil, nil)
+        let (cap, deskFrame) = try await deskStart
+        let cDesk = Clock.nowNanos()
+        let (ov, overlayFrame) = try await overlayStart
+        log("connect setup: resolve \(ms(cResolve)) ms, catalog \(ms(cCatalog)) ms, desktop capture \(ms(cDesk)) ms, overlay capture \(ms(Clock.nowNanos())) ms (from the stream request)")
         return try await withCheckedThrowingContinuation { c in
             queue.async {
                 do {

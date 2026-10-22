@@ -342,12 +342,16 @@ final class ViewerSession: @unchecked Sendable {
         for t in receiveTasks { t.cancel() }
         receiveTasks = []
         let client = QUICClient(host: host, port: port)
+        // Connect timing (M-FIVE: the time before the first picture), logged at each step from here.
+        let connectStart = Date()
+        func since() -> String { String(format: "%.0f ms", Date().timeIntervalSince(connectStart) * 1000) }
         self.client = client
         defer { client.close(); disconnectedAt = Date(); statsLock.lock(); hostStatus = nil; statsLock.unlock() }   // review M5: no leaked groups
         do {
             let store = try Store()
             let identity = try ViewerCredentials.clientIdentity(store: store)
             try await client.connect(timeout: resumable ? 4 : 15)
+            log("connect timing: QUIC connected at \(since())")
             guard let fp = client.tlsFingerprint else { throw MirageError.transport("no TLS fingerprint") }
             let control = try await client.openStream()
             self.control = control
@@ -370,7 +374,9 @@ final class ViewerSession: @unchecked Sendable {
                     return "pairing failed: \(error)"
                 }
             }
+            log("connect timing: control stream open at \(since())")
             let welcome = try await session.authenticate(resumeToken: resumeToken)
+            log("connect timing: authenticated at \(since())")
             let resumed = welcome.resumed == true
             if resumeToken != nil { if resumed { resumes += 1 } else { reconnects += 1 } }
             if let t = welcome.resumeToken { resumeToken = t; saveResume() }
@@ -408,6 +414,7 @@ final class ViewerSession: @unchecked Sendable {
             control.connection.viabilityUpdateHandler = { [weak self] viable in self?.log("path \(viable ? "viable" : "not viable")"); if viable { self?.pathChanged() } }
             control.connection.betterPathUpdateHandler = { [weak self] better in if better { self?.log("a better path is available"); self?.pathChanged() } }
             log("connected: control, tile streams and datagram flow up")
+            log("connect timing: all streams up at \(since())")
             if let v = viewInterest { sender?.send(.viewInterest(v)) }   // before the stream: Unified never streams the desktop
             await MainActor.run { if let p = pendingRequest { pendingRequest = nil; requestStream(width: p.width, height: p.height) } }
             await MainActor.run { model.reconnecting = nil; model.error = nil }
