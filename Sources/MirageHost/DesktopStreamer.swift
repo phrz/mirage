@@ -1203,6 +1203,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // after every Show Desktop round on mac-daddy (its backdrop level was taken mid-slide).
             let returned = l.offDisplayTiles.subtracting(offDisplay)
             if compositor, !returned.isEmpty { l.tracker.releaseHeld(returned, now: now) }
+            // Their changes while off the display were deferred (captured): due now, from the frame of this moment.
+            if !returned.isEmpty { _ = l.tracker.expedite(in: l.bounds, now: now, only: returned) }
             l.offDisplayTiles = offDisplay
             let fps = l.frontmost ? 30 : (fraction <= 0.001 ? 2 : 10)
             if let cap = l.capturer {
@@ -1841,10 +1843,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         // Occluded on the host (covered by a window in front, or off the display): tracked, not sent. They
         // become due when uncovered (reconcileLayers expedites them) and are then sent from the frame of that moment.
-        if !layer.occludedTiles.isEmpty {
-            let hidden = dirty.filter { layer.occludedTiles.contains($0) }
+        // Off the display counts too: Show Desktop pushed the bench to x = -1576, its capture there was opaque black outside the
+        // display, and that black went out as a keyframe and 54 blocks: the window came back black for seconds (mac-daddy,
+        // compositor model, 2026-10-22 08:43Z; phrz's "desktop artifacts").
+        let notShown = layer.isDisplay ? layer.occludedTiles : layer.occludedTiles.union(layer.offDisplayTiles)
+        if !notShown.isEmpty {
+            let hidden = dirty.filter { notShown.contains($0) }
             if !hidden.isEmpty {
-                dirty.removeAll { layer.occludedTiles.contains($0) }
+                dirty.removeAll { notShown.contains($0) }
                 tracker.defer(hidden, now: now, delayNanos: 3_600_000_000_000, direct: false)   // uncovered later: a level, not a change
                 statOccluded += hidden.count
             }

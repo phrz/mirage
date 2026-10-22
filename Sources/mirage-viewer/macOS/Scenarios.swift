@@ -21,7 +21,7 @@ final class ScenarioRunner {
     private var lastBench: ControlMessage.WindowInfo?
     /// The bench window, or the last one seen (a window-list update can momentarily drop it).
     private func bench() -> ControlMessage.WindowInfo? {
-        if let w = session.windowsSnapshot().first(where: { $0.title.contains("Mirage Test Bench") && ($0.app ?? "Mirage Test Bench") == "Mirage Test Bench" && !$0.title.contains("overlay") && !$0.title.contains("icons") && !["docklike", "tooltip", "vibrancy"].contains(where: $0.title.contains) }) { lastBench = w }
+        if let w = session.windowsSnapshot().first(where: { $0.title.contains("Mirage Test Bench") && ($0.app ?? "Mirage Test Bench") == "Mirage Test Bench" && !$0.title.contains("overlay") && !$0.title.contains("icons") && !["docklike", "tooltip", "vibrancy", "floating"].contains(where: $0.title.contains) }) { lastBench = w }
         return lastBench
     }
     /// The bench's visible part (it may have drifted partly off-screen); points are picked inside it,
