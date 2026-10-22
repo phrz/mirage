@@ -519,6 +519,18 @@ final class ViewerSession: @unchecked Sendable {
             log("\(Clock.nowNanos() / 1_000_000) TRUTH TIMEOUT L\(v.id): \(n) pending tiles shown after \(held) ms without a frameEnd")
         }
     }
+    /// Staged pixels nobody will see: a level that got no staged write for 5 s and no commit (its commit was lost or overtook
+    /// its blocks: the fade window's right column stayed staged for good). Logged as an INVARIANT, then presented, so an
+    /// ordering race shows in the signatures instead of as silently stale pixels. (The host presents a level that nothing
+    /// was added to for 3 s itself.)
+    private func stagedInvariant(now: UInt64) {
+        for v in layerViews.values where v.compositor.stagedTiles > 0 && v.compositor.lastStagedWriteNanos > 0
+            && Clock.elapsed(since: v.compositor.lastStagedWriteNanos, now: now) > 5_000_000_000 {
+            let n = v.compositor.stagedTiles
+            v.compositor.commitStaged(durationNanos: tunables.levelFadeNanos)
+            log("\(Clock.nowNanos() / 1_000_000) INVARIANT staged pixels: L\(v.id) \(n) staged tiles had no commit 5 s after the last staged write; presented")
+        }
+    }
     /// The session's first picture has been presented (stage 1's commit set).
     private var firstPictureShown = false
     /// Presents a layer's staged level (a commit, alone or in stage 1's set).
@@ -1080,6 +1092,7 @@ final class ViewerSession: @unchecked Sendable {
         let now = Clock.nowNanos()
         for v in layerViews.values { v.compositor.settle(now: now) }
         truthTimeouts(now: now)
+        stagedInvariant(now: now)
         statsLock.lock(); let rtt = sRTT; statsLock.unlock()
         if rtt > 0 {
             assembler.timeoutNanos = UInt64(rtt * 1e6 * 2.5) + 300_000_000   // NACK round trip plus slack

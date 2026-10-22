@@ -295,7 +295,10 @@ public final class Compositor {
         if let pending { out.append(pending) }
         return out
     }
+    /// When the staged level last received a write (0: nothing staged); the viewer's staged-pixels invariant.
+    public private(set) var lastStagedWriteNanos: UInt64 = 0
     private func markStaged(_ r: PixelRect) {
+        lastStagedWriteNanos = Clock.nowNanos()
         let cols = tileCols, rows = tileRows
         guard stagedMask.count == cols * rows, !r.isEmpty else { return }
         let c0 = max(0, r.x / 64), c1 = min(cols - 1, (r.maxX - 1) / 64), r0 = max(0, r.y / 64), r1 = min(rows - 1, (r.maxY - 1) / 64)
@@ -360,6 +363,7 @@ public final class Compositor {
         let start = Clock.nowNanos()
         lock.lock(); for r in runs { fades.append(Fade(rect: r, startNanos: start, durationNanos: durationNanos, easeOut: commitEaseOut)) }; lock.unlock()
         stagedMask = Array(repeating: false, count: tileCols * tileRows)
+        lastStagedWriteNanos = 0
         commitsPresented += 1
         bump()
         return n
