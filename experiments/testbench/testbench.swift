@@ -98,6 +98,7 @@ final class App: NSObject, NSApplicationDelegate {
     /// must find none, and the viewer must draw none.
     var noShadowWindow: NSWindow?
     var transMover: NSWindow?
+    var fadeWindow: NSWindow?
     func startNoShadow(near f: NSRect) {
         let w = NSWindow(contentRect: NSRect(x: f.minX + 40, y: f.minY + 40, width: 260, height: 160), styleMask: [.borderless], backing: .buffered, defer: false)
         w.title = "Mirage Test Bench noshadow"; w.hasShadow = false; w.isOpaque = true
@@ -116,6 +117,28 @@ final class App: NSObject, NSApplicationDelegate {
         w.orderFrontRegardless()
         Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { _ in mv.step() }
         transMover = w
+    }
+
+    /// `--fade`: a plain opaque 600x400 window whose colour fades from one shade to another over 3 s, 5 s after launch, in
+    /// ~180 steps of about a level each (each under the host's change tolerance: drift that must still reach the viewer),
+    /// then holds. `--faded`: the same window at the end colour (a fresh connect's reference).
+    func startFade(near f: NSRect, done: Bool) {
+        let w = NSWindow(contentRect: NSRect(x: f.minX + 80, y: f.minY + 80, width: 600, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
+        w.title = "Mirage Test Bench fade"; w.isOpaque = true; w.hasShadow = false
+        let a = (0.20, 0.45, 0.70), b = (0.55, 0.30, 0.25)
+        func colour(_ t: Double) -> NSColor { NSColor(srgbRed: a.0 + (b.0 - a.0) * t, green: a.1 + (b.1 - a.1) * t, blue: a.2 + (b.2 - a.2) * t, alpha: 1) }
+        w.backgroundColor = colour(done ? 1 : 0)
+        w.orderFrontRegardless()
+        fadeWindow = w
+        guard !done else { return }
+        var step = 0
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+            Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { timer in
+                step += 1
+                w.backgroundColor = colour(min(1, Double(step) / 180))
+                if step >= 180 { timer.invalidate() }
+            }
+        }
     }
 
     func startDockLike(screen: NSScreen, near b: NSRect) {
@@ -328,6 +351,7 @@ final class App: NSObject, NSApplicationDelegate {
             if CommandLine.arguments.contains("--floating") { startFloating(near: w.frame) }
             if CommandLine.arguments.contains("--noshadow") { startNoShadow(near: w.frame) }
             if CommandLine.arguments.contains("--transmover") { startTransMover(near: w.frame) }
+            if CommandLine.arguments.contains("--fade") || CommandLine.arguments.contains("--faded") { startFade(near: w.frame, done: CommandLine.arguments.contains("--faded")) }
             if CommandLine.arguments.contains("--terminal") { startTerminal(tv) }
             updateCaption()
             window = w
