@@ -15,13 +15,9 @@ final class SceneTests: XCTestCase {
         return ctx.device.makeTexture(descriptor: d)!
     }
     /// Reads one pixel after the GPU has finished. The wait is bounded (10 s): an unbounded waitUntilCompleted stalled one
-    /// test for 250 s on a busy machine; a GPU that does not finish in time skips the test instead.
+    /// test for 250 s on a busy machine; a GPU that does not finish in time fails the test.
     private func pixel(_ ctx: MetalContext, _ t: MTLTexture, _ x: Int, _ y: Int) throws -> (b: UInt8, g: UInt8, r: UInt8) {
-        let cb = ctx.commandQueue.makeCommandBuffer()!
-        let done = DispatchSemaphore(value: 0)
-        cb.addCompletedHandler { _ in done.signal() }
-        cb.commit()
-        if done.wait(timeout: .now() + 10) == .timedOut { throw XCTSkip("the GPU did not finish within 10 s (a busy machine)") }
+        try ctx.commandQueue.makeCommandBuffer()!.commitAndWaitBounded()
         var p = [UInt8](repeating: 0, count: 4)
         t.getBytes(&p, bytesPerRow: 4, from: MTLRegionMake2D(x, y, 1, 1), mipmapLevel: 0)
         return (p[0], p[1], p[2])
