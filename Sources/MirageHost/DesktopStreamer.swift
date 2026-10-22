@@ -2572,13 +2572,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         stage1Cuts = [:]
         stage1Encoding = []
         stage1Active = false
-        sendDeferredProbe("stage 1 presented")
         // One write for all the commits: sent one by one, a loss on one (a retransmit, a round trip) held every later commit
         // on the in-order stream, and the windows after it came in 460 ms after the desktop on Japan bus (an extra step).
         let ids = stage1Staged.sorted()
         for id in ids { layers[id]?.exposed = true }
         let together = request?.stageTransaction == true
-        tileQueue.async { [weak self] in self?.send(commits: ids, together: together, captureNanos: now) }
+        // The probe train only once the commits are on the stream: sent first, its 48 KB went ahead of them on the link (0.6 s
+        // of Japan bus's 650 kbps between the last still and the commit that shows it).
+        tileQueue.async { [weak self] in
+            self?.send(commits: ids, together: together, captureNanos: now)
+            self?.queue.async { self?.sendDeferredProbe("stage 1 presented") }
+        }
         log("stage 1: \(stage1Staged.count) stills presented together\(waiting.isEmpty ? "" : " (\(waiting.count) layers not ready by 0.7 s: they follow on their own)")")
         stage1Staged = []
         publishWindows(now: now, full: false)

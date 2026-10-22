@@ -508,7 +508,9 @@ final class ViewerSession: @unchecked Sendable {
     private func commit(layer: UInt32, now: UInt64) {
         guard let v = layerView(layer) else { return }
         let staged = v.compositor.stagedTiles
-        v.compositor.commitStaged(durationNanos: tunables.levelFadeNanos)
+        // A layer's first level appears at once: there is nothing to crossfade from (on Japan bus the fade was 0.22 s of the
+        // first picture's 2.3 s).
+        v.compositor.commitStaged(durationNanos: v.compositor.commitsPresented == 0 ? 1_000_000 : tunables.levelFadeNanos)
         if layer != 0 { measureCorner(v) }
         if staged > 0 { v.step("commit", now: now) }
         let c = v.compositor
