@@ -504,13 +504,17 @@ final class ViewerSession: @unchecked Sendable {
         startInputTimer()
     }
 
+    /// The session's first picture has been presented (stage 1's commit set).
+    private var firstPictureShown = false
     /// Presents a layer's staged level (a commit, alone or in stage 1's set).
-    private func commit(layer: UInt32, now: UInt64) {
+    private func commit(layer: UInt32, now: UInt64, sessionFirst: Bool = false) {
         guard let v = layerView(layer) else { return }
         let staged = v.compositor.stagedTiles
-        // A layer's first level appears at once: there is nothing to crossfade from (on Japan bus the fade was 0.22 s of the
-        // first picture's 2.3 s).
-        v.compositor.commitStaged(durationNanos: v.compositor.commitsPresented == 0 ? 1_000_000 : tunables.levelFadeNanos)
+        // The session's first picture fades in briefly over the connecting screen (140 ms, easing out: phrz, not a hard
+        // cut); a layer's first level inside a screen already shown appears at once (nothing to crossfade from: on Japan
+        // bus the 220 ms fade was part of every first picture); later levels crossfade as tuned.
+        if sessionFirst { v.compositor.commitStaged(durationNanos: 140_000_000, easeOut: true) }
+        else { v.compositor.commitStaged(durationNanos: v.compositor.commitsPresented == 0 ? 1_000_000 : tunables.levelFadeNanos) }
         if layer != 0 { measureCorner(v) }
         if staged > 0 { v.step("commit", now: now) }
         let c = v.compositor
@@ -877,7 +881,9 @@ final class ViewerSession: @unchecked Sendable {
             sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: c.header.captureNanos, receivedNanos: now, bytes: bytes)))
         case .commitSet(let ids):
             // Stage 1 as one transaction: every layer's level presented in the same pass (one message: all or nothing).
-            for id in ids { commit(layer: id, now: now) }
+            let first = !firstPictureShown
+            firstPictureShown = true
+            for id in ids { commit(layer: id, now: now, sessionFirst: first) }
             if Self.debugTiles || Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present: stage 1 committed together (layers \(ids.map(String.init).joined(separator: " ")))") }
         case .commit(let layer):
             commit(layer: layer, now: now)

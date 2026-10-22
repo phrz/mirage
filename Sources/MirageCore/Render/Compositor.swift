@@ -78,7 +78,7 @@ public final class Compositor {
     private var scaler: AnyObject?   // MetalFX is not in the iOS Simulator SDK: bilinear there
     #endif
     private var incoming: MTLTexture?      // pixels still crossfading in (refinement, progressive steps)
-    public struct Fade: Equatable { public var rect: PixelRect; public var startNanos: UInt64; public var durationNanos: UInt64 }
+    public struct Fade: Equatable { public var rect: PixelRect; public var startNanos: UInt64; public var durationNanos: UInt64; public var easeOut = false }
     private var fades: [Fade] = []
     /// Crossfade length for a whole-layer level sent as one message (DESIGN §3.3: 200–250 ms).
     public var crossfadeNanos: UInt64 = 220_000_000
@@ -281,7 +281,9 @@ public final class Compositor {
     /// step for the layer). Waits for running fades to end first, so a level never jumps mid-fade. Returns the
     /// number of tiles committed now (0 if deferred or nothing staged).
     @discardableResult
-    public func commitStaged(durationNanos: UInt64 = 220_000_000) -> Int {
+    /// `easeOut`: the fade decelerates (the session's first picture coming in over the connecting screen).
+    public func commitStaged(durationNanos: UInt64 = 220_000_000, easeOut: Bool = false) -> Int {
+        commitEaseOut = easeOut
         guard stagedMask.contains(true) else { commitPending = nil; return 0 }
         if hasActiveFades { commitPending = durationNanos; return 0 }
         guard let cb = commandQueue.makeCommandBuffer() else { return 0 }
@@ -292,6 +294,7 @@ public final class Compositor {
     /// Commits pending from a deferred `commitStaged` (count of committed levels, for diagnostics).
     public private(set) var commitsPresented = 0
     private var commitPending: UInt64? = nil
+    private var commitEaseOut = false
     private func performCommit(durationNanos: UInt64, _ cb: MTLCommandBuffer) -> Int {
         commitPending = nil
         guard let staging, let inc = ensureIncoming(), let blit = cb.makeBlitCommandEncoder() else { return 0 }
@@ -300,7 +303,7 @@ public final class Compositor {
         for r in runs { copy(staging, to: inc, rect: r, blit: blit) }
         blit.endEncoding()
         let start = Clock.nowNanos()
-        lock.lock(); for r in runs { fades.append(Fade(rect: r, startNanos: start, durationNanos: durationNanos)) }; lock.unlock()
+        lock.lock(); for r in runs { fades.append(Fade(rect: r, startNanos: start, durationNanos: durationNanos, easeOut: commitEaseOut)) }; lock.unlock()
         stagedMask = Array(repeating: false, count: tileCols * tileRows)
         commitsPresented += 1
         bump()
@@ -581,7 +584,10 @@ public final class Compositor {
     /// The fades to draw now with their progress (a finished one at 1 until `settle` commits it). Render thread.
     func activeFades(now: UInt64) -> [(Fade, Float)] {
         lock.lock(); let list = fades; lock.unlock()
-        return list.map { f in (f, min(1, max(0, Float(Clock.elapsed(since: f.startNanos, now: now)) / Float(max(1, f.durationNanos))))) }
+        return list.map { f in
+            let t = min(1, max(0, Float(Clock.elapsed(since: f.startNanos, now: now)) / Float(max(1, f.durationNanos))))
+            return (f, f.easeOut ? 1 - (1 - t) * (1 - t) * (1 - t) : t)   // cubic ease-out
+        }
     }
     var incomingTexture: MTLTexture? { incoming }
     /// Commits finished crossfades (incoming → canvas), then a deferred level commit once no fade runs. Called every

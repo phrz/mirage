@@ -69,9 +69,11 @@ struct R { var coherent: Int?; var crisp: Int?; var changes = 0; var inChange = 
 // video frames are content; refinement tiles and level commits are quality steps. A change is content when its layer
 // presented content between the frame before it and the frame of the change.
 var contentAt: [UInt32: [Int]] = [:], firstCommit: [UInt32: Int] = [:]
+var stage1Clock: Int? = nil   // the viewer's clock when stage 1's commit set was presented (data latency, before the fade)
 let logURL = dir.deletingLastPathComponent().appendingPathComponent(dir.lastPathComponent.replacingOccurrences(of: "-frames", with: "")).appendingPathComponent("viewer.log")
 if let text = try? String(contentsOf: logURL, encoding: .utf8) {
     for line in text.split(separator: "\n") {
+        if stage1Clock == nil, line.contains("present: stage 1 committed together"), let c = Int(line.prefix(while: { $0.isNumber })) { stage1Clock = c }
         let parts = line.split(separator: " ", maxSplits: 3)
         guard parts.count >= 4, parts[1] == "present", parts[2].hasPrefix("L"), let clock = Int(parts[0]), let id = UInt32(parts[2].dropFirst().prefix(while: { $0.isNumber })) else { continue }
         let rest = parts[3]
@@ -122,3 +124,5 @@ let big = regions.indices.filter { k in regions[k].mask.filter { $0 }.count * 10
 let coh = big.compactMap { res[$0].coherent }.max(), crisp = big.allSatisfy({ res[$0].crisp != nil }) ? big.compactMap { res[$0].crisp }.max() : nil
 func rel(_ ms: Int?) -> String { guard let ms, let f = firstPictureMs else { return "?" }; return String(format: "%.1f s", Double(ms - f) / 1000) }
 print("ALL: coherent \(t(coh)), crisp \(t(crisp)) (from the first picture at \(t(firstPictureMs)): coherent \(rel(coh)), crisp \(rel(crisp))) over \(lines.count) frames; \(pass ? "PASS (flicker)" : "FAIL (flicker)")")
+// Coherent at commit time (the fade is presentation, not data latency): stage 1's commit on the recorder's clock.
+if let c = stage1Clock, let f = lines.first, let fc = f.clock { print(String(format: "stage 1 committed at %.2f s from connect (coherent at commit time)", Double(c - (fc - f.ms)) / 1000)) }
