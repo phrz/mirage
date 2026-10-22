@@ -994,9 +994,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     public func handle(probeEcho sentNanos: UInt64, receivedNanos: UInt64) {
         queue.async {
             if self.trainSent.contains(sentNanos) {
-                // The train's first echo is a round-trip sample too (the first packet waits behind none of the train): the
-                // connect has an RTT ~0.5 s earlier than the first delay probe, for startup's delivery window.
-                if self.trainReceived.isEmpty { self.rc?.probeSample(sentNanos: sentNanos, receivedNanos: receivedNanos, now: Clock.nowNanos()) }
+                // The train's first echo seeds srtt (only srtt: RateController.seedRTT) ~0.5 s before the first delay
+                // probe, for startup's delivery window.
+                if self.trainReceived.isEmpty { self.rc?.seedRTT(Double(Clock.nowNanos() &- sentNanos)) }
                 self.trainEcho(receivedNanos: receivedNanos); return
             }
             self.rc?.probeSample(sentNanos: sentNanos, receivedNanos: receivedNanos, now: Clock.nowNanos()); self.applyBudget(now: Clock.nowNanos())

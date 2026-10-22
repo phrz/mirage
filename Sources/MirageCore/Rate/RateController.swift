@@ -203,6 +203,14 @@ public struct RateController {
     /// A delay probe's echo: the host sent a 32-byte datagram at `sentNanos` (host clock), the viewer
     /// stamped it `receivedNanos` (its clock) and sent it straight back, arriving `now`. The host sends
     /// one every second unconditionally (0.3 kbps); it is the srtt / min-RTT source when video is idle.
+    /// A first round-trip sample for srtt only, when none has come yet (the connect probe train's first echo): never the
+    /// minimum RTT or the stress signal. As a probe sample its RTT, from a packet that waited behind nothing, became the
+    /// minimum; every later probe, queued behind the connect's data, read > 1.25 x it, which ended startup at its first
+    /// delivery sample and marked the path stressed (20 Mbps crisp 8.6-9.1 s on 6242954).
+    public mutating func seedRTT(_ rtt: Double) {
+        guard !srttSeeded, rtt > 0 else { return }
+        srttNanos = rtt; srttSeeded = true
+    }
     public mutating func probeSample(sentNanos: UInt64, receivedNanos: UInt64, now: UInt64) {
         // RTT and min-RTT only (mac-daddy, 2026-10-17 night: the probe datagram itself queues in the
         // host's QUIC send path behind refinement blocks, so its one-way delay read 91–98 ms of our own
