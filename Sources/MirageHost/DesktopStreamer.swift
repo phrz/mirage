@@ -3850,7 +3850,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // ahead as a greyscale mask, only where it changed.
         let maskPath = !l.isDisplay && l.id != ControlMessage.WindowInfo.overlayID && hostTunables[.alphaMask] >= 0.5 && request?.alphaMask == true
         if maskPath {
-            if l.alphaSize != (l.width, l.height) { l.alphaSent = [:]; l.alphaPlanes = [:]; l.alphaSize = (l.width, l.height) }
+            if l.alphaSize != (l.width, l.height) { l.alphaSent = [:]; l.alphaPlanes = [:]; l.alphaSeen = [:]; l.alphaSize = (l.width, l.height) }
             var changed: [TileMessage.AlphaTile] = []
             for i in tiles {
                 let r = l.tracker.rect(of: i)
@@ -3859,7 +3859,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if l.alphaSent[i] == h || (l.alphaSent[i] == nil && kind == .opaque) { continue }
                 // A plane within 3 levels of the one sent everywhere is the same mask (capture jitter re-sent every tile of a
                 // translucent mover each frame: 786 KB in 5 s).
-                if kind == .plane, let last = l.alphaPlanes[i], last.count == plane.count, !zip(last, plane).contains(where: { abs(Int($0) - Int($1)) > 3 }) { continue }
+                // Compared with the last plane SENT, so a slow fade's drift adds up and goes once past 3 levels; and a fade that
+                // came to rest within 3 levels (exactly unchanged since the previous frame) goes once, exact.
+                if kind == .plane, let last = l.alphaPlanes[i], last.count == plane.count, !zip(last, plane).contains(where: { abs(Int($0) - Int($1)) > 3 }) {
+                    let settled = l.alphaSeen[i] == plane
+                    l.alphaSeen[i] = plane
+                    if !settled { continue }
+                }
+                l.alphaSeen[i] = plane
                 let data = kind == .plane ? (AlphaPlane.compress(plane) ?? Data()) : Data()
                 if kind == .plane, data.isEmpty { continue }
                 l.alphaSent[i] = h

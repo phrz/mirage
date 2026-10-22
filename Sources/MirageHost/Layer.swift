@@ -37,6 +37,8 @@ final class Layer {
     var alphaSent: [Int: UInt64] = [:]
     /// The last plane sent per tile (`.plane` tiles), compared with a tolerance: captured alpha jitters by a level or so.
     var alphaPlanes: [Int: [UInt8]] = [:]
+    /// The plane seen at the previous frame per tile (a settled fade: unchanged since then but not what was sent).
+    var alphaSeen: [Int: [UInt8]] = [:]
     var alphaSize = (0, 0)
     /// The first frame came from a snapshot: compared with the own capture's first frame (logged), then dropped.
     var snapshotFrame: CVPixelBuffer?
