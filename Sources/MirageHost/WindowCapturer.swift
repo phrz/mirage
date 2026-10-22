@@ -122,6 +122,9 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// One frame now, with exactly the stream's filter and configuration (the same pixels its frames will have), from a
     /// screenshot: ScreenCaptureKit starts window streams one after another (~0.75 s each on mac-daddy, measured: eight
     /// started at once, done one by one), so the stream's first frame can be seconds away (M-FIVE).
+    /// Rule for probes of this kind (a feature flag the viewer acts on): a probe that cannot see the thing returns unknown,
+    /// never false. (f35cf62 read a window's shadow from a rect that never shows it, answered "no" for every window, and every
+    /// window lost its shadow on the viewer.)
     /// Whether the window casts a shadow: the window alone on a clear background (a display filter including only it, shadows
     /// kept), over its frame plus a 40-pt margin: any alpha in the margin is its shadow. One small screenshot. Nil when it
     /// cannot tell (no margin on the display, no shot). (The window-alone filter's content rect is the frame itself, shadow or

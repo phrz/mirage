@@ -60,6 +60,9 @@ public struct Tunables: Codable, Equatable, Sendable {
         // Host only: stage 1's stills together cost this many seconds of the link's rate (M-FIVE; was 0.5: on Japan bus the
         // stills then arrived 2.3 s after the first picture, behind the probe train and 59 KB of cuts).
         case stage1Seconds
+        // Host only: 1 = the shadow probe's result is published (WindowInfo.shadow); 0 = logged only, every window's shadow
+        // unknown (drawn as before), until the probe is verified on real windows.
+        case shadowProbe
 
         /// Compiled-in default and the bounds a host value is clamped to.
         public var spec: (default: Double, min: Double, max: Double) {
@@ -97,6 +100,7 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .warmSnapshotSeconds: return (30, 30, 3600)
             case .windowShotIndependent: return (1, 0, 1)
             case .stage1Seconds: return (0.2, 0.05, 2)
+            case .shadowProbe: return (0, 0, 1)
             }
         }
     }

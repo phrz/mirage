@@ -1337,7 +1337,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                         // After the windows' stream starts (ScreenCaptureKit serialises starts and shots).
                         try? await Task.sleep(for: .seconds(2))
                         let (has, detail) = await cap.shadowProbe()
-                        self?.queue.async { guard let self else { return }; l.hasShadow = has; self.log("layer \(l.id): shadow \(has.map { $0 ? "yes" : "no" } ?? "unknown") (\(detail))"); self.publishWindows(now: Clock.nowNanos(), full: true) }
+                        self?.queue.async {
+                            guard let self else { return }
+                            // Published only when the probe is trusted (tunable shadowProbe, off until verified); logged always.
+                            let publish = self.hostTunables[.shadowProbe] >= 0.5
+                            if publish { l.hasShadow = has }
+                            self.log("layer \(l.id): shadow \(has.map { $0 ? "yes" : "no" } ?? "unknown") (\(detail))\(publish ? "" : "; not published (shadowProbe 0)")")
+                            if publish { self.publishWindows(now: Clock.nowNanos(), full: true) }
+                        }
                     }
                 }
                 guard let pb else { return }
