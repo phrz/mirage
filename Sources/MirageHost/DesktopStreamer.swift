@@ -1088,7 +1088,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         await withCheckedContinuation { c in queue.async {
             let before = self.layers.values.reduce(0) { $0 + ($1.lastFrame.map { CVPixelBufferGetDataSize($0) } ?? 0) }
             for l in self.layers.values {
-                l.lastFrame = nil; l.canvas = nil; l.scaled = nil; l.transfer = nil; l.encoder = nil
+                l.lastFrame = nil; l.diffRef = nil; l.canvas = nil; l.scaled = nil; l.transfer = nil; l.encoder = nil
                 l.forceFullDiff = true
             }
             self.log("suspended session: pixel caches shed (\(before >> 20) MB of last frames); a resume sends every layer's picture again")
@@ -1983,6 +1983,31 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// video frame plus a full lossless refinement pass (measured: ~400 KB per flicker).
     private static let diffTolerance: Int32 = 4
 
+    /// The diff reference takes the new pixels of the tiles found changed (all of them when it does not exist yet or
+    /// changed size); the others keep what they had, so their drift keeps counting against it.
+    static func advanceDiffRef(_ layer: Layer, from pb: CVPixelBuffer, tiles: [Int], tracker: TileTracker) {
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        if layer.diffRef == nil || CVPixelBufferGetWidth(layer.diffRef!) != w || CVPixelBufferGetHeight(layer.diffRef!) != h {
+            var out: CVPixelBuffer?
+            CVPixelBufferCreate(nil, w, h, kCVPixelFormatType_32BGRA, [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &out)
+            guard let out else { layer.diffRef = nil; return }
+            CVPixelBufferLockBaseAddress(pb, .readOnly); CVPixelBufferLockBaseAddress(out, [])
+            let s = CVPixelBufferGetBaseAddress(pb)!, d = CVPixelBufferGetBaseAddress(out)!, ss = CVPixelBufferGetBytesPerRow(pb), ds = CVPixelBufferGetBytesPerRow(out)
+            for y in 0..<h { memcpy(d.advanced(by: y * ds), s.advanced(by: y * ss), w * 4) }
+            CVPixelBufferUnlockBaseAddress(out, []); CVPixelBufferUnlockBaseAddress(pb, .readOnly)
+            layer.diffRef = out
+            return
+        }
+        guard !tiles.isEmpty, let ref = layer.diffRef else { return }
+        CVPixelBufferLockBaseAddress(pb, .readOnly); CVPixelBufferLockBaseAddress(ref, [])
+        let s = CVPixelBufferGetBaseAddress(pb)!, d = CVPixelBufferGetBaseAddress(ref)!, ss = CVPixelBufferGetBytesPerRow(pb), ds = CVPixelBufferGetBytesPerRow(ref)
+        for i in tiles {
+            let r = tracker.rect(of: i).intersection(PixelRect(x: 0, y: 0, width: w, height: h))
+            guard !r.isEmpty else { continue }
+            for y in r.y..<r.maxY { memcpy(d.advanced(by: y * ds + r.x * 4), s.advanced(by: y * ss + r.x * 4), r.width * 4) }
+        }
+        CVPixelBufferUnlockBaseAddress(ref, []); CVPixelBufferUnlockBaseAddress(pb, .readOnly)
+    }
     private func tileChangedBox(_ a: ShiftDetector.Frame, _ b: ShiftDetector.Frame, _ r: PixelRect, alphaLayer: Bool = false) -> PixelRect? {
         TileDiff.changedBox(a, b, r, tolerance: Int32(Self.diffTolerance), alphaLayer: alphaLayer)
     }
@@ -2065,6 +2090,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let prev { CVPixelBufferLockBaseAddress(prev, .readOnly); old = frameView(prev) }
         defer { if let prev { CVPixelBufferUnlockBaseAddress(prev, .readOnly) } }
 
+        // The diff's reference (Layer.diffRef) where it has this frame's size; the shift detection below keeps the last frame.
+        let ref = layer.diffRef.flatMap { CVPixelBufferGetWidth($0) == CVPixelBufferGetWidth(pb) && CVPixelBufferGetHeight($0) == CVPixelBufferGetHeight(pb) ? $0 : nil }
+        var refOld: ShiftDetector.Frame? = nil
+        if let ref { CVPixelBufferLockBaseAddress(ref, .readOnly); refOld = frameView(ref) }
+        defer { if let ref { CVPixelBufferUnlockBaseAddress(ref, .readOnly) } }
         var tightBoxes: [Int: PixelRect] = [:]
         if let old {
             // CPU diff inside SCK's dirty rects (they over-report ~1.7x, experiments/probes) or over the whole
@@ -2074,10 +2104,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let wantBoxes = effort.tightBoxes
             let alphaLayer = !layer.isDisplay
             dirty.removeAll { i in
-                if let box = tileChangedBox(old, new, tracker.rect(of: i), alphaLayer: alphaLayer) { if wantBoxes { tightBoxes[i] = box }; return false }
+                if let box = tileChangedBox(refOld ?? old, new, tracker.rect(of: i), alphaLayer: alphaLayer) { if wantBoxes { tightBoxes[i] = box }; return false }
                 return true
             }
             statDiffPruned += before - dirty.count
+            Self.advanceDiffRef(layer, from: pb, tiles: dirty, tracker: tracker)
             if layer.isDisplay, !layer.forceFullDiff {
                 let missed = dirty.filter { !reported.contains($0) }.count
                 if missed > 0 { statDirtyMissed += missed }

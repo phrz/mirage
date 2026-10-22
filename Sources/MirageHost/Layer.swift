@@ -34,6 +34,10 @@ final class Layer {
     var stillSent = false
     var cutStill = false
     /// Alpha mask sent per tile (its hash; opaque = 1, clear = 0) for video with a mask, at `alphaSize`.
+    /// What the change diff compares a new frame with: the last frame, except that a tile whose change stayed under the
+    /// tolerance keeps its older pixels here, so slow change (a fade, a gradient drifting) adds up until it is sent
+    /// instead of being lost frame by frame (a copy; nil until the second frame, or after a size change or a cache shed).
+    var diffRef: CVPixelBuffer?
     var alphaSent: [Int: UInt64] = [:]
     /// The last plane sent per tile (`.plane` tiles), compared with a tolerance: captured alpha jitters by a level or so.
     var alphaPlanes: [Int: [UInt8]] = [:]

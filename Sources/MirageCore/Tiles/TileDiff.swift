@@ -23,10 +23,12 @@ public enum TileDiff {
                 if alphaLayer {
                     // A window's rounded corners: the anti-aliased edge pixels re-render a little differently from
                     // frame to frame (measured: four 23×23 corner boxes "changing" on a still window, ±10 levels);
-                    // semi-transparent pixels get a wide tolerance, fully transparent ones never count.
+                    // semi-transparent pixels get a wider tolerance (24, above the corners' ±10 either way: 48 dropped almost every change in a translucent
+                    // window's smooth animation; drift no longer hides under it, the host diffs against Layer.diffRef),
+                    // fully transparent ones never count.
                     let aa = Int32(ua[o + 3]), ab = Int32(ub[o + 3])
                     if aa == 0 && ab == 0 { changed = false }
-                    else if aa < 255 || ab < 255 { changed = abs(aa - ab) > 48 || abs(Int32(ua[o]) - Int32(ub[o])) > 48 || abs(Int32(ua[o + 1]) - Int32(ub[o + 1])) > 48 || abs(Int32(ua[o + 2]) - Int32(ub[o + 2])) > 48 }
+                    else if aa < 255 || ab < 255 { changed = abs(aa - ab) > 24 || abs(Int32(ua[o]) - Int32(ub[o])) > 24 || abs(Int32(ua[o + 1]) - Int32(ub[o + 1])) > 24 || abs(Int32(ua[o + 2]) - Int32(ub[o + 2])) > 24 }
                     else if abs(aa - ab) > tol { changed = true }
                 }
                 if changed {

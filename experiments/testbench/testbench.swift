@@ -417,8 +417,9 @@ final class IconsView: NSView {
 /// and exposed strips as diagonal stripes gave).
 final class StripesView: NSView {
     var t = 0
-    func step() { t += 1; needsDisplay = true }
-    override func draw(_ dirty: NSRect) {
+    // The plasma goes straight into the layer's contents each tick (needsDisplay on this layer-backed view redrew once only).
+    func step() { t += 1; layer?.contents = plasma() }
+    func plasma() -> CGImage? {
         let w = 300, h = 200
         var px = [UInt8](repeating: 255, count: w * h * 4)
         let tt = Double(t) * 0.08
@@ -427,8 +428,7 @@ final class StripesView: NSView {
             let o = (y * w + x) * 4
             px[o] = UInt8(127 + 127 * sin(v)); px[o + 1] = UInt8(127 + 127 * sin(v + 2)); px[o + 2] = UInt8(127 + 127 * sin(v + 4))
         } }
-        let img = px.withUnsafeMutableBytes { CGContext(data: $0.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)?.makeImage() }
-        if let img { NSGraphicsContext.current?.cgContext.draw(img, in: bounds) }
+        return px.withUnsafeMutableBytes { CGContext(data: $0.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)?.makeImage() }
     }
     func drawStripes() {
         let n = 24
