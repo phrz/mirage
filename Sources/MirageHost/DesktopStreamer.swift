@@ -1342,7 +1342,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Warm host: the idle snapshot, while the window layout is the one it was taken in (no screenshot to wait for).
         if let (snap, age) = WarmPool.shared.freshSnapshot(displayID: t.display.displayID) {
             log("placeholders and stage 1 from the warm snapshot (\(age / 1000) s old)")
-            placeholders(from: snap.px, width: snap.width, height: snap.height, streamWidth: t.pixelWidth)
+            // Next turn of the queue: at stream start this runs inside configure(), before the window list and the layers
+            // exist (placeholders() then sent nothing, and only 2 of 13 stills made the stage-1 barrier).
+            queue.async { [weak self] in self?.placeholders(from: snap.px, width: snap.width, height: snap.height, streamWidth: t.pixelWidth) }
             return
         }
         let shotW = compositor ? max(800, t.pixelWidth / 2) : 800, shotH = max(1, shotW * t.pixelHeight / max(1, t.pixelWidth))
