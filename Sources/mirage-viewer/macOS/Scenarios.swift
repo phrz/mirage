@@ -258,6 +258,18 @@ final class ScenarioRunner {
             return
         }
         if name == "realapps" { await realApps(); return }
+        // closewindow: closes one window of our own tests through Accessibility (MIRAGE_TEST_CLOSE_WINDOW=<id>; a Finder window
+        // on a scratch folder the test opened), and nothing else.
+        if name == "closewindow" {
+            for _ in 0..<100 where session.windowsSnapshot().isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
+            guard let id = ProcessInfo.processInfo.environment["MIRAGE_TEST_CLOSE_WINDOW"].flatMap(UInt32.init), let w = session.windowsSnapshot().first(where: { $0.id == id }) else {
+                session.log("scenario closewindow: no such window"); return }
+            session.log("scenario closewindow: closing \(w.id) (\(w.app ?? "?"), \(w.frame.width)x\(w.frame.height))")
+            session.sendWindowCommand(.init(id: w.id, action: .close))
+            try? await Task.sleep(for: .seconds(3))
+            session.log("scenario closewindow: still listed \(session.windowsSnapshot().contains { $0.id == id })")
+            return
+        }
         if name == "closescratch" {
             // Cleanup after realapps: the Finder windows on ~/MirageScratch closed through Accessibility (AXPress on close).
             for _ in 0..<100 where session.windowsSnapshot().isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
