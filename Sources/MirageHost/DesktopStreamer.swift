@@ -2912,7 +2912,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard !remaining.isEmpty else { l.fresh = .done; if l.isDisplay { log("fresh picture: complete") }; return }
             // The middle-level decision was made with the start rate (the still goes out before the probe answers): once the
             // link is known (the probe, or delivery), it is made again for a window none of whose blocks went out yet.
-            if !l.isDisplay, !l.middleRechecked, l.sentRefine == 0, let rc, rc.probeKbps > 0 || rc.deliveryKbps > 0 {
+            // Only in the connect's first seconds (the trace window, 8 s): on Japan bus a window whose blocks waited behind
+            // the others' took its middle level 30 s in (~150 KB, and a change of its own, late).
+            if !l.isDisplay, !l.middleRechecked, l.sentRefine == 0, now < traceUntil, let rc, rc.probeKbps > 0 || rc.deliveryKbps > 0 {
                 l.middleRechecked = true
                 if intermediateWorthwhile(l) { l.fresh = .intermediate; log("layer \(l.id): middle level after all (the link is slow: \(lastBudget.tileKbps) kbps for tiles)"); return }
             }

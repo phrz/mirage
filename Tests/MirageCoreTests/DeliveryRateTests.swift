@@ -234,4 +234,19 @@ final class DeliveryRateTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(run(sampleInflight: true), 8_000)
         XCTAssertLessThan(run(sampleInflight: false), 1_000, "the control: the stall's acks read the link low")
     }
+
+    /// Video frames paced at the target arrive at the target's rate on a fast link: their trains measure the host's pacer.
+    /// They must not become the capacity estimate (0.7 x of it capped the target, which lowered the pacing, and so on).
+    func testPacedFrameTrainsDoNotPullTheTargetDown() {
+        var rc = RateController(initialKbps: 2_000, maxKbps: 50_000, nativePixels: 3200 * 1800)
+        var now: UInt64 = 10_000 * ms
+        for _ in 0..<150 {
+            let bytes = rc.targetKbps * 1000 / 8 / 30
+            let frags = bytes / 1157 + 1
+            let spread = UInt64(Double(bytes) * 8 / (Double(rc.targetKbps) * 1000) * 1e9)   // paced at the target
+            rc.frameAcked(sentNanos: now, firstReceived: now + 15 * ms, lastReceived: now + 15 * ms + spread, fragments: frags, bytes: bytes, now: now + 30 * ms, rttNanos: 30_000_000)
+            now += 33 * ms
+        }
+        XCTAssertGreaterThanOrEqual(rc.targetKbps, 2_000, "paced trains lowered the target to \(rc.targetKbps)")
+    }
 }

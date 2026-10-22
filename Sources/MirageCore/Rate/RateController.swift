@@ -165,7 +165,11 @@ public struct RateController {
         // Delivery rate from the datagram train.
         if fragments >= tuning.minTrainFragments, lastReceived > firstReceived, lastReceived - firstReceived >= tuning.minTrainNanos {
             let kbps = Double(bytes) * 8 / (Double(lastReceived - firstReceived) / 1e9) / 1000
-            rateSamples.append((now, kbps))
+            // A frame that arrived at about the target (within 15 %) may have measured the host's pacer, not the link: 0.7 x
+            // that as the ceiling pulled the target down with itself (2000 -> 1534 kbps at a 20 Mbps connect: crisp 6.0 s
+            // instead of 4.4). Clearly slower says the link is slower; clearly faster, that it is faster.
+            let ratio = kbps / Double(max(1, targetKbps))
+            if ratio < 0.85 || ratio > 1.15 { rateSamples.append((now, kbps)) }
         }
         noteFrame(lost: false, now: now)
         rateSamples.removeAll { now - $0.nanos > 10_000_000_000 }
