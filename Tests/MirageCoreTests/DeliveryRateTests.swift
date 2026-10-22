@@ -126,6 +126,29 @@ final class DeliveryRateTests: XCTestCase {
         XCTAssertNil(RateController.trainRate(clump, packetBytes: 1240), "a clump stamped together is not a rate")
     }
 
+    /// A fast, short-RTT link has no dense burst to read (the train arrives in a few receive batches): the whole train's
+    /// dispersion is read instead, but only raises the target, held under the pre-estimate ceiling, and is never a delivery
+    /// estimate or a saved peak (the 231 Mbps misread must not recur).
+    func testTheWholeTrainOnlyRaisesTheTargetUnderTheCeiling() {
+        let ms: UInt64 = 1_000_000
+        // 20 Mbps: 40 packets of 1240 B in ~19.8 ms, stamped in batches of 8 over 5 ms apart (no 10-packet burst over 4 ms).
+        let r: [UInt64] = (0..<40).map { i in UInt64(i / 8) * 5_500_000 + UInt64(i % 8) * 20_000 }
+        XCTAssertNil(RateController.trainRate(r, packetBytes: 1240), "no dense burst")
+        let whole = RateController.trainRateWhole(r, packetBytes: 1240)!
+        XCTAssertGreaterThan(whole, 12_000, "the batch gaps only make it read low")
+        XCTAssertNil(RateController.trainRateWhole(Array(r.prefix(10)), packetBytes: 1240), "too few packets")
+        XCTAssertNil(RateController.trainRateWhole((0..<40).map { UInt64($0) * 50_000 }, packetBytes: 1240), "under 5 ms: a clump, not a rate")
+        _ = ms
+        var rc = RateController(initialKbps: 2_000, maxKbps: 50_000, nativePixels: 3200 * 1800)
+        rc.seedTargetFromProbe(kbps: min(whole, 4 * 2_000))
+        XCTAssertLessThanOrEqual(rc.targetKbps, 8_000, "held under 4 x the start")
+        XCTAssertGreaterThan(rc.targetKbps, 2_000, "raised")
+        XCTAssertEqual(rc.deliveryKbps, 0, "not a delivery estimate")
+        XCTAssertEqual(rc.measuredPeakKbps, 0, "nothing a session would save")
+        rc.seedTargetFromProbe(kbps: 500)
+        XCTAssertGreaterThan(rc.targetKbps, 2_000, "never lowers")
+    }
+
     /// Careful resume: the last estimate on this network gives 0.75 × it at once, out of startup (1.1 × delivery from the
     /// first window of acks), so a worse network today is caught by the first measurement.
     func testCarefulResumeStartsAtThreeQuartersAndLeavesStartup() {

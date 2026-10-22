@@ -2128,7 +2128,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                    fresh, blocks, pacer.blocks.filter { $0.msgSeq == nil }.count))
         traceCapped = 0
     }
-    private var probeAfterStage1 = false
+    private var probeAfterStage1 = false, probeDeadline: UInt64 = 0
+    /// On `queue`: the deferred probe train, once the first picture is out (or its deadline passed).
+    private func sendDeferredProbe(_ why: String) {
+        guard probeAfterStage1 else { return }
+        probeAfterStage1 = false
+        if debugLayers { log("connect probe: sent (\(why))") }
+        sendProbeTrain()
+    }
     /// Stage-1 cuts waiting for the tile budget (layer, lossy still), sent in order by `sendStage1Queue`.
     private var stage1Queue: [(id: UInt32, data: Data)] = []
     private func sendStage1Queue(now: UInt64) {
@@ -2152,7 +2159,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         guard waiting.isEmpty || now >= stage1Deadline else { return }
         stage1Active = false
-        if probeAfterStage1 { probeAfterStage1 = false; sendProbeTrain() }
+        sendDeferredProbe("stage 1 presented")
         for id in stage1Staged.sorted() {
             sendTileMessage(.commit(layer: id), captureNanos: now)
             layers[id]?.exposed = true
@@ -2190,7 +2197,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let r = trainReceived.sorted()
         trainSent = []
         guard let kbps = RateController.trainRate(r, packetBytes: Self.trainSize + 40) else {
-            log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read"); return
+            // The whole train instead: raises the target only, at most to the pre-estimate ceiling (4 x the start rate, under
+            // the cap), never the delivery estimate or delivery.json: delivery samples must confirm it (the 231 Mbps misread).
+            if let whole = RateController.trainRateWhole(r, packetBytes: Self.trainSize + 40) {
+                rc?.seedTargetFromProbe(kbps: min(whole, 4 * Int(hostTunables[.startKbps]), Int(hostTunables[.autoMaxKbps])))
+                log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read; whole train \(whole) kbps; target \(rc?.targetKbps ?? 0) kbps (unconfirmed)")
+                applyBudget(now: Clock.nowNanos())
+            } else { log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read") }
+            return
         }
         // A cross-check that can only raise the start (careful resume and the doubling startup lead), and by at most 4 x the
         // start rate: receive-side batching can still flatter a burst.
@@ -2222,7 +2236,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard trigger.restartsWholePicture else { return }
         if trigger == .streamStart || trigger == .viewerEmpty {
             // Compositor model: the probe train follows stage 1 (on Japan bus its 48 KB took 0.6 s of the link ahead of the stills).
-            if hostTunables[.connectProbe] >= 1 { if compositor { probeAfterStage1 = true } else { sendProbeTrain() } }   // kill switch: tunables.json {"connectProbe": 0}
+            // Both models: the probe train follows the first picture (compositor: stage 1 presented; seam: the display's base
+            // keyframe acked), at the latest 1.5 s after the start.
+            if hostTunables[.connectProbe] >= 1 { probeAfterStage1 = true; probeDeadline = Clock.nowNanos() + 1_500_000_000 }   // kill switch: tunables.json {"connectProbe": 0}
             if hostTunables[.placeholders] >= 1 { sendPlaceholders() }   // M-FIVE stage 0, both models
         }
         if compositor {
@@ -2244,6 +2260,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard let rc else { return }
         switch l.fresh {
         case .base(let s) where seq >= s && s != 0, .climb(let s) where seq >= s && s != 0:
+            if l.isDisplay { sendDeferredProbe("base picture acked") }
             // Climb to the highest rung the target affords in one step: one whole-frame keyframe, the layer's middle level
             // (DESIGN §3.3: at most three presentation steps; a rung-by-rung climb was one crossfade per rung).
             let kpix = Double(l.width * l.height) / 1000
@@ -3489,6 +3506,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard let self else { return }
             let now = Clock.nowNanos()
             self.connectTrace(now: now)
+            if self.probeAfterStage1, now >= self.probeDeadline { self.sendDeferredProbe("deadline") }
             // The window list drives layers and the client's composition; it must not depend on captures
             // (the display layer is mostly static now that the windows are not in it).
             if let w = self.windows?.sample(captureSeq: self.captureSeq, now: now) {

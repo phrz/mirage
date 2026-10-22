@@ -451,6 +451,23 @@ public struct RateController {
         targetKbps = min(maxKbps, max(targetKbps, max(tuning.minKbps, Int(Double(kbps) * tuning.capacityFraction))))
     }
 
+    /// Raises the target only (never the delivery estimate, the ceiling or what a session saves): a weaker probe reading,
+    /// held under the pre-estimate ceiling until delivery samples confirm the link.
+    public mutating func seedTargetFromProbe(kbps: Int) {
+        guard kbps > 0 else { return }
+        targetKbps = min(deliveryCeilingKbps, max(targetKbps, max(tuning.minKbps, Int(Double(kbps) * tuning.capacityFraction))))
+    }
+
+    /// The whole train's dispersion (first to last arrival), when no burst is dense enough to read (a fast, short-RTT link:
+    /// 40 packets of a 20 Mbps link arrive in ~20 ms, in receive batches; mac-daddy: "no burst to read" at every connect).
+    /// At least 20 packets over at least 5 ms; any idle gap in the train only makes it read low.
+    public static func trainRateWhole(_ received: [UInt64], packetBytes: Int) -> Int? {
+        guard received.count >= 20, let first = received.first, let last = received.last, last > first else { return nil }
+        let span = Double(last - first)
+        guard span >= 5_000_000 else { return nil }
+        return Int(Double((received.count - 1) * packetBytes) * 8 / (span / 1e9) / 1000)
+    }
+
     /// The train's rate from its densest burst (packets with no gap over 5 ms, at least 4 of them, spanning 1 ms or more):
     /// the congestion window releases the train in bursts an RTT apart, and inside a burst the packets arrive at the link's
     /// rate. Nil without such a burst.
