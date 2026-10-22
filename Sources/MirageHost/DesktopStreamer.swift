@@ -2893,8 +2893,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard let self else { return }
             let data = d.withUnsafeBytes { TileCodec.encodeLossy(base: $0.baseAddress!, width: rect.width, height: rect.height, stride: rect.width * 4, outWidth: ow, outHeight: oh, quality: 60) }
             guard let data else { self.queue.async { self.pacer.dropped(id: block) }; return }
-            // On the stream from here, in order with the layer's copy-rects (DESIGN §3.3 ordering invariant).
-            self.send(tile: .tiles(.init(header: hdr, refinement: false, staged: staged, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: block, layer: layerID)
+            // On the stream from here, in order with the layer's copy-rects (DESIGN §3.3 ordering invariant). A staged still goes on
+            // the fast stream, where its reset and its commit go (sendTileMessage): on the other stream the commit overtook it,
+            // stage 1 presented "0 staged tiles" for every window and the stills waited for the next level, 5 s later (20 Mbps
+            // on mac-daddy, f4fb76f).
+            self.send(tile: .tiles(.init(header: hdr, refinement: false, staged: staged, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: staged, refinementBytes: data.count, block: block, layer: layerID)
             self.queue.async {
                 self.tileTokens -= Double(data.count - estimate)
                 self.statTileBytes += data.count; self.statTileRects += 1; self.secTileBytes += data.count
