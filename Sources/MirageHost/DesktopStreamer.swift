@@ -1623,6 +1623,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let budget = max(Self.stage1MinBytes, rateBytes * hostTunables[.stage1Seconds] * l.visibleFraction * Double(l.frame.area) / Double(max(1, display?.bounds.area ?? 1)))
             let scale = min(1.0, (budget / 0.1 / Double(r.width * r.height)).squareRoot())
             let ow = max(16, Int(Double(r.width) * scale)), oh = max(16, Int(Double(r.height) * scale))
+            // A cut that stands as the still: its rounded corners transparent (the window's measured radius), not the desktop
+            // behind them, which an early move would drag along.
+            if ownShots, cutStands(l) { Self.maskCorners(&cut, width: r.width, height: r.height, radius: cornerRadius(of: id, layer: l, sample: s) * k) }
             guard let data = cut.withUnsafeBytes({ TileCodec.encodeLossy(base: $0.baseAddress!, width: r.width, height: r.height, stride: r.width * 4, outWidth: ow, outHeight: oh, quality: 60) }) else { continue }
             // With window-alone shots: kept for a window that misses the barrier (checkStage1). Without: paced, queued and
             // sent as the tile budget allows (refine), not as one blast.
@@ -1635,6 +1638,35 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             continue
         }
         if sent > 0 { log("placeholders and stage-1 cuts: the desktop and \(sent - 1) windows, \(bytes) bytes (cuts paced)"); sendStage1Queue(now: Clock.nowNanos()); checkStage1(now: Clock.nowNanos()); publishWindows(now: Clock.nowNanos(), full: false) }
+    }
+
+    /// Window corner radii in stream pixels, per app, measured from windows' own (alpha) frames; in memory only.
+    private static var cornerRadii: [String: Double] = [:]
+    /// The window's corner radius in stream pixels: its app's measured one, else 24 pt (macOS 26 windows: ~20 pt titled,
+    /// larger with a toolbar; a larger mask only hides a sliver of window, a smaller one shows desktop).
+    private func cornerRadius(of id: UInt32, layer l: Layer, sample s: WindowTracker.Sample) -> Double {
+        if let app = s.byID[id]?.app, let r = Self.cornerRadii[app] { return r }
+        let pw = Double(s.pointBounds[id]?.width ?? 0)
+        return pw > 0 ? 24 * Double(l.frame.width) / pw : 48
+    }
+    /// The top-left corner's radius in pixels of a window-alone frame: the first row whose leftmost pixel is opaque (0 for a
+    /// square window); nil when no row in the first 160 is (not a plain window).
+    static func measureCornerRadius(_ pb: CVPixelBuffer) -> Double? {
+        CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pb)?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        let stride = CVPixelBufferGetBytesPerRow(pb), h = CVPixelBufferGetHeight(pb)
+        for y in 0..<min(h, 160) where base[y * stride + 3] >= 128 { return Double(y) }
+        return nil
+    }
+    /// Premultiplied BGRA: the pixels outside a rounded rect of `radius` made transparent.
+    static func maskCorners(_ px: inout [UInt8], width w: Int, height h: Int, radius: Double) {
+        let r = Int(radius.rounded(.up))
+        guard r > 0, r * 2 <= min(w, h) else { return }
+        for y in 0..<r { for x in 0..<r {
+            let dx = radius - Double(x) - 0.5, dy = radius - Double(y) - 0.5
+            guard dx * dx + dy * dy > radius * radius else { continue }
+            for (cx, cy) in [(x, y), (w - 1 - x, y), (x, h - 1 - y), (w - 1 - x, h - 1 - y)] { let o = (cy * w + cx) * 4; px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 0 }
+        } }
     }
 
     /// Cut vs window-alone shot (MIRAGE_TEST_CUT_CHECK): mean and max RGB difference on a 96-wide grid over the window's
@@ -2042,6 +2074,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             dirty = Array(0..<tracker.tileCount)
             if !layer.isDisplay {
                 layer.announced = true
+                if layer.visibleFraction >= 0.999, let app = windows.current?.byID[layer.id]?.app, let r = Self.measureCornerRadius(pb) {
+                    let v = r * Double(layer.width) / Double(max(1, CVPixelBufferGetWidth(pb)))
+                    if Self.cornerRadii[app] != v { Self.cornerRadii[app] = v; log("layer \(layer.id): \(app) corner radius \(Int(v)) px") }
+                }
                 log("layer \(layer.id): first frame \(layer.width)x\(layer.height) after \((Clock.elapsed(since: layer.createdNanos, now: now)) / 1_000_000) ms; announced")
                 // A stage-1 cut already stands for it (announced with it; a second `.reset` would discard it if still staged).
                 if !layer.cutStill { sendTileMessage(.reset(layer: layer.id, width: layer.width, height: layer.height), captureNanos: nanos) }
