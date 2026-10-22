@@ -149,6 +149,23 @@ final class DeliveryRateTests: XCTestCase {
         XCTAssertGreaterThan(rc.targetKbps, 2_000, "never lowers")
     }
 
+    /// Before delivery samples the probe bounds the start both ways: a slow reading lowers the ceiling (no startup doubling to
+    /// 5.4 Mbps on a 650 kbps link), a fast one raises the in-flight cap from 64 KB; neither is delivery or a saved peak.
+    func testTheProbeBoundsTheStartBeforeDelivery() {
+        var slow = RateController(initialKbps: 2_000, maxKbps: 50_000, nativePixels: 3200 * 1800)
+        XCTAssertEqual(slow.deliveryCeilingKbps, 8_000)
+        XCTAssertEqual(slow.inflightCapBytes, 64_000)
+        slow.seedTargetFromProbe(kbps: 621)
+        XCTAssertEqual(slow.deliveryCeilingKbps, 2_000, "a 621 kbps reading: no climb above the start before delivery says so")
+        XCTAssertLessThanOrEqual(slow.targetKbps, 2_000)
+        var fast = RateController(initialKbps: 2_000, maxKbps: 50_000, nativePixels: 3200 * 1800)
+        fast.seedTargetFromProbe(kbps: 8_000)
+        XCTAssertEqual(fast.deliveryCeilingKbps, 8_000, "never above 4 x the start before delivery")
+        XCTAssertGreaterThan(fast.inflightCapBytes, 64_000, "the cap follows the probe-allowed target")
+        XCTAssertLessThanOrEqual(fast.inflightCapBytes, 2_000_000)
+        XCTAssertEqual(fast.deliveryKbps, 0); XCTAssertEqual(fast.measuredPeakKbps, 0)
+    }
+
     /// Careful resume: the last estimate on this network gives 0.75 × it at once, out of startup (1.1 × delivery from the
     /// first window of acks), so a worse network today is caught by the first measurement.
     func testCarefulResumeStartsAtThreeQuartersAndLeavesStartup() {

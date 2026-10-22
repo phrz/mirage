@@ -420,8 +420,15 @@ public struct RateController {
 
     /// The delivery-rate ceiling on the target; before any estimate, 4 x the start (the doubling startup otherwise reached
     /// the 50 Mbps cap in ~150 ms on a 20 Mbps link, before a single window of acks).
+    /// The connect probe's reading (burst or whole train), until delivery samples exist: it bounds the start both ways (the
+    /// ceiling and the in-flight cap below), and is never saved or taken as delivery.
+    public private(set) var probeKbps = 0
     public var deliveryCeilingKbps: Int {
-        deliveryKbps > 0 ? min(maxKbps, max(tuning.minKbps, Int(Double(deliveryKbps) * deliveryGain))) : min(maxKbps, max(tuning.minKbps, initialKbps * 4))
+        if deliveryKbps > 0 { return min(maxKbps, max(tuning.minKbps, Int(Double(deliveryKbps) * deliveryGain))) }
+        // Before any delivery sample: 4 x the start, or less when the probe read a slower link (Japan bus: startup doubled the
+        // target to 5.4 Mbps on a 650 kbps link while the probe had read 621 kbps; only the 64 KB cap stopped a queue).
+        let byProbe = probeKbps > 0 ? max(initialKbps, 2 * probeKbps) : Int.max
+        return min(maxKbps, max(tuning.minKbps, min(initialKbps * 4, byProbe)))
     }
     /// The highest delivery estimate measured from acks this session (never a seed): what careful resume may start from.
     public private(set) var measuredPeakKbps = 0
@@ -430,7 +437,13 @@ public struct RateController {
     /// least 32 KB, and 64 KB until there is an estimate. (At 2 × in startup, a round trip the link's queue inflates allowed
     /// ~25 % growth per window, which read as "no growth": startup ended at 1.4 Mbps of Fast 4G's 8.1 on mac-daddy.)
     public var inflightCapBytes: Int {
-        guard deliveryKbps > 0 else { return 64_000 }
+        guard deliveryKbps > 0 else {
+            // Before delivery samples: 3 x (the target the probe allows) x srtt, from 64 KB (20 Mbps on mac-daddy: the fixed
+            // 64 KB held a 5.6 Mbps target to ~3 Mbps for the first 1.9 s, and delivery then measured that).
+            guard probeKbps > 0 else { return 64_000 }
+            let rate = Double(min(targetKbps, probeKbps)) * 1000 / 8
+            return min(2_000_000, max(64_000, Int(3 * rate * srttNanos / 1e9)))
+        }
         let bdp = Double(deliveryKbps) * 1000 / 8 * minRttMs / 1000
         return max(32_000, Int((inStartup ? 3 : 2) * bdp))
     }
@@ -447,6 +460,7 @@ public struct RateController {
     /// instead of 800 kbps and a climb, and the delivery estimate starts there, so the first picture is sized for the link.
     public mutating func seedFromProbe(kbps: Int) {
         guard kbps > 0 else { return }
+        probeKbps = max(probeKbps, kbps)
         deliveryKbps = max(deliveryKbps, kbps)
         targetKbps = min(maxKbps, max(targetKbps, max(tuning.minKbps, Int(Double(kbps) * tuning.capacityFraction))))
     }
@@ -455,6 +469,7 @@ public struct RateController {
     /// held under the pre-estimate ceiling until delivery samples confirm the link.
     public mutating func seedTargetFromProbe(kbps: Int) {
         guard kbps > 0 else { return }
+        probeKbps = max(probeKbps, kbps)
         targetKbps = min(deliveryCeilingKbps, max(targetKbps, max(tuning.minKbps, Int(Double(kbps) * tuning.capacityFraction))))
     }
 
