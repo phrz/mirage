@@ -2140,6 +2140,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// A window layer's encoder, created on first motion; at most `maxLayerEncoders` live at once, the
     /// idle one longest unused making room. False if none can be had right now.
     private func ensureEncoder(_ l: Layer) -> Bool {
+        if l.id == ControlMessage.WindowInfo.overlayID { return false }   // never video: HEVC has no alpha (tryEncode)
         if l.encoder != nil { return true }
         let live = layers.values.filter { $0.encoder != nil && !$0.isDisplay }
         if live.count >= maxLayerEncoders {
@@ -3339,13 +3340,26 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     private func tryEncode(_ l: Layer, now: UInt64, latest: ShiftDetector.Frame) {
+        // The overlay never goes as video, whatever asked for it (a keyframe request from a rung change or a recovery reached it:
+        // an overlay keyframe on mac-daddy painted its transparent left tile column opaque black during Show Desktop, SD5 on
+        // 6a427fb). Pending changes go as lossless tiles (alpha kept).
+        if l.id == ControlMessage.WindowInfo.overlayID {
+            let t = l.pendingVideoTiles
+            l.pendingVideoTiles = []; l.pendingVideoRegion = .zero; l.pendingWholeFrame = false; l.wantKeyframe = false
+            l.encoder = nil
+            if !t.isEmpty { _ = l.tracker.expedite(in: l.bounds, now: now, only: t) }
+            return
+        }
         guard var enc = l.encoder, let req = request, let canvas = ensureCanvas(l) else { return }
         // A window partly off the display (Show Desktop's push, a window over the edge): its frame is transparent outside the
         // display, and video has no alpha, so that came out black (the bench's bottom row black for ~3 s after a Show Desktop
         // return on mac-daddy, from keyframes sent while it was pushed). Its changes go as lossless tiles (alpha kept) instead.
         // (A keyframe request stays pending: the first video after the return is a keyframe, not a frame predicted from a
         // reference the viewer no longer shows.)
-        if !l.isDisplay, !l.offDisplayTiles.isEmpty, l.hasVideoPending {
+        // (Any part past the display's edge, not only whole tiles: the mini player 18 px off the left edge got video keyframes
+        // whose partly-off column came out black, SD1 on 6a427fb.)
+        let pastEdge = display.map { d in l.frame.intersection(d.bounds) != l.frame } ?? false
+        if !l.isDisplay, pastEdge || !l.offDisplayTiles.isEmpty, l.hasVideoPending {
             let t = l.pendingVideoTiles.subtracting(l.offDisplayTiles)
             if !t.isEmpty || l.pendingWholeFrame { l.wantKeyframe = true }
             l.pendingVideoTiles = []; l.pendingVideoRegion = .zero; l.pendingWholeFrame = false
