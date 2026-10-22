@@ -1567,6 +1567,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         return (out, cleared)
     }
+    /// Every pixel of `r` fully opaque (alpha 255; sampled every 2nd pixel and row).
+    private func opaqueTile(_ f: ShiftDetector.Frame, _ r: PixelRect) -> Bool {
+        let x1 = min(f.width, r.maxX), y1 = min(f.height, r.maxY)
+        guard r.x < x1, r.y < y1 else { return false }
+        for y in stride(from: r.y, to: y1, by: 2) {
+            let row = f.base.advanced(by: y * f.stride).assumingMemoryBound(to: UInt8.self)
+            for x in stride(from: r.x, to: x1, by: 2) where row[x * 4 + 3] != 255 { return false }
+        }
+        return true
+    }
     /// Mean absolute difference per channel (B, G, R, A) between two BGRA frames of the same size, sampled; nil otherwise.
     static func meanDifference(_ a: CVPixelBuffer, _ b: CVPixelBuffer) -> Double? {
         let w = CVPixelBufferGetWidth(a), h = CVPixelBufferGetHeight(a)
@@ -3383,21 +3393,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             return
         }
         guard var enc = l.encoder, let req = request, let canvas = ensureCanvas(l) else { return }
-        // A window partly off the display (Show Desktop's push, a window over the edge): its frame is transparent outside the
-        // display, and video has no alpha, so that came out black (the bench's bottom row black for ~3 s after a Show Desktop
-        // return on mac-daddy, from keyframes sent while it was pushed). Its changes go as lossless tiles (alpha kept) instead.
-        // (A keyframe request stays pending: the first video after the return is a keyframe, not a frame predicted from a
-        // reference the viewer no longer shows.)
-        // (Any part past the display's edge, not only whole tiles: the mini player 18 px off the left edge got video keyframes
-        // whose partly-off column came out black, SD1 on 6a427fb.)
-        let pastEdge = display.map { d in l.frame.intersection(d.bounds) != l.frame } ?? false
-        if !l.isDisplay, pastEdge || !l.offDisplayTiles.isEmpty, l.hasVideoPending {
-            let t = l.pendingVideoTiles.subtracting(l.offDisplayTiles)
-            if !t.isEmpty || l.pendingWholeFrame { l.wantKeyframe = true }
-            l.pendingVideoTiles = []; l.pendingVideoRegion = .zero; l.pendingWholeFrame = false
-            if !t.isEmpty { _ = l.tracker.expedite(in: l.bounds, now: now, only: t) }
-            return
-        }
         // Compositor model: the desktop's first picture is its still and lossless blocks. The encoder's start keyframe (no
         // motion behind it) waits until that is done: on Japan bus it landed first (2.44 s), replaced the composited
         // placeholder with the desktop alone, and every window vanished until its still arrived 1.3 s later (a fourth change).
@@ -3466,6 +3461,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
         // Host-side crop: a window layer's tiles off the display stay transparent on the viewer (cropOffDisplay).
         if !l.isDisplay, !l.blankedOffDisplay.isEmpty { tiles.subtract(l.blankedOffDisplay) }
+        // Video only where the window is fully opaque: HEVC has no alpha, so translucent pixels (vibrancy, rounded corners,
+        // a shadow) and the transparent part of a window past the display's edge came out black (the mini player, the bench
+        // after Show Desktop, mac-daddy). Those tiles go as lossless tiles (alpha kept); a window running past an edge keeps
+        // video for its opaque on-display part (the crop). Until an alpha path lands (coordinator: greyscale mask).
+        if !l.isDisplay {
+            let clear = tiles.filter { !opaqueTile(latest, l.tracker.rect(of: $0)) }
+            if !clear.isEmpty {
+                tiles.subtract(clear)
+                let due = clear.filter { !l.tracker.isCrisp($0) }
+                if !due.isEmpty { _ = l.tracker.expedite(in: l.bounds, now: now, only: Set(due)) }
+            }
+            if tiles.isEmpty { l.pendingVideoTiles = []; l.pendingVideoRegion = .zero; l.pendingWholeFrame = false; return }
+        }
         // Build the mask over the region's tile grid.
         let grid = TileMask.grid(for: region)
         var mask = TileMask(cols: grid.cols, rows: grid.rows)
