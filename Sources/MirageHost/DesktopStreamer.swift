@@ -1486,7 +1486,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let nanos = Clock.nowNanos()
                 self?.queue.async {
                     guard let self else { return }
-                    if let c = self.cutCheck.removeValue(forKey: l.id) { self.log("layer \(l.id): cut check: \(Self.cutDifference(c.px, w: c.w, h: c.h, pb))") }
+                    if let c = self.cutCheck.removeValue(forKey: l.id) { self.log("layer \(l.id): cut check: \(Self.cutDifference(c.px, w: c.w, h: c.h, pb))"); Self.dumpCutCheck(l.id, c.px, w: c.w, h: c.h, pb) }
                     guard l.capturer === cap, l.lastFrame == nil else { return }; l.snapshotFrame = pb; self.captured(pb, nanos, dirtyRects: [], layerID: l.id)
                 }
             }
@@ -1647,13 +1647,31 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         var sum = 0, n = 0, mx = 0, big = 0
         for gy in 0..<gh { for gx in 0..<gw {
             let fx = 0.08 + 0.84 * (Double(gx) + 0.5) / Double(gw), fy = 0.08 + 0.84 * (Double(gy) + 0.5) / Double(gh)
-            let po = Int(fy * Double(ph)) * stride + Int(fx * Double(pw)) * 4
-            guard base[po + 3] >= 250 else { continue }
-            let co = (Int(fy * Double(ch)) * cw + Int(fx * Double(cw))) * 4
-            let d = max(abs(Int(base[po]) - Int(cut[co])), abs(Int(base[po + 1]) - Int(cut[co + 1])), abs(Int(base[po + 2]) - Int(cut[co + 2])))
+            // The cut pixel and the mean of the shot's pixels it stands for (the cut is smaller: compared at the cut's scale).
+            let cx = Int(fx * Double(cw)), cy = Int(fy * Double(ch))
+            let x0 = cx * pw / cw, x1 = max(x0 + 1, (cx + 1) * pw / cw), y0 = cy * ph / ch, y1 = max(y0 + 1, (cy + 1) * ph / ch)
+            var acc = [0, 0, 0], cnt = 0, opaque = true
+            for y in y0..<min(ph, y1) { for x in x0..<min(pw, x1) { let o = y * stride + x * 4; if base[o + 3] < 250 { opaque = false }; acc[0] += Int(base[o]); acc[1] += Int(base[o + 1]); acc[2] += Int(base[o + 2]); cnt += 1 } }
+            guard opaque, cnt > 0 else { continue }
+            let co = (cy * cw + cx) * 4
+            let d = max(abs(acc[0] / cnt - Int(cut[co])), abs(acc[1] / cnt - Int(cut[co + 1])), abs(acc[2] / cnt - Int(cut[co + 2])))
             sum += d; n += 1; mx = max(mx, d); if d > 24 { big += 1 }
         } }
         return n == 0 ? "no opaque samples" : String(format: "mean %.1f max %d, %d of %d samples off by > 24 (shot %dx%d, cut %dx%d)", Double(sum) / Double(n), mx, big, n, pw, ph, cw, ch)
+    }
+
+    /// The cut and the shot as PNGs in /tmp/mirage-cutcheck (test only), for a look at what differs.
+    static func dumpCutCheck(_ id: UInt32, _ cut: [UInt8], w: Int, h: Int, _ pb: CVPixelBuffer) {
+        let dir = URL(fileURLWithPath: "/tmp/mirage-cutcheck"); try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let info = CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        func png(_ img: CGImage?, _ name: String) {
+            guard let img, let dst = CGImageDestinationCreateWithURL(dir.appendingPathComponent(name) as CFURL, "public.png" as CFString, 1, nil) else { return }
+            CGImageDestinationAddImage(dst, img, nil); CGImageDestinationFinalize(dst)
+        }
+        var c = cut
+        png(c.withUnsafeMutableBytes { CGContext(data: $0.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info)?.makeImage() }, "\(id)-cut.png")
+        CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        png(CGContext(data: CVPixelBufferGetBaseAddress(pb), width: CVPixelBufferGetWidth(pb), height: CVPixelBufferGetHeight(pb), bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(pb), space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: info)?.makeImage(), "\(id)-shot.png")
     }
 
     /// Layers cut from the full display capture only until their own capture delivers (off: see reconcileLayers).
