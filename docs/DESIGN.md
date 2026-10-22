@@ -1213,6 +1213,13 @@ the codec. Built 2026-10-17 as M2.5 (§3.3c); loopback measurements in §6.
 - SPAKE2+ in Swift: implement on CryptoKit P-256 primitives (small, RFC-specified) vs. vendor.
 - Headless operation on mac-daddy: real displays today; a virtual display (CGVirtualDisplay,
   private) only if you ever want a client-shaped desktop without a monitor attached.
+- The video ladder on a large full-motion layer (2026-10-22, bench `--motion --translucent`, 3200x1588 on Fast 4G):
+  capture and encode reached ~10 fps against the 30 wanted, the shortfall read as budget-limited, and the ladder fell to
+  the tiny rung (400x224 for the whole layer) with an 8.8 Mbps target unused. Whether a shortfall the host itself causes
+  (capture or encode time, not the link) should drop rungs: measure on real content before changing it.
+- The connect probe on real links: in the lab the shaper sits in front of QUIC and its timers clump arrivals, so both
+  the densest-burst and whole-train reads say little (8.1 Mbps profile read 24-68 Mbps). Judge it on dummynet or a
+  phone hotspot; until then it only raises the start, clamped at 4 x.
 
 ## 6. Status
 
