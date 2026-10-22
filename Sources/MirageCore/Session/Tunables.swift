@@ -52,7 +52,8 @@ public struct Tunables: Codable, Equatable, Sendable {
         // (under 1: smaller, cheaper for WindowServer, no usable first frame); 1 = warmed with the window-alone filter.
         case warmWindows, warmScale, warmIndependent
         // Host only, warm host: 0 = a display snapshot every warmSnapshotSeconds (phrz: never more often than every 30 s),
-        // stage 1 cut from it at connect while the window layout is unchanged; 1 = the windows' captures kept running.
+        // stage 1 cut from it at connect while the window layout is unchanged; 1 = the windows' captures kept running;
+        // 2 = the snapshot plus the desktop and overlay display captures kept running (their starts took ~1.2 s of a connect).
         case warmMode, warmSnapshotSeconds
         // Host only: 1 = a window's first-frame snapshot at connect uses the window-alone filter (desktopIndependentWindow).
         case windowShotIndependent
@@ -92,7 +93,7 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .warmWindows: return (12, 0, 40)
             case .warmScale: return (1, 0.02, 1)
             case .warmIndependent: return (0, 0, 1)
-            case .warmMode: return (0, 0, 1)
+            case .warmMode: return (0, 0, 2)
             case .warmSnapshotSeconds: return (30, 30, 3600)
             case .windowShotIndependent: return (1, 0, 1)
             case .stage1Seconds: return (0.2, 0.05, 2)
