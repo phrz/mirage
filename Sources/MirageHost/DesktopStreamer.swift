@@ -2114,6 +2114,20 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// one commit per layer presents them all in the same frame on the viewer (a whole-layer crossfade each), instead of
     /// windows popping in one by one as their captures start.
     private var stage1Active = false
+    /// Connect trace (M-FIVE: where the time to crisp goes): every 250 ms for 8 s after a stream start's fresh picture.
+    private var traceUntil: UInt64 = 0, traceNext: UInt64 = 0, traceCapped = 0, traceBytes = 0
+    private func connectTrace(now: UInt64) {
+        guard now < traceUntil, now >= traceNext, let rc else { return }
+        traceNext = now + 250_000_000
+        let sent = statTileBytes >= traceBytes ? statTileBytes - traceBytes : statTileBytes; traceBytes = statTileBytes   // (the 5 s stats reset it)
+        let fresh = layers.values.filter { $0.fresh != .done }.count
+        let blocks = layers.values.reduce(0) { n, l in if case .blocks(let r) = l.fresh { return n + r.count }; return n }
+        log(String(format: "trace +%.2f s: target %d ceiling %d delivery %d kbps | in flight %d KB (refine %d KB) cap %d KB, capped %d× | tokens %.0f KB fresh %.0f KB | sent %d KB | %d layers fresh, %d blocks left, %d block(s) encoding",
+                   Double(Clock.elapsed(since: traceUntil - 8_000_000_000, now: now)) / 1e9, rc.targetKbps, rc.deliveryCeilingKbps, rc.deliveryKbps,
+                   tileInflightBytes / 1000, refinementInFlight / 1000, rc.inflightCapBytes / 1000, traceCapped, tileTokens / 1000, freshTokens / 1000, sent / 1000,
+                   fresh, blocks, pacer.blocks.filter { $0.msgSeq == nil }.count))
+        traceCapped = 0
+    }
     private var probeAfterStage1 = false
     /// Stage-1 cuts waiting for the tile budget (layer, lossy still), sent in order by `sendStage1Queue`.
     private var stage1Queue: [(id: UInt32, data: Data)] = []
@@ -2217,6 +2231,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             display?.fresh = .still
             for l in layers.values { l.stillSent = false; l.cutStill = false }
             stage1Active = true; stage1Staged = []; stage1Deadline = Clock.nowNanos() + 700_000_000
+            if trigger == .streamStart { traceUntil = Clock.nowNanos() + 8_000_000_000; traceNext = 0; traceBytes = statTileBytes; traceCapped = 0 }
             log("fresh picture (\(trigger.rawValue)\(detail)): stage 1, one coherent still per visible layer, presented together")
             return
         }
@@ -2836,7 +2851,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let rc {
             let cap = rc.inflightCapBytes
             let pendingEncode = pacer.blocks.reduce(0) { $1.msgSeq == nil ? $0 + $1.bytes : $0 }
-            if refinementInFlight + pendingEncode >= cap || tileInflightForCap >= cap * 2 { self.rc?.noteCapped(now: now); return }
+            if refinementInFlight + pendingEncode >= cap || tileInflightForCap >= cap * 2 { self.rc?.noteCapped(now: now); traceCapped += 1; return }
         }
         let ordered = layersByPriority()
         // Fresh pictures: the display's ladder gates everything until its base is acked; window stills
@@ -3473,6 +3488,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         r.setEventHandler { [weak self] in
             guard let self else { return }
             let now = Clock.nowNanos()
+            self.connectTrace(now: now)
             // The window list drives layers and the client's composition; it must not depend on captures
             // (the display layer is mostly static now that the windows are not in it).
             if let w = self.windows?.sample(captureSeq: self.captureSeq, now: now) {
