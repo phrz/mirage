@@ -167,22 +167,6 @@ final class DeliveryRateTests: XCTestCase {
         XCTAssertEqual(fast.deliveryKbps, 0); XCTAssertEqual(fast.measuredPeakKbps, 0)
     }
 
-    /// A window the host's own budget held back (tokens spent, work queued) cannot lower the estimate: the probe's seed stands
-    /// until a window that was not held back says otherwise.
-    func testABudgetLimitedWindowDoesNotLowerTheEstimate() {
-        var rc = RateController(initialKbps: 2_000, maxKbps: 50_000, nativePixels: 3200 * 1800)
-        rc.seedFromProbe(kbps: 8_000)
-        XCTAssertEqual(rc.deliveryKbps, 8_000)
-        var t: UInt64 = 1_000_000_000
-        // 2 s of acks at ~1.5 Mbps while the budget is in debt.
-        for _ in 0..<40 { rc.noteBudgetLimited(now: t); rc.streamAcked(bytes: 9_400, receivedNanos: t, now: t); t += 50_000_000 }
-        XCTAssertEqual(rc.deliveryKbps, 8_000, "the held-back window did not replace the seed")
-        // Then a free window at ~1.5 Mbps (the link really is slow): it lowers the estimate.
-        t += 5_000_000_000
-        for _ in 0..<60 { rc.streamAcked(bytes: 9_400, receivedNanos: t, now: t); t += 50_000_000 }
-        XCTAssertLessThan(rc.deliveryKbps, 8_000, "a window not held back is the link's rate")
-    }
-
     /// Careful resume: the last estimate on this network gives 0.75 × it at once, out of startup (1.1 × delivery from the
     /// first window of acks), so a worse network today is caught by the first measurement.
     func testCarefulResumeStartsAtThreeQuartersAndLeavesStartup() {

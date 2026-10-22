@@ -3559,8 +3559,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard let self else { return }
             let now = Clock.nowNanos()
             self.connectTrace(now: now)
-            // Work queued but the budget spent: the controller must not read the acks that follow as the link's rate.
-            if self.tileTokens < 0, self.layers.values.contains(where: { $0.fresh != .done }) || self.refinementInFlight > 0 { self.rc?.noteBudgetLimited(now: now) }
             if self.probeAfterStage1, now >= self.probeDeadline { self.sendDeferredProbe("deadline") }
             // The window list drives layers and the client's composition; it must not depend on captures
             // (the display layer is mostly static now that the windows are not in it).
