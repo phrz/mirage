@@ -1522,7 +1522,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// its own content (minus the shadow), so it is its stage-1 still and its window-alone shot is skipped (coordinator,
     /// a'). Covered windows wait for their shots: a cut would show the other window's pixels inside their rect.
     private func cutStands(_ l: Layer) -> Bool {
-        guard compositor, warmStage1, hostTunables[.windowShotIndependent] >= 0.5, !l.isDisplay, l.id != ControlMessage.WindowInfo.overlayID,
+        guard compositor, warmStage1, hostTunables[.cutStills] >= 0.5, hostTunables[.windowShotIndependent] >= 0.5, !l.isDisplay, l.id != ControlMessage.WindowInfo.overlayID,
               l.visibleFraction >= 0.999, let d = display, d.bounds.intersection(l.frame) == l.frame else { return false }
         return fallbackCovers(of: l.id, frame: l.frame).isEmpty
     }

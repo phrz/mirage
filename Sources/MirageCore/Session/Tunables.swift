@@ -63,6 +63,9 @@ public struct Tunables: Codable, Equatable, Sendable {
         // Host only: 1 = the shadow probe's result is published (WindowInfo.shadow); 0 = logged only, every window's shadow
         // unknown (drawn as before), until the probe is verified on real windows.
         case shadowProbe
+        // Host only: 1 = a window nothing covers in the stage-1 picture takes its cut as its still (no window-alone shot);
+        // 0 = every window waits for its window-alone shot, until the cut is verified equal to it (the cut check).
+        case cutStills
 
         /// Compiled-in default and the bounds a host value is clamped to.
         public var spec: (default: Double, min: Double, max: Double) {
@@ -101,6 +104,7 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .windowShotIndependent: return (1, 0, 1)
             case .stage1Seconds: return (0.2, 0.05, 2)
             case .shadowProbe: return (0, 0, 1)
+            case .cutStills: return (0, 0, 1)
             }
         }
     }
