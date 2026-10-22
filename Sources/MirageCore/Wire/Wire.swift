@@ -313,6 +313,8 @@ public enum ControlMessage: Codable, Equatable {
         public var networkFingerprint: String?
         /// The viewer reads `TileMessage.commitSet` (stage 1 as one transaction). nil (older viewers): separate commits.
         public var stageTransaction: Bool?
+        /// The viewer applies `TileMessage.alphaMask` to video (translucent tiles may go as video). nil: older viewers.
+        public var alphaMask: Bool?
         public init(width: Int, height: Int, bitrateKbps: Int = 0, maxFPS: Int = 30, displayID: UInt32? = nil, snapNative: Bool? = nil, holdsPicture: Bool? = nil, tunablesVersion: Int? = nil,
                     explicitBitrate: Bool? = nil, throttle: NetworkThrottle? = nil, networkFingerprint: String? = nil) {
             self.width = width; self.height = height; self.bitrateKbps = bitrateKbps; self.maxFPS = maxFPS; self.displayID = displayID; self.snapNative = snapNative

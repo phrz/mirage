@@ -33,6 +33,9 @@ final class Layer {
     /// The layer's stage-1 still has gone (M-FIVE); `cutStill`: it was cut from the stream-start screenshot.
     var stillSent = false
     var cutStill = false
+    /// Alpha mask sent per tile (its hash; opaque = 1, clear = 0) for video with a mask, at `alphaSize`.
+    var alphaSent: [Int: UInt64] = [:]
+    var alphaSize = (0, 0)
     /// The first frame came from a snapshot: compared with the own capture's first frame (logged), then dropped.
     var snapshotFrame: CVPixelBuffer?
     /// Visible tiles held back (not due) at the last invariant audit.

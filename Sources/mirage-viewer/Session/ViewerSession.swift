@@ -534,6 +534,7 @@ final class ViewerSession: @unchecked Sendable {
             var req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: max(0, model.bitrateKbps), maxFPS: 30, snapNative: Self.snapNative ? true : nil, tunablesVersion: Tunables.schemaVersion,
                                                    explicitBitrate: true, throttle: model.throttle, networkFingerprint: networkFingerprint)
             req.stageTransaction = true
+            req.alphaMask = true
             if req == lastRequest { return }
             guard let sender else { pendingRequest = req; log("stream request \(width)x\(height) queued until connected"); return }
             lastRequest = req; lastRequestSent = req
@@ -880,6 +881,14 @@ final class ViewerSession: @unchecked Sendable {
             if Self.debugTiles || Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present: stage 1 committed together (layers \(ids.map(String.init).joined(separator: " ")))") }
         case .commit(let layer):
             commit(layer: layer, now: now)
+        case .alphaMask(let layer, let tiles):
+            guard let v = layerView(layer) else { break }
+            let w = v.compositor.width, h = v.compositor.height
+            v.compositor.applyAlphaMask(tiles.map { t in
+                let r = PixelRect(x: Int(t.col) * 64, y: Int(t.row) * 64, width: 64, height: 64).intersection(PixelRect(x: 0, y: 0, width: w, height: h))
+                return (r, t.kind, t.kind == .plane ? AlphaPlane.decompress(t.data, count: r.width * r.height) : nil)
+            })
+            if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(layer): alpha mask for \(tiles.count) tiles (\(v.compositor.alphaTileCount) masked)") }
         case .reset(let layer, let w, let h):
             if layer == 0 {
                 // A fresh stream at the same size keeps the pixels (review M11: the last picture stays until the

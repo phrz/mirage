@@ -1831,6 +1831,20 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         return (out, cleared)
     }
     /// Every pixel of `r` fully opaque (alpha 255; sampled every 2nd pixel and row).
+    /// A tile's alpha: fully clear, fully opaque, or its plane (row-major, the tile's width x height).
+    private func alphaTile(_ f: ShiftDetector.Frame, _ r: PixelRect) -> (TileMessage.AlphaTile.Kind, [UInt8]) {
+        let x1 = min(f.width, r.maxX), y1 = min(f.height, r.maxY)
+        guard r.x < x1, r.y < y1 else { return (.clear, []) }
+        let w = x1 - r.x, h = y1 - r.y
+        var plane = [UInt8](repeating: 0, count: w * h)
+        var all0 = true, all255 = true
+        for y in 0..<h {
+            let row = f.base.advanced(by: (r.y + y) * f.stride).assumingMemoryBound(to: UInt8.self)
+            for x in 0..<w { let a = row[(r.x + x) * 4 + 3]; plane[y * w + x] = a; if a != 0 { all0 = false }; if a != 255 { all255 = false } }
+        }
+        return all255 ? (.opaque, []) : all0 ? (.clear, []) : (.plane, plane)
+    }
+    private var statAlphaMaskBytes = 0, statAlphaMaskTiles = 0
     private func opaqueTile(_ f: ShiftDetector.Frame, _ r: PixelRect) -> Bool {
         let x1 = min(f.width, r.maxX), y1 = min(f.height, r.maxY)
         guard r.x < x1, r.y < y1 else { return false }
@@ -3262,7 +3276,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Sends a tile-stream message in order (all sends go through the tile queue). Copy-rects and resets are interactive.
     private func sendTileMessage(_ m: TileMessage, captureNanos: UInt64) {
         var layer: UInt32 = 0
-        switch m { case .tiles(let t): layer = t.header.windowID; case .copyRect(let c): layer = c.header.windowID; case .reset(let l, _, _): layer = l; case .commit(let l): layer = l; case .commitSet: layer = 0 }
+        switch m { case .tiles(let t): layer = t.header.windowID; case .copyRect(let c): layer = c.header.windowID; case .reset(let l, _, _): layer = l; case .commit(let l): layer = l; case .commitSet: layer = 0; case .alphaMask(let l, _): layer = l }
         tileQueue.async { [weak self] in self?.send(tile: m, captureNanos: captureNanos, fast: true, refinementBytes: 0, layer: layer) }
     }
     /// On tileQueue.
@@ -3276,7 +3290,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         switch m {
         case .tiles(let t): rects = t.tiles.map(\.rect)
         case .copyRect(let c): rects = [c.rect, c.rect.offset(c.dx, c.dy)]
-        case .reset, .commit, .commitSet: rects = []
+        case .reset, .commit, .commitSet, .alphaMask: rects = []
         }
         queue.async {
             self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes, block, layer, rects); self.refinementInFlight += refinementBytes; self.tileInflightBytes += d.count
@@ -3830,7 +3844,27 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // a shadow) and the transparent part of a window past the display's edge came out black (the mini player, the bench
         // after Show Desktop, mac-daddy). Those tiles go as lossless tiles (alpha kept); a window running past an edge keeps
         // video for its opaque on-display part (the crop). Until an alpha path lands (coordinator: greyscale mask).
-        if !l.isDisplay {
+        // With the mask path (tunable alphaMask, viewers that read it), translucent tiles go as video too: their alpha goes
+        // ahead as a greyscale mask, only where it changed.
+        let maskPath = !l.isDisplay && l.id != ControlMessage.WindowInfo.overlayID && hostTunables[.alphaMask] >= 0.5 && request?.alphaMask == true
+        if maskPath {
+            if l.alphaSize != (l.width, l.height) { l.alphaSent = [:]; l.alphaSize = (l.width, l.height) }
+            var changed: [TileMessage.AlphaTile] = []
+            for i in tiles {
+                let r = l.tracker.rect(of: i)
+                let (kind, plane) = alphaTile(latest, r)
+                let h: UInt64 = kind == .opaque ? 1 : kind == .clear ? 0 : AlphaPlane.hash(plane)
+                if l.alphaSent[i] == h || (l.alphaSent[i] == nil && kind == .opaque) { continue }
+                let data = kind == .plane ? (AlphaPlane.compress(plane) ?? Data()) : Data()
+                if kind == .plane, data.isEmpty { continue }
+                l.alphaSent[i] = h
+                changed.append(.init(col: UInt16(i % l.tracker.cols), row: UInt16(i / l.tracker.cols), kind: kind, data: data))
+            }
+            if !changed.isEmpty {
+                sendTileMessage(.alphaMask(layer: l.id, tiles: changed), captureNanos: now)
+                statAlphaMaskBytes += changed.reduce(0) { $0 + $1.data.count + 9 }; statAlphaMaskTiles += changed.count
+            }
+        } else if !l.isDisplay {
             let clear = tiles.filter { !opaqueTile(latest, l.tracker.rect(of: $0)) }
             if !clear.isEmpty {
                 tiles.subtract(clear)
@@ -4161,6 +4195,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             statStaleDropped = 0; statStills = 0; statOccluded = 0; statWindowCommands = 0; statTaintResent = 0; statExclusionLag = 0
             statControlBytes = 0; statFoveaTiles = 0
             statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0
+            if statAlphaMaskTiles > 0 { log("alpha mask: \(statAlphaMaskTiles) tiles, \(statAlphaMaskBytes) bytes in 5 s") }
+            statAlphaMaskTiles = 0; statAlphaMaskBytes = 0
             statTileBytes = 0; statTileRects = 0; statRefineBytes = 0; statCopyRects = 0; statDirtyTiles = 0; statDiffPruned = 0; statTileSkipped = 0
         }
         t.resume()

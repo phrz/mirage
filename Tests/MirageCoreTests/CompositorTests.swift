@@ -56,6 +56,35 @@ final class CompositorTests: XCTestCase {
         XCTAssertLessThan(pixel(px, 128, 10, 10).1, 40, "unmasked tile untouched")
     }
 
+    /// Video over a tile with an alpha mask takes the mask's alpha and keeps its colour under it (premultiplied); a tile
+    /// whose mask went back to opaque is a plain blit again.
+    func testVideoTakesTheAlphaMask() throws {
+        guard let c = Compositor() else { throw XCTSkip("no Metal device") }
+        c.configure(width: 128, height: 64)
+        var pb: CVPixelBuffer?
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary, kCVPixelBufferMetalCompatibilityKey: true]
+        XCTAssertEqual(CVPixelBufferCreate(nil, 128, 64, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attrs as CFDictionary, &pb), kCVReturnSuccess)
+        CVPixelBufferLockBaseAddress(pb!, [])
+        memset(CVPixelBufferGetBaseAddressOfPlane(pb!, 0), 235, CVPixelBufferGetBytesPerRowOfPlane(pb!, 0) * 64)
+        memset(CVPixelBufferGetBaseAddressOfPlane(pb!, 1), 128, CVPixelBufferGetBytesPerRowOfPlane(pb!, 1) * 32)
+        CVPixelBufferUnlockBaseAddress(pb!, [])
+        // Left tile: alpha 128 on its left half, 255 on its right; right tile: fully clear.
+        var plane = [UInt8](repeating: 255, count: 64 * 64)
+        for y in 0..<64 { for x in 0..<32 { plane[y * 64 + x] = 128 } }
+        c.applyAlphaMask([(PixelRect(x: 0, y: 0, width: 64, height: 64), .plane, plane), (PixelRect(x: 64, y: 0, width: 64, height: 64), .clear, nil)])
+        XCTAssertEqual(c.alphaTileCount, 2)
+        c.applyVideo(pb!, region: PixelRect(x: 0, y: 0, width: 128, height: 64), mask: nil)
+        var px = try readback(c)
+        let a = { (x: Int, y: Int) in px[(y * 128 + x) * 4 + 3] }
+        XCTAssertEqual(Int(a(10, 10)), 128, accuracy: 1); XCTAssertLessThanOrEqual(Int(pixel(px, 128, 10, 10).1), 129, "colour kept under the alpha")
+        XCTAssertEqual(a(50, 10), 255); XCTAssertGreaterThan(pixel(px, 128, 50, 10).1, 240)
+        XCTAssertEqual(a(100, 10), 0); XCTAssertEqual(pixel(px, 128, 100, 10).1, 0, "clear: nothing")
+        c.applyAlphaMask([(PixelRect(x: 64, y: 0, width: 64, height: 64), .opaque, nil)])
+        c.applyVideo(pb!, region: PixelRect(x: 0, y: 0, width: 128, height: 64), mask: nil)
+        px = try readback(c)
+        XCTAssertEqual(px[(10 * 128 + 100) * 4 + 3], 255, "opaque again: a plain blit")
+    }
+
     /// Review T6/M1: a crossfaded refinement tile reaches the canvas without any render once its fade is over.
     func testCrossfadeSettlesWithoutRendering() throws {
         guard let c = Compositor() else { throw XCTSkip("no Metal device") }

@@ -103,4 +103,16 @@ final class LayerWireTests: XCTestCase {
         let got = try p.feed(set.encode(msgSeq: 5) + TileMessage.commit(layer: 9).encode(msgSeq: 6))
         XCTAssertEqual(got.map(\.message), [set, .commit(layer: 9)])
     }
+
+    /// The alpha mask: clear and opaque flags carry no data; a soft-edged plane survives zlib exactly.
+    func testAlphaMaskRoundTrip() throws {
+        var plane = [UInt8](repeating: 255, count: 64 * 64)
+        for y in 0..<64 { for x in 0..<12 { plane[y * 64 + x] = UInt8(x * 20) } }
+        let z = try XCTUnwrap(AlphaPlane.compress(plane))
+        XCTAssertLessThan(z.count, 600, "a mostly flat mask compresses well (\(z.count) B)")
+        XCTAssertEqual(AlphaPlane.decompress(z, count: plane.count), plane)
+        let m = TileMessage.alphaMask(layer: 7, tiles: [.init(col: 0, row: 0, kind: .plane, data: z), .init(col: 1, row: 0, kind: .clear), .init(col: 2, row: 3, kind: .opaque)])
+        var p = TileStreamParser()
+        XCTAssertEqual(try p.feed(m.encode(msgSeq: 1)).map(\.message), [m])
+    }
 }

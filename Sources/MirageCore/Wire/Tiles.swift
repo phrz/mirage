@@ -64,6 +64,19 @@ public enum TileMessage: Equatable, Sendable {
     /// Separate commits could arrive apart (a loss on one held the rest a round trip), showing the desktop's fill where
     /// windows are. Only to viewers whose request said `stageTransaction`.
     case commitSet(layers: [UInt32])
+    /// A layer's alpha where it goes as video (HEVC has none): per 64-px tile of the layer, fully clear, fully opaque, or an
+    /// 8-bit greyscale plane (zlib). Sent only where it changed, ahead of the video frame; the viewer keeps the latest per
+    /// tile and applies it to every video frame written there (coordinator: single-channel greyscale, never colour; uniform
+    /// tiles a flag). Only to viewers whose request said `alphaMask`.
+    case alphaMask(layer: UInt32, tiles: [AlphaTile])
+
+    public struct AlphaTile: Equatable, Sendable {
+        public enum Kind: UInt8, Sendable { case clear = 0, opaque = 1, plane = 2 }
+        public var col: UInt16, row: UInt16, kind: Kind
+        /// For `.plane`: the tile's alpha bytes (its width x height, row-major), zlib-compressed (AlphaPlane).
+        public var data: Data
+        public init(col: UInt16, row: UInt16, kind: Kind, data: Data = Data()) { self.col = col; self.row = row; self.kind = kind; self.data = data }
+    }
 
     public struct Header: Equatable, Sendable {
         public var captureSeq: UInt32
@@ -105,7 +118,7 @@ public enum TileMessage: Equatable, Sendable {
         public init(header: Header, rect: PixelRect, dx: Int, dy: Int) { self.header = header; self.rect = rect; self.dx = dx; self.dy = dy }
     }
 
-    enum Kind: UInt8 { case tiles = 1, copyRect = 2, reset = 3, commit = 4, commitSet = 5 }
+    enum Kind: UInt8 { case tiles = 1, copyRect = 2, reset = 3, commit = 4, commitSet = 5, alphaMask = 6 }
     /// Tiles dropped because their format byte was unknown (diagnostics).
     nonisolated(unsafe) public static var skippedUnknownFormats = 0
 
@@ -138,6 +151,10 @@ public enum TileMessage: Equatable, Sendable {
         case .commitSet(let layers):
             kind = .commitSet
             body.appendBE(UInt16(layers.count)); for l in layers { body.appendBE(l) }
+        case .alphaMask(let layer, let tiles):
+            kind = .alphaMask
+            body.appendBE(layer); body.appendBE(UInt16(tiles.count))
+            for t in tiles { body.appendBE(t.col); body.appendBE(t.row); body.append(t.kind.rawValue); body.appendBE(UInt32(t.data.count)); body.append(t.data) }
         }
         var d = Data(capacity: 9 + body.count)
         d.append(kind.rawValue); d.appendBE(msgSeq); d.appendBE(UInt32(body.count))
@@ -192,6 +209,20 @@ public enum TileMessage: Equatable, Sendable {
             let n: UInt16 = r.read()
             guard r.remaining >= 4 * Int(n) else { return nil }
             return .commitSet(layers: (0..<Int(n)).map { _ in r.read() })
+        case .alphaMask:
+            guard r.remaining >= 6 else { return nil }
+            let layer: UInt32 = r.read(), n: UInt16 = r.read()
+            var tiles: [AlphaTile] = []
+            for _ in 0..<n {
+                guard r.remaining >= 9 else { return nil }
+                let col: UInt16 = r.read(), row: UInt16 = r.read()
+                guard let k = AlphaTile.Kind(rawValue: r.readByte()) else { return nil }
+                let len: UInt32 = r.read()
+                guard r.remaining >= Int(len) else { return nil }
+                tiles.append(AlphaTile(col: col, row: row, kind: k, data: body.subdata(in: r.offset..<r.offset + Int(len))))
+                r.offset += Int(len)
+            }
+            return .alphaMask(layer: layer, tiles: tiles)
         }
     }
 }

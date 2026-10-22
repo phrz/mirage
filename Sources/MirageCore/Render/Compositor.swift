@@ -17,6 +17,7 @@ public final class MetalContext {
     let blendPipeline: MTLRenderPipelineState       // texture × alpha, premultiplied over
     let shadowPipeline: MTLRenderPipelineState      // soft rounded-rect shadow
     let yuvPipeline: MTLComputePipelineState
+    let videoAlphaPipeline: MTLComputePipelineState
     let linearSampler: MTLSamplerState
     let nearestSampler: MTLSamplerState
 
@@ -45,6 +46,7 @@ public final class MetalContext {
             rp.fragmentFunction = lib.makeFunction(name: "shadowFragment")
             shadowPipeline = try device.makeRenderPipelineState(descriptor: rp)
             yuvPipeline = try device.makeComputePipelineState(function: lib.makeFunction(name: "nv12ToBGRA")!)
+            videoAlphaPipeline = try device.makeComputePipelineState(function: lib.makeFunction(name: "videoWithAlpha")!)
         } catch { FileHandle.standardError.write(Data("metal: pipeline setup failed: \(error)\n".utf8)); return nil }
         let sd = MTLSamplerDescriptor()
         sd.minFilter = .linear; sd.magFilter = .linear; sd.sAddressMode = .clampToEdge; sd.tAddressMode = .clampToEdge
@@ -121,6 +123,7 @@ public final class Compositor {
         incoming = nil
         staging = nil; stagedMask = []; commitPending = nil
         fades = []
+        alphaPlane = nil; alphaTiles = []
         clear()
     }
     /// Like `configure`, but a size change keeps the old picture at the top-left (cropped or with cleared margins) until
@@ -128,6 +131,7 @@ public final class Compositor {
     /// re-captures it.
     public func configureKeepingPixels(width: Int, height: Int) {
         guard let old = canvas, self.width > 0, width > 0, height > 0, width != self.width || height != self.height else { configure(width: width, height: height); return }
+        alphaPlane = nil; alphaTiles = []
         let ow = self.width, oh = self.height
         configure(width: width, height: height)
         guard let new = canvas, let cb = commandQueue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return }
@@ -334,6 +338,33 @@ public final class Compositor {
 
     // MARK: Video
 
+    /// The layer's alpha where it goes as video (TileMessage.alphaMask): one 8-bit plane at canvas size, and the 64-px tiles
+    /// it holds a non-opaque mask for. Video written to those tiles takes its alpha from here.
+    private var alphaPlane: MTLTexture?
+    private var alphaTiles = Set<Int>()
+    public var alphaTileCount: Int { alphaTiles.count }
+    /// Stores masks: `.opaque` drops the tile's mask, `.clear` and `.plane` set it (a plane: the tile's bytes, row-major).
+    public func applyAlphaMask(_ tiles: [(rect: PixelRect, kind: TileMessage.AlphaTile.Kind, plane: [UInt8]?)]) {
+        guard width > 0, height > 0 else { return }
+        if alphaPlane == nil {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Unorm, width: width, height: height, mipmapped: false)
+            d.usage = [.shaderRead]; d.storageMode = .shared
+            alphaPlane = device.makeTexture(descriptor: d)
+        }
+        guard let ap = alphaPlane else { return }
+        let cols = (width + 63) / 64
+        for t in tiles {
+            let r = t.rect.intersection(PixelRect(x: 0, y: 0, width: width, height: height))
+            guard !r.isEmpty else { continue }
+            let i = (r.y / 64) * cols + r.x / 64
+            if t.kind == .opaque { alphaTiles.remove(i); continue }
+            let bytes = t.kind == .clear ? [UInt8](repeating: 0, count: r.width * r.height) : (t.plane ?? [])
+            guard bytes.count == r.width * r.height else { continue }
+            bytes.withUnsafeBytes { ap.replace(region: MTLRegionMake2D(r.x, r.y, r.width, r.height), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: r.width) }
+            alphaTiles.insert(i)
+        }
+    }
+
     /// Writes the masked tiles of a decoded NV12 frame into `region` of the canvas (scaling if the
     /// frame is smaller than the region, i.e. the host is on a lower rung).
     public func applyVideo(_ image: CVImageBuffer, region: PixelRect, mask: TileMask?, tile: Int = 64, crossfade: Bool = false) {
@@ -376,19 +407,34 @@ public final class Compositor {
             upscale(rgb, to: up, commandBuffer: cb)
             source = up
         }
-        // Blit the masked tiles (or the whole region) into every target.
+        // Blit the masked tiles (or the whole region) into every target; tiles with an alpha mask go through the alpha kernel.
         guard let blit = cb.makeBlitCommandEncoder() else { return }
         let r = full.intersection(PixelRect(x: 0, y: 0, width: width, height: height))
         let grid = TileMask.grid(for: r, tile: tile)
+        let cols = (width + 63) / 64
+        var withAlpha: [PixelRect] = []
         for row in 0..<grid.rows {
             for col in 0..<grid.cols {
                 if let mask, !mask[col, row] { continue }
                 let t = PixelRect(x: r.x + col * tile, y: r.y + row * tile, width: tile, height: tile).intersection(r)
                 guard !t.isEmpty, t.maxX <= source.width, t.maxY <= source.height else { continue }
+                if tile == 64, alphaPlane != nil, alphaTiles.contains((t.y / 64) * cols + t.x / 64) { withAlpha.append(t); continue }
                 for dst in outs { copy(source, to: dst, rect: t, blit: blit) }
             }
         }
         blit.endEncoding()
+        if !withAlpha.isEmpty, let ap = alphaPlane, let ce = cb.makeComputeCommandEncoder() {
+            ce.setComputePipelineState(context.videoAlphaPipeline)
+            for dst in outs {
+                ce.setTexture(source, index: 0); ce.setTexture(ap, index: 1); ce.setTexture(dst, index: 2)
+                for t in withAlpha {
+                    var rect = SIMD4<UInt32>(UInt32(t.x), UInt32(t.y), UInt32(t.width), UInt32(t.height))
+                    ce.setBytes(&rect, length: MemoryLayout<SIMD4<UInt32>>.stride, index: 0)
+                    ce.dispatchThreadgroups(MTLSize(width: (t.width + 15) / 16, height: (t.height + 15) / 16, depth: 1), threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+                }
+            }
+            ce.endEncoding()
+        }
         cb.commit()
         bump()
     }
@@ -725,6 +771,15 @@ public final class Compositor {
         float cr = (C.y - 128.0/255.0) * (255.0/224.0);
         float3 rgb = float3(yy + 1.5748 * cr, yy - 0.1873 * cb - 0.4681 * cr, yy + 1.8556 * cb);
         out.write(float4(saturate(rgb), 1), gid);
+    }
+    // A video tile with an alpha mask: the colour (premultiplied as captured, clamped under the alpha) and the mask's alpha.
+    kernel void videoWithAlpha(texture2d<float, access::read> src [[texture(0)]], texture2d<float, access::read> alpha [[texture(1)]],
+                               texture2d<float, access::write> dst [[texture(2)]], constant uint4 &r [[buffer(0)]], uint2 gid [[thread_position_in_grid]]) {
+        if (gid.x >= r.z || gid.y >= r.w) return;
+        uint2 p = uint2(r.x, r.y) + gid;
+        float a = alpha.read(p).r;
+        float3 c = src.read(p).rgb;
+        dst.write(float4(min(c, float3(a)), a), p);
     }
     """
 }
