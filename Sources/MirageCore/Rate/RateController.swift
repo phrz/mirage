@@ -420,7 +420,10 @@ public struct RateController {
         targetKbps = min(maxKbps, max(tuning.minKbps, Int(Double(k) * 0.75)))
         inStartup = false   // the 1.1 × gain applies as soon as the first window of acks measures the link
     }
-    private var deliveryWindowNanos: UInt64 { max(1_500_000_000, UInt64(4 * srttNanos)) }
+    /// In startup, 4 round trips (at least 150 ms), so the ceiling (2 x delivery) can double several times in the first
+    /// second as BBR's does per round trip; after it, at least 1.5 s (a steadier estimate). A 1.5 s window in startup grew
+    /// the ceiling once per 1.5 s: 20 Mbps reached its rate ~3.5 s into a connect, crisp at 5.7 s against 2.
+    private var deliveryWindowNanos: UInt64 { inStartup ? max(150_000_000, UInt64(4 * srttNanos)) : max(1_500_000_000, UInt64(4 * srttNanos)) }
 
     /// The delivery-rate ceiling on the target; before any estimate, 4 x the start (the doubling startup otherwise reached
     /// the 50 Mbps cap in ~150 ms on a 20 Mbps link, before a single window of acks).

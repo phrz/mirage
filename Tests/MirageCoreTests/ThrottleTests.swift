@@ -192,6 +192,15 @@ final class ThrottleTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(targets.last ?? 0, 40_000, "and the 50 Mbps ceiling soon after (targets \(targets))")
     }
 
+    /// Startup grows the ceiling per few round trips, not per 1.5 s window: a fast link is reached within the connect's
+    /// first seconds (20 Mbps crisp waited for a ramp that doubled once per 1.5 s).
+    func testStartupReachesAFastLinkWithinSeconds() {
+        let targets = closedLoop(link: nil, seconds: 6)
+        let at = targets.firstIndex { $0 >= 16_000 }
+        XCTAssertNotNil(at, "reaches 16 Mbps (targets \(targets))")
+        XCTAssertLessThanOrEqual(at ?? 99, 3, "within 3 s (targets \(targets))")
+    }
+
     func testTheControllerSeesAThrottledLinkAsARealOne() {
         // Slow 4G: 1440 kbps down behind a 64 KB queue, 562.5 ms added. Starting at 800 and probing up, the controller must
         // settle near the link (not at the 50 Mbps ceiling, not collapsed to its floor).
