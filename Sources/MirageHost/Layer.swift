@@ -35,6 +35,8 @@ final class Layer {
     var cutStill = false
     /// Alpha mask sent per tile (its hash; opaque = 1, clear = 0) for video with a mask, at `alphaSize`.
     var alphaSent: [Int: UInt64] = [:]
+    /// The last plane sent per tile (`.plane` tiles), compared with a tolerance: captured alpha jitters by a level or so.
+    var alphaPlanes: [Int: [UInt8]] = [:]
     var alphaSize = (0, 0)
     /// The first frame came from a snapshot: compared with the own capture's first frame (logged), then dropped.
     var snapshotFrame: CVPixelBuffer?

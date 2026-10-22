@@ -111,7 +111,7 @@ final class App: NSObject, NSApplicationDelegate {
     func startTransMover(near f: NSRect) {
         let w = NSWindow(contentRect: NSRect(x: f.minX + 80, y: f.minY + 80, width: 600, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
         w.title = "Mirage Test Bench transmover"; w.isOpaque = false; w.backgroundColor = .clear; w.hasShadow = false
-        let mv = MotionView(frame: NSRect(x: 0, y: 0, width: 600, height: 400)); mv.wantsLayer = true; mv.alphaValue = 0.6
+        let mv = StripesView(frame: NSRect(x: 0, y: 0, width: 600, height: 400)); mv.wantsLayer = true; mv.alphaValue = 0.6
         w.contentView = mv
         w.orderFrontRegardless()
         Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { _ in mv.step() }
@@ -413,6 +413,33 @@ final class IconsView: NSView {
     }
 }
 /// A bouncing disc over moving stripes with a frame counter: every 30 fps tick changes most of the region.
+/// An evolving plasma over the whole view: every pixel changes every frame with no shift to detect (video, not copy-rects
+/// and exposed strips as diagonal stripes gave).
+final class StripesView: NSView {
+    var t = 0
+    func step() { t += 1; needsDisplay = true }
+    override func draw(_ dirty: NSRect) {
+        let w = 300, h = 200
+        var px = [UInt8](repeating: 255, count: w * h * 4)
+        let tt = Double(t) * 0.08
+        for y in 0..<h { for x in 0..<w {
+            let v = sin(Double(x) * 0.05 + tt) + sin(Double(y) * 0.07 - tt * 1.3) + sin(Double(x + y) * 0.03 + tt * 0.7)
+            let o = (y * w + x) * 4
+            px[o] = UInt8(127 + 127 * sin(v)); px[o + 1] = UInt8(127 + 127 * sin(v + 2)); px[o + 2] = UInt8(127 + 127 * sin(v + 4))
+        } }
+        let img = px.withUnsafeMutableBytes { CGContext(data: $0.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)?.makeImage() }
+        if let img { NSGraphicsContext.current?.cgContext.draw(img, in: bounds) }
+    }
+    func drawStripes() {
+        let n = 24
+        for i in -n..<(n * 2) {
+            let x = CGFloat(i * 40 + (t * 6) % 80)
+            NSColor(calibratedHue: CGFloat(((i + t / 3) % 12 + 12) % 12) / 12, saturation: 0.6, brightness: 0.9, alpha: 1).setFill()
+            let p = NSBezierPath(); p.move(to: NSPoint(x: x, y: 0)); p.line(to: NSPoint(x: x + 40, y: 0)); p.line(to: NSPoint(x: x + 40 + bounds.height, y: bounds.height)); p.line(to: NSPoint(x: x + bounds.height, y: bounds.height)); p.close(); p.fill()
+        }
+    }
+}
+
 final class MotionView: NSView {
     var t = 0
     var x = 100.0, y = 100.0, vx = 7.0, vy = 5.0
