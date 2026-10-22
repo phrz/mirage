@@ -3148,7 +3148,29 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Encodes copied rects on the tile queue and sends them (review L13: one body for tiles and blocks).
     /// `lossy`: every rect as lossy WebP at that quality (a scroll's exposed strip: lossy first on the stream, in order with
     /// its copy-rect; refined lossless once it settles).
+    // MARK: TRUTH (DESIGN §3.0): frameEnd after each batch of direct changes
+
+    private var transactionalOn: Bool { hostTunables[.transactional] >= 0.5 && request?.transactionalVersion != nil }
+    private var frameEndLayers = Set<UInt32>()
+    private var frameEndScheduled = false
+    /// On `queue`: a direct change (unstaged tiles, a copy-rect) went to `layer`; a frameEnd naming every such layer follows
+    /// once the current turn of the queue is done (all of its sends are on the tile queue by then, so it goes after them).
+    private func markFrameEnd(_ layer: UInt32) {
+        guard transactionalOn else { return }
+        frameEndLayers.insert(layer)
+        guard !frameEndScheduled else { return }
+        frameEndScheduled = true
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.frameEndScheduled = false
+            let layers = self.frameEndLayers.sorted(); self.frameEndLayers = []
+            guard !layers.isEmpty else { return }
+            self.sendTileMessage(.frameEnd(captureSeq: self.captureSeq, layers: layers), captureNanos: Clock.nowNanos())
+        }
+    }
+
     private func encodeAndSend(_ jobs: [(PixelRect, Data)], estimate: Int, layer: Layer, refinement: Bool, block: Int?, nanos: UInt64, photoQuality: Float = 90, staged: Bool = false, lossy: Float? = nil, correction: Bool = false) {
+        if !refinement, !staged { markFrameEnd(layer.id) }
         let hdr = header(layer: layer.id, nanos: nanos)
         if staged { layer.stagedEncoding += 1; layer.lastStagedNanos = nanos; if layer.stagedOpenSince == nil { layer.stagedOpenSince = nanos } }
         // On `queue`: this message is on the tile stream (or dropped), so a commit sent after it follows it.
@@ -3313,8 +3335,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// Sends a tile-stream message in order (all sends go through the tile queue). Copy-rects and resets are interactive.
     private func sendTileMessage(_ m: TileMessage, captureNanos: UInt64) {
+        switch m {
+        case .copyRect(let c): markFrameEnd(c.header.windowID)
+        case .tiles(let t) where !t.staged && !t.refinement: markFrameEnd(t.header.windowID)
+        default: break
+        }
         var layer: UInt32 = 0
-        switch m { case .tiles(let t): layer = t.header.windowID; case .copyRect(let c): layer = c.header.windowID; case .reset(let l, _, _): layer = l; case .commit(let l): layer = l; case .commitSet: layer = 0; case .alphaMask(let l, _): layer = l }
+        switch m { case .tiles(let t): layer = t.header.windowID; case .copyRect(let c): layer = c.header.windowID; case .reset(let l, _, _): layer = l; case .commit(let l): layer = l; case .commitSet: layer = 0; case .alphaMask(let l, _): layer = l; case .frameEnd: layer = 0 }
         tileQueue.async { [weak self] in self?.send(tile: m, captureNanos: captureNanos, fast: true, refinementBytes: 0, layer: layer) }
     }
     /// On tileQueue.
@@ -3328,7 +3355,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         switch m {
         case .tiles(let t): rects = t.tiles.map(\.rect)
         case .copyRect(let c): rects = [c.rect, c.rect.offset(c.dx, c.dy)]
-        case .reset, .commit, .commitSet, .alphaMask: rects = []
+        case .reset, .commit, .commitSet, .alphaMask, .frameEnd: rects = []
         }
         queue.async {
             self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes, block, layer, rects); self.refinementInFlight += refinementBytes; self.tileInflightBytes += d.count

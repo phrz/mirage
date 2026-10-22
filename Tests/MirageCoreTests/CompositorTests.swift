@@ -85,6 +85,29 @@ final class CompositorTests: XCTestCase {
         XCTAssertEqual(px[(10 * 128 + 100) * 4 + 3], 255, "opaque again: a plain blit")
     }
 
+    /// TRUTH: a capture's direct changes (tiles, a copy-rect) stay off the canvas until its frameEnd commits them all at
+    /// once; a plain write meanwhile shows at once and is not undone by the commit.
+    func testTransactionShowsOnlyOnCommit() throws {
+        guard let c = Compositor() else { throw XCTSkip("no Metal device") }
+        c.configure(width: 192, height: 64)
+        let red: [UInt8] = [0, 0, 255, 255], green: [UInt8] = [0, 255, 0, 255], blue: [UInt8] = [255, 0, 0, 255]
+        c.applyTiles([solid(0, 0, red), solid(64, 0, red), solid(128, 0, red)])
+        c.applyTiles([solid(0, 0, green)], transaction: true)
+        c.applyCopyRect(PixelRect(x: 0, y: 0, width: 64, height: 64), dx: 64, dy: 0, transaction: true)   // green moves to the middle
+        c.applyTiles([solid(128, 0, blue)])   // a plain write: at once
+        XCTAssertGreaterThan(c.pendingSinceNanos, 0)
+        var px = try readback(c)
+        XCTAssertEqual(pixel(px, 192, 10, 10).2, 255, "the transaction is not shown yet (left still red)")
+        XCTAssertEqual(pixel(px, 192, 70, 10).2, 255, "middle still red")
+        XCTAssertEqual(pixel(px, 192, 140, 10).0, 255, "the plain write shows at once")
+        XCTAssertGreaterThan(c.commitTransaction(), 0)
+        XCTAssertEqual(c.pendingSinceNanos, 0)
+        px = try readback(c)
+        XCTAssertEqual(pixel(px, 192, 10, 10).1, 255, "left green")
+        XCTAssertEqual(pixel(px, 192, 70, 10).1, 255, "middle green (the copy-rect)")
+        XCTAssertEqual(pixel(px, 192, 140, 10).0, 255, "the plain write is kept")
+    }
+
     /// Review T6/M1: a crossfaded refinement tile reaches the canvas without any render once its fade is over.
     func testCrossfadeSettlesWithoutRendering() throws {
         guard let c = Compositor() else { throw XCTSkip("no Metal device") }

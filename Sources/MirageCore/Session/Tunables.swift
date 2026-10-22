@@ -69,6 +69,9 @@ public struct Tunables: Codable, Equatable, Sendable {
         // Host only: 1 = translucent window tiles go as video with a greyscale alpha mask (viewers that read it); 0 = they
         // stay lossless tiles, as before, until the mask path is verified.
         case alphaMask
+        // 1 = TRUTH (DESIGN §3.0): the host ends each capture's direct changes with frameEnd and the viewer shows them only
+        // then, all at once (bounded wait: 2 srtt + 50 ms, then TRUTH TIMEOUT); 0 = changes show as they arrive.
+        case transactional
 
         /// Compiled-in default and the bounds a host value is clamped to.
         public var spec: (default: Double, min: Double, max: Double) {
@@ -109,6 +112,7 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .shadowProbe: return (0, 0, 1)
             case .cutStills: return (0, 0, 1)
             case .alphaMask: return (0, 0, 1)
+            case .transactional: return (0, 0, 1)
             }
         }
     }

@@ -83,6 +83,13 @@ public final class Compositor {
     /// Crossfade length for a whole-layer level sent as one message (DESIGN §3.3: 200–250 ms).
     public var crossfadeNanos: UInt64 = 220_000_000
     private var staging: MTLTexture?       // the next presentation level, assembled off-screen
+    /// TRUTH (DESIGN §3.0, tunable `transactional`): a capture's direct changes collect here, a mirror of the canvas, and
+    /// show together on its `frameEnd` (`commitTransaction`); every other write lands here too, so a commit never puts older
+    /// pixels back.
+    private var pending: MTLTexture?
+    private var pendingMask: [Bool] = []
+    /// When the oldest uncommitted transactional write landed (0: none): the viewer's TRUTH TIMEOUT.
+    public private(set) var pendingSinceNanos: UInt64 = 0
     private var stagedMask: [Bool] = []    // per 64-px tile: staged and not yet presented
     private var scalerSize: (Int, Int, Int, Int) = (0, 0, 0, 0)
     private let lock = NSLock()
@@ -124,6 +131,7 @@ public final class Compositor {
         staging = nil; stagedMask = []; commitPending = nil
         fades = []
         alphaPlane = nil; alphaTiles = []
+        pending = nil; pendingMask = []; pendingSinceNanos = 0
         clear()
     }
     /// Like `configure`, but a size change keeps the old picture at the top-left (cropped or with cleared margins) until
@@ -132,6 +140,7 @@ public final class Compositor {
     public func configureKeepingPixels(width: Int, height: Int) {
         guard let old = canvas, self.width > 0, width > 0, height > 0, width != self.width || height != self.height else { configure(width: width, height: height); return }
         alphaPlane = nil; alphaTiles = []
+        pending = nil; pendingMask = []; pendingSinceNanos = 0
         let ow = self.width, oh = self.height
         configure(width: width, height: height)
         guard let new = canvas, let cb = commandQueue.makeCommandBuffer(), let blit = cb.makeBlitCommandEncoder() else { return }
@@ -194,6 +203,46 @@ public final class Compositor {
     // A write that is not staged lands on the canvas, on `incoming` where a fade runs over it (so the fade shows the
     // new pixels at once and commits them), and on `staging` (so a commit never puts older pixels back).
 
+    private func ensurePending(_ cb: MTLCommandBuffer) -> MTLTexture? {
+        if let pending { return pending }
+        guard width > 0, let canvas else { return nil }
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        d.usage = [.shaderRead, .shaderWrite, .renderTarget]; d.storageMode = .private
+        guard let p = device.makeTexture(descriptor: d), let blit = cb.makeBlitCommandEncoder() else { return nil }
+        blit.copy(from: canvas, to: p)
+        lock.lock(); let running = fades; lock.unlock()
+        if let incoming { for f in running { copy(incoming, to: p, rect: f.rect, blit: blit) } }
+        blit.endEncoding()
+        pending = p
+        pendingMask = Array(repeating: false, count: tileCols * tileRows)
+        return p
+    }
+    private func markPending(_ r: PixelRect) {
+        let cols = tileCols, rows = tileRows
+        guard pendingMask.count == cols * rows, !r.isEmpty else { return }
+        let c0 = max(0, r.x / 64), c1 = min(cols - 1, (r.maxX - 1) / 64), r0 = max(0, r.y / 64), r1 = min(rows - 1, (r.maxY - 1) / 64)
+        guard c1 >= c0, r1 >= r0 else { return }
+        for y in r0...r1 { for x in c0...c1 { pendingMask[y * cols + x] = true } }
+        if pendingSinceNanos == 0 { pendingSinceNanos = Clock.nowNanos() }
+    }
+    public var pendingTiles: Int { pendingMask.filter { $0 }.count }
+    /// Shows every pending (transactional) change at once, without a fade (it is the host's next complete frame).
+    @discardableResult
+    public func commitTransaction() -> Int {
+        pendingSinceNanos = 0
+        guard let pending, let canvas, pendingMask.contains(true), let cb = commandQueue.makeCommandBuffer() else { return 0 }
+        let runs = Self.runs(pendingMask, cols: tileCols, rows: tileRows, width: width, height: height)
+        for r in runs { finishFades(intersecting: r, cb) }
+        guard let blit = cb.makeBlitCommandEncoder() else { return 0 }
+        for r in runs { copy(pending, to: canvas, rect: r, blit: blit) }
+        blit.endEncoding()
+        cb.commit()
+        let n = pendingTiles
+        pendingMask = Array(repeating: false, count: tileCols * tileRows)
+        bump()
+        return n
+    }
+
     private func ensureStaging(_ cb: MTLCommandBuffer) -> MTLTexture? {
         if let staging { return staging }
         guard width > 0, let canvas else { return nil }
@@ -225,8 +274,12 @@ public final class Compositor {
         blit.endEncoding()
     }
     /// The textures a write of `rect` lands on.
-    private func targets(_ rect: PixelRect, staged: Bool, crossfade: Bool, _ cb: MTLCommandBuffer) -> [MTLTexture] {
+    private func targets(_ rect: PixelRect, staged: Bool, crossfade: Bool, transaction: Bool = false, _ cb: MTLCommandBuffer) -> [MTLTexture] {
         guard let canvas else { return [] }
+        if transaction, !staged, let p = pending {
+            markPending(rect)
+            return [p] + (staging.map { [$0] } ?? [])
+        }
         if staged {
             guard let s = ensureStaging(cb) else { return [] }
             markStaged(rect)
@@ -239,6 +292,7 @@ public final class Compositor {
             if let incoming, fadeIntersects(rect) { out.append(incoming) }
         }
         if let staging { out.append(staging) }
+        if let pending { out.append(pending) }
         return out
     }
     private func markStaged(_ r: PixelRect) {
@@ -301,6 +355,7 @@ public final class Compositor {
         let runs = Self.runs(stagedMask, cols: tileCols, rows: tileRows, width: width, height: height)
         let n = stagedTiles
         for r in runs { copy(staging, to: inc, rect: r, blit: blit) }
+        if let pending { for r in runs { copy(staging, to: pending, rect: r, blit: blit) } }
         blit.endEncoding()
         let start = Clock.nowNanos()
         lock.lock(); for r in runs { fades.append(Fade(rect: r, startNanos: start, durationNanos: durationNanos, easeOut: commitEaseOut)) }; lock.unlock()
@@ -490,11 +545,13 @@ public final class Compositor {
     /// level only, shown on `commitStaged`; the parts of them inside `alsoShow` are written to the canvas too
     /// (the desktop where the viewer shows fill: any clean picture beats the fill). Lossless and solid tiles only.
     @discardableResult
-    public func applyTiles(_ tiles: [TileMessage.Tile], crossfade: Bool = false, staged: Bool = false, alsoShow: [PixelRect] = []) -> Int {
+    /// `transaction`: a capture's direct change under TRUTH, collected in `pending` until `commitTransaction`.
+    public func applyTiles(_ tiles: [TileMessage.Tile], crossfade: Bool = false, staged: Bool = false, alsoShow: [PixelRect] = [], transaction: Bool = false) -> Int {
         guard canvas != nil, let cb = commandQueue.makeCommandBuffer() else { return 0 }
         let bounds = PixelRect(x: 0, y: 0, width: width, height: height)
         if crossfade && !staged { for t in tiles { finishFades(intersecting: t.rect, cb) } }
         if staged, ensureStaging(cb) == nil { return 0 }   // before any encoder below is open
+        if transaction, !staged, ensurePending(cb) == nil { return 0 }
         var n = 0
         var blit: MTLBlitCommandEncoder? = nil
         var faded: [PixelRect] = []
@@ -514,7 +571,7 @@ public final class Compositor {
                 if hasAlpha { Self.clampPremultiplied(&pixels) }
                 tex.replace(region: MTLRegionMake2D(0, 0, dw, dh), mipmapLevel: 0, withBytes: pixels, bytesPerRow: dw * 4)
                 blit?.endEncoding(); blit = nil
-                for dst in targets(r, staged: staged, crossfade: crossfade, cb) { drawScaled(tex, into: dst, rect: r, commandBuffer: cb) }
+                for dst in targets(r, staged: staged, crossfade: crossfade, transaction: transaction, cb) { drawScaled(tex, into: dst, rect: r, commandBuffer: cb) }
                 if crossfade && !staged { faded.append(r) }
                 n += 1
                 continue
@@ -525,7 +582,7 @@ public final class Compositor {
             } else {
                 guard let (dw, dh) = TileCodec.size(of: t.data), dw == w, dh == h, TileCodec.decode(t.data, into: buf.contents(), width: w, height: h, stride: stride) else { continue }
             }
-            let outs = targets(r, staged: staged, crossfade: crossfade, cb)
+            let outs = targets(r, staged: staged, crossfade: crossfade, transaction: transaction, cb)
             if blit == nil { blit = cb.makeBlitCommandEncoder() }
             for dst in outs {
                 blit?.copy(from: buf, sourceOffset: 0, sourceBytesPerRow: stride, sourceBytesPerImage: stride * h, sourceSize: MTLSize(width: r.width, height: r.height, depth: 1),
@@ -617,8 +674,9 @@ public final class Compositor {
         return n
     }
 
-    public func applyCopyRect(_ rect: PixelRect, dx: Int, dy: Int) {
+    public func applyCopyRect(_ rect: PixelRect, dx: Int, dy: Int, transaction: Bool = false) {
         guard let canvas, let cb = commandQueue.makeCommandBuffer() else { return }
+        if transaction, ensurePending(cb) == nil { return }
         // A fade under the move ends now (its pixels move with the rest); the staged level moves too.
         finishFades(intersecting: rect.union(rect.offset(dx, dy)), cb)
         guard let scratch = ensureScratch() else { return }
@@ -626,7 +684,11 @@ public final class Compositor {
         let src = rect.intersection(bounds).intersection(bounds.offset(-dx, -dy))
         guard !src.isEmpty else { cb.commit(); return }
         let size = MTLSize(width: src.width, height: src.height, depth: 1)
-        for tex in [canvas] + (staging.map { [$0] } ?? []) {
+        // Under TRUTH the move collects in `pending` (the canvas gets it on the capture's frameEnd); otherwise it lands on
+        // the canvas and every mirror.
+        let texs = transaction ? [pending!] + (staging.map { [$0] } ?? []) : [canvas] + (staging.map { [$0] } ?? []) + (pending.map { [$0] } ?? [])
+        if transaction { markPending(rect.union(rect.offset(dx, dy)).intersection(bounds)) }
+        for tex in texs {
             guard let blit = cb.makeBlitCommandEncoder() else { continue }
             blit.copy(from: tex, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: src.x, y: src.y, z: 0), sourceSize: size,
                       to: scratch, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: src.x, y: src.y, z: 0))

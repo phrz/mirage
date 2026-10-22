@@ -69,6 +69,9 @@ public enum TileMessage: Equatable, Sendable {
     /// tile and applies it to every video frame written there (coordinator: single-channel greyscale, never colour; uniform
     /// tiles a flag). Only to viewers whose request said `alphaMask`.
     case alphaMask(layer: UInt32, tiles: [AlphaTile])
+    /// TRUTH (DESIGN §3.0): the direct changes the host sent since the last frameEnd, up to capture `captureSeq`, are complete
+    /// for these layers; the viewer shows them all at once. Only to viewers whose request said `transactionalVersion`.
+    case frameEnd(captureSeq: UInt32, layers: [UInt32])
 
     public struct AlphaTile: Equatable, Sendable {
         public enum Kind: UInt8, Sendable { case clear = 0, opaque = 1, plane = 2 }
@@ -118,7 +121,7 @@ public enum TileMessage: Equatable, Sendable {
         public init(header: Header, rect: PixelRect, dx: Int, dy: Int) { self.header = header; self.rect = rect; self.dx = dx; self.dy = dy }
     }
 
-    enum Kind: UInt8 { case tiles = 1, copyRect = 2, reset = 3, commit = 4, commitSet = 5, alphaMask = 6 }
+    enum Kind: UInt8 { case tiles = 1, copyRect = 2, reset = 3, commit = 4, commitSet = 5, alphaMask = 6, frameEnd = 7 }
     /// Tiles dropped because their format byte was unknown (diagnostics).
     nonisolated(unsafe) public static var skippedUnknownFormats = 0
 
@@ -151,6 +154,9 @@ public enum TileMessage: Equatable, Sendable {
         case .commitSet(let layers):
             kind = .commitSet
             body.appendBE(UInt16(layers.count)); for l in layers { body.appendBE(l) }
+        case .frameEnd(let seq, let layers):
+            kind = .frameEnd
+            body.appendBE(seq); body.appendBE(UInt16(layers.count)); for l in layers { body.appendBE(l) }
         case .alphaMask(let layer, let tiles):
             kind = .alphaMask
             body.appendBE(layer); body.appendBE(UInt16(tiles.count))
@@ -209,6 +215,11 @@ public enum TileMessage: Equatable, Sendable {
             let n: UInt16 = r.read()
             guard r.remaining >= 4 * Int(n) else { return nil }
             return .commitSet(layers: (0..<Int(n)).map { _ in r.read() })
+        case .frameEnd:
+            guard r.remaining >= 6 else { return nil }
+            let seq: UInt32 = r.read(), n: UInt16 = r.read()
+            guard r.remaining >= 4 * Int(n) else { return nil }
+            return .frameEnd(captureSeq: seq, layers: (0..<Int(n)).map { _ in r.read() })
         case .alphaMask:
             guard r.remaining >= 6 else { return nil }
             let layer: UInt32 = r.read(), n: UInt16 = r.read()

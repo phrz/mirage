@@ -115,4 +115,10 @@ final class LayerWireTests: XCTestCase {
         var p = TileStreamParser()
         XCTAssertEqual(try p.feed(m.encode(msgSeq: 1)).map(\.message), [m])
     }
+
+    func testFrameEndRoundTrip() throws {
+        let m = TileMessage.frameEnd(captureSeq: 4242, layers: [0, 13046, 4294967040])
+        var p = TileStreamParser()
+        XCTAssertEqual(try p.feed(m.encode(msgSeq: 9)).map(\.message), [m])
+    }
 }

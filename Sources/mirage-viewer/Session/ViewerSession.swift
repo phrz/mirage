@@ -504,6 +504,21 @@ final class ViewerSession: @unchecked Sendable {
         startInputTimer()
     }
 
+    /// TRUTH is on (the host's tunable): direct changes wait for their capture's frameEnd.
+    private var transactional: Bool { tunables[.transactional] >= 0.5 }
+    private(set) var truthTimeoutCount = 0
+    /// A frameEnd that never comes (lost, reordered, a host bug) must not freeze a layer: after 2 srtt + 50 ms its pending
+    /// changes show anyway, logged as TRUTH TIMEOUT (the glitch metric counts them).
+    private func truthTimeouts(now: UInt64) {
+        statsLock.lock(); let rtt = sRTT; statsLock.unlock()
+        let bound = UInt64(max(rtt > 0 ? rtt * 2 + 50 : 300, 50) * 1_000_000)
+        for v in layerViews.values where v.compositor.pendingSinceNanos > 0 && Clock.elapsed(since: v.compositor.pendingSinceNanos, now: now) > bound {
+            let held = Clock.elapsed(since: v.compositor.pendingSinceNanos, now: now) / 1_000_000
+            let n = v.compositor.commitTransaction()
+            truthTimeoutCount += 1
+            log("\(Clock.nowNanos() / 1_000_000) TRUTH TIMEOUT L\(v.id): \(n) pending tiles shown after \(held) ms without a frameEnd")
+        }
+    }
     /// The session's first picture has been presented (stage 1's commit set).
     private var firstPictureShown = false
     /// Presents a layer's staged level (a commit, alone or in stage 1's set).
@@ -539,6 +554,7 @@ final class ViewerSession: @unchecked Sendable {
                                                    explicitBitrate: true, throttle: model.throttle, networkFingerprint: networkFingerprint)
             req.stageTransaction = true
             req.alphaMask = true
+            req.transactionalVersion = 1
             if req == lastRequest { return }
             guard let sender else { pendingRequest = req; log("stream request \(width)x\(height) queued until connected"); return }
             lastRequest = req; lastRequestSent = req
@@ -829,7 +845,8 @@ final class ViewerSession: @unchecked Sendable {
             if v.id == 0 { markDesktopClean(shown.map(\.rect) + fillParts) }
             var n = 0
             if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) seq \(seq) capture \(t.header.captureSeq): shown \(shown.map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)\($0.format == .lossy ? "L" : "")" }.joined(separator: " ")) staged \(staged.map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))\(t.refinement ? " (refinement)" : "")") }
-            if !shown.isEmpty { n += v.compositor.applyTiles(shown, crossfade: t.refinement && !t.staged) }
+            // TRUTH: a capture's direct change waits for its frameEnd (refinement keeps its own crossfades and levels).
+            if !shown.isEmpty { n += v.compositor.applyTiles(shown, crossfade: t.refinement && !t.staged, transaction: transactional && !t.refinement) }
             if !staged.isEmpty { n += v.compositor.applyTiles(staged, staged: true, alsoShow: fillParts); v.stagedLossless += staged.filter { $0.format != .lossy || finalLossy }.map(\.rect) }
             if !t.staged, !shown.isEmpty {
                 let area = shown.reduce(0) { $0 + $1.rect.area }, whole = area * 10 >= max(1, v.compositor.width * v.compositor.height) * 9
@@ -869,7 +886,7 @@ final class ViewerSession: @unchecked Sendable {
             sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: t.header.captureNanos, receivedNanos: now, bytes: bytes)))
         case .copyRect(let c):
             guard let v = layerView(c.header.windowID) else { sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: c.header.captureNanos, receivedNanos: now, bytes: bytes))); return }
-            v.compositor.applyCopyRect(c.rect, dx: c.dx, dy: c.dy)
+            v.compositor.applyCopyRect(c.rect, dx: c.dx, dy: c.dy, transaction: transactional)
             if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) seq \(seq): copy \(c.rect.x),\(c.rect.y) \(c.rect.width)x\(c.rect.height) by \(c.dx),\(c.dy) capture \(c.header.captureSeq)") }
             markCapture(v, c.rect.union(c.rect.offset(c.dx, c.dy)), captureSeq: c.header.captureSeq)
             statsLock.lock(); sCopyRects += 1; statsLock.unlock()
@@ -887,6 +904,16 @@ final class ViewerSession: @unchecked Sendable {
             if Self.debugTiles || Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present: stage 1 committed together (layers \(ids.map(String.init).joined(separator: " ")))") }
         case .commit(let layer):
             commit(layer: layer, now: now)
+        case .frameEnd(let seq, let ids):
+            // TRUTH: every named layer's direct changes up to this capture, shown at once.
+            var shownTiles = 0, waited: [UInt64] = []
+            for id in ids {
+                guard let v = layerView(id) else { continue }
+                let since = v.compositor.pendingSinceNanos
+                shownTiles += v.compositor.commitTransaction()
+                if since > 0 { waited.append(Clock.elapsed(since: since, now: now) / 1_000_000) }
+            }
+            if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present: frame \(seq) layers \(ids.map(String.init).joined(separator: " ")): \(shownTiles) tiles, held \(waited.max() ?? 0) ms") }
         case .alphaMask(let layer, let tiles):
             guard let v = layerView(layer) else { break }
             let w = v.compositor.width, h = v.compositor.height
@@ -1052,6 +1079,7 @@ final class ViewerSession: @unchecked Sendable {
     func assemblerTick() {
         let now = Clock.nowNanos()
         for v in layerViews.values { v.compositor.settle(now: now) }
+        truthTimeouts(now: now)
         statsLock.lock(); let rtt = sRTT; statsLock.unlock()
         if rtt > 0 {
             assembler.timeoutNanos = UInt64(rtt * 1e6 * 2.5) + 300_000_000   // NACK round trip plus slack
