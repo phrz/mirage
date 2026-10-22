@@ -8,7 +8,7 @@
 // Pass per region: changes <= 3, no regression; the targets are checked by the caller against coherent/crisp times.
 import AppKit
 
-struct Line: Decodable { var i: Int; var ms: Int; var width: Int; var height: Int; var layers: [L] }
+struct Line: Decodable { var i: Int; var ms: Int; var width: Int; var height: Int; var layers: [L]; var clock: Int? }
 struct L: Decodable { var id: UInt32; var x: Int; var y: Int; var w: Int; var h: Int }
 
 let dir = URL(fileURLWithPath: CommandLine.arguments[1])
@@ -26,7 +26,7 @@ func load(_ i: Int) -> [UInt8]? {
     return ok ? px : nil
 }
 let W = last.width, H = last.height
-struct Region { var name: String; var mask: [Bool] }
+struct Region { var name: String; var mask: [Bool]; var id: UInt32 = 0 }
 var regions: [Region] = []
 var covered = [Bool](repeating: false, count: W * H)
 // The overlay layer spans the whole frame (clear except the menu bar, the Dock and menus, which are in the bands left out
@@ -34,7 +34,7 @@ var covered = [Bool](repeating: false, count: W * H)
 for l in last.layers where !(l.x <= 0 && l.y <= 0 && l.w >= W && l.h >= H) {
     var m = [Bool](repeating: false, count: W * H)
     for y in max(0, l.y)..<min(H, l.y + l.h) { for x in max(0, l.x)..<min(W, l.x + l.w) { m[y * W + x] = true; covered[y * W + x] = true } }
-    if m.contains(true) { regions.append(Region(name: "layer \(l.id) \(l.x * 4),\(l.y * 4) \(l.w * 4)x\(l.h * 4)", mask: m)) }
+    if m.contains(true) { regions.append(Region(name: "layer \(l.id) \(l.x * 4),\(l.y * 4) \(l.w * 4)x\(l.h * 4)", mask: m, id: l.id)) }
 }
 regions.insert(Region(name: "desktop", mask: covered.map { !$0 }), at: 0)
 // The menu bar and the Dock (the overlay's chrome, live: clocks, animated icons) are no window's and no desktop's: left out.
@@ -63,13 +63,33 @@ func blockMad(_ a: [UInt8], _ b: [UInt8], _ m: [Bool]) -> Double {
     } }
     return n > 0 ? s / Double(n) : 0
 }
-struct R { var coherent: Int?; var crisp: Int?; var changes = 0; var inChange = false; var bestToFinal = Double.infinity; var regress = false }
+struct R { var coherent: Int?; var crisp: Int?; var changes = 0; var inChange = false; var bestToFinal = Double.infinity; var regress = false; var content = 0 }
+// Content vs quality steps (M-FIVE: a live window's own changes are not flicker). The viewer's log (MIRAGE_DEBUG_PRESENT, the
+// run's viewer.log next to the frames directory) says per layer what it presented: "shown <rects>" outside a refinement and
+// video frames are content; refinement tiles and level commits are quality steps. A change is content when its layer
+// presented content between the frame before it and the frame of the change.
+var contentAt: [UInt32: [Int]] = [:], firstCommit: [UInt32: Int] = [:]
+let logURL = dir.deletingLastPathComponent().appendingPathComponent(dir.lastPathComponent.replacingOccurrences(of: "-frames", with: "")).appendingPathComponent("viewer.log")
+if let text = try? String(contentsOf: logURL, encoding: .utf8) {
+    for line in text.split(separator: "\n") {
+        let parts = line.split(separator: " ", maxSplits: 3)
+        guard parts.count >= 4, parts[1] == "present", parts[2].hasPrefix("L"), let clock = Int(parts[0]), let id = UInt32(parts[2].dropFirst().prefix(while: { $0.isNumber })) else { continue }
+        let rest = parts[3]
+        let shownContent = rest.range(of: #"shown [0-9]"#, options: .regularExpression) != nil && !rest.contains("(refinement)")
+        if rest.hasPrefix("level committed"), firstCommit[id] == nil { firstCommit[id] = clock }
+        if shownContent || rest.hasPrefix("video") { contentAt[id, default: []].append(clock) }
+    }
+    // Before a layer's first committed level, what it shows is its first picture (placeholder, still): quality steps.
+    for (id, cs) in contentAt { contentAt[id] = cs.filter { c in firstCommit[id].map { c > $0 } ?? false } }
+}
+func presentedContent(_ id: UInt32, from a: Int, to b: Int) -> Bool { contentAt[id]?.contains { $0 > a && $0 <= b } ?? false }
 // The first picture: the first frame where anything is drawn (the desktop region no longer the empty canvas), so times can
 // be read from it as well as from the recorder's start (which includes connecting and signing in).
 var firstPictureMs: Int? = nil
 let verbose = ProcessInfo.processInfo.environment["CONNECTCHECK_VERBOSE"] != nil
 var res = [R](repeating: R(), count: regions.count)
 var prev: [UInt8]? = nil
+var prevClock = 0
 for line in lines {
     guard let f = load(line.i) else { continue }
     if firstPictureMs == nil, blockMad(f, final, regions[0].mask) < 40 { firstPictureMs = line.ms }
@@ -82,18 +102,20 @@ for line in lines {
         res[k].bestToFinal = min(res[k].bestToFinal, toFinal)
         if let p = prev, res[k].crisp == nil || res[k].crisp == line.ms {
             let moving = mad(f, p, r.mask) > 2
-            if moving, !res[k].inChange { res[k].changes += 1; if verbose { print(String(format: "  %@: change %d at %.1f s (%.1f levels; %.1f from the final)", reg.name, res[k].changes, Double(line.ms) / 1000, mad(f, p, r.mask), toFinal)) } }
+            let isContent = moving && !res[k].inChange && presentedContent(reg.id, from: prevClock, to: line.clock ?? 0)
+            if isContent { res[k].content += 1; if verbose { print(String(format: "  %@: content change at %.1f s", reg.name, Double(line.ms) / 1000)) } }
+            if moving, !res[k].inChange, !isContent { res[k].changes += 1; if verbose { print(String(format: "  %@: change %d at %.1f s (%.1f levels; %.1f from the final)", reg.name, res[k].changes, Double(line.ms) / 1000, mad(f, p, r.mask), toFinal)) } }
             res[k].inChange = moving
         }
     }
-    prev = f
+    prev = f; prevClock = line.clock ?? 0
 }
 var pass = true
 func t(_ ms: Int?) -> String { ms.map { String(format: "%.1f s", Double($0) / 1000) } ?? "never" }
 for (k, reg) in regions.enumerated() { let r = res[k]
     let ok = r.changes <= 3 && !r.regress && r.crisp != nil
     if !ok { pass = false }
-    print("\(reg.name): coherent \(t(res[k].coherent)), crisp \(t(res[k].crisp)), changes \(res[k].changes)\(res[k].regress ? ", REGRESSED" : "") \(ok ? "ok" : "FAIL")")
+    print("\(reg.name): coherent \(t(res[k].coherent)), crisp \(t(res[k].crisp)), changes \(res[k].changes)\(res[k].content > 0 ? " (+\(res[k].content) content)" : "")\(res[k].regress ? ", REGRESSED" : "") \(ok ? "ok" : "FAIL")")
 }
 // The overall times leave out regions under 1 % of the frame (a window almost entirely covered), still listed above.
 let big = regions.indices.filter { k in regions[k].mask.filter { $0 }.count * 100 >= W * H }
