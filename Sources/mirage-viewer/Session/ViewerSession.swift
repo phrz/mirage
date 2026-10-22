@@ -1118,7 +1118,7 @@ final class ViewerSession: @unchecked Sendable {
                         else { written.append(tr) }
                     } }
                     compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive))
-                    if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) video \(frame.seq)\(frame.flags.contains(.keyframe) ? " key" : "")\(frame.flags.contains(.progressive) ? " progressive" : "") region \(region) tiles \(written.count)") }
+                    if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) video \(frame.seq) capture \(frame.captureSeq)\(frame.flags.contains(.keyframe) ? " key" : "")\(frame.flags.contains(.progressive) ? " progressive" : "") region \(region) tiles \(written.count)") }
                     if frame.flags.contains(.keyframe), region.area * 10 >= compositor.width * compositor.height * 9 { v.step(frame.flags.contains(.progressive) ? "fade" : "key", now: now) }
                     if v.id == 0 { markDesktopClean(written) }
                     v.receivedBytes += frame.bytes; v.videoFrames += 1
@@ -1455,7 +1455,8 @@ final class ViewerSession: @unchecked Sendable {
     }
 
     private func hostWindowList(_ list: ControlMessage.WindowList, now: UInt64) {
-        if Self.debugPresent, let ch = list.changed, !ch.isEmpty { log(String(format: "%.3f window list in: ", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 60)) + ch.map { "\($0.id) \($0.frame.x),\($0.frame.y)" }.joined(separator: " | ")) }
+        // (The present clock and the list's capture too: the glitch metric joins a moved window with the desktop it uncovered.)
+        if Self.debugPresent, let ch = list.changed, !ch.isEmpty { log(String(format: "%.3f window list in: ", Date().timeIntervalSince1970.truncatingRemainder(dividingBy: 60)) + "[\(Clock.nowNanos() / 1_000_000) capture \(list.captureSeq)] " + ch.map { "\($0.id) \($0.frame.x),\($0.frame.y)" }.joined(separator: " | ")) }
         predictorLock.lock()
         let before = hostFrames
         windows = list.apply(to: windows)

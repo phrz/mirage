@@ -109,6 +109,7 @@ public struct RateController {
     private var underSince: UInt64 = 0
     private var lastProbeNanos: UInt64 = 0
     private var srttNanos: Double = 250_000_000
+    private var srttSeeded = false
     private var belowSince: UInt64 = 0, aboveSince: UInt64 = 0
     private var lastRungChange: UInt64 = 0
     /// Achieved vs wanted video frame rate while motion is active (review §2.2: density alone never
@@ -156,7 +157,7 @@ public struct RateController {
             // srtt only: the minimum RTT (the tier's input) comes from the delay probes. A video frame's RTT is measured
             // from its pacer's estimated end, which under heavy pacing reads low; one such sample took the minimum under
             // 100 ms and the tier to Normal at srtt 949 ms and 8 % loss (phrz's session, 22:47:45Z).
-            srttNanos = srttNanos * 0.8 + rtt * 0.2
+            srttNanos = srttSeeded ? srttNanos * 0.8 + rtt * 0.2 : rtt; srttSeeded = true
         }
         // One-way delay proxy (receiver clock − host clock); its minimum is the base, the rest is queue. Weighted by the bytes
         // the frame carried (full weight at 16 KB): a trickle of tiny frames (an animated icon) barely moves the estimate.
@@ -207,7 +208,9 @@ public struct RateController {
         // host's QUIC send path behind refinement blocks, so its one-way delay read 91–98 ms of our own
         // buffering on an idle link and no baseline could tell). Path delay comes from video acks alone.
         let rtt = Double(now &- sentNanos)
-        srttNanos = srttNanos * 0.8 + rtt * 0.2
+        // The first real sample replaces the 250 ms default outright: averaged in at 20 % per probe (one a second), srtt
+        // stayed near the default for the connect, and startup's delivery window (4 srtt) stayed ~1 s on a 30 ms link.
+        srttNanos = srttSeeded ? srttNanos * 0.8 + rtt * 0.2 : rtt; srttSeeded = true
         probeRTT = probeRTT.isNaN ? rtt : probeRTT * 0.5 + rtt * 0.5; lastProbeSampleNanos = now
         if minRTTWindowStart == 0 { minRTTWindowStart = now }
         minRTTCandidate = min(minRTTCandidate, rtt); minRTTNanos = min(minRTTNanos, rtt)
