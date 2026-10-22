@@ -1504,9 +1504,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         } }
         return String(format: "%d of %d cells over 8 levels", hot, total) + (hot > 0 ? " in \(box.x),\(box.y) \(box.width)x\(box.height)" : "") + String(format: ", worst %.1f at %d,%d (window %dx%d)", worst, worstAt.0, worstAt.1, w, h)
     }
-    /// The overlay frame with `rects` cleared to transparent (a copy from a small pool): see `captured`.
+    /// The overlay frame with its opaque pure-black pixels inside `rects` cleared to transparent, never inside `keep` (the menu
+    /// bar's and the Dock bar's rects): a copy from a small pool, see `captured`. Only the black is the Dock's failed copy of a
+    /// pushed window's edge; anything else there (a menu, a tooltip, a magnified icon) stays.
     private var overlayPool: CVPixelBufferPool?, overlayPoolSize = (0, 0)
-    private func overlayCleared(_ pb: CVPixelBuffer, rects: [PixelRect]) -> CVPixelBuffer? {
+    private func overlayCleared(_ pb: CVPixelBuffer, rects: [PixelRect], keep: [PixelRect]) -> CVPixelBuffer? {
         let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
         if overlayPool == nil || overlayPoolSize != (w, h) {
             let attrs: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey: w, kCVPixelBufferHeightKey: h, kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
@@ -1527,7 +1529,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         for r in rects {
             let x0 = max(0, r.x), x1 = min(w, r.maxX), y0 = max(0, r.y), y1 = min(h, r.maxY)
             guard x1 > x0, y1 > y0 else { continue }
-            for y in y0..<y1 { memset(dst.advanced(by: y * ds + x0 * 4), 0, (x1 - x0) * 4) }
+            for y in y0..<y1 {
+                let row = dst.advanced(by: y * ds).assumingMemoryBound(to: UInt8.self)
+                for x in x0..<x1 where !keep.contains(where: { $0.contains(x, y) }) {
+                    let o = x * 4
+                    if row[o + 3] >= 250, row[o] <= 6, row[o + 1] <= 6, row[o + 2] <= 6 { row[o] = 0; row[o + 1] = 0; row[o + 2] = 0; row[o + 3] = 0 }
+                }
+            }
         }
         return out
     }
@@ -1679,7 +1687,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let pushed = layers.values.filter { !$0.isDisplay && $0.id != layerID && !$0.offDisplayTiles.isEmpty }
                 .map { ($0.frame, $0.frame.intersection(d.bounds)) }
                 .filter { !$0.1.isEmpty && $0.1.area * 100 < $0.0.area * 15 }.map(\.1)
-            if !pushed.isEmpty, let copy = overlayCleared(pbIn, rects: pushed) { pb = copy }
+            if !pushed.isEmpty, let copy = overlayCleared(pbIn, rects: pushed, keep: loggedChrome ?? []) { pb = copy }
         }
         captureSeq &+= 1
         let now = Clock.nowNanos()
@@ -3580,6 +3588,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let now = Clock.nowNanos()
             self.connectTrace(now: now)
             if self.probeAfterStage1, now >= self.probeDeadline { self.sendDeferredProbe("deadline") }
+            // Work queued but the budget spent: the controller must not read the acks that follow as the link's rate.
+            if self.tileTokens < 0, self.layers.values.contains(where: { $0.fresh != .done }) || self.refinementInFlight > 0 { self.rc?.noteBudgetLimited(now: now) }
             // The window list drives layers and the client's composition; it must not depend on captures
             // (the display layer is mostly static now that the windows are not in it).
             if let w = self.windows?.sample(captureSeq: self.captureSeq, now: now) {

@@ -455,6 +455,10 @@ public struct RateController {
     /// The host had budget and room in flight but nothing to send (no backlog, no changes): acks soon after say what the
     /// host sent, not what the link can carry.
     public mutating func noteIdle(now: UInt64) { lastIdleNanos = now }
+    /// The host had work queued but its own budget (the target's tokens) held it back: acks soon after say what the target
+    /// allowed, not what the link carries.
+    public mutating func noteBudgetLimited(now: UInt64) { lastBudgetLimitedNanos = now }
+    private var lastBudgetLimitedNanos: UInt64 = 0
 
     /// The connect-time probe (DESIGN M-FIVE): a packet train's delivery rate. The target starts at 0.7 × it (under the cap)
     /// instead of 800 kbps and a climb, and the delivery estimate starts there, so the first picture is sized for the link.
@@ -519,8 +523,14 @@ public struct RateController {
         // App-limited: the host ran out of things to send during the window these acks answer (shifted by an RTT). Held
         // back by the in-flight cap is not app-limited: that is the link's rate.
         let appLimited = lastIdleNanos > 0 && now &- lastIdleNanos < w + UInt64(srttNanos)
+        // Held back by its own budget (tokens spent, work queued) counts as app-limited too: on 20 Mbps the fresh picture's
+        // block estimates put the budget 426 KB in debt, sending stopped for 0.6 s, and that window's 1.5 Mbps replaced the
+        // probe's 8 Mbps (ceiling 2.9 Mbps for 2 s). Not when the path says otherwise: a rising round trip (> 25 % over the
+        // minimum) or loss caps the estimate whatever held the host back. Not an idle round for startup.
+        let pathStressed = (!probeRTT.isNaN && minRTTNanos.isFinite && probeRTT > minRTTNanos * 1.25) || lossPercent > 1
+        let budgetLimited = !pathStressed && lastBudgetLimitedNanos > 0 && now &- lastBudgetLimitedNanos < w + UInt64(srttNanos)
         deliverySamples.removeAll { now &- $0.nanos > 10_000_000_000 }
-        if !appLimited || kbps > Double(deliveryKbps) { deliverySamples.append((now, kbps)) }
+        if !(appLimited || budgetLimited) || kbps > Double(deliveryKbps) { deliverySamples.append((now, kbps)) }
         // The windowed max (in startup) or the 75th percentile (after): after a retransmission the ordered stream lands in a
         // clump, also by receive time, and the max read 1.25 × a lossy 650 kbps link (Japan bus); the median lagged a ramp so
         // far that startup ended at a fifth of Fast 4G.

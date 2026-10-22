@@ -167,6 +167,31 @@ final class DeliveryRateTests: XCTestCase {
         XCTAssertEqual(fast.deliveryKbps, 0); XCTAssertEqual(fast.measuredPeakKbps, 0)
     }
 
+    /// A window the host's own budget held back cannot lower the estimate (the probe's seed stands until a window that was not
+    /// held back says otherwise); a window not held back lowers it.
+    func testABudgetLimitedWindowDoesNotLowerTheEstimate() {
+        var rc = RateController(initialKbps: 2_000, maxKbps: 50_000, nativePixels: 3200 * 1800)
+        rc.seedFromProbe(kbps: 8_000)
+        var t: UInt64 = 1_000_000_000
+        for _ in 0..<40 { rc.noteBudgetLimited(now: t); rc.streamAcked(bytes: 9_400, receivedNanos: t, now: t); t += 50_000_000 }
+        XCTAssertEqual(rc.deliveryKbps, 8_000, "the held-back window did not replace the seed")
+        t += 5_000_000_000
+        for _ in 0..<60 { rc.streamAcked(bytes: 9_400, receivedNanos: t, now: t); t += 50_000_000 }
+        XCTAssertLessThan(rc.deliveryKbps, 8_000, "a window not held back is the link's rate")
+    }
+
+    /// But a rising round trip caps it whatever held the host back: the path is saying the rate is too high.
+    func testABudgetLimitedWindowStillLowersTheEstimateWhenTheRoundTripRises() {
+        var rc = RateController(initialKbps: 2_000, maxKbps: 50_000, nativePixels: 3200 * 1800)
+        rc.seedFromProbe(kbps: 8_000)
+        var t: UInt64 = 1_000_000_000
+        rc.probeSample(sentNanos: t, receivedNanos: t + 25_000_000, now: t + 50_000_000)        // 50 ms minimum
+        t += 100_000_000
+        for _ in 0..<6 { rc.probeSample(sentNanos: t, receivedNanos: t + 60_000_000, now: t + 120_000_000); t += 50_000_000 }   // 120 ms
+        for _ in 0..<40 { rc.noteBudgetLimited(now: t); rc.streamAcked(bytes: 9_400, receivedNanos: t, now: t); t += 50_000_000 }
+        XCTAssertLessThan(rc.deliveryKbps, 8_000, "a stressed path's window is the link's rate")
+    }
+
     /// Careful resume: the last estimate on this network gives 0.75 × it at once, out of startup (1.1 × delivery from the
     /// first window of acks), so a worse network today is caught by the first measurement.
     func testCarefulResumeStartsAtThreeQuartersAndLeavesStartup() {
