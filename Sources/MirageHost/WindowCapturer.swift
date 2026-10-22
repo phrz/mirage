@@ -59,8 +59,19 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private var pool: CVPixelBufferPool?
     private var poolSize = (0, 0)
     /// Captured pixel size: native when the layer's scale differs from it, else the layer size.
+    /// The part of the window on its display. ScreenCaptureKit clips a source rect to the display: a window partly off it (the
+    /// Music mini player 16 pt off the left edge; every window Show Desktop pushes aside) came back as its visible part placed
+    /// at the frame's origin, sent as the whole window: shifted content and black tiles on the viewer (mac-daddy, 2026-10-22).
+    /// Such a window is captured as its visible part and placed at its offset in a transparent full-size frame.
+    private var visibleRect: CGRect { pointFrame.intersection(display.frame) }
+    private var clipped: Bool { warm?.independent != true && !display.frame.contains(pointFrame) && !visibleRect.isNull && visibleRect.width >= 4 && visibleRect.height >= 4 }
+    /// The whole window at the display's native scale (the padded frame of a clipped capture).
+    private var fullNativeSize: (Int, Int) {
+        (max(2, Int((pointFrame.width * nativeScale).rounded())) & ~1, max(2, Int((pointFrame.height * nativeScale).rounded())) & ~1)
+    }
     private var captureSize: (Int, Int) {
         if warm != nil { return (width, height) }   // the warm pool's low-cost size, captured as is
+        if clipped { let v = visibleRect; return (max(2, Int((v.width * nativeScale).rounded())), max(2, Int((v.height * nativeScale).rounded()))) }
         let nw = Int((pointFrame.width * nativeScale).rounded()), nh = Int((pointFrame.height * nativeScale).rounded())
         if abs(nw - width) <= 2 && abs(nh - height) <= 2 { return (width, height) }
         return (max(2, nw) & ~1, max(2, nh) & ~1)
@@ -78,7 +89,7 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         let c = SCStreamConfiguration()
         let size = captureSize
         c.width = size.0; c.height = size.1
-        c.sourceRect = pointFrame.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
+        c.sourceRect = (clipped ? visibleRect : pointFrame).offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
         // The window-alone filter's content is the window itself: its source rect is window-local (the display offset
         // shifted the picture up and left by the window's position, mac-daddy 02:13Z).
         if warm?.independent == true { c.sourceRect = CGRect(origin: .zero, size: pointFrame.size) }
@@ -114,7 +125,11 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         let (f, cfg): (SCContentFilter, SCStreamConfiguration) = queue.sync {
             for w in others where w.windowID != windowID { excluded[w.windowID] = w }
             let cfg = configuration()
-            if independent { cfg.sourceRect = CGRect(origin: .zero, size: pointFrame.size) }   // window-local (see configuration())
+            if independent {
+                // Window-local, and the whole window (the window-alone filter is not clipped to the display).
+                cfg.sourceRect = CGRect(origin: .zero, size: pointFrame.size)
+                if clipped { let f = fullNativeSize; cfg.width = f.0; cfg.height = f.1 }
+            }
             return (independent ? SCContentFilter(desktopIndependentWindow: window) : filter(), cfg)
         }
         let t0 = Clock.nowNanos()
@@ -209,10 +224,13 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         guard CVPixelBufferGetWidth(pb) == size.0, CVPixelBufferGetHeight(pb) == size.1 else { droppedMoved += 1; return }
         let sr = (info[.screenRect] as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0) }
         if Self.debug { hostLog("capture \(windowID): frame screenRect \(sr.map { "\($0)" } ?? "none") following \(pointFrame) dirty \(((info[.dirtyRects] as? [Any]) ?? []).compactMap { ($0 as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0) } })") }
-        if display.frame.contains(pointFrame), let d = info[.screenRect] as? NSDictionary, let r = CGRect(dictionaryRepresentation: d) {
-            guard abs(r.minX - pointFrame.minX) < 0.5, abs(r.minY - pointFrame.minY) < 0.5, abs(r.width - pointFrame.width) < 0.5, abs(r.height - pointFrame.height) < 0.5 else { droppedMoved += 1; needFull = true; return }
+        let isClipped = clipped
+        if display.frame.contains(pointFrame) || isClipped, let d = info[.screenRect] as? NSDictionary, let r = CGRect(dictionaryRepresentation: d) {
+            let want = isClipped ? visibleRect : pointFrame
+            guard abs(r.minX - want.minX) < 0.5, abs(r.minY - want.minY) < 0.5, abs(r.width - want.width) < 0.5, abs(r.height - want.height) < 0.5 else { droppedMoved += 1; needFull = true; return }
         }
-        guard edgesHold(pb) else { droppedEdge += 1; needFull = true; return }
+        // (A clipped capture's edge toward the display's edge is the cut, not the window's border.)
+        guard isClipped || edgesHold(pb) else { droppedEdge += 1; needFull = true; return }
         // Unchanged since the last frame passed on (a display stream reports what it redrew).
         if !needFull, let rects = info[.dirtyRects] as? [Any], rects.isEmpty || rects.allSatisfy({ ($0 as? NSDictionary).flatMap { CGRect(dictionaryRepresentation: $0) }.map { $0.isEmpty } ?? false }) {
             skippedUnchanged += 1; return
@@ -220,8 +238,42 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         needFull = false
         frames += 1
         if adoptedNanos > 0 { hostLog("capture \(windowID): first frame \(Clock.elapsed(since: adoptedNanos, now: Clock.nowNanos()) / 1_000_000) ms after adoption"); adoptedNanos = 0 }
-        if size.0 == width && size.1 == height { onFrame?(pb, Clock.nowNanos()) }
-        else if let out = scaled(pb) { onFrame?(out, Clock.nowNanos()) }
+        var frame = pb
+        if isClipped { guard let p = padded(pb) else { return }; frame = p }
+        let fsize = (CVPixelBufferGetWidth(frame), CVPixelBufferGetHeight(frame))
+        if fsize.0 == width && fsize.1 == height { onFrame?(frame, Clock.nowNanos()) }
+        else if let out = scaled(frame) { onFrame?(out, Clock.nowNanos()) }
+    }
+
+    /// A clipped capture (the window's visible part) placed at its offset in a transparent frame of the whole window at native
+    /// scale; the part off the display stays transparent (its tiles are left out by the streamer, DesktopStreamer offDisplayTiles).
+    private var padPool: CVPixelBufferPool?
+    private var padPoolSize = (0, 0)
+    private func padded(_ pb: CVPixelBuffer) -> CVPixelBuffer? {
+        let full = fullNativeSize
+        if padPool == nil || padPoolSize != full {
+            let attrs: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey: full.0, kCVPixelBufferHeightKey: full.1,
+                                          kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+            var p: CVPixelBufferPool?
+            CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey: 4] as CFDictionary, attrs as CFDictionary, &p)
+            padPool = p; padPoolSize = full
+        }
+        guard let padPool else { return nil }
+        var out: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(nil, padPool, &out) == kCVReturnSuccess, let out else { return nil }
+        CVPixelBufferLockBaseAddress(pb, .readOnly); CVPixelBufferLockBaseAddress(out, [])
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly); CVPixelBufferUnlockBaseAddress(out, []) }
+        guard let src = CVPixelBufferGetBaseAddress(pb), let dst = CVPixelBufferGetBaseAddress(out) else { return nil }
+        let ss = CVPixelBufferGetBytesPerRow(pb), ds = CVPixelBufferGetBytesPerRow(out)
+        let sw = CVPixelBufferGetWidth(pb), sh = CVPixelBufferGetHeight(pb)
+        memset(dst, 0, ds * full.1)
+        let v = visibleRect
+        let ox = max(0, min(full.0 - 1, Int(((v.minX - pointFrame.minX) * nativeScale).rounded())))
+        let oy = max(0, min(full.1 - 1, Int(((v.minY - pointFrame.minY) * nativeScale).rounded())))
+        let cw = min(sw, full.0 - ox), ch = min(sh, full.1 - oy)
+        guard cw > 0, ch > 0 else { return out }
+        for y in 0..<ch { memcpy(dst.advanced(by: (oy + y) * ds + ox * 4), src.advanced(by: y * ss), cw * 4) }
+        return out
     }
 
     /// The native-scale capture at the layer's pixel size (alpha kept), from a small pool.
