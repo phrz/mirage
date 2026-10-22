@@ -2425,10 +2425,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         stage1Cuts = [:]
         stage1Active = false
         sendDeferredProbe("stage 1 presented")
-        for id in stage1Staged.sorted() {
-            sendTileMessage(.commit(layer: id), captureNanos: now)
-            layers[id]?.exposed = true
-        }
+        // One write for all the commits: sent one by one, a loss on one (a retransmit, a round trip) held every later commit
+        // on the in-order stream, and the windows after it came in 460 ms after the desktop on Japan bus (an extra step).
+        let ids = stage1Staged.sorted()
+        for id in ids { layers[id]?.exposed = true }
+        tileQueue.async { [weak self] in self?.send(commits: ids, captureNanos: now) }
         log("stage 1: \(stage1Staged.count) stills presented together\(waiting.isEmpty ? "" : " (\(waiting.count) layers not ready by 0.7 s: they follow on their own)")")
         stage1Staged = []
         publishWindows(now: now, full: false)
@@ -3099,6 +3100,22 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes, block, layer, rects); self.refinementInFlight += refinementBytes; self.tileInflightBytes += d.count
             if let block { self.pacer.sent(id: block, msgSeq: seq, bytes: d.count, now: Clock.nowNanos()) }
             if refinementBytes == 0 { self.secInteractiveBytes += d.count }
+        }
+    }
+
+    /// On tileQueue: commits for several layers in one write (they arrive together or not at all).
+    private func send(commits ids: [UInt32], captureNanos: UInt64) {
+        guard let out = output, !ids.isEmpty else { return }
+        var data = Data(), sent: [(UInt32, Int, UInt32)] = []
+        for id in ids {
+            tileMsgSeq &+= 1
+            let d = TileMessage.commit(layer: id).encode(msgSeq: tileMsgSeq)
+            data.append(d); sent.append((tileMsgSeq, d.count, id))
+        }
+        out.sendTiles(data, fast: true)
+        queue.async {
+            let t = Clock.nowNanos()
+            for (seq, n, id) in sent { self.tileSent[seq] = (t, n, 0, nil, id, []); self.tileInflightBytes += n; self.secInteractiveBytes += n }
         }
     }
 
