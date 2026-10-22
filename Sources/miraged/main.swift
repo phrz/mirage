@@ -38,11 +38,17 @@ struct Serve: AsyncParsableCommand {
         let ctx = HostContext(identity: identity, store: store, tlsFingerprint: tls.fingerprint, log: { log($0) },
                               makeStreamer: { MacDesktopStreamer(log: { log($0) }) })
         let host = try QUICHost(port: port, tls: tls)
-        WarmPool.shared.start(log: { log($0) })   // warm host (M-FIVE): visible windows' captures running before anyone connects
         log("mirage host \(identity.name) id=\(identity.id.prefix(12)) tls=\(tls.fingerprint.prefix(6).map { String(format: "%02x", $0) }.joined()) devices=\(try store.authorizedDevices().count)")
         // TCC: prompting registers this binary in System Settings → Privacy & Security so it can be ticked once.
         // MIRAGE_NO_PERMISSION_PROMPTS: check only (test runs on a Mac whose grants belong to another binary).
         let prompts = ProcessInfo.processInfo.environment["MIRAGE_NO_PERMISSION_PROMPTS"] == nil
+        // A test host (no permission prompts of its own) does not start while a system prompt is on screen: it may be this
+        // binary's own consent prompt, which is a person's to answer, and it changes every picture measured.
+        if !prompts, !WarmPool.systemPromptWindows().isEmpty {
+            log("not starting: system prompt windows on screen \(WarmPool.systemPromptWindows()) (UserNotificationCenter); a person must answer them")
+            throw ExitCode(3)
+        }
+        WarmPool.shared.start(log: { log($0) })   // warm host (M-FIVE): a display snapshot kept while nobody is connected
         let screen = HostPermissions.screenRecordingGranted() || (prompts && HostPermissions.requestScreenRecording())
         let ax = HostPermissions.accessibilityGranted(prompt: prompts)
         log("permissions: screen recording \(screen ? "granted" : "MISSING (System Settings → Privacy & Security → Screen & System Audio Recording → enable miraged)")"

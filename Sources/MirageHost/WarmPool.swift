@@ -118,6 +118,14 @@ public final class WarmPool: @unchecked Sendable {
         }
     }
 
+    /// System prompts on screen (UserNotificationCenter windows: a privacy prompt such as macOS's screen-capture consent for
+    /// this binary, raised by test hosts on mac-daddy 2026-10-21 11:19Z and unnoticed for 15 h). A person must answer them.
+    public static func systemPromptWindows() -> [UInt32] {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return [] }
+        return list.compactMap { w in (w[kCGWindowOwnerName as String] as? String) == "UserNotificationCenter" ? (w[kCGWindowNumber as String] as? Int).map(UInt32.init) : nil }
+    }
+    private var promptsSeen = Set<UInt32>()
+
     private var tun = Tunables.defaults
     private func enabled() -> Bool {
         tun = Tunables.load(from: Tunables.hostFileURL(try? Store())).tunables
@@ -170,6 +178,9 @@ public final class WarmPool: @unchecked Sendable {
     }
 
     private func refresh() {
+        let prompts = Set(Self.systemPromptWindows())
+        if !prompts.subtracting(promptsSeen).isEmpty { log?("SYSTEM PROMPT on screen (UserNotificationCenter windows \(prompts.sorted())): a person must answer it") }
+        promptsSeen = prompts
         guard !refreshing else { return }
         if activeStreams > 0 { return }                       // the streamer owns the captures now
         if !enabled() { dropAll("warmCapture off"); return }
