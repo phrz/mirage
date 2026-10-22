@@ -130,7 +130,9 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         let content = info.contentRect, frame = pointFrame
         let grow = (frame.minX - content.minX, frame.minY - content.minY, content.maxX - frame.maxX, content.maxY - frame.maxY)
         let detail = String(format: "content %.0fx%.0f vs frame %.0fx%.0f, beyond it %.0f/%.0f/%.0f/%.0f pt", content.width, content.height, frame.width, frame.height, grow.0, grow.1, grow.2, grow.3)
-        guard max(grow.0, grow.1, grow.2, grow.3) >= 3 else { return (false, detail) }
+        // The content rect of the window-alone filter is the frame itself, shadow or not (mac-daddy: every window, the bench
+        // included, read "no shadow" from it and lost its shadow on the viewer): it tells nothing, so unknown (drawn as before).
+        guard max(grow.0, grow.1, grow.2, grow.3) >= 3 else { return (nil, detail + "; content rect is the frame: unknown") }
         let c = SCStreamConfiguration()
         let k = 1.0
         c.width = max(2, Int(content.width * k)); c.height = max(2, Int(content.height * k)); c.showsCursor = false
