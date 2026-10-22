@@ -3280,6 +3280,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     private func tryEncode(_ l: Layer, now: UInt64, latest: ShiftDetector.Frame) {
         guard var enc = l.encoder, let req = request, let canvas = ensureCanvas(l) else { return }
+        // A window partly off the display (Show Desktop's push, a window over the edge): its frame is transparent outside the
+        // display, and video has no alpha, so that came out black (the bench's bottom row black for ~3 s after a Show Desktop
+        // return on mac-daddy, from keyframes sent while it was pushed). Its changes go as lossless tiles (alpha kept) instead.
+        // (A keyframe request stays pending: the first video after the return is a keyframe, not a frame predicted from a
+        // reference the viewer no longer shows.)
+        if !l.isDisplay, !l.offDisplayTiles.isEmpty, l.hasVideoPending {
+            let t = l.pendingVideoTiles.subtracting(l.offDisplayTiles)
+            if !t.isEmpty || l.pendingWholeFrame { l.wantKeyframe = true }
+            l.pendingVideoTiles = []; l.pendingVideoRegion = .zero; l.pendingWholeFrame = false
+            if !t.isEmpty { _ = l.tracker.expedite(in: l.bounds, now: now, only: t) }
+            return
+        }
         // Compositor model: the desktop's first picture is its still and lossless blocks. The encoder's start keyframe (no
         // motion behind it) waits until that is done: on Japan bus it landed first (2.44 s), replaced the composited
         // placeholder with the desktop alone, and every window vanished until its still arrived 1.3 s later (a fourth change).
