@@ -1340,7 +1340,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // (Full size, with each cut as the window's first frame, was tried in 26ae000: the window's own capture then differed
         // from the composited cut in most tiles, which went again, and windows changed 4-6 times: 20 Mbps crisp 15.8 s.)
         // Warm host: the idle snapshot, while the window layout is the one it was taken in (no screenshot to wait for).
-        if compositor, let (snap, age) = WarmPool.shared.freshSnapshot(displayID: t.display.displayID) {
+        if let (snap, age) = WarmPool.shared.freshSnapshot(displayID: t.display.displayID) {
             log("placeholders and stage 1 from the warm snapshot (\(age / 1000) s old)")
             placeholders(from: snap.px, width: snap.width, height: snap.height, streamWidth: t.pixelWidth)
             return

@@ -86,7 +86,12 @@ public final class WarmPool: @unchecked Sendable {
     func freshSnapshot(displayID: UInt32) -> (Snapshot, ageMs: UInt64)? {
         guard let s = snapshot, s.displayID == displayID else { return nil }
         let age = Clock.elapsed(since: s.nanos, now: Clock.nowNanos()) / 1_000_000
-        guard Self.layout() == s.layout else { log?("warm host: snapshot (\(age / 1000) s old) not used: the window layout changed"); return nil }
+        let now = Self.layout()
+        guard now == s.layout else {
+            let a = Set(s.layout.split(separator: " ")), b = Set(now.split(separator: " "))
+            log?("warm host: snapshot (\(age / 1000) s old) not used: the window layout changed (gone \(a.subtracting(b).sorted().joined(separator: " ")); new \(b.subtracting(a).sorted().joined(separator: " ")))")
+            return nil
+        }
         return (s, age)
     }
     private func takeSnapshot() {
