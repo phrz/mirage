@@ -478,6 +478,7 @@ public struct RateController {
         if let f = inflightLog.first, now &- f.nanos > keep { inflightLog.removeAll { now &- $0.nanos > keep } }
     }
     private var inflightLog: [(nanos: UInt64, under: Bool)] = []
+    private var pathStressedNow = false
     /// Most of the window the acks at `now` answer (shifted back an RTT) had little in flight (at least 5 samples).
     private func underusedWindow(now: UInt64) -> Bool {
         let hi = now &- UInt64(srttNanos), lo = hi &- deliveryWindowNanos
@@ -550,6 +551,7 @@ public struct RateController {
         // App-limited: the host ran out of things to send during the window these acks answer (shifted by an RTT). Held
         // back by the in-flight cap is not app-limited: that is the link's rate.
         let pathStressed = (!probeRTT.isNaN && minRTTNanos.isFinite && probeRTT > minRTTNanos * 1.25) || lossPercent > 1
+        pathStressedNow = pathStressed
         // Little in flight for most of the window counts too, unless the path itself says the link is the limit.
         let appLimited = (lastIdleNanos > 0 && now &- lastIdleNanos < w + UInt64(srttNanos)) || (!pathStressed && underusedWindow(now: now))
         // Held back by its own budget (tokens spent, work queued) counts as app-limited too: on 20 Mbps the fresh picture's
@@ -567,6 +569,9 @@ public struct RateController {
             let i = inStartup ? sorted.count - 1 : min(sorted.count - 1, sorted.count * 3 / 4)
             deliveryKbps = max(1, Int(sorted[i]))
             measuredPeakKbps = max(measuredPeakKbps, deliveryKbps)
+            // Startup paces at its gain over what was delivered (BBR): the target goes to the ceiling (2 x delivery) with each
+            // sample instead of creeping up behind it (20 Mbps at a connect: ceiling 5.3 Mbps, target still 2.1, 2 s in).
+            if inStartup, !pathStressedNow { targetKbps = min(maxKbps, max(targetKbps, deliveryCeilingKbps)) }
         }
         // Startup ends when three rounds bring less than 25 % growth. A round is one delivery window: the estimate cannot
         // grow faster than its window moves (rounds of one srtt ended startup within half a second on Fast 4G).
