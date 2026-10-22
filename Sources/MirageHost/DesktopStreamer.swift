@@ -2920,7 +2920,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard complete || stuck else { continue }
             l.stagedOpenSince = nil
             l.levelsCommitted += 1
-            sendTileMessage(.commit(layer: l.id), captureNanos: now)
+            // On the refinement stream, behind the level's staged blocks: on the fast stream the commit overtook the last two
+            // blocks of a level (sent 7 ms before it), which stayed staged and unseen for good (the fade window, gate g-tx).
+            sendTileMessage(.commit(layer: l.id), captureNanos: now, fast: false)
             if debugLayers || l.levelsCommitted <= 2 { log("layer \(l.id): level \(l.levelsCommitted) presented after \(Clock.elapsed(since: since, now: now) / 1_000_000) ms\(complete ? "" : " (incomplete: refinement stalled)")") }
         }
     }
@@ -3334,7 +3336,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     static let stillEncoders = DispatchQueue(label: "mirage.still-encode", qos: .userInitiated, attributes: .concurrent)
 
     /// Sends a tile-stream message in order (all sends go through the tile queue). Copy-rects and resets are interactive.
-    private func sendTileMessage(_ m: TileMessage, captureNanos: UInt64) {
+    /// `fast: false`: on the refinement stream (a level's commit goes behind the level's staged blocks there).
+    private func sendTileMessage(_ m: TileMessage, captureNanos: UInt64, fast: Bool = true) {
         switch m {
         case .copyRect(let c): markFrameEnd(c.header.windowID)
         case .tiles(let t) where !t.staged && !t.refinement: markFrameEnd(t.header.windowID)
@@ -3342,7 +3345,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         var layer: UInt32 = 0
         switch m { case .tiles(let t): layer = t.header.windowID; case .copyRect(let c): layer = c.header.windowID; case .reset(let l, _, _): layer = l; case .commit(let l): layer = l; case .commitSet: layer = 0; case .alphaMask(let l, _): layer = l; case .frameEnd: layer = 0 }
-        tileQueue.async { [weak self] in self?.send(tile: m, captureNanos: captureNanos, fast: true, refinementBytes: 0, layer: layer) }
+        tileQueue.async { [weak self] in self?.send(tile: m, captureNanos: captureNanos, fast: fast, refinementBytes: 0, layer: layer) }
     }
     /// On tileQueue.
     private func send(tile m: TileMessage, captureNanos: UInt64, fast: Bool, refinementBytes: Int, block: Int? = nil, layer: UInt32) {
