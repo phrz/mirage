@@ -111,8 +111,10 @@ final class App: NSObject, NSApplicationDelegate {
     /// translucent and changing: the alpha-mask path for video, measured per layer against the lossless fallback).
     func startTransMover(near f: NSRect) {
         let w = NSWindow(contentRect: NSRect(x: f.minX + 80, y: f.minY + 80, width: 600, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
-        w.title = "Mirage Test Bench transmover"; w.isOpaque = false; w.backgroundColor = .clear; w.hasShadow = false
-        let mv = StripesView(frame: NSRect(x: 0, y: 0, width: 600, height: 400)); mv.wantsLayer = true; mv.alphaValue = 0.6
+        // `--opaque`: the same mover fully opaque (does sustained full-window motion in a normal window go as video?).
+        let opaque = CommandLine.arguments.contains("--opaque")
+        w.title = "Mirage Test Bench transmover"; w.isOpaque = opaque; w.backgroundColor = opaque ? .black : .clear; w.hasShadow = false
+        let mv = StripesView(frame: NSRect(x: 0, y: 0, width: 600, height: 400)); mv.wantsLayer = true; mv.alphaValue = opaque ? 1 : 0.6
         w.contentView = mv
         w.orderFrontRegardless()
         Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { _ in mv.step() }
