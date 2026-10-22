@@ -518,7 +518,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                         self.reconcileLayers(s.sample, now: now); self.publishWindows(now: now, full: true)
                     }
                     // The desktop's first frame: the snapshot, provisional (its still only).
-                    if let d = self.display { d.provisional = true; self.captured(provisional, Clock.nowNanos(), dirtyRects: [PixelRect(x: 0, y: 0, width: t.pixelWidth, height: t.pixelHeight)], layerID: 0, provisionalFrame: true) }
+                    if let d = self.display { d.provisional = true; self.provisionalSince = Clock.nowNanos(); self.captured(provisional, Clock.nowNanos(), dirtyRects: [PixelRect(x: 0, y: 0, width: t.pixelWidth, height: t.pixelHeight)], layerID: 0, provisionalFrame: true) }
                     self.startTimers()
                     self.log("connect setup: stream up at \(Clock.elapsed(since: c0, now: Clock.nowNanos()) / 1_000_000) ms with the warm snapshot; the display captures start alongside")
                     c.resume(returning: t.info)
@@ -549,6 +549,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         return info
     }
+    static let testHoldProvisionalMs = ProcessInfo.processInfo.environment["MIRAGE_TEST_HOLD_PROVISIONAL_MS"].flatMap(Int.init)
+    private var provisionalSince: UInt64 = 0
     /// A premultiplied BGRA pixel array scaled into a new pixel buffer.
     static func scaledFrame(_ px: [UInt8], width: Int, height: Int, toWidth: Int, toHeight: Int) -> CVPixelBuffer? {
         var out: CVPixelBuffer?
@@ -1851,9 +1853,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // The desktop's real first frame after a provisional one (the warm snapshot): it replaces it without a diff; the
         // fresh picture's lossless blocks are read from it from now on.
         if layer.isDisplay, layer.provisional, !provisionalFrame {
+            // Test knob (MIRAGE_TEST_HOLD_PROVISIONAL_MS): the provisional desktop held that long after the stream start, so a
+            // test can move a window while it stands (the ghost check); real frames are dropped until then.
+            if let hold = Self.testHoldProvisionalMs, Clock.elapsed(since: provisionalSince, now: Clock.nowNanos()) < UInt64(hold) * 1_000_000 { return }
             layer.provisional = false
             layer.lastFrame = pbIn
-            log("layer 0: the real desktop frame replaces the provisional one")
+            log("layer 0: the real desktop frame replaces the provisional one (\(Clock.elapsed(since: provisionalSince, now: Clock.nowNanos()) / 1_000_000) ms after it)")
             refine(now: Clock.nowNanos())
             return
         }

@@ -201,6 +201,7 @@ final class ScenarioRunner {
     }
 
     func run() async {
+        let runStart = Date()
         if name == "watch" { await watch(seconds: seconds); return }
         if name == "closescratch" {
             // Test cleanup: closes the MirageScratch Finder window through the host's window command (Accessibility).
@@ -262,8 +263,11 @@ final class ScenarioRunner {
         // picture, while the desktop is still the provisional warm snapshot): the area it leaves must show desktop, never a
         // ghost of the bench or of any window baked into the snapshot. Logged: the bench's frame before and after.
         if name == "earlydrag" {
-            for _ in 0..<100 where !(bench()?.isLayered ?? false) || session.hostStatus == nil { try? await Task.sleep(for: .milliseconds(20)) }
-            guard let b = bench(), b.isLayered else { session.log("scenario earlydrag: no bench layer"); return }
+            // As soon as the bench is listed (the first picture's moment), not after a quiet period: the drag must fall inside the
+            // host's provisional desktop (its log says when the real desktop replaced it).
+            for _ in 0..<250 where bench() == nil || session.hostStatus == nil { try? await Task.sleep(for: .milliseconds(20)) }
+            guard let b = bench() else { session.log("scenario earlydrag: no bench"); return }
+            session.log(String(format: "scenario earlydrag: drag starts %.0f ms after the scenario start (wall %.3f)", Date().timeIntervalSince(runStart) * 1000, Date().timeIntervalSince1970))
             guard realGuards() else { return }
             let ppp = await MainActor.run { session.pixelsPerPoint }
             let px = b.frame.x + b.frame.width / 2, py = b.frame.y + Int(12 * ppp)
