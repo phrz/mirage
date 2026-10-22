@@ -1217,6 +1217,10 @@ the codec. Built 2026-10-17 as M2.5 (§3.3c); loopback measurements in §6.
   capture and encode reached ~10 fps against the 30 wanted, the shortfall read as budget-limited, and the ladder fell to
   the tiny rung (400x224 for the whole layer) with an 8.8 Mbps target unused. Whether a shortfall the host itself causes
   (capture or encode time, not the link) should drop rungs: measure on real content before changing it.
+- Full-window motion in a translucent window (2026-10-22, bench `--transmover`, 600x400 plasma, Fast 4G, 30 s): opaque it
+  goes as video, ~4.2 MB (video 3.9, direct 0, ~16 fps); at 60 % opacity it costs 9-17 MB, mostly direct lossless tiles,
+  with or without the alpha mask (`alphaMask`, off): classify marks it motion, something after it for non-opaque layers
+  sends it lossless. Parked with the mask; start there.
 - The connect probe on real links: in the lab the shaper sits in front of QUIC and its timers clump arrivals, so both
   the densest-burst and whole-train reads say little (8.1 Mbps profile read 24-68 Mbps). Judge it on dummynet or a
   phone hotspot; until then it only raises the start, clamped at 4 x.
