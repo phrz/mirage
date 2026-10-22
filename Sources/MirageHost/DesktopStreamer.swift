@@ -1844,7 +1844,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         return all255 ? (.opaque, []) : all0 ? (.clear, []) : (.plane, plane)
     }
-    private var statAlphaMaskBytes = 0, statAlphaMaskTiles = 0
+    private var statAlphaMaskBytes = 0, statAlphaMaskTiles = 0, statAlphaPlane = 0, statAlphaClear = 0, statAlphaOpaque = 0
     private func opaqueTile(_ f: ShiftDetector.Frame, _ r: PixelRect) -> Bool {
         let x1 = min(f.width, r.maxX), y1 = min(f.height, r.maxY)
         guard r.x < x1, r.y < y1 else { return false }
@@ -3865,6 +3865,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if !changed.isEmpty {
                 sendTileMessage(.alphaMask(layer: l.id, tiles: changed), captureNanos: now)
                 statAlphaMaskBytes += changed.reduce(0) { $0 + $1.data.count + 9 }; statAlphaMaskTiles += changed.count
+                for t in changed { switch t.kind { case .plane: statAlphaPlane += 1; case .clear: statAlphaClear += 1; case .opaque: statAlphaOpaque += 1 } }
             }
         } else if !l.isDisplay {
             let clear = tiles.filter { !opaqueTile(latest, l.tracker.rect(of: $0)) }
@@ -4197,8 +4198,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             statStaleDropped = 0; statStills = 0; statOccluded = 0; statWindowCommands = 0; statTaintResent = 0; statExclusionLag = 0
             statControlBytes = 0; statFoveaTiles = 0
             statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0
-            if statAlphaMaskTiles > 0 { log("alpha mask: \(statAlphaMaskTiles) tiles, \(statAlphaMaskBytes) bytes in 5 s") }
-            statAlphaMaskTiles = 0; statAlphaMaskBytes = 0
+            if statAlphaMaskTiles > 0 { log("alpha mask: \(statAlphaMaskTiles) tiles (\(statAlphaPlane) planes, \(statAlphaClear) clear, \(statAlphaOpaque) back to opaque), \(statAlphaMaskBytes) bytes in 5 s") }
+            statAlphaMaskTiles = 0; statAlphaMaskBytes = 0; statAlphaPlane = 0; statAlphaClear = 0; statAlphaOpaque = 0
             statTileBytes = 0; statTileRects = 0; statRefineBytes = 0; statCopyRects = 0; statDirtyTiles = 0; statDiffPruned = 0; statTileSkipped = 0
         }
         t.resume()

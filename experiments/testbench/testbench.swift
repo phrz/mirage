@@ -97,12 +97,25 @@ final class App: NSObject, NSApplicationDelegate {
     /// `--noshadow`: a borderless, opaque window without a shadow (hasShadow false, like a HUD or a widget): the shadow probe
     /// must find none, and the viewer must draw none.
     var noShadowWindow: NSWindow?
+    var transMover: NSWindow?
     func startNoShadow(near f: NSRect) {
         let w = NSWindow(contentRect: NSRect(x: f.minX + 40, y: f.minY + 40, width: 260, height: 160), styleMask: [.borderless], backing: .buffered, defer: false)
         w.title = "Mirage Test Bench noshadow"; w.hasShadow = false; w.isOpaque = true
         w.backgroundColor = NSColor(calibratedRed: 0.95, green: 0.6, blue: 0.1, alpha: 1)
         w.orderFrontRegardless()
         noShadowWindow = w
+    }
+
+    /// `--transmover`: a 600x400 window whose whole picture is a moving scene at 60 % opacity over clear (every tile
+    /// translucent and changing: the alpha-mask path for video, measured per layer against the lossless fallback).
+    func startTransMover(near f: NSRect) {
+        let w = NSWindow(contentRect: NSRect(x: f.minX + 80, y: f.minY + 80, width: 600, height: 400), styleMask: [.borderless], backing: .buffered, defer: false)
+        w.title = "Mirage Test Bench transmover"; w.isOpaque = false; w.backgroundColor = .clear; w.hasShadow = false
+        let mv = MotionView(frame: NSRect(x: 0, y: 0, width: 600, height: 400)); mv.wantsLayer = true; mv.alphaValue = 0.6
+        w.contentView = mv
+        w.orderFrontRegardless()
+        Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { _ in mv.step() }
+        transMover = w
     }
 
     func startDockLike(screen: NSScreen, near b: NSRect) {
@@ -299,6 +312,9 @@ final class App: NSObject, NSApplicationDelegate {
         if isMotion {
             let mv = MotionView(frame: NSRect(x: (size.width - 640) / 2, y: (size.height - 480) / 2 - 60, width: 640, height: 480))
             content.addSubview(mv)
+            // `--translucent`: the moving picture at 60 % opacity over a clear window: translucent tiles that change every
+            // frame (the alpha-mask path for video).
+            if CommandLine.arguments.contains("--translucent") { w.isOpaque = false; w.backgroundColor = .clear; mv.wantsLayer = true; mv.alphaValue = 0.6 }
             Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { _ in mv.step() }
         }
         w.contentView = content
@@ -311,6 +327,7 @@ final class App: NSObject, NSApplicationDelegate {
             if CommandLine.arguments.contains("--vibrancy") { startVibrancy(screen: screen) }
             if CommandLine.arguments.contains("--floating") { startFloating(near: w.frame) }
             if CommandLine.arguments.contains("--noshadow") { startNoShadow(near: w.frame) }
+            if CommandLine.arguments.contains("--transmover") { startTransMover(near: w.frame) }
             if CommandLine.arguments.contains("--terminal") { startTerminal(tv) }
             updateCaption()
             window = w
