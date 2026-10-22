@@ -516,16 +516,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// windows (they are layers).
     private func overlayExclusion(_ display: SCDisplay) -> [SCWindow] { Self.overlayExclusion(catalog.all, display) }
     static func overlayExclusion(_ windows: [SCWindow], _ display: SCDisplay) -> [SCWindow] {
-        windows.filter { $0.frame.intersects(display.frame) && ($0.windowLayer <= 0 || floatingLevels.contains($0.windowLayer) && !systemOwners.contains($0.owningApplication?.applicationName ?? "") || isProxyOwner($0)) }
-    }
-    /// WindowManager's windows (Show Desktop's edges of the pushed-aside windows, Stage Manager's strips) show other apps'
-    /// windows, which are layers of their own; captured in the overlay they came out opaque black (a 70-px band at the left
-    /// edge over the bench's and the mini player's edges during Show Desktop, mac-daddy 2026-10-22).
-    static func isProxyOwner(_ w: SCWindow) -> Bool { w.owningApplication?.applicationName == "WindowManager" }
-    /// On-screen WindowManager windows right now (CGWindowList: synchronous and cheap).
-    static func onScreenProxyWindowIDs() -> [UInt32] {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return [] }
-        return list.compactMap { w in (w[kCGWindowOwnerName as String] as? String) == "WindowManager" ? (w[kCGWindowNumber as String] as? Int).map(UInt32.init) : nil }
+        windows.filter { $0.frame.intersects(display.frame) && ($0.windowLayer <= 0 || floatingLevels.contains($0.windowLayer) && !systemOwners.contains($0.owningApplication?.applicationName ?? "")) }
     }
     /// Floating app windows (stay-on-top panels, utility windows: levels 1–19) are layers of their own in the compositor model,
     /// hit-testable like any window. In the overlay (which hit-testing passes over) they could not be clicked (phrz, 08:46Z:
@@ -595,20 +586,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         layers[id] = Layer(id: id, width: d.width, height: d.height, frame: d.bounds, now: Clock.nowNanos())
     }
     /// Keeps the overlay's exclusion (new normal windows) and the desktop layer's windows (a widget added) current.
-    private var proxyTried = Set<UInt32>()
     private func reconcileCompositor(_ s: WindowTracker.Sample, needCatalog: inout [UInt32]) {
         guard compositor, let t = target else { return }
         for w in s.windows where w.windowLevel <= 0 && catalog.window(w.id) == nil { needCatalog.append(w.id) }
-        // WindowManager's windows are not in the window list the tracker keeps (normal windows only): on screen and unknown to
-        // the catalog (it lists on-screen windows at its last refresh), they would stay in the overlay. Refreshed for them, and
-        // the exclusion applied again when the refresh is in.
-        // (Once per window id: one that ScreenCaptureKit does not list is not asked for again, or Stage Manager's strips would
-        // refresh the catalog four times a second for good.)
-        let wm = Self.onScreenProxyWindowIDs().filter { catalog.window($0) == nil && !proxyTried.contains($0) }
-        if !wm.isEmpty {
-            proxyTried.formUnion(wm)
-            catalog.ensure(wm) { [weak self] in self?.queue.async { guard let self, let cur = self.windows?.current else { return }; var n: [UInt32] = []; self.reconcileCompositor(cur, needCatalog: &n) } }
-        }
         let excl = overlayExclusion(t.display)
         let ids = Set(excl.map(\.windowID))
         if ids != overlayExcludedIDs, let ov = overlay {
@@ -1524,6 +1504,33 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         } }
         return String(format: "%d of %d cells over 8 levels", hot, total) + (hot > 0 ? " in \(box.x),\(box.y) \(box.width)x\(box.height)" : "") + String(format: ", worst %.1f at %d,%d (window %dx%d)", worst, worstAt.0, worstAt.1, w, h)
     }
+    /// The overlay frame with `rects` cleared to transparent (a copy from a small pool): see `captured`.
+    private var overlayPool: CVPixelBufferPool?, overlayPoolSize = (0, 0)
+    private func overlayCleared(_ pb: CVPixelBuffer, rects: [PixelRect]) -> CVPixelBuffer? {
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        if overlayPool == nil || overlayPoolSize != (w, h) {
+            let attrs: [CFString: Any] = [kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey: w, kCVPixelBufferHeightKey: h, kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+            var p: CVPixelBufferPool?
+            CVPixelBufferPoolCreate(nil, [kCVPixelBufferPoolMinimumBufferCountKey: 3] as CFDictionary, attrs as CFDictionary, &p)
+            overlayPool = p; overlayPoolSize = (w, h)
+        }
+        guard let overlayPool else { return nil }
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        var out: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(nil, overlayPool, &out) == kCVReturnSuccess, let out else { return nil }
+        CVPixelBufferLockBaseAddress(out, [])
+        defer { CVPixelBufferUnlockBaseAddress(out, []) }
+        guard let src = CVPixelBufferGetBaseAddress(pb), let dst = CVPixelBufferGetBaseAddress(out) else { return nil }
+        let ss = CVPixelBufferGetBytesPerRow(pb), ds = CVPixelBufferGetBytesPerRow(out)
+        for y in 0..<h { memcpy(dst.advanced(by: y * ds), src.advanced(by: y * ss), w * 4) }
+        for r in rects {
+            let x0 = max(0, r.x), x1 = min(w, r.maxX), y0 = max(0, r.y), y1 = min(h, r.maxY)
+            guard x1 > x0, y1 > y0 else { continue }
+            for y in y0..<y1 { memset(dst.advanced(by: y * ds + x0 * 4), 0, (x1 - x0) * 4) }
+        }
+        return out
+    }
     /// Mean absolute difference per channel (B, G, R, A) between two BGRA frames of the same size, sampled; nil otherwise.
     static func meanDifference(_ a: CVPixelBuffer, _ b: CVPixelBuffer) -> Double? {
         let w = CVPixelBufferGetWidth(a), h = CVPixelBufferGetHeight(a)
@@ -1659,8 +1666,21 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// One captured frame of one layer (on `queue`). `dirtyRects` are SCK's (display layer) or empty
     /// (window layers: the whole frame is a candidate; the diff decides).
-    private func captured(_ pb: CVPixelBuffer, _ nanos: UInt64, dirtyRects: [PixelRect], layerID: UInt32) {
+    private func captured(_ pbIn: CVPixelBuffer, _ nanos: UInt64, dirtyRects: [PixelRect], layerID: UInt32) {
         guard request != nil, output != nil, let windows, let layer = layers[layerID] else { return }
+        // Show Desktop: the Dock's full-screen window (in the overlay) draws the pushed windows' visible edges, and those pixels
+        // were captured opaque black, intermittently (a 70-px band at the left edge over the bench's and the mini player's
+        // edges, mac-daddy 2026-10-22). Those edges are drawn by the windows' own layers (their last picture): while a window
+        // layer is partly off the display, the overlay is cleared over its on-display part (a copy, used for everything after).
+        var pb = pbIn
+        if layerID == ControlMessage.WindowInfo.overlayID, let d = display {
+            // Mostly off the display (under 15 % on it), as Show Desktop leaves them: a window that only runs past the screen's
+            // edge (ChatGPT's 300 px below it) keeps the overlay over it (the Dock).
+            let pushed = layers.values.filter { !$0.isDisplay && $0.id != layerID && !$0.offDisplayTiles.isEmpty }
+                .map { ($0.frame, $0.frame.intersection(d.bounds)) }
+                .filter { !$0.1.isEmpty && $0.1.area * 100 < $0.0.area * 15 }.map(\.1)
+            if !pushed.isEmpty, let copy = overlayCleared(pbIn, rects: pushed) { pb = copy }
+        }
         captureSeq &+= 1
         let now = Clock.nowNanos()
         statCaptures += 1; effortCaptures += 1
