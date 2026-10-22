@@ -1313,15 +1313,22 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if let err { self?.useFallback(l, why: "its own capture stopped (\(err))") }
         } }
         // The window's first frame from a snapshot with the stream's own filter, while ScreenCaptureKit queues the stream.
-        if compositor {
+        let shot = compositor
+        if shot {
             let independent = hostTunables[.windowShotIndependent] >= 0.5
+            _ = WindowCapturer.shotsPending.add(1)
             Task { [weak self] in
-                guard let pb = await cap.snapshot(excluding: others, independent: independent) else { return }
+                let pb = await cap.snapshot(excluding: others, independent: independent)
+                _ = WindowCapturer.shotsPending.add(-1)
+                guard let pb else { return }
                 let nanos = Clock.nowNanos()
                 self?.queue.async { guard let self, l.capturer === cap, l.lastFrame == nil else { return }; l.snapshotFrame = pb; self.captured(pb, nanos, dirtyRects: [], layerID: l.id) }
             }
         }
         Task { [weak self] in
+            // Stream starts wait for the first-frame shots (at most 0.5 s): ScreenCaptureKit serialises starts, and shots queued
+            // behind them came 1.65 s late (6 of 11 windows missed stage 1's barrier on 20 Mbps, mac-daddy 11:11Z).
+            if shot { let t0 = Clock.nowNanos(); while WindowCapturer.shotsPending.add(0) > 0, Clock.elapsed(since: t0, now: Clock.nowNanos()) < 500_000_000 { try? await Task.sleep(for: .milliseconds(10)) } }
             do { try await cap.start(excluding: others) { [weak self] pb, nanos in self?.queue.async { self?.ownFrame(pb, nanos, layer: l) } } }
             catch { self?.queue.async { if l.capturer === cap { l.capturer = nil }; self?.log("layer \(l.id) capture failed: \(error)"); self?.useFallback(l, why: "its own capture failed") } }
         }

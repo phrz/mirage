@@ -117,6 +117,8 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// `others`: every window ScreenCaptureKit lists except this one and its child windows.
     /// Window capture starts in progress (all instances).
     static let starting = AtomicCounter()
+    /// First-frame shots in progress (all instances): stream starts wait for them (DesktopStreamer.startCapturer).
+    static let shotsPending = AtomicCounter()
     /// One frame now, with exactly the stream's filter and configuration (the same pixels its frames will have), from a
     /// screenshot: ScreenCaptureKit starts window streams one after another (~0.75 s each on mac-daddy, measured: eight
     /// started at once, done one by one), so the stream's first frame can be seconds away (M-FIVE).
