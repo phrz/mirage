@@ -189,12 +189,17 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// What `includeMenuBar` was before displayFilter set it (nil before the first filter, or before macOS 14.2): logged by the
     /// sharpness knob.
     nonisolated(unsafe) static var menuBarDefault: Bool?
+    /// Test knob MIRAGE_TEST_MENUBAR_IN_DESKTOP=1: the menu bar's window (level 24) goes in the desktop capture, composited
+    /// over the wallpaper, and out of the overlay: whether the menu titles' vibrancy, lost when the bar is captured alone over
+    /// transparency, comes back (check 5: titles at 0.03-0.23 of the screen in the host's model, status items exact).
+    static let testMenuBarInDesktop = ProcessInfo.processInfo.environment["MIRAGE_TEST_MENUBAR_IN_DESKTOP"] == "1"
+    static let menuBarLevel = 24
 
     /// The desktop alone: the display's desktop-level windows (window layer below zero: the wallpaper, the desktop icons and
     /// widgets). No app window can ever be in it.
     static func desktopFilter(_ display: SCDisplay) async throws -> SCContentFilter {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-        let desk = content.windows.filter { $0.windowLayer < 0 && $0.frame.intersects(display.frame) }
+        let desk = content.windows.filter { ($0.windowLayer < 0 || testMenuBarInDesktop && $0.windowLayer == menuBarLevel) && $0.frame.intersects(display.frame) }
         guard !desk.isEmpty else { throw MirageError.transport("no desktop-level windows on display \(display.displayID)") }
         return SCContentFilter(display: display, including: desk)
     }
