@@ -660,7 +660,23 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
     /// The windows the overlay leaves out: the desktop-level ones, every normal window on the display, and floating app
     /// windows (they are layers).
-    private func overlayExclusion(_ display: SCDisplay) -> [SCWindow] { Self.overlayExclusion(catalog.all, display) }
+    private func overlayExclusion(_ display: SCDisplay) -> [SCWindow] {
+        let excl = Self.overlayExclusion(catalog.all, display)
+        // Test knob MIRAGE_TEST_OVERLAY_KEEP=layers|apps|desktop: that category stays in the overlay (layers: windows streamed
+        // as layers; apps: other ordinary app windows; desktop: desktop-level windows), to find which exclusion takes the
+        // menu titles and the Dock's dots with it (check 5: both absent from the overlay, present in an unfiltered shot).
+        guard let keep = Self.testOverlayKeep else { return excl }
+        return excl.filter { w in
+            let isLayer = layers[w.windowID] != nil
+            switch keep {
+            case "layers": return !isLayer
+            case "apps": return isLayer || w.windowLayer < 0
+            case "desktop": return w.windowLayer >= 0
+            default: return true
+            }
+        }
+    }
+    static let testOverlayKeep = ProcessInfo.processInfo.environment["MIRAGE_TEST_OVERLAY_KEEP"]
     static func overlayExclusion(_ windows: [SCWindow], _ display: SCDisplay) -> [SCWindow] {
         windows.filter { $0.frame.intersects(display.frame) && ($0.windowLayer <= 0 || floatingLevels.contains($0.windowLayer) && !systemOwners.contains($0.owningApplication?.applicationName ?? "")
             || ScreenCapturer.testMenuBarInDesktop && $0.windowLayer == ScreenCapturer.menuBarLevel) }
