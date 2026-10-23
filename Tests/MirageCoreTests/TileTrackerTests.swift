@@ -286,6 +286,7 @@ final class LinkTierTests: XCTestCase {
         XCTAssertEqual(LinkTier.classify(rateKbps: 800, limitedByLink: false, rttMs: 2, lossPercent: 0), .local)
         XCTAssertEqual(LinkTier.classify(rateKbps: 256, limitedByLink: true, rttMs: 900, lossPercent: 5), .extreme)
         XCTAssertEqual(LinkTier.classify(rateKbps: 7000, limitedByLink: false, rttMs: 450, lossPercent: 0), .constrained, "a slow round trip is not a lower picture")
+        XCTAssertNotEqual(LinkTier.classify(rateKbps: 20_000, limitedByLink: false, rttMs: 30, lossPercent: 5), .extreme, "loss alone is the transport's, not the picture's")
         XCTAssertEqual(LinkTier.constrained.policy, LinkTier.normal.policy, "Constrained (round trip) must not cut quality")
         XCTAssertTrue(LinkTier.extreme.policy.videoEnabled, "video-minimal, not off")
         XCTAssertEqual(LinkTier.extreme.policy.minRung, RateController.tinyRung); XCTAssertEqual(LinkTier.extreme.policy.maxVideoFPS, 5)

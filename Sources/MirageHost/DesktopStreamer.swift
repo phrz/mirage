@@ -1900,10 +1900,32 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
               let t = target else { return }
         sharpRefTaken = true
         let w = t.pixelWidth, h = t.pixelHeight, log = self.log
+        // The host's own model of the same moment: the desktop layer with the overlay over it (premultiplied), so a shortfall
+        // on the viewer splits into the model (capture, compositing) and the transport.
+        if let d = display, let dp = Self.pixels(d.lastFrame, width: w, height: h) {
+            var model = dp
+            if let o = layers[ControlMessage.WindowInfo.overlayID], let op = Self.pixels(o.lastFrame, width: w, height: h) {
+                for i in Swift.stride(from: 0, to: model.count, by: 4) {
+                    let a = 255 - Int(op[i + 3])
+                    for k in 0..<3 { model[i + k] = UInt8(min(255, Int(op[i + k]) + Int(model[i + k]) * a / 255)) }
+                }
+            }
+            for (name, f) in ref.regions { log("sharp model \(name) \(String(format: "%.2f", Self.edgeEnergy(model, width: w, height: h, f)))") }
+        }
         Task.detached {
             guard let px = await Self.displayShot(t.display, width: w, height: h) else { log("sharp reference: no shot"); return }
             for (name, f) in ref.regions { log("sharp reference \(name) \(String(format: "%.2f", Self.edgeEnergy(px, width: w, height: h, f)))") }
         }
+    }
+    /// A BGRA buffer of exactly `width`×`height` as tight bytes (nil otherwise).
+    static func pixels(_ b: CVPixelBuffer?, width w: Int, height h: Int) -> [UInt8]? {
+        guard let b, CVPixelBufferGetWidth(b) == w, CVPixelBufferGetHeight(b) == h else { return nil }
+        CVPixelBufferLockBaseAddress(b, .readOnly); defer { CVPixelBufferUnlockBaseAddress(b, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(b) else { return nil }
+        let rb = CVPixelBufferGetBytesPerRow(b)
+        var out = [UInt8](repeating: 0, count: w * h * 4)
+        out.withUnsafeMutableBytes { o in for y in 0..<h { memcpy(o.baseAddress! + y * w * 4, base + y * rb, w * 4) } }
+        return out
     }
     /// Mean |dx|+|dy| of luminance over a rect given in fractions (the scratchpad `sharp` tool's measure).
     static func edgeEnergy(_ px: [UInt8], width w: Int, height h: Int, _ f: [Double]) -> Double {
@@ -3317,8 +3339,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// or under 2 Mbps. Not by tier: the tier follows the round trip, and phrz's 7 Mbps link at ~200 ms is Constrained, so
     /// his wallpaper, desktop files and the glass menu bar's static half ended at lossy q90 for good (counted crisp) while
     /// low-colour UI went lossless: "never past an imperceptible blur" (2026-10-22, 23:19Z and 23:43Z).
+    /// Test knob MIRAGE_TEST_TIER_LOSSY=1: the pre-ab11d03 rule (lossy on Constrained and Extreme too), so the gate's
+    /// sharpness check can be shown to see the bug it was built for.
+    static let testTierLossy = ProcessInfo.processInfo.environment["MIRAGE_TEST_TIER_LOSSY"] == "1"
     private var photographicFinalIsLossy: Bool {
         guard let rc else { return false }
+        if Self.testTierLossy && rc.tier.rawValue >= LinkTier.constrained.rawValue { return true }
         return rc.maxKbps <= 2000 || rc.targetKbps <= 2000
     }
 

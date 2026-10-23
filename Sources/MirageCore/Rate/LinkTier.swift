@@ -41,9 +41,11 @@ public enum LinkTier: Int, Codable, Sendable, CaseIterable {
     /// enough samples to mean anything (the controller zeroes it below 30 frames). A long round trip alone is never
     /// Extreme: Extreme's policy lowers the picture (tiny rung, 5 fps, a fresh picture on entry), and a slow round trip is
     /// not a narrow link (phrz's is ~200 ms at several Mbps; a bufferbloat spike past 400 ms must not shrink his screen).
-    /// Constrained by round trip stays: its policy is Normal's.
+    /// Constrained by round trip stays: its policy is Normal's. Nor is loss alone Extreme: a lossy Wi-Fi hop with 20 Mbps
+    /// behind it is common, and loss is the transport's to answer (redundancy, smaller in-flight), not the picture's.
+    /// Extreme is a link-limited rate under 500 kbps, nothing else.
     public static func classify(rateKbps: Int, limitedByLink: Bool, rttMs: Double, lossPercent: Double) -> LinkTier {
-        if (limitedByLink && rateKbps < 500) || lossPercent > 2 { return .extreme }
+        if limitedByLink && rateKbps < 500 { return .extreme }
         if (limitedByLink && rateKbps < 2000) || rttMs >= 100 { return .constrained }
         if rttMs < 10 && (!limitedByLink || rateKbps > 50_000) { return .local }
         return .normal
