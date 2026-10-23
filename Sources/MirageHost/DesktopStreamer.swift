@@ -1718,10 +1718,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var compositorSinceNanos: UInt64 = 0
     /// A window has moved this session (a drag, Show Desktop): the desktop under windows may be seen.
     private var windowMovedThisSession = false
-    /// Compositor model: the desktop under shown windows is refined (at underlay quality) only where it may be seen: on
-    /// fast tiers, or once a window has moved this session. On Constrained/Extreme it was 950 KB nobody saw on a 650 kbps
-    /// link (Japan bus); when a window does move away, the uncovered tiles are expedited (updateDisplayHidden).
-    private var underlayWanted: Bool { windowMovedThisSession || (rc?.tier.rawValue ?? 0) < LinkTier.constrained.rawValue }
+    /// Compositor model: the desktop under shown windows is refined (at underlay quality) only where it may be seen: when
+    /// the link has bandwidth to spare, or once a window has moved this session. Short of bandwidth it was 950 KB nobody saw
+    /// on a 650 kbps link (Japan bus); when a window does move away, the uncovered tiles are expedited (updateDisplayHidden).
+    /// By rate, not tier: the tier follows the round trip, and phrz's ~200 ms, several-Mbps link revealed a soft desktop.
+    private var underlayWanted: Bool { windowMovedThisSession || !photographicFinalIsLossy }
     private var fallbackCapture: ScreenCapturer?
     private var fallbackStarting = false
     private var fallbackPools: [UInt32: (pool: CVPixelBufferPool, w: Int, h: Int)] = [:]
@@ -1881,6 +1882,36 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             log("\(layerName(l)) crisp\(l.crispOnce ? " again" : "") at +\(String(format: "%.1f", Double(Clock.elapsed(since: streamStartNanos, now: now)) / 1e9)) s (\(s.visible) visible tiles lossless)")
             l.crispOnce = true
         }
+    }
+    /// Test knob `MIRAGE_TEST_SHARP_REF="<ms>;<name>:<fx0>,<fy0>,<fx1>,<fy1>;..."`: <ms> after stream start, one full-size
+    /// display shot whose edge energy per region (fractions of the screen) is logged as "sharp reference <name> <E>": the
+    /// truth a viewer frame of the same moment is held to (the gate's sharpness check; numbers only, the shot is dropped).
+    static let sharpRef: (ms: UInt64, regions: [(String, [Double])])? = ProcessInfo.processInfo.environment["MIRAGE_TEST_SHARP_REF"].flatMap { v in
+        let parts = v.split(separator: ";"); guard let ms = parts.first.flatMap({ UInt64($0) }) else { return nil }
+        let regions: [(String, [Double])] = parts.dropFirst().compactMap { r in
+            let kv = r.split(separator: ":"); guard kv.count == 2 else { return nil }
+            let f = kv[1].split(separator: ",").compactMap { Double($0) }; return f.count == 4 ? (String(kv[0]), f) : nil
+        }
+        return (ms, regions)
+    }
+    private var sharpRefTaken = false
+    private func sharpReference(now: UInt64) {
+        guard let ref = Self.sharpRef, !sharpRefTaken, streamStartNanos > 0, Clock.elapsed(since: streamStartNanos, now: now) >= ref.ms * 1_000_000,
+              let t = target else { return }
+        sharpRefTaken = true
+        let w = t.pixelWidth, h = t.pixelHeight, log = self.log
+        Task.detached {
+            guard let px = await Self.displayShot(t.display, width: w, height: h) else { log("sharp reference: no shot"); return }
+            for (name, f) in ref.regions { log("sharp reference \(name) \(String(format: "%.2f", Self.edgeEnergy(px, width: w, height: h, f)))") }
+        }
+    }
+    /// Mean |dx|+|dy| of luminance over a rect given in fractions (the scratchpad `sharp` tool's measure).
+    static func edgeEnergy(_ px: [UInt8], width w: Int, height h: Int, _ f: [Double]) -> Double {
+        let x0 = Int(f[0] * Double(w)), y0 = Int(f[1] * Double(h)), x1 = min(w - 1, Int(f[2] * Double(w))), y1 = min(h - 1, Int(f[3] * Double(h)))
+        func l(_ o: Int) -> Double { 0.3 * Double(px[o + 2]) + 0.59 * Double(px[o + 1]) + 0.11 * Double(px[o]) }
+        var s = 0.0, n = 0
+        for y in y0..<max(y0, y1 - 1) { for x in x0..<max(x0, x1 - 1) { let o = (y * w + x) * 4; let c = l(o); s += abs(c - l(o + 4)) + abs(c - l(o + w * 4)); n += 1 } }
+        return n > 0 ? s / Double(n) : 0
     }
     private func visibilityReport(now: UInt64) {
         var lines: [String] = []
@@ -3464,6 +3495,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func gate(_ g: String) { refineGates[g, default: 0] += 1 }
     private func refine(now: UInt64) {
         crispCheck(now: now)
+        sharpReference(now: now)
         // Whatever follows (a stall anywhere, the probe hold), what is in flight says whether the next acks measure the link.
         if let rc { self.rc?.noteInflight(bytes: tileInflightForCap, linkBusy: lastBudget.videoKbps > 0 && rc.recentVideoKbps * 2 >= lastBudget.videoKbps, now: now) }
         if now < probeHoldUntil { gate("probe-hold"); return }
