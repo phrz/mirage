@@ -1861,6 +1861,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         for i in 0..<l.tracker.tileCount where !hidden.contains(i) && !(l.isDisplay && l.underLayer.contains(i)) {
             visible += 1
             if let (why, since) = l.tracker.soft(i, now: now) { counts[why, default: 0] += 1; if since > 0 { oldest = max(oldest, Clock.elapsed(since: since, now: now)) } }
+            else if !photographicFinalIsLossy && l.photoLossyFinal.contains(i) { counts[.lossyFinal, default: 0] += 1 }   // "crisp" on the tracker, lossy on screen while the link allows better
         }
         return visible > 0 ? (visible, counts, oldest) : nil
     }
@@ -3272,16 +3273,22 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     else if photoQuality < 90 { l.account.underlay += bytes } else if !refinement { l.account.direct += bytes } else if block != nil { l.account.blocks += bytes } else { l.account.refine += bytes }
                 }
                 if photoQuality < 90, let l = self.layers[layerID] { for t in out where t.format == .lossy { l.underlayLossy.formUnion(l.tracker.tiles(covering: [t.rect])) } }
+                // A photographic final sent lossy (a short link) is remembered for the upgrade; a lossless one clears it.
+                if photoQuality >= 90, lossy == nil, let l = self.layers[layerID] {
+                    for t in out { let ts = l.tracker.tiles(covering: [t.rect]); if t.format == .lossy && photoLossy { l.photoLossyFinal.formUnion(ts) } else if t.format != .lossy { l.photoLossyFinal.subtract(ts) } }
+                }
                 if self.debugLayers { self.log("layer \(layerID): sent \(out.count) \(staged ? "staged " : "")\(refinement ? (block != nil ? "block" : "refinement") : "direct") rects \(bytes) B: \(out.prefix(3).map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))") }
             }
         }
     }
 
-    /// Photographic rects end visually lossless (q90) on a constrained link: the cap or the controller's target
-    /// at or under 2 Mbps, or the Constrained/Extreme tier.
+    /// Photographic rects end visually lossless (q90) only where the bandwidth is short: the cap or the controller's target at
+    /// or under 2 Mbps. Not by tier: the tier follows the round trip, and phrz's 7 Mbps link at ~200 ms is Constrained, so
+    /// his wallpaper, desktop files and the glass menu bar's static half ended at lossy q90 for good (counted crisp) while
+    /// low-colour UI went lossless: "never past an imperceptible blur" (2026-10-22, 23:19Z and 23:43Z).
     private var photographicFinalIsLossy: Bool {
         guard let rc else { return false }
-        return rc.maxKbps <= 2000 || rc.targetKbps <= 2000 || rc.tier.rawValue >= LinkTier.constrained.rawValue
+        return rc.maxKbps <= 2000 || rc.targetKbps <= 2000
     }
 
     /// Copies the tiles' pixels out and encodes them on the tile queue. Returns the byte estimate charged to the budget.
@@ -3526,6 +3533,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // The upgrade of uncovered q75 underlay runs on its own 15 % budget alongside the rest (not only when all
         // else is idle: a desktop with an animating app would starve it).
         if let d = display { upgradeStep(d, now: now) }
+        for l in layers.values where !l.isDisplay && !l.photoLossyFinal.isEmpty && !photographicFinalIsLossy { upgradeStep(l, now: now) }
         let windowLayers = ordered.filter { !$0.isDisplay }
         // The desktop and the windows take turns: windows always first starved the desktop whenever one window had live
         // activity (the Claude app on mac-daddy), and desktop revealed by a moved window stayed black for good.
@@ -3596,13 +3604,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var lastUpgradeRefill: UInt64 = 0
     private func upgradeStep(_ d: Layer, now: UInt64) {
         let rate = Double(lastBudget.tileKbps * 1000 / 8) * 0.15
-        upgradeTokens = min(rate * 0.5, upgradeTokens + Double(now &- (lastUpgradeRefill == 0 ? now : lastUpgradeRefill)) / 1e9 * rate)
-        lastUpgradeRefill = now
-        d.upgradePending.subtract(d.underLayer)   // covered again: nothing to upgrade there now
-        guard !d.upgradePending.isEmpty, upgradeTokens > 0, let src = d.lastFrame else { return }
+        if d.isDisplay {
+            upgradeTokens = min(rate * 0.5, upgradeTokens + Double(now &- (lastUpgradeRefill == 0 ? now : lastUpgradeRefill)) / 1e9 * rate)
+            lastUpgradeRefill = now
+        }
+        if d.isDisplay { d.upgradePending.subtract(d.underLayer) }   // covered again: nothing to upgrade there now
+        // Photographic finals that went lossy while the link was short: near-lossless now that it is not (any layer).
+        let photo = photographicFinalIsLossy ? Set<Int>() : d.photoLossyFinal.subtracting(d.occludedTiles).subtracting(d.isDisplay ? d.underLayer : [])
+        let pending = d.upgradePending.union(photo)
+        guard !pending.isEmpty, upgradeTokens > 0, let src = d.lastFrame else { return }
         var take: [Int] = []
         var est = 0.0
-        for i in d.upgradePending.sorted() where !d.occludedTiles.contains(i) {
+        for i in pending.sorted() where !d.occludedTiles.contains(i) {
             take.append(i); est += Double(d.tracker.rect(of: i).area) / 8
             if est >= upgradeTokens || take.count >= 24 { break }
         }
@@ -3610,11 +3623,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         CVPixelBufferLockBaseAddress(src, .readOnly); defer { CVPixelBufferUnlockBaseAddress(src, .readOnly) }
         let f = frameView(src)
         guard f.width == d.width, f.height == d.height else { return }
-        displaySent(take)
+        if d.isDisplay { displaySent(take) }
         let bytes = submitLossless(layer: d, tiles: take, from: f, refinement: true, nanos: now, tracker: d.tracker, staged: true)
         upgradeTokens -= Double(bytes)
         d.tracker.sent(lossless: take, now: now)
-        d.upgradePending.subtract(take)
+        d.upgradePending.subtract(take); d.photoLossyFinal.subtract(take)
         d.account.upgrade += bytes
     }
 

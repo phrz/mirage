@@ -40,6 +40,9 @@ final class Layer {
     var diffRef: CVPixelBuffer?
     /// When every visible tile of the layer was last found lossless (0: not crisp now); the always-on crisp log.
     var crispAt: UInt64 = 0
+    /// Photographic tiles whose final went lossy (q90: the link was short of bandwidth then); upgraded to near-lossless once
+    /// it is not (upgradeStep), and counted soft until then.
+    var photoLossyFinal = Set<Int>()
     var crispOnce = false
     var alphaSent: [Int: UInt64] = [:]
     /// The last plane sent per tile (`.plane` tiles), compared with a tolerance: captured alpha jitters by a level or so.

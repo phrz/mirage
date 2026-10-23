@@ -34,7 +34,7 @@ final class VideoNSView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
         metalLayer.pixelFormat = .bgra8Unorm
-        metalLayer.framebufferOnly = true
+        metalLayer.framebufferOnly = ScenePresenter.dumpDirectory == nil   // the present dump reads the drawable back
         metalLayer.isOpaque = true
         metalLayer.presentsWithTransaction = false
         layer?.addSublayer(metalLayer)

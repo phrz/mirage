@@ -11,7 +11,8 @@ import MirageCore
 final class FrameRecorder {
     static let directory: URL? = ProcessInfo.processInfo.environment["MIRAGE_TEST_FRAMES"].map { URL(fileURLWithPath: $0) }
     let dir: URL
-    let scale = 0.25
+    /// MIRAGE_TEST_FRAMES_SCALE (default 0.25): at a quarter, softness (a still left in place of the lossless level) hides.
+    let scale = ProcessInfo.processInfo.environment["MIRAGE_TEST_FRAMES_SCALE"].flatMap(Double.init).map { min(1, max(0.05, $0)) } ?? 0.25
     private var index = 0
     private let start = Clock.nowNanos()
     private var log: FileHandle?

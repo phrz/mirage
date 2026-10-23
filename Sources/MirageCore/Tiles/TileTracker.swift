@@ -53,7 +53,7 @@ public struct TileTracker {
 
     public var tileCount: Int { cols * rows }
     /// Why a tile is not crisp yet (diagnostics: the visibility report): nil when crisp.
-    public enum Soft: String { case due, deferred, held, unqueued }
+    public enum Soft: String { case due, deferred, held, unqueued, lossyFinal = "lossy-final" }
     public func soft(_ i: Int, now: UInt64) -> (Soft, since: UInt64)? {
         guard i >= 0, i < cells.count, !isCrisp(i) else { return nil }
         let c = cells[i]

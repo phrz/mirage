@@ -508,6 +508,20 @@ final class ScenarioRunner {
             _ = session.typeaheadSnapshot()
             let c = session.typeaheadCounts()
             session.log("scenario typeahead: \(c.shown) predicted, \(c.confirmed) confirmed, \(c.mismatched) mismatched, \(c.expired) expired")
+        case "benchmenu":
+            // phrz (2026-10-22): menus "never got past an imperceptible blur". The bench's own application menu (the frontmost
+            // app's title in the menu bar), opened three times, held 5 s, closed with Escape; the host's visibility lines say
+            // whether the overlay's menu tiles go lossless while it is open. Guards re-checked before each open.
+            for k in 1...3 {
+                guard guardsStillHold() else { break }
+                await click(Int(95 * ppp), Int(12 * ppp))
+                session.log("scenario benchmenu: menu \(k) opened")
+                try? await Task.sleep(for: .seconds(5))
+                session.send(.key(.init(keyCode: 53, down: true, isRepeat: false, modifiers: 0, characters: nil)), scripted: true)
+                session.send(.key(.init(keyCode: 53, down: false, isRepeat: false, modifiers: 0, characters: nil)), scripted: true)
+                session.log("scenario benchmenu: menu \(k) closed")
+                try? await Task.sleep(for: .seconds(3))
+            }
         case "typing":
             // Caret sits where the raise-click put it (lower half of the text); type at 6 keys/s.
             session.resetWatched()
