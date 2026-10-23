@@ -3446,7 +3446,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     // lossless (lossy WebP q90 at full size, ~4x under near-lossless on a 2x desktop picture), not at
                     // bit-exact; text and UI (≤ 4096 colours) stay lossless everywhere.
                     if photographic, photoLossy || photoQuality < 90, let data = TileCodec.encodeLossy(base: base, width: r.width, height: r.height, stride: r.width * 4, outWidth: r.width, outHeight: r.height, quality: photoQuality, alpha: alpha) { return (.lossy, data) }
-                    let fmt: TileCodec.Format = photographic ? .nearLossless : .lossless
+                    let fmt = TileCodec.finalFormat(photographic: photographic, translucent: alpha && photographic && TileCodec.translucent(base: base, width: r.width, height: r.height, stride: r.width * 4))
                     return TileCodec.encode(base: base, width: r.width, height: r.height, stride: r.width * 4, format: fmt, effort: webp, alpha: alpha).map { (fmt, $0) }
                 }
                 if let (fmt, data) = encoded { out.append(.init(rect: r, format: fmt, data: data)) }

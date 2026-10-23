@@ -71,3 +71,43 @@ final class SolidTileTests: XCTestCase {
         XCTAssertEqual(got.first?.message, m)
     }
 }
+
+/// A translucent tile (the glass menu bar's text over clear) must reach the viewer exact: composited at 50 % alpha over a
+/// known backdrop, the decoded tile gives the source's result to within 1 level (check 5, 2026-10-23: near-lossless lost
+/// 10-20 % of the bar's edge energy).
+final class TranslucentTileTests: XCTestCase {
+    func testHalfAlphaPhotographicTileCompositesExactly() {
+        let w = 128, h = 64   // (more pixels than the 4096-colour bar)
+        var src = [UInt8](repeating: 0, count: w * h * 4)
+        var s: UInt32 = 9
+        for i in 0..<(w * h) {
+            s = s &* 1664525 &+ 1013904223
+            let a: UInt8 = 128
+            // Premultiplied, many colours (photographic: > 4096), "text" strokes every 5th column.
+            let stroke = (i % w) % 5 == 0
+            src[i * 4] = stroke ? 120 : UInt8(s >> 25); src[i * 4 + 1] = stroke ? 124 : UInt8((s >> 17) & 127); src[i * 4 + 2] = stroke ? 118 : UInt8((s >> 9) & 127); src[i * 4 + 3] = a
+        }
+        let photographic = src.withUnsafeBytes { TileCodec.colourCount(base: $0.baseAddress!, width: w, height: h, stride: w * 4, limit: 4096) > 4096 }
+        XCTAssertTrue(photographic)
+        let translucent = src.withUnsafeBytes { TileCodec.translucent(base: $0.baseAddress!, width: w, height: h, stride: w * 4) }
+        XCTAssertTrue(translucent)
+        let fmt = TileCodec.finalFormat(photographic: photographic, translucent: translucent)
+        XCTAssertEqual(fmt, .lossless)
+        guard let data = src.withUnsafeBytes({ TileCodec.encode(base: $0.baseAddress!, width: w, height: h, stride: w * 4, format: fmt, alpha: true) }) else { return XCTFail("encode") }
+        var out = [UInt8](repeating: 0, count: w * h * 4)
+        XCTAssertTrue(out.withUnsafeMutableBytes { TileCodec.decode(data, into: $0.baseAddress!, width: w, height: h, stride: w * 4) })
+        // Premultiplied "over" onto a backdrop, as the viewer's blend pipeline does (one, one-minus-source-alpha).
+        func over(_ p: [UInt8], _ i: Int, _ bg: Int) -> Int { Int(p[i]) + bg * (255 - Int(p[i - i % 4 + 3])) / 255 }
+        var worst = 0
+        for i in 0..<(w * h * 4) where i % 4 != 3 { let bg = (i * 37) % 256; worst = max(worst, abs(over(out, i, bg) - over(src, i, bg))) }
+        XCTAssertLessThanOrEqual(worst, 1)
+        // And near-lossless would not be: the reason for the rule.
+        if let nl = src.withUnsafeBytes({ TileCodec.encode(base: $0.baseAddress!, width: w, height: h, stride: w * 4, format: .nearLossless, alpha: true) }) {
+            var o2 = [UInt8](repeating: 0, count: w * h * 4)
+            _ = o2.withUnsafeMutableBytes { TileCodec.decode(nl, into: $0.baseAddress!, width: w, height: h, stride: w * 4) }
+            var worstNL = 0
+            for i in 0..<(w * h * 4) where i % 4 != 3 { let bg = (i * 37) % 256; worstNL = max(worstNL, abs(over(o2, i, bg) - over(src, i, bg))) }
+            print("near-lossless worst error at 50 % alpha: \(worstNL)")
+        }
+    }
+}

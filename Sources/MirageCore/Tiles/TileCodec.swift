@@ -110,6 +110,19 @@ public enum TileCodec {
         }
     }
 
+    /// The final (refined) format of a rect: near-lossless for photographic content, lossless otherwise, and lossless for any
+    /// rect with translucent pixels: near-lossless drops low bits, and on premultiplied pixels of low alpha (the glass menu
+    /// bar's text over clear: alpha 20-50) those bits are most of the signal; the viewer showed the bar's status items at
+    /// 0.78-0.91 of the host's edge energy, exact once the overlay was opaque (check 5, 2026-10-23).
+    public static func finalFormat(photographic: Bool, translucent: Bool) -> Format { photographic && !translucent ? .nearLossless : .lossless }
+    /// Whether a rect holds pixels that are neither fully opaque nor fully clear.
+    public static func translucent(base: UnsafeRawPointer, width: Int, height: Int, stride: Int) -> Bool {
+        for y in 0..<height {
+            let row = base.advanced(by: y * stride).assumingMemoryBound(to: UInt8.self)
+            for x in 0..<width { let a = row[x * 4 + 3]; if a != 0 && a != 255 { return true } }
+        }
+        return false
+    }
     /// Counts distinct colours in a rect, stopping early once `limit` is exceeded; drives the near-lossless choice.
     public static func colourCount(base: UnsafeRawPointer, width: Int, height: Int, stride: Int, limit: Int = 256) -> Int {
         var seen = Set<UInt32>()
