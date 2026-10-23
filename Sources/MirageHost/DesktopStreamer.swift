@@ -1929,9 +1929,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // levels, excluded from the overlay) is on the host's screen and nowhere in the stream (owner, level, frame only).
         let excluded = Set(overlayExclusion(t.display).map(\.windowID))
         log("sharp windows: overlay filter includeMenuBar was \(ScreenCapturer.menuBarDefault.map { "\($0)" } ?? "unknown") by default; set true")
-        for win in catalog.all where win.isOnScreen && win.frame.intersects(t.display.frame) {
+        // (Off-screen ones too, flagged: the overlay's exclusion takes them from the whole catalog.)
+        for win in catalog.all where win.frame.intersects(t.display.frame) {
             let where_ = layers[win.windowID] != nil ? "layer" : win.windowLayer < 0 ? "desktop" : !excluded.contains(win.windowID) ? "overlay" : "NOWHERE"
-            log("sharp windows \(where_) \(win.windowID) \(win.owningApplication?.applicationName ?? "?") L\(win.windowLayer) \(Int(win.frame.minX)),\(Int(win.frame.minY)) \(Int(win.frame.width))x\(Int(win.frame.height))")
+            log("sharp windows \(where_)\(win.isOnScreen ? "" : " (off-screen)") \(win.windowID) \(win.owningApplication?.applicationName ?? "?") L\(win.windowLayer) \(Int(win.frame.minX)),\(Int(win.frame.minY)) \(Int(win.frame.width))x\(Int(win.frame.height))")
         }
         Task.detached {
             guard let px = await Self.displayShot(t.display, width: w, height: h) else { log("sharp reference: no shot"); return }
