@@ -1917,6 +1917,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Which on-screen windows each capture carries: a window in none of them (not a layer, not in the desktop capture's
         // levels, excluded from the overlay) is on the host's screen and nowhere in the stream (owner, level, frame only).
         let excluded = Set(overlayExclusion(t.display).map(\.windowID))
+        log("sharp windows: overlay filter includeMenuBar was \(ScreenCapturer.menuBarDefault.map { "\($0)" } ?? "unknown") by default; set true")
         for win in catalog.all where win.isOnScreen && win.frame.intersects(t.display.frame) {
             let where_ = layers[win.windowID] != nil ? "layer" : win.windowLayer < 0 ? "desktop" : !excluded.contains(win.windowID) ? "overlay" : "NOWHERE"
             log("sharp windows \(where_) \(win.windowID) \(win.owningApplication?.applicationName ?? "?") L\(win.windowLayer) \(Int(win.frame.minX)),\(Int(win.frame.minY)) \(Int(win.frame.width))x\(Int(win.frame.height))")

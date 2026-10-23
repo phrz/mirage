@@ -186,6 +186,9 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// on the display is left out, black), for screenshots of a client against a person's own Mac. Pair it with
     /// MIRAGE_LAYER_APPS naming the same app so no other window becomes a layer. Fails closed: no such app, no capture.
     static let testOnlyApp = ProcessInfo.processInfo.environment["MIRAGE_TEST_ONLY_APP"]
+    /// What `includeMenuBar` was before displayFilter set it (nil before the first filter, or before macOS 14.2): logged by the
+    /// sharpness knob.
+    nonisolated(unsafe) static var menuBarDefault: Bool?
 
     /// The desktop alone: the display's desktop-level windows (window layer below zero: the wallpaper, the desktop icons and
     /// widgets). No app window can ever be in it.
@@ -205,7 +208,14 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
     /// The display picture's filter: the display minus `excluding` (window layers), or under MIRAGE_TEST_ONLY_APP that app only.
     static func displayFilter(_ display: SCDisplay, excluding: [SCWindow]) async throws -> SCContentFilter {
-        guard let id = testOnlyApp else { return SCContentFilter(display: display, excludingWindows: excluding) }
+        guard let id = testOnlyApp else {
+            let f = SCContentFilter(display: display, excludingWindows: excluding)
+            // The menu bar's own content (the frontmost app's menu titles) is not a window in the list: without this the
+            // overlay held the status items and the bar but not the titles (check 5: menu-bar left at 0.03-0.23 of the screen
+            // in the host's own model, the viewer showing the connect's half-size still there for good: phrz's "permablur").
+            if #available(macOS 14.2, *) { menuBarDefault = f.includeMenuBar; f.includeMenuBar = true }
+            return f
+        }
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         guard let app = content.applications.first(where: { $0.bundleIdentifier == id }) else {
             throw MirageError.transport("MIRAGE_TEST_ONLY_APP: \(id) is not running; capturing nothing")
