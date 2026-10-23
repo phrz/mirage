@@ -238,6 +238,16 @@ final class App: NSObject, NSApplicationDelegate {
         // case where the bench's underlay was deferred as "covered twice" and a move uncovered fill).
         // `--photo`: a full-screen opaque photographic-looking picture (smooth gradients plus noise, > 4096 colours)
         // at the normal level behind everything: a wallpaper of our own for the underlay / upgrade path.
+        // `--attention`: no window; the bench's own Dock icon bounces (critical attention request) from 3 s to 11 s, then the
+        // bench quits. Launch it in the background (open -g) so it is not the active app (a bounce needs that). The Dock
+        // bounce measurement (phrz, 2026-10-23: bouncing icons rendered as a stutter).
+        if CommandLine.arguments.contains("--attention") {
+            var request = 0
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { request = NSApp.requestUserAttention(.criticalRequest); print("attention requested \(request)") }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 11) { NSApp.cancelUserAttentionRequest(request) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 13) { NSApp.terminate(nil) }
+            return
+        }
         if CommandLine.arguments.contains("--photo") {
             let o = NSWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
             o.hasShadow = false; o.ignoresMouseEvents = true; o.title = "Mirage photo backdrop (measurement, closes itself)"

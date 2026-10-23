@@ -190,6 +190,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     // Stats (per log interval).
     private var statFrames = 0, statBytes = 0, statDropped = 0, statSkippedBudget = 0, statLost = 0
     private var statEncodeNanos: UInt64 = 0
+    /// Overlay sprite shifts (a bouncing Dock icon) and their residual bytes (estimated), this session.
+    private var statSpriteShifts = 0, statSpriteBytes = 0
     private var statInput = 0, statTileBytes = 0, statTileRects = 0, statRefineBytes = 0, statCopyRects = 0, statDirtyTiles = 0, statDiffPruned = 0, statTileSkipped = 0, statFoveaTiles = 0, statStills = 0, statOccluded = 0
     private var secTileBytes = 0, secVideoBytes = 0, secVideoFrames = 0, secSkippedBudget = 0   // per rateState second
     private var statCaptures = 0
@@ -2147,7 +2149,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             strips = [PixelRect(x: 0, y: 0, width: e, height: b.height), PixelRect(x: b.width - e, y: 0, width: e, height: b.height),
                       PixelRect(x: e, y: 0, width: b.width - 2 * e, height: e), PixelRect(x: e, y: b.height - e, width: b.width - 2 * e, height: e)]
         } else { strips = [] }
-        if !strips.isEmpty, let (copy, n) = overlayCleared(pbIn, rects: strips, keep: loggedChrome ?? []) {
+        // Not before the menu bar's and Dock's rects are known: with nothing kept, the Dock's own dark pixels went (49 at connect).
+        if !strips.isEmpty, let keep = loggedChrome, let (copy, n) = overlayCleared(pbIn, rects: strips, keep: keep) {
             if n > 0 { pb = copy; if n != lastOverlayCleared { lastOverlayCleared = n; log("overlay: \(n) opaque black pixels outside the menu bar and the Dock made transparent") } }
         }
         captureSeq &+= 1
@@ -2308,8 +2311,26 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let onLayer = layers[s.windowID] != nil ? s.windowID : 0
                 if onLayer == layer.id { scrollHere = s; scrollLock.lock(); pendingScroll = nil; scrollLock.unlock() }
             }
+            // A small sprite moving vertically in the overlay (a bouncing Dock icon): one copy-rect and the blocks it leaves wrong,
+            // exact, at every capture. Only from tiles the viewer holds lossless (a copy of soft pixels would stay soft).
+            var spriteDone = false
+            if layer.id == ControlMessage.WindowInfo.overlayID, !unexplained.isEmpty, unexplained.count <= 48 {
+                let region = tracker.boundingRect(unexplained)
+                if region.width <= 512, region.height <= 768, let s = SpriteShift.detect(old: old, new: new, region: region),
+                   tracker.tiles(covering: [s.rect]).allSatisfy({ tracker.soft($0, now: now) == nil && !layer.photoLossyFinal.contains($0) }) {
+                    sendTileMessage(.copyRect(.init(header: header(layer: layer.id, nanos: nanos), rect: s.rect, dx: 0, dy: s.dy)), captureNanos: nanos)
+                    var bytes = 0
+                    if !s.residual.isEmpty { bytes = submitRects(layer, s.residual, from: new, refinement: false, nanos: nanos); debit("sprite", Double(bytes)) }
+                    let all = tracker.tiles(covering: [region])
+                    explained.formUnion(all)
+                    tracker.sent(lossless: all, now: now)
+                    statCopyRects += 1; copyRectsThisCapture += 1; statSpriteShifts += 1; statSpriteBytes += bytes
+                    if debugLayers, statSpriteShifts % 30 == 1 { log("overlay sprite shift \(s.rect) by \(s.dy): \(s.residual.count) residual rects, ~\(bytes) B (\(statSpriteShifts) so far)") }
+                    spriteDone = true
+                }
+            }
             let bb = tracker.boundingRect(unexplained)
-            if unexplained.count >= 12, bb.height >= 128 || bb.width >= 128 {
+            if !spriteDone, unexplained.count >= 12, bb.height >= 128 || bb.width >= 128 {
                 var known: PixelRect? = nil
                 var win: ControlMessage.WindowInfo? = nil
                 if layer.isDisplay {

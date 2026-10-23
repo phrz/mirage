@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import ArgumentParser
 import MirageCore
@@ -13,6 +14,15 @@ struct Miraged: AsyncParsableCommand {
         defaultSubcommand: Serve.self)
 }
 
+/// The host is invisible: no Dock tile, no activation, ever. miraged lives in Mirage.app/Contents/MacOS, so LaunchServices
+/// files it under the app's bundle, whose Info.plist has no LSUIElement (the viewer goes accessory at run time); at its first
+/// window-server contact it checked in as a Foreground app, a second "Mirage" in the Dock that could bounce (phrz,
+/// 2026-10-23). Called first, before any ScreenCaptureKit, CoreGraphics or AppKit use; the binary (and its TCC grants) are
+/// unchanged. Its one prompt, pairing, is the menu-bar app's (over the control socket). scripts/check-host-invisible.sh checks.
+func stayInvisible() {
+    _ = NSApplication.shared.setActivationPolicy(.prohibited)
+}
+
 func log(_ s: String) {
     let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     FileHandle.standardError.write(Data("\(f.string(from: Date())) \(s)\n".utf8))
@@ -26,6 +36,7 @@ struct Serve: AsyncParsableCommand {
     @Flag(help: "No local control socket and no permission watcher: a second, test instance beside the login-item agent (whose control.sock it would otherwise take over).") var noLocalControl = false
 
     func run() async throws {
+        stayInvisible()
         if let logFile {
             let path = (logFile as NSString).expandingTildeInPath
             try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
@@ -144,6 +155,7 @@ struct ProbeLayers: AsyncParsableCommand {
     @Option(help: "Write the first window's last frame as PNG here.") var dump: String?
     @Option(help: "window (one stream per matched window), display (whole display), exclude (display minus the matched windows).") var mode: String = "window"
     func run() async throws {
+        stayInvisible()
         try await LayerProbe.run(match: match, seconds: seconds, scale: scale, dump: dump, mode: mode, log: { log($0) })
     }
 }
