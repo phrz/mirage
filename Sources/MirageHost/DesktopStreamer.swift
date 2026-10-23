@@ -1914,6 +1914,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
             for (name, f) in ref.regions { log("sharp model \(name) \(String(format: "%.2f", Self.edgeEnergy(model, width: w, height: h, f)))") }
         }
+        // Which on-screen windows each capture carries: a window in none of them (not a layer, not in the desktop capture's
+        // levels, excluded from the overlay) is on the host's screen and nowhere in the stream (owner, level, frame only).
+        let excluded = Set(overlayExclusion(t.display).map(\.windowID))
+        for win in catalog.all where win.isOnScreen && win.frame.intersects(t.display.frame) {
+            let where_ = layers[win.windowID] != nil ? "layer" : win.windowLayer < 0 ? "desktop" : !excluded.contains(win.windowID) ? "overlay" : "NOWHERE"
+            log("sharp windows \(where_) \(win.windowID) \(win.owningApplication?.applicationName ?? "?") L\(win.windowLayer) \(Int(win.frame.minX)),\(Int(win.frame.minY)) \(Int(win.frame.width))x\(Int(win.frame.height))")
+        }
         Task.detached {
             guard let px = await Self.displayShot(t.display, width: w, height: h) else { log("sharp reference: no shot"); return }
             for (name, f) in ref.regions { log("sharp reference \(name) \(String(format: "%.2f", Self.edgeEnergy(px, width: w, height: h, f)))") }
