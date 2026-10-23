@@ -1012,7 +1012,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// lossless resend, unacked video frames are forgotten (the resume keyframe replaces them).
     public func suspend() async {
         queue.sync { holdWarm(false) }
-        queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.request?.throttle == nil ? self.request?.networkFingerprint : nil) }   // the next connect starts there
+        queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.priorDeliveryNetwork) }   // the next connect starts there
         // The session is cut loose first (output, timers, captures detached), then the captures are stopped, each within 3 s:
         // ScreenCaptureKit's stopCapture can fail to return, and awaiting it before the cut left a suspended streamer
         // capturing, refining and sending into the dead connection for good (mac-daddy 2026-10-21: a second streamer
@@ -1174,7 +1174,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     public func stop() async {
         queue.sync { holdWarm(false) }
-        queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.request?.throttle == nil ? self.request?.networkFingerprint : nil) }
+        queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.priorDeliveryNetwork) }
         // Cut loose first, then stop the captures within 3 s each (suspend()).
         let (cap, caps): (ScreenCapturer?, [WindowCapturer]) = await withCheckedContinuation { c in
             queue.async {
@@ -2811,6 +2811,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Per pairing and viewer network (the request's fingerprint), the last session's delivery estimate in kbit/s, if from
     /// the last 24 h (the host's store, delivery.json).
     struct PriorDelivery: Codable { var kbps: Int; var at: Date }
+    /// The network a session's estimate is saved under: none for a throttled session, nor for one under a viewer's bitrate cap
+    /// (its peak is the cap's, not the link's: a test run at --bitrate 800 saved 1267 kbps into the store the login-item host
+    /// shares, and phrz's next connect on his several-Mbps link started at 950, 2026-10-23 12:41Z).
+    private var priorDeliveryNetwork: String? {
+        guard let req = request, req.throttle == nil, BitratePolicy.isAutomatic(req) else { return nil }
+        return req.networkFingerprint
+    }
     static func priorDelivery(for peer: String?, network: String?) -> Int? {
         guard let peer, let network, let url = (try? Store())?.url("delivery.json"), let d = try? Data(contentsOf: url),
               let m = try? JSONDecoder().decode([String: PriorDelivery].self, from: d), let e = m[peer + "|" + network],
