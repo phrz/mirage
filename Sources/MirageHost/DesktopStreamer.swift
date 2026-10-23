@@ -276,6 +276,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var plannedFrames: [UInt32: PixelRect] = [:]
     private var recentFrames: [(rect: PixelRect, nanos: UInt64)] = []
     private var statTaintResent = 0, statExclusionLag = 0
+    /// Compositor model: when each desktop tile was last re-sent at the viewer's ask (it holds no clean pixels there).
+    private var unknownResent: [Int: UInt64] = [:]
     private var lastLagLogNanos: UInt64 = 0
     private func windowAreas(now: UInt64) -> [PixelRect] {
         recentFrames.removeAll { now &- $0.nanos > 600_000_000 }
@@ -1020,6 +1022,18 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 guard r.layer == 0, let d = self.display else { return }
                 let tiles = r.tiles.map(Int.init).filter { $0 >= 0 && $0 < d.tracker.tileCount }
                 self.statAuditRefreshed += tiles.count
+                if self.compositor {
+                    // The compositor model's desktop layer never holds a window, so the taint re-send (seam model) never runs
+                    // here; but the viewer marks desktop tiles unknown where a window was when it became a layer and fills
+                    // them flat until a clean write lands. They were never re-sent: phrz's wallpaper and widgets stayed a
+                    // flat fill for good (check 5, 2026-10-23: viewer at 0.04-0.47 of the host's edge energy there). Re-sent
+                    // from the current desktop, each at most once per 10 s (the viewer asks every 2 s while it lacks them).
+                    let now = Clock.nowNanos()
+                    let due = tiles.filter { !d.occludedTiles.contains($0) && now &- (self.unknownResent[$0] ?? 0) > 10_000_000_000 }
+                    for i in due { self.unknownResent[i] = now }
+                    if !due.isEmpty { d.tracker.markDirect(due, now: now); if self.debugLayers { self.log("viewer holds no clean pixels for \(tiles.count) desktop tiles: \(due.count) re-sent") } }
+                    return
+                }
                 d.taint.mark(tiles); d.taintScheduled.subtract(tiles)
                 if self.debugLayers { self.log("viewer asks for \(tiles.count) desktop tiles it holds no clean pixels for") }
             }
