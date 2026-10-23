@@ -662,8 +662,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// windows (they are layers).
     private func overlayExclusion(_ display: SCDisplay) -> [SCWindow] {
         let excl = Self.overlayExclusion(catalog.all, display)
-        // Test knob MIRAGE_TEST_OVERLAY_KEEP=layers|apps|desktop: that category stays in the overlay (layers: windows streamed
-        // as layers; apps: other ordinary app windows; desktop: desktop-level windows), to find which exclusion takes the
+        // Test knob MIRAGE_TEST_OVERLAY_KEEP=layers|apps|desktop|front|id:<n>,…: that category stays in the overlay (layers:
+        // windows streamed as layers; apps: other ordinary app windows; desktop: desktop-level windows; front: the frontmost
+        // app's windows; id: those windows), to find which exclusion takes the
         // menu titles and the Dock's dots with it (check 5: both absent from the overlay, present in an unfiltered shot).
         guard let keep = Self.testOverlayKeep else { return excl }
         return excl.filter { w in
@@ -672,7 +673,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             case "layers": return !isLayer
             case "apps": return isLayer || w.windowLayer < 0
             case "desktop": return w.windowLayer >= 0
-            default: return true
+            case "front": return w.owningApplication?.processID != NSWorkspace.shared.frontmostApplication?.processIdentifier
+            default:
+                // id:<n>,<n>: those windows stay in.
+                if keep.hasPrefix("id:") { return !keep.dropFirst(3).split(separator: ",").compactMap { UInt32($0) }.contains(w.windowID) }
+                return true
             }
         }
     }
