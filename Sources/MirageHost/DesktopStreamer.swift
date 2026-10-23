@@ -756,8 +756,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var bands: [Band] = []
     /// The overlay's latest frame as captured (before the bands): a band's change re-runs it with the new band.
     private var overlayRaw: CVPixelBuffer?
+    /// Test knob MIRAGE_TEST_NO_BANDS=1: no band streams (the A/B of their cost).
+    static let testNoBands = ProcessInfo.processInfo.environment["MIRAGE_TEST_NO_BANDS"] == "1"
     private func ensureBands(_ chrome: [PixelRect]) {
-        guard compositor, overlay != nil, let t = target, let req = request else { return }
+        guard compositor, overlay != nil, !Self.testNoBands, let t = target, let req = request else { return }
         let display = PixelRect(x: 0, y: 0, width: t.pixelWidth, height: t.pixelHeight)
         let want = chrome.map { $0.intersection(display) }.filter { $0.width >= 16 && $0.height >= 8 }
         guard want != bands.map(\.rect) else { return }
