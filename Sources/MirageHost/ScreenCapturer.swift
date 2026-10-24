@@ -212,6 +212,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// transparency, comes back (check 5: titles at 0.03-0.23 of the screen in the host's model, status items exact).
     static let testMenuBarInDesktop = ProcessInfo.processInfo.environment["MIRAGE_TEST_MENUBAR_IN_DESKTOP"] == "1"
     static let menuBarLevel = 24
+    static let testDesktopExclude = ProcessInfo.processInfo.environment["MIRAGE_TEST_DESKTOP_EXCLUDE"] == "1"
 
     /// The desktop alone: the display's desktop-level windows (window layer below zero: the wallpaper, the desktop icons and
     /// widgets). No app window can ever be in it.
@@ -219,6 +220,10 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let desk = content.windows.filter { ($0.windowLayer < 0 || testMenuBarInDesktop && $0.windowLayer == menuBarLevel) && $0.frame.intersects(display.frame) }
         guard !desk.isEmpty else { throw MirageError.transport("no desktop-level windows on display \(display.displayID)") }
+        // Test knob MIRAGE_TEST_DESKTOP_EXCLUDE=1: the display minus every window at the normal level or above, instead of the
+        // desktop-level windows included by name: whether Finder's desktop icons, absent from the host's desktop layer though
+        // their window is listed (check 5, 2026-10-24: top-right cells at 0.16-0.25 of the screen), come back that way.
+        if testDesktopExclude { return SCContentFilter(display: display, excludingWindows: content.windows.filter { $0.windowLayer >= 0 }) }
         return SCContentFilter(display: display, including: desk)
     }
     /// Re-reads the desktop-level windows (a widget added or removed) and applies them; desktop sources only.
