@@ -12,6 +12,7 @@ final class FrameRecorder {
     static let directory: URL? = ProcessInfo.processInfo.environment["MIRAGE_TEST_FRAMES"].map { URL(fileURLWithPath: $0) }
     let dir: URL
     /// MIRAGE_TEST_FRAMES_SCALE (default 0.25): at a quarter, softness (a still left in place of the lossless level) hides.
+    static let layers = ProcessInfo.processInfo.environment["MIRAGE_TEST_FRAMES_LAYERS"] == "1"
     let scale = ProcessInfo.processInfo.environment["MIRAGE_TEST_FRAMES_SCALE"].flatMap(Double.init).map { min(1, max(0.05, $0)) } ?? 0.25
     private var index = 0
     private let start = Clock.nowNanos()
@@ -50,6 +51,18 @@ final class FrameRecorder {
         let data = Data(bytes: buf.contents(), count: stride * h)
         let line = Line(i: i, ms: ms, clock: Int(Clock.nowNanos() / 1_000_000), width: w, height: h, layers: layers.map { id, r in L(id: id, x: Int(Double(r.x) * scale), y: Int(Double(r.y) * scale), w: Int(Double(r.width) * scale), h: Int(Double(r.height) * scale)) })
         if let j = try? JSONEncoder().encode(line) { log?.write(j + Data("\n".utf8)) }
+        // MIRAGE_TEST_FRAMES_LAYERS=1: the desktop layer alone (`l0-`), the desktop with the viewer's fill for desktop tiles
+        // it holds no clean pixels for (`l0f-`), and the overlay alone on clear (`ov-`, premultiplied), at the frame's
+        // scale: which layer a softness is in (numbers only, like the frames).
+        if Self.layers {
+            let d0 = LayerScene(background: bg, items: [], displacements: [], bandColors: [:])
+            let df = LayerScene(background: bg, items: [], displacements: [], bandColors: [:], displayFill: scene.displayFill, fillColor: scene.fillColor)
+            UnifiedShots.write(scene: d0, crop: PixelRect(x: 0, y: 0, width: bg.width, height: bg.height), context: context, to: dir.appendingPathComponent(String(format: "l0-%04d.png", i)), scale: scale)
+            UnifiedShots.write(scene: df, crop: PixelRect(x: 0, y: 0, width: bg.width, height: bg.height), context: context, to: dir.appendingPathComponent(String(format: "l0f-%04d.png", i)), scale: scale)
+            for item in scene.items { if case .layer(let c, _, _, _) = item, c.layerID == ControlMessage.WindowInfo.overlayID, c.width == bg.width {
+                UnifiedShots.write(c, source: PixelRect(x: 0, y: 0, width: c.width, height: c.height), context: context, to: dir.appendingPathComponent(String(format: "ov-%04d.png", i)), scale: scale)
+            } }
+        }
         let url = dir.appendingPathComponent(String(format: "frame-%04d.png", i))
         DispatchQueue.global(qos: .utility).async {
             guard let provider = CGDataProvider(data: data as CFData),
@@ -67,18 +80,18 @@ final class FrameRecorder {
 /// windows the host captures as layers, so a loopback run with MIRAGE_LAYER_APPS shows nothing of the person's screen.
 enum UnifiedShots {
     static let directory: URL? = ProcessInfo.processInfo.environment["MIRAGE_TEST_UNIFIED_SHOTS"].map { URL(fileURLWithPath: $0) }
-    static func write(_ c: Compositor, source: PixelRect, context: MetalContext, to url: URL) {
-        render(context: context, width: source.width, height: source.height, to: url) { target in
-            SceneRenderer.renderCrop(c, source: source, displacements: [], bandColors: [:], context: context, target: target, clear: MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0))
+    static func write(_ c: Compositor, source: PixelRect, context: MetalContext, to url: URL, scale: Double = 1) {
+        render(context: context, width: Int(Double(source.width) * scale), height: Int(Double(source.height) * scale), to: url) { target in
+            SceneRenderer.renderCrop(c, source: source, scale: scale, displacements: [], bandColors: [:], context: context, target: target, clear: MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0))
         }
     }
     /// Test knob `MIRAGE_TEST_BENCH_SHOTS=<dir>` (any mode, `--scenario` runs): the composited scene cropped to the bench
     /// window plus a margin, `bench-NNNN.png` at `MIRAGE_TEST_BENCH_FPS` (default 2): what the person sees of our own
     /// window and its corners and shadow, and nothing of the rest of the screen.
-    static func write(scene: LayerScene, crop: PixelRect, context: MetalContext, to url: URL) {
+    static func write(scene: LayerScene, crop: PixelRect, context: MetalContext, to url: URL, scale: Double = 1) {
         guard let bg = scene.background, bg.width > 0 else { return }
-        render(context: context, width: crop.width, height: crop.height, to: url) { target in
-            SceneRenderer.render(scene, context: context, target: target, dest: CGRect(x: -crop.x, y: -crop.y, width: bg.width, height: bg.height))
+        render(context: context, width: Int(Double(crop.width) * scale), height: Int(Double(crop.height) * scale), to: url) { target in
+            SceneRenderer.render(scene, context: context, target: target, dest: CGRect(x: -Double(crop.x) * scale, y: -Double(crop.y) * scale, width: Double(bg.width) * scale, height: Double(bg.height) * scale))
         }
     }
     private static func render(context: MetalContext, width: Int, height: Int, to url: URL, draw: (MTLTexture) -> Void) {
