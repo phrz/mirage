@@ -91,6 +91,9 @@ public struct VideoFragment: Equatable, Sendable {
         public static let tileMask = Flags(rawValue: 1 << 3)
         /// A progressive-refinement step of a fresh picture (ladder climb): the client crossfades it in.
         public static let progressive = Flags(rawValue: 1 << 4)
+        /// Payload carries a priority key (TileKey) per masked tile, after the mask (only to viewers whose request said
+        /// `tileKeys`).
+        public static let tileKeys = Flags(rawValue: 1 << 5)
     }
 
     public var frameSeq: UInt32
@@ -156,7 +159,7 @@ public struct VideoFragment: Equatable, Sendable {
 /// client only takes masked tiles from the decoded picture, so crisp tiles elsewhere survive.
 /// Then the HEVC sample data (4-byte length-prefixed NAL units, hvcC style).
 public enum VideoFramePayload {
-    public static func encode(parameterSets: [Data], tileMask: Data? = nil, sample: Data) -> Data {
+    public static func encode(parameterSets: [Data], tileMask: Data? = nil, keys: [UInt64]? = nil, sample: Data) -> Data {
         guard !parameterSets.isEmpty || tileMask != nil else { return sample }
         var d = Data(capacity: sample.count + 128 + (tileMask?.count ?? 0))
         if !parameterSets.isEmpty {
@@ -164,10 +167,11 @@ public enum VideoFramePayload {
             for ps in parameterSets { d.appendBE(UInt16(ps.count)); d.append(ps) }
         }
         if let m = tileMask { d.appendBE(UInt16(m.count)); d.append(m) }
+        if let keys { d.appendBE(UInt16(keys.count)); for k in keys { d.appendBE(k) } }
         d.append(sample)
         return d
     }
-    public static func decode(_ d: Data, hasParameterSets: Bool, hasTileMask: Bool = false) -> (parameterSets: [Data], tileMask: Data?, sample: Data)? {
+    public static func decode(_ d: Data, hasParameterSets: Bool, hasTileMask: Bool = false, hasKeys: Bool = false) -> (parameterSets: [Data], tileMask: Data?, keys: [UInt64]?, sample: Data)? {
         var r = ByteReader(d, offset: 0)
         var sets: [Data] = []
         if hasParameterSets {
@@ -187,7 +191,14 @@ public enum VideoFramePayload {
             guard r.remaining >= Int(len) else { return nil }
             mask = d.subdata(in: r.offset..<r.offset + Int(len)); r.offset += Int(len)
         }
-        return (sets, mask, d.subdata(in: r.offset..<d.endIndex))
+        var keys: [UInt64]? = nil
+        if hasKeys {
+            guard r.remaining >= 2 else { return nil }
+            let n: UInt16 = r.read()
+            guard r.remaining >= 8 * Int(n) else { return nil }
+            keys = (0..<Int(n)).map { _ in r.read() }
+        }
+        return (sets, mask, keys, d.subdata(in: r.offset..<d.endIndex))
     }
 }
 
@@ -220,6 +231,8 @@ public struct VideoFrame: Sendable {
     public var lastFragmentNanos: UInt64
     public var parameterSets: [Data]
     public var tileMask: Data?
+    /// One TileKey per masked tile (row-major), when the host sent them.
+    public var keys: [UInt64]? = nil
     public var sample: Data
     public var bytes: Int
     public var fragments: Int
@@ -230,6 +243,8 @@ public struct VideoFrame: Sendable {
     /// Fragments that needed parity or a NACK (the viewer reports them in the ack).
     public var fragmentsLost: Int = 0
 }
+
+extension VideoFrame { func withKeys(_ k: [UInt64]?) -> VideoFrame { var f = self; f.keys = k; return f } }
 
 /// Reassembles fragments into frames, delivers them strictly in sequence order (a frame with a
 /// hole holds the frames after it, which are P-frames that reference it), asks for missing
@@ -393,12 +408,12 @@ public struct FrameAssembler {
                 partials[seq] = nil
                 var sample = Data(capacity: p.total)
                 for part in p.parts { sample.append(part!) }
-                let decoded = VideoFramePayload.decode(sample, hasParameterSets: p.flags.contains(.parameterSets), hasTileMask: p.flags.contains(.tileMask))
+                let decoded = VideoFramePayload.decode(sample, hasParameterSets: p.flags.contains(.parameterSets), hasTileMask: p.flags.contains(.tileMask), hasKeys: p.flags.contains(.tileKeys))
                 delivered = seq
                 if let decoded {
                     events.append(.completed(VideoFrame(seq: seq, flags: p.flags, captureNanos: p.captureNanos, firstFragmentNanos: p.firstNanos,
                                                          lastFragmentNanos: p.lastNanos, parameterSets: decoded.parameterSets, tileMask: decoded.tileMask, sample: decoded.sample, bytes: sample.count,
-                                                         fragments: p.count, captureSeq: p.captureSeq, inputSeq: p.inputSeq, region: p.region, layerID: p.layerID, fragmentsLost: p.recovered)))
+                                                         fragments: p.count, captureSeq: p.captureSeq, inputSeq: p.inputSeq, region: p.region, layerID: p.layerID, fragmentsLost: p.recovered).withKeys(decoded.keys)))
                 } else {
                     events.append(.lost(seq: seq, layer: p.layerID))
                 }

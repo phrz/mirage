@@ -132,6 +132,7 @@ public final class Compositor {
         fades = []
         alphaPlane = nil; alphaTiles = []
         pending = nil; pendingMask = []; pendingSinceNanos = 0
+        canvasKey = []; stagedKey = []
         clear()
     }
     /// Like `configure`, but a size change keeps the old picture at the top-left (cropped or with cleared margins) until
@@ -297,6 +298,71 @@ public final class Compositor {
         if let pending { out.append(pending) }
         return out
     }
+    // MARK: Tile keys (TileKey): one priority per write per 64-px tile, the only landing rule when the host sends them
+
+    /// Per 64-px tile: the key of what the canvas shows, and of the staged level's pixels (where stagedMask is set).
+    private var canvasKey: [UInt64] = [], stagedKey: [UInt64] = []
+    /// The canvas's key for tile `i` (0 when no keyed write landed there).
+    public func key(tile i: Int) -> UInt64 { i >= 0 && i < canvasKey.count ? canvasKey[i] : 0 }
+    private func ensureKeys() {
+        let n = tileCols * tileRows
+        if canvasKey.count != n { canvasKey = Array(repeating: 0, count: n); stagedKey = Array(repeating: 0, count: n) }
+    }
+    private func tileRect(_ i: Int) -> PixelRect {
+        PixelRect(x: (i % tileCols) * 64, y: (i / tileCols) * 64, width: 64, height: 64).intersection(PixelRect(x: 0, y: 0, width: width, height: height))
+    }
+    /// A write covering only part of a tile: the tile's key takes its content seq when newer, but never more than the lower
+    /// of the two ranks (the rest of the tile still holds the older pixels).
+    static func partialKey(_ k: UInt64, over old: UInt64) -> UInt64 {
+        TileKey.contentSeq(k) > TileKey.contentSeq(old) ? TileKey.make(contentSeq: TileKey.contentSeq(k), rank: min(TileKey.rank(k), TileKey.rank(old))) : old
+    }
+    struct Piece { var rect: PixelRect; var tile: Int; var key: UInt64; var canvas: Bool; var staging: Bool; var full: Bool }
+    /// A keyed write of `r` (keys: one per tile of r's span on the 64-px grid, row-major), cut per tile with where it lands:
+    /// a direct write on the canvas iff its key beats the canvas's, on the staged level iff it beats the staged pixels (a
+    /// tile not staged follows the canvas); a staged write iff it beats both. Keys are updated here.
+    func pieces(_ r: PixelRect, keys: [UInt64], staged: Bool) -> [Piece] {
+        ensureKeys()
+        let b = r.intersection(PixelRect(x: 0, y: 0, width: width, height: height))
+        guard !b.isEmpty else { return [] }
+        let cols = tileCols
+        let c0 = r.x / 64, r0 = r.y / 64, spanCols = (r.maxX - 1) / 64 - c0 + 1
+        var out: [Piece] = []
+        for ty in (b.y / 64)...((b.maxY - 1) / 64) {
+            for tx in (b.x / 64)...((b.maxX - 1) / 64) {
+                let ki = (ty - r0) * spanCols + (tx - c0)
+                guard ki >= 0, ki < keys.count else { continue }
+                let i = ty * cols + tx, tr = tileRect(i), piece = tr.intersection(b)
+                guard !piece.isEmpty else { continue }
+                let k = keys[ki], full = piece == tr
+                let isStaged = i < stagedMask.count && stagedMask[i]
+                var p = Piece(rect: piece, tile: i, key: k, canvas: false, staging: false, full: full)
+                if staged {
+                    p.staging = k > max(canvasKey[i], isStaged ? stagedKey[i] : 0)
+                    p.canvas = k > canvasKey[i]   // (for alsoShow: shown at once where the scene draws fill)
+                    if p.staging { stagedKey[i] = full ? k : Self.partialKey(k, over: isStaged ? stagedKey[i] : canvasKey[i]) }
+                } else {
+                    p.canvas = k > canvasKey[i]
+                    p.staging = isStaged ? k > stagedKey[i] : p.canvas
+                    if p.canvas { canvasKey[i] = full ? k : Self.partialKey(k, over: canvasKey[i]) }
+                    if isStaged, p.staging { stagedKey[i] = full ? k : Self.partialKey(k, over: stagedKey[i]) }
+                }
+                out.append(p)
+            }
+        }
+        return out
+    }
+    /// Writes skipped because a write of higher or equal key was already there (diagnostics).
+    public private(set) var keyRejected = 0
+    /// The canvas side of a direct write (canvas, or the fade's incoming texture, or TRUTH's pending mirror).
+    private func canvasSide(_ rect: PixelRect, crossfade: Bool, transaction: Bool) -> [MTLTexture] {
+        guard let canvas else { return [] }
+        if transaction, let p = pending { markPending(rect); return [p] }
+        var out: [MTLTexture] = []
+        if crossfade { out.append(ensureIncoming() ?? canvas) } else { out.append(canvas); if let incoming, fadeIntersects(rect) { out.append(incoming) } }
+        if let pending { out.append(pending) }
+        return out
+    }
+
     /// When the staged level last received a write (0: nothing staged); the viewer's staged-pixels invariant.
     public private(set) var lastStagedWriteNanos: UInt64 = 0
     private func markStaged(_ r: PixelRect) {
@@ -381,6 +447,12 @@ public final class Compositor {
     private func performCommit(durationNanos: UInt64, _ cb: MTLCommandBuffer) -> Int {
         commitPending = nil
         guard let staging, let inc = ensureIncoming(), let blit = cb.makeBlitCommandEncoder() else { return 0 }
+        // Keyed: a staged tile whose pixels no longer beat the canvas's (a newer write landed there meanwhile) is not presented.
+        if canvasKey.count == stagedMask.count, stagedKey.count == stagedMask.count {
+            for i in 0..<stagedMask.count where stagedMask[i] {
+                if stagedKey[i] != 0, stagedKey[i] <= canvasKey[i] { stagedMask[i] = false } else if stagedKey[i] != 0 { canvasKey[i] = stagedKey[i] }
+            }
+        }
         let runs = Self.runs(stagedMask, cols: tileCols, rows: tileRows, width: width, height: height)
         let n = stagedTiles
         for r in runs { copy(staging, to: inc, rect: r, blit: blit) }
@@ -455,7 +527,9 @@ public final class Compositor {
 
     /// Writes the masked tiles of a decoded NV12 frame into `region` of the canvas (scaling if the
     /// frame is smaller than the region, i.e. the host is on a lower rung).
-    public func applyVideo(_ image: CVImageBuffer, region: PixelRect, mask: TileMask?, tile: Int = 64, crossfade: Bool = false, captureSeq: UInt32? = nil) {
+    /// `keys`: one TileKey per masked tile (row-major over the region's grid), when the host sent them: each tile lands where
+    /// its key wins, the only rule (captureSeq is then unused).
+    public func applyVideo(_ image: CVImageBuffer, region: PixelRect, mask: TileMask?, tile: Int = 64, crossfade: Bool = false, captureSeq: UInt32? = nil, keys: [UInt64]? = nil) {
         guard canvas != nil, CVPixelBufferGetPlaneCount(image) == 2 else { return }
         let full = region.isEmpty ? PixelRect(x: 0, y: 0, width: width, height: height) : region
         let vw = CVPixelBufferGetWidthOfPlane(image, 0), vh = CVPixelBufferGetHeightOfPlane(image, 0)
@@ -501,14 +575,23 @@ public final class Compositor {
         let grid = TileMask.grid(for: r, tile: tile)
         let cols = (width + 63) / 64
         var withAlpha: [PixelRect] = []
+        var keyIndex = 0
         for row in 0..<grid.rows {
             for col in 0..<grid.cols {
                 if let mask, !mask[col, row] { continue }
+                let ki = keyIndex; keyIndex += 1
                 let t = PixelRect(x: r.x + col * tile, y: r.y + row * tile, width: tile, height: tile).intersection(r)
                 guard !t.isEmpty, t.maxX <= source.width, t.maxY <= source.height else { continue }
+                var tileOuts = outs
+                if let keys, ki < keys.count, tile == 64 {
+                    // Keyed: the canvas side iff the key beats the canvas's, the staged level iff it beats the staged pixels.
+                    guard let p = pieces(t, keys: [keys[ki]], staged: false).first else { continue }
+                    tileOuts = outs.filter { dst in dst === staging ? p.staging : p.canvas }
+                    if tileOuts.isEmpty { keyRejected += 1; continue }
+                }
                 if tile == 64, alphaPlane != nil, alphaTiles.contains((t.y / 64) * cols + t.x / 64) { withAlpha.append(t); continue }
-                let keepStaged = captureSeq.map { stagedLosslessCovers(t, seq: $0) } ?? false
-                for dst in outs where !(keepStaged && dst === staging) { copy(source, to: dst, rect: t, blit: blit) }
+                let keepStaged = keys == nil && (captureSeq.map { stagedLosslessCovers(t, seq: $0) } ?? false)
+                for dst in tileOuts where !(keepStaged && dst === staging) { copy(source, to: dst, rect: t, blit: blit) }
             }
         }
         blit.endEncoding()
@@ -555,10 +638,13 @@ public final class Compositor {
     }
 
     /// Draws `src` (whole) scaled into `rect` of `dst` (bilinear), replacing the pixels there.
-    private func drawScaled(_ src: MTLTexture, into dst: MTLTexture, rect: PixelRect, commandBuffer cb: MTLCommandBuffer) {
+    private func drawScaled(_ src: MTLTexture, into dst: MTLTexture, rect: PixelRect, clip: PixelRect? = nil, commandBuffer cb: MTLCommandBuffer) {
         let rp = MTLRenderPassDescriptor()
         rp.colorAttachments[0].texture = dst; rp.colorAttachments[0].loadAction = .load; rp.colorAttachments[0].storeAction = .store
         guard let re = cb.makeRenderCommandEncoder(descriptor: rp) else { return }
+        if let c = clip?.intersection(PixelRect(x: 0, y: 0, width: dst.width, height: dst.height)), !c.isEmpty {
+            re.setScissorRect(MTLScissorRect(x: c.x, y: c.y, width: c.width, height: c.height))
+        }
         re.setRenderPipelineState(context.quadPipeline)
         let dw = Float(dst.width), dh = Float(dst.height)
         let x0 = Float(rect.x) / dw * 2 - 1, y0 = 1 - Float(rect.y) / dh * 2, x1 = Float(rect.maxX) / dw * 2 - 1, y1 = 1 - Float(rect.maxY) / dh * 2
@@ -604,8 +690,19 @@ public final class Compositor {
                 if hasAlpha { Self.clampPremultiplied(&pixels) }
                 tex.replace(region: MTLRegionMake2D(0, 0, dw, dh), mipmapLevel: 0, withBytes: pixels, bytesPerRow: dw * 4)
                 blit?.endEncoding(); blit = nil
-                for dst in targets(r, staged: staged, crossfade: crossfade, transaction: transaction, lowerFrom: staged ? nil : captureSeq, cb) { drawScaled(tex, into: dst, rect: r, commandBuffer: cb) }
-                if staged, let s = captureSeq { noteStagedQuality(r, seq: s, lossless: false) }
+                if let keys = t.keys {
+                    // Keyed: per tile, where its key lands (a still drawn scaled, clipped to each landing tile).
+                    for p in pieces(t.rect, keys: keys, staged: staged) {
+                        var dsts: [MTLTexture] = []
+                        if staged { if p.staging, let s = ensureStaging(cb) { markStaged(p.rect); dsts.append(s) } }
+                        else { if p.canvas { dsts += canvasSide(p.rect, crossfade: crossfade, transaction: transaction) }; if p.staging, let s = staging { dsts.append(s) } }
+                        if dsts.isEmpty { keyRejected += 1 }
+                        for dst in dsts { drawScaled(tex, into: dst, rect: t.rect, clip: p.rect, commandBuffer: cb) }
+                    }
+                } else {
+                    for dst in targets(r, staged: staged, crossfade: crossfade, transaction: transaction, lowerFrom: staged ? nil : captureSeq, cb) { drawScaled(tex, into: dst, rect: r, commandBuffer: cb) }
+                    if staged, let s = captureSeq { noteStagedQuality(r, seq: s, lossless: false) }
+                }
                 if crossfade && !staged { faded.append(r) }
                 n += 1
                 continue
@@ -615,6 +712,40 @@ public final class Compositor {
                 guard TileCodec.fillSolid(t.data, into: buf.contents(), width: w, height: h, stride: stride) else { continue }
             } else {
                 guard let (dw, dh) = TileCodec.size(of: t.data), dw == w, dh == h, TileCodec.decode(t.data, into: buf.contents(), width: w, height: h, stride: stride) else { continue }
+            }
+            if let keys = t.keys {
+                // Keyed: each tile of the rect lands where its key wins.
+                if staged { _ = ensureStaging(cb) }
+                let ps = pieces(t.rect, keys: keys, staged: staged)
+                if blit == nil { blit = cb.makeBlitCommandEncoder() }
+                for p in ps {
+                    var dsts: [MTLTexture] = []
+                    if staged { if p.staging, let s = staging { markStaged(p.rect); dsts.append(s) } }
+                    else { if p.canvas { dsts += canvasSide(p.rect, crossfade: crossfade, transaction: transaction) }; if p.staging, let s = staging { dsts.append(s) } }
+                    if dsts.isEmpty { keyRejected += 1; continue }
+                    let off = (p.rect.y - t.rect.y) * stride + (p.rect.x - t.rect.x) * 4
+                    for dst in dsts {
+                        blit?.copy(from: buf, sourceOffset: off, sourceBytesPerRow: stride, sourceBytesPerImage: stride * h, sourceSize: MTLSize(width: p.rect.width, height: p.rect.height, depth: 1),
+                                   to: dst, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: p.rect.x, y: p.rect.y, z: 0))
+                    }
+                    if crossfade && !staged && p.canvas { faded.append(p.rect) }
+                    // Staged where the scene draws fill: shown at once too, where the canvas takes it.
+                    if staged, p.canvas, let canvasTex = canvas {
+                        for part in alsoShow {
+                            let q = part.intersection(p.rect)
+                            guard !q.isEmpty else { continue }
+                            let o = (q.y - t.rect.y) * stride + (q.x - t.rect.x) * 4
+                            for dst in [canvasTex] + (incoming != nil && fadeIntersects(q) ? [incoming!] : []) {
+                                blit?.copy(from: buf, sourceOffset: o, sourceBytesPerRow: stride, sourceBytesPerImage: stride * h, sourceSize: MTLSize(width: q.width, height: q.height, depth: 1),
+                                           to: dst, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: q.x, y: q.y, z: 0))
+                            }
+                            canvasKey[p.tile] = q == tileRect(p.tile) ? p.key : Self.partialKey(p.key, over: canvasKey[p.tile])
+                            shownNow = true
+                        }
+                    }
+                }
+                n += 1
+                continue
             }
             let outs = targets(r, staged: staged, crossfade: crossfade, transaction: transaction, cb)
             if staged, let s = captureSeq { noteStagedQuality(r, seq: s, lossless: true) }
@@ -709,7 +840,9 @@ public final class Compositor {
         return n
     }
 
-    public func applyCopyRect(_ rect: PixelRect, dx: Int, dy: Int, transaction: Bool = false) {
+    /// `contentSeq`: the capture of the move (keyed viewers): a destination tile's key takes that seq and the lowest rank of
+    /// the source tiles it overlaps (moved content counts as changed; never better than what was moved).
+    public func applyCopyRect(_ rect: PixelRect, dx: Int, dy: Int, transaction: Bool = false, contentSeq: UInt32? = nil) {
         guard let canvas, let cb = commandQueue.makeCommandBuffer() else { return }
         if transaction, ensurePending(cb) == nil { return }
         // A fade under the move ends now (its pixels move with the rest); the staged level moves too.
@@ -732,6 +865,22 @@ public final class Compositor {
             blit2.copy(from: scratch, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: src.x, y: src.y, z: 0), sourceSize: size,
                        to: tex, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: src.x + dx, y: src.y + dy, z: 0))
             blit2.endEncoding()
+        }
+        if let seq = contentSeq, !canvasKey.isEmpty {
+            let before = canvasKey, beforeStaged = stagedKey, dst = src.offset(dx, dy)
+            for ty in (dst.y / 64)...((dst.maxY - 1) / 64) { for tx in (dst.x / 64)...((dst.maxX - 1) / 64) {
+                let i = ty * tileCols + tx, tr = tileRect(i), part = tr.intersection(dst)
+                guard !part.isEmpty, i < canvasKey.count else { continue }
+                let from = part.offset(-dx, -dy)
+                var rank: UInt8 = TileKey.lossless, srank: UInt8 = TileKey.lossless
+                for sy in (from.y / 64)...((from.maxY - 1) / 64) { for sx in (from.x / 64)...((from.maxX - 1) / 64) {
+                    let j = sy * tileCols + sx; guard j < before.count else { continue }
+                    rank = min(rank, TileKey.rank(before[j])); srank = min(srank, TileKey.rank(beforeStaged[j]))
+                } }
+                let k = TileKey.make(contentSeq: seq, rank: rank)
+                canvasKey[i] = part == tr ? k : Self.partialKey(k, over: before[i])
+                if i < stagedMask.count, stagedMask[i] { let ks = TileKey.make(contentSeq: seq, rank: srank); stagedKey[i] = part == tr ? ks : Self.partialKey(ks, over: beforeStaged[i]) }
+            } }
         }
         // Staged tiles that moved stay staged where they landed (over-marking only re-presents identical pixels).
         if staging != nil, stagedMask.contains(true) {

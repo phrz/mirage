@@ -121,4 +121,18 @@ final class LayerWireTests: XCTestCase {
         var p = TileStreamParser()
         XCTAssertEqual(try p.feed(m.encode(msgSeq: 9)).map(\.message), [m])
     }
+
+    func testTileKeysRoundTrip() {
+        let h = TileMessage.Header(captureSeq: 9, inputSeq: 1, windowID: 0, captureNanos: 2)
+        let keys = [TileKey.make(contentSeq: 7, rank: TileKey.lossless), TileKey.make(contentSeq: 3, rank: TileKey.lossless)]
+        let m = TileMessage.tiles(.init(header: h, refinement: true, tiles: [.init(rect: PixelRect(x: 0, y: 0, width: 128, height: 64), format: .lossless, data: Data([1, 2, 3]), keys: keys)]))
+        let d = m.encode(msgSeq: 1)
+        XCTAssertEqual(TileMessage.decode(kind: d[0], body: d.subdata(in: 9..<d.count)), m)
+        let unkeyed = TileMessage.tiles(.init(header: h, refinement: true, tiles: [.init(rect: PixelRect(x: 0, y: 0, width: 64, height: 64), format: .lossless, data: Data([1]))]))
+        let du = unkeyed.encode(msgSeq: 2)
+        XCTAssertEqual(du[9 + 24] & 8, 0, "no keys, no flag: older viewers read it unchanged")
+        let payload = VideoFramePayload.encode(parameterSets: [], tileMask: Data([0b101]), keys: [1, 2], sample: Data([9, 9]))
+        let v = VideoFramePayload.decode(payload, hasParameterSets: false, hasTileMask: true, hasKeys: true)
+        XCTAssertEqual(v?.keys, [1, 2]); XCTAssertEqual(v?.sample, Data([9, 9]))
+    }
 }

@@ -317,6 +317,8 @@ public enum ControlMessage: Codable, Equatable {
         public var alphaMask: Bool?
         /// The TRUTH protocol version the viewer reads (`TileMessage.frameEnd`); nil: older viewers, no frameEnd.
         public var transactionalVersion: Int?
+        /// The viewer orders tile writes by TileKey (per-tile keys on tiles and video). nil: older viewers, capture order.
+        public var tileKeys: Bool?
         public init(width: Int, height: Int, bitrateKbps: Int = 0, maxFPS: Int = 30, displayID: UInt32? = nil, snapNative: Bool? = nil, holdsPicture: Bool? = nil, tunablesVersion: Int? = nil,
                     explicitBitrate: Bool? = nil, throttle: NetworkThrottle? = nil, networkFingerprint: String? = nil) {
             self.width = width; self.height = height; self.bitrateKbps = bitrateKbps; self.maxFPS = maxFPS; self.displayID = displayID; self.snapNative = snapNative

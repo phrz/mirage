@@ -1224,6 +1224,11 @@ the codec. Built 2026-10-17 as M2.5 (§3.3c); loopback measurements in §6.
 - The connect probe on real links: in the lab the shaper sits in front of QUIC and its timers clump arrivals, so both
   the densest-burst and whole-train reads say little (8.1 Mbps profile read 24-68 Mbps). Judge it on dummynet or a
   phone hotspot; until then it only raises the start, clamped at 4 x.
+- A rate collapse on Fast 4G (2026-10-24 05:58Z, check-5 run c5n, the first stream after a host restart at 05:57:32): the
+  connect probe read 9586 kbps (31 of 40 echoes, no burst) and set 5600, srtt was 476 ms at the tier decision, and the
+  target then fell 2435 -> 2552 -> 1079 kbps over 15 s with queue 0 ms, refinement held at "inflight-cap" (588 stops in
+  the last 5 s) and both window layers soft at +19 s. The rerun two minutes later reached 9740. One occurrence; if it
+  recurs, find what the controller read as loss or delay with an empty queue.
 
 ## 6. Status
 

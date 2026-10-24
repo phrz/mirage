@@ -180,6 +180,55 @@ final class CompositorTests: XCTestCase {
         XCTAssertGreaterThan(pixel(px, 192, 140, 10).2, 240, "a newer capture's video supersedes the staged tile")
     }
 
+    /// TileKey, the one landing rule: a write lands on a tile iff its key beats the tile's (contentSeq, then rank).
+    func testTileKeysOrderEveryWrite() throws {
+        guard let c = Compositor() else { throw XCTSkip("no Metal device") }
+        c.configure(width: 256, height: 64)
+        var pb: CVPixelBuffer?
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary, kCVPixelBufferMetalCompatibilityKey: true]
+        XCTAssertEqual(CVPixelBufferCreate(nil, 256, 64, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attrs as CFDictionary, &pb), kCVReturnSuccess)
+        CVPixelBufferLockBaseAddress(pb!, [])
+        memset(CVPixelBufferGetBaseAddressOfPlane(pb!, 0), 235, CVPixelBufferGetBytesPerRowOfPlane(pb!, 0) * 64)   // white video
+        memset(CVPixelBufferGetBaseAddressOfPlane(pb!, 1), 128, CVPixelBufferGetBytesPerRowOfPlane(pb!, 1) * 32)
+        CVPixelBufferUnlockBaseAddress(pb!, [])
+        func green(_ x: Int, _ seq: UInt32) -> TileMessage.Tile {
+            var px = [UInt8](repeating: 0, count: 64 * 64 * 4); for p in 0..<(64 * 64) { px[p * 4 + 1] = 255; px[p * 4 + 3] = 255 }
+            return .init(rect: PixelRect(x: x, y: 0, width: 64, height: 64), format: .lossless, data: px.withUnsafeBytes { TileCodec.encode(base: $0.baseAddress!, width: 64, height: 64, stride: 256, format: .lossless)! },
+                         keys: [TileKey.make(contentSeq: seq, rank: TileKey.lossless)])
+        }
+        func video(tile: Int, seq: UInt32, rank: UInt8 = TileKey.video(rung: 4)) {
+            var m = TileMask(cols: 4, rows: 1); m[tile, 0] = true
+            c.applyVideo(pb!, region: PixelRect(x: 0, y: 0, width: 256, height: 64), mask: m, keys: [TileKey.make(contentSeq: seq, rank: rank)])
+        }
+        // Tile 0: staged lossless of content 5, then video of the same content (arriving later, a newer capture or not), commit.
+        XCTAssertEqual(c.applyTiles([green(0, 5)], staged: true), 1)
+        video(tile: 0, seq: 5)
+        XCTAssertGreaterThan(c.commitStaged(durationNanos: 1_000_000), 0); usleep(5_000); c.settle()
+        // Tile 1: lossless shown, then video of OLDER content (a frame that was in flight).
+        _ = c.applyTiles([green(64, 5)]); video(tile: 1, seq: 4)
+        // Tile 2: lossless shown, then video of CHANGED content: it wins.
+        _ = c.applyTiles([green(128, 5)]); video(tile: 2, seq: 6)
+        // Tile 3: video first, then lossless of the same content: the upgrade lands; a second video of it does not.
+        video(tile: 3, seq: 5); _ = c.applyTiles([green(192, 5)]); video(tile: 3, seq: 5)
+        let px = try readback(c)
+        XCTAssertEqual(pixel(px, 256, 10, 10).1, 255); XCTAssertLessThan(pixel(px, 256, 10, 10).2, 20, "staged lossless beats later video of the same content")
+        XCTAssertLessThan(pixel(px, 256, 70, 10).2, 20, "video of older content never lands")
+        XCTAssertGreaterThan(pixel(px, 256, 140, 10).2, 240, "changed content always wins")
+        XCTAssertLessThan(pixel(px, 256, 200, 10).2, 20, "lossless upgrades video of the same content, and stays")
+        XCTAssertEqual(TileKey.rank(c.key(tile: 3)), TileKey.lossless)
+        XCTAssertEqual(TileKey.contentSeq(c.key(tile: 2)), 6)
+    }
+
+    /// A write covering part of a tile takes a newer content seq but never more than the lower rank: a later whole-tile
+    /// lossless of that content still lands (the rest of the tile held older pixels).
+    func testPartialTileWriteKeepsTheLowerRank() {
+        let old = TileKey.make(contentSeq: 5, rank: TileKey.video(rung: 4)), w = TileKey.make(contentSeq: 6, rank: TileKey.lossless)
+        let k = Compositor.partialKey(w, over: old)
+        XCTAssertEqual(TileKey.contentSeq(k), 6); XCTAssertEqual(TileKey.rank(k), TileKey.video(rung: 4))
+        XCTAssertGreaterThan(TileKey.make(contentSeq: 6, rank: TileKey.lossless), k)
+        XCTAssertEqual(Compositor.partialKey(TileKey.make(contentSeq: 5, rank: TileKey.lossless), over: old), old, "same content, part of the tile: the key stays")
+    }
+
     /// A commit while a fade runs waits for it (a level never jumps mid-fade), then lands on its own.
     func testCommitWaitsForRunningFade() throws {
         guard let c = Compositor() else { throw XCTSkip("no Metal device") }

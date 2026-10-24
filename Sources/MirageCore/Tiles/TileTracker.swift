@@ -27,6 +27,8 @@ public struct TileTracker {
     public var tuning = Tuning()
 
     struct Cell {
+        /// The capture at which this tile's pixels last changed (TileKey's content seq).
+        var contentSeq: UInt32 = 0
         var hits: UInt8 = 0
         var lastDirtyNanos: UInt64 = 0
         var lastLosslessNanos: UInt64 = 0
@@ -257,6 +259,9 @@ public struct TileTracker {
     /// The client has this tile pixel-exact (last update was lossless or a copy of crisp pixels, nothing pending).
     /// When the tile last changed (receiver of the audit: only tiles quiet for a while are compared).
     public func lastDirty(_ i: Int) -> UInt64 { cells[i].lastDirtyNanos }
+    /// These tiles' pixels changed at capture `seq` (TileKey).
+    public mutating func noteContent(_ tiles: [Int], seq: UInt32) { for i in tiles where i >= 0 && i < cells.count { cells[i].contentSeq = seq } }
+    public func contentSeq(_ i: Int) -> UInt32 { i >= 0 && i < cells.count ? cells[i].contentSeq : 0 }
     public func isCrisp(_ i: Int) -> Bool { !cells[i].pending && cells[i].lastLosslessNanos >= cells[i].lastDirtyNanos }
 
     /// Marks tiles as updated by a copy-rect (they are crisp again if the source was crisp).

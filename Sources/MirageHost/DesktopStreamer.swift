@@ -1722,7 +1722,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let ow = 64, oh = max(4, 64 * sh / max(1, sw))
             if let data = shot.withUnsafeBytes({ TileCodec.encodeLossy(base: $0.baseAddress!, width: sw, height: sh, stride: sw * 4, outWidth: ow, outHeight: oh, quality: 40) }) {
                 let now = Clock.nowNanos()
-                sendTileMessage(.tiles(.init(header: header(layer: 0, nanos: now), refinement: false, tiles: [.init(rect: d.bounds, format: .lossy, data: data)])), captureNanos: now)
+                sendTileMessage(.tiles(.init(header: header(layer: 0, nanos: now), refinement: false, tiles: [.init(rect: d.bounds, format: .lossy, data: data, keys: seqKeys(d, d.bounds))])), captureNanos: now, ranks: [TileKey.placeholder])
                 sent += 1; bytes += data.count
             }
         }
@@ -2212,7 +2212,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let newlyOff = off.subtracting(l.blankedOffDisplay).sorted()
         l.blankedOffDisplay = off
         guard !newlyOff.isEmpty else { return }
-        let clear = l.tracker.mergedRects(newlyOff).map { TileMessage.Tile(rect: $0, format: .solid, data: Data([0, 0, 0, 0])) }
+        let clear = l.tracker.mergedRects(newlyOff).map { TileMessage.Tile(rect: $0, format: .solid, data: Data([0, 0, 0, 0]), keys: seqKeys(l, $0, seq: captureSeq)) }
         sendTileMessage(.tiles(.init(header: header(layer: l.id, nanos: now), refinement: false, tiles: clear)), captureNanos: now)
         l.tracker.defer(newlyOff, now: now, delayNanos: 3_600_000_000_000, direct: true)
         if debugLayers { log("layer \(l.id): \(newlyOff.count) tiles off the display sent transparent") }
@@ -2414,6 +2414,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         statDirtyTiles += dirty.count
         layer.frames += 1
         layer.account.dirtyTiles += dirty.count
+        tracker.noteContent(dirty, seq: captureSeq)   // (TileKey: what changed, at this capture)
         if dirty.isEmpty { layer.lastFrame = pb; layer.tracker = tracker; refine(now: now); return }
         // A window moving (or 300 ms after it moved) whose pixels changed widely: its translucent parts (Liquid Glass
         // toolbars and sidebars) show the blurred desktop behind it, which a move changes everywhere. Nothing goes now:
@@ -2870,7 +2871,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             stage1Queue.removeFirst()
             guard let l = layers[next.id], !l.stillSent || l.cutStill else { continue }
             sendTileMessage(.reset(layer: next.id, width: l.width, height: l.height), captureNanos: now)
-            sendTileMessage(.tiles(.init(header: header(layer: next.id, nanos: now), refinement: false, staged: true, tiles: [.init(rect: l.bounds, format: .lossy, data: next.data)])), captureNanos: now)
+            sendTileMessage(.tiles(.init(header: header(layer: next.id, nanos: now), refinement: false, staged: true, tiles: [.init(rect: l.bounds, format: .lossy, data: next.data, keys: seqKeys(l, l.bounds))])), captureNanos: now, ranks: [TileKey.provisional])
             if tileTokens > 0 { debit("cut", Double(next.data.count)) } else { freshTokens -= Double(next.data.count); debit("cut", Double(next.data.count)) }
             l.stillSent = true
             if stage1Active { stage1Staged.insert(next.id) } else { sendTileMessage(.commit(layer: next.id), captureNanos: now); l.exposed = true }
@@ -2902,7 +2903,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         for l in waiting where !l.isDisplay {
             guard let data = stage1Cuts[l.id] else { continue }
             sendTileMessage(.reset(layer: l.id, width: l.width, height: l.height), captureNanos: now)
-            sendTileMessage(.tiles(.init(header: header(layer: l.id, nanos: now), refinement: false, staged: true, tiles: [.init(rect: l.bounds, format: .lossy, data: data)])), captureNanos: now)
+            sendTileMessage(.tiles(.init(header: header(layer: l.id, nanos: now), refinement: false, staged: true, tiles: [.init(rect: l.bounds, format: .lossy, data: data, keys: seqKeys(l, l.bounds))])), captureNanos: now, ranks: [TileKey.provisional])
             l.cutStill = true
             stage1Staged.insert(l.id)
             misses.append(l.id)
@@ -3167,7 +3168,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.debit("mid-refund", -targetBytes)
                     return
                 }
-                self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: true, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: block, layer: layerID) }
+                let mkeys = self.seqKeys(self.layers[layerID], rect)
+                self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: true, tiles: [.init(rect: rect, format: .lossy, data: data, keys: mkeys)])), captureNanos: nanos, fast: false, refinementBytes: data.count, block: block, layer: layerID) }
                 // The level covers the whole layer, off-display part included: cropped again on the next tick (after it on the stream).
                 if let l = self.layers[layerID] { l.blankedOffDisplay = []; l.needsCrop = true }
                 self.debit("mid-trueup", Double(data.count) - targetBytes)
@@ -3392,6 +3394,28 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         output?.sendControl(m)
     }
 
+    /// TileKey: whether this viewer orders writes by key (its request said `tileKeys`).
+    private var keysOn: Bool { request?.tileKeys == true }
+    /// On `queue`, when the pixels of `r` are taken: one key per 64-px tile of r's span (row-major) with the tile's content
+    /// seq (or `seq`, for a write that is itself the change) and rank 0; `send` fills the rank in. Nil for older viewers.
+    private func seqKeys(_ l: Layer?, _ r: PixelRect, seq: UInt32? = nil) -> [UInt64]? {
+        guard keysOn, let l, !r.isEmpty else { return nil }
+        let cols = l.tracker.cols
+        var out: [UInt64] = []
+        for ty in (r.y / 64)...((r.maxY - 1) / 64) { for tx in (r.x / 64)...((r.maxX - 1) / 64) {
+            out.append(TileKey.make(contentSeq: seq ?? l.tracker.contentSeq(ty * cols + tx), rank: 0))
+        } }
+        return out
+    }
+    /// The rank of a tile write when its site gave none: lossless or solid 9, near-lossless 8, a lossy refinement not staged
+    /// (a middle level) 7, any other lossy write (a still) 2.
+    static func inferredRank(_ f: TileCodec.Format, refinement: Bool, staged: Bool) -> UInt8 {
+        switch f {
+        case .lossless, .solid: return TileKey.lossless
+        case .nearLossless: return TileKey.nearLossless
+        case .lossy: return refinement && !staged ? TileKey.middle : TileKey.lossyStill
+        }
+    }
     private func header(layer: UInt32, nanos: UInt64) -> TileMessage.Header {
         .init(captureSeq: captureSeq, inputSeq: lastInputSeq, windowID: layer, captureNanos: nanos)
     }
@@ -3477,24 +3501,33 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let alpha = !layer.isDisplay
         let layerID = layer.id
         let photoLossy = photographicFinalIsLossy
+        // TileKey: the tiles' content seqs as the pixels were taken (just now, by the caller's copyOut).
+        let jobKeys = jobs.map { seqKeys(layer, $0.0) }
         tileQueue.async { [weak self] in
             guard let self else { return }
             var out: [TileMessage.Tile] = []
-            for (r, d) in jobs {
+            var ranks: [UInt8] = []
+            for (ji, (r, d)) in jobs.enumerated() {
+                var rank = TileKey.lossless
                 let encoded: (TileCodec.Format, Data)? = d.withUnsafeBytes { p -> (TileCodec.Format, Data)? in
                     let base = p.baseAddress!
                     if !alpha, let solid = TileCodec.solidColour(base: base, width: r.width, height: r.height, stride: r.width * 4) { return (.solid, solid) }
                     // At half size (the viewer draws a lossy rect scaled onto it): soft for a moment, refined lossless once it settles.
+                    rank = TileKey.lossyStill
                     if let q = lossy, let data = TileCodec.encodeLossy(base: base, width: r.width, height: r.height, stride: r.width * 4, outWidth: max(16, r.width / 2), outHeight: max(16, r.height / 2), quality: q, alpha: alpha) { return (.lossy, data) }
                     let photographic = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4, limit: 4096) > 4096
                     // Review #22: on constrained links a photographic rect (a wallpaper, a photo) ends at visually
                     // lossless (lossy WebP q90 at full size, ~4x under near-lossless on a 2x desktop picture), not at
                     // bit-exact; text and UI (≤ 4096 colours) stay lossless everywhere.
+                    rank = photoQuality < 90 ? TileKey.lossyStill : TileKey.lossyFinal
                     if photographic, photoLossy || photoQuality < 90, let data = TileCodec.encodeLossy(base: base, width: r.width, height: r.height, stride: r.width * 4, outWidth: r.width, outHeight: r.height, quality: photoQuality, alpha: alpha) { return (.lossy, data) }
                     let fmt = TileCodec.finalFormat(photographic: photographic, translucent: alpha && photographic && TileCodec.translucent(base: base, width: r.width, height: r.height, stride: r.width * 4))
                     return TileCodec.encode(base: base, width: r.width, height: r.height, stride: r.width * 4, format: fmt, effort: webp, alpha: alpha).map { (fmt, $0) }
                 }
-                if let (fmt, data) = encoded { out.append(.init(rect: r, format: fmt, data: data)) }
+                if let (fmt, data) = encoded {
+                    if fmt == .lossless || fmt == .solid { rank = TileKey.lossless } else if fmt == .nearLossless { rank = TileKey.nearLossless }
+                    out.append(.init(rect: r, format: fmt, data: data, keys: jobKeys[ji])); ranks.append(rank)
+                }
             }
             guard !out.isEmpty else { self.queue.async { if let block { self.pacer.dropped(id: block) }; self.debit("empty-refund", -Double(estimate)); settled(self.layers[layerID]) }; return }
             let bytes = out.reduce(0) { $0 + $1.data.count }
@@ -3502,7 +3535,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // capture's copy-rect overtake them, so the viewer shifted its pixels first and then dropped or misplaced these
             // tiles while the host counted them delivered (striped Finder icons through a scroll on mac-daddy, c9f678d).
             let early = !refinement
-            if early { self.send(tile: .tiles(.init(header: hdr, refinement: false, staged: staged, tiles: out)), captureNanos: nanos, fast: true, refinementBytes: 0, block: block, layer: layerID) }
+            if early { self.send(tile: .tiles(.init(header: hdr, refinement: false, staged: staged, tiles: out)), captureNanos: nanos, fast: true, refinementBytes: 0, block: block, layer: layerID, ranks: ranks) }
             self.queue.async {
                 // Encoded while the region moved on (a drag, a scroll): stale, never sent (the viewer would
                 // drop it too, but the bytes are better not spent).
@@ -3511,7 +3544,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     if l.isDisplay { let ts = l.tracker.tiles(covering: out.map(\.rect)); l.taint.sent(ts, tracker: l.tracker, windowAreas: [l.bounds]); l.taintScheduled.subtract(ts) }
                     self.statStaleDropped += out.count; self.debit("stale-refund", -Double(estimate)); if let block { self.pacer.dropped(id: block) }; settled(self.layers[layerID]); return
                 }
-                if !early { self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: refinement, staged: staged, tiles: out)), captureNanos: nanos, fast: !refinement, refinementBytes: refinement ? bytes : 0, block: block, layer: layerID) } }
+                if !early { self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: refinement, staged: staged, tiles: out)), captureNanos: nanos, fast: !refinement, refinementBytes: refinement ? bytes : 0, block: block, layer: layerID, ranks: ranks) } }
                 settled(self.layers[layerID])
                 self.debit("trueup", Double(bytes - estimate))   // true up the estimate
                 self.statTileBytes += bytes; self.statTileRects += out.count; self.secTileBytes += bytes
@@ -3599,6 +3632,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         var d = Data(count: rect.width * rect.height * 4)
         d.withUnsafeMutableBytes { dst in for y in 0..<rect.height { memcpy(dst.baseAddress!.advanced(by: y * rect.width * 4), f.base.advanced(by: y * f.stride), rect.width * 4) } }
         let hdr = header(layer: layer.id, nanos: nanos)
+        let stillKeys = seqKeys(layer, rect)
         let estimate = Int(targetBytes)
         let layerID = layer.id
         let block = pacer.start(layer: layer.id, estimate: estimate, now: nanos)
@@ -3619,7 +3653,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // the fast stream, where its reset and its commit go (sendTileMessage): on the other stream the commit overtook it,
             // stage 1 presented "0 staged tiles" for every window and the stills waited for the next level, 5 s later (20 Mbps
             // on mac-daddy, f4fb76f).
-            self.send(tile: .tiles(.init(header: hdr, refinement: false, staged: staged, tiles: [.init(rect: rect, format: .lossy, data: data)])), captureNanos: nanos, fast: staged, refinementBytes: data.count, block: block, layer: layerID)
+            self.send(tile: .tiles(.init(header: hdr, refinement: false, staged: staged, tiles: [.init(rect: rect, format: .lossy, data: data, keys: stillKeys)])), captureNanos: nanos, fast: staged, refinementBytes: data.count, block: block, layer: layerID)
             self.queue.async {
                 self.debit("still-trueup", Double(data.count - estimate))
                 self.statTileBytes += data.count; self.statTileRects += 1; self.secTileBytes += data.count
@@ -3643,7 +3677,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// Sends a tile-stream message in order (all sends go through the tile queue). Copy-rects and resets are interactive.
     /// `fast: false`: on the refinement stream (a level's commit goes behind the level's staged blocks there).
-    private func sendTileMessage(_ m: TileMessage, captureNanos: UInt64, fast: Bool = true) {
+    private func sendTileMessage(_ m: TileMessage, captureNanos: UInt64, fast: Bool = true, ranks: [UInt8]? = nil) {
         switch m {
         case .copyRect(let c): markFrameEnd(c.header.windowID)
         case .tiles(let t) where !t.staged && !t.refinement: markFrameEnd(t.header.windowID)
@@ -3651,11 +3685,20 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         var layer: UInt32 = 0
         switch m { case .tiles(let t): layer = t.header.windowID; case .copyRect(let c): layer = c.header.windowID; case .reset(let l, _, _): layer = l; case .commit(let l): layer = l; case .commitSet: layer = 0; case .alphaMask(let l, _): layer = l; case .frameEnd: layer = 0 }
-        tileQueue.async { [weak self] in self?.send(tile: m, captureNanos: captureNanos, fast: fast, refinementBytes: 0, layer: layer) }
+        tileQueue.async { [weak self] in self?.send(tile: m, captureNanos: captureNanos, fast: fast, refinementBytes: 0, layer: layer, ranks: ranks) }
     }
     /// On tileQueue.
-    private func send(tile m: TileMessage, captureNanos: UInt64, fast: Bool, refinementBytes: Int, block: Int? = nil, layer: UInt32) {
+    private func send(tile mIn: TileMessage, captureNanos: UInt64, fast: Bool, refinementBytes: Int, block: Int? = nil, layer: UInt32, ranks: [UInt8]? = nil) {
         guard let out = output else { return }
+        var m = mIn
+        if case .tiles(var t) = m, t.tiles.contains(where: { $0.keys != nil }) {
+            // TileKey: each tile's rank into its keys (the sites took the content seqs with the pixels).
+            for i in t.tiles.indices {
+                let rank = ranks.flatMap { i < $0.count ? $0[i] : nil } ?? Self.inferredRank(t.tiles[i].format, refinement: t.refinement, staged: t.staged)
+                t.tiles[i].keys = (t.tiles[i].keys ?? []).map { $0 & ~0xFF | UInt64(rank) }
+            }
+            m = .tiles(t)
+        }
         tileMsgSeq &+= 1
         let seq = tileMsgSeq
         let d = m.encode(msgSeq: seq)
@@ -3975,15 +4018,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         d.taint.clear(take)
         d.tracker.defer(take, now: now, delayNanos: 3_600_000_000_000, direct: false)
         let hdr = header(layer: 0, nanos: now)
+        var underKeys: [PixelRect: [UInt64]] = [:]
+        for (r, _, _) in jobs { underKeys[r] = seqKeys(d, r) }
         tileQueue.async { [weak self] in
             guard let self else { return }
             let tiles: [TileMessage.Tile] = jobs.compactMap { r, rr, data in
                 data.withUnsafeBytes { p in TileCodec.encodeLossy(base: p.baseAddress!, width: rr.width, height: rr.height, stride: rr.width * 4, outWidth: rr.width, outHeight: rr.height, quality: 70, alpha: false) }
-                    .map { TileMessage.Tile(rect: r, format: .lossy, data: $0) }
+                    .map { TileMessage.Tile(rect: r, format: .lossy, data: $0, keys: underKeys[r]) }
             }
             guard !tiles.isEmpty else { return }
             let bytes = tiles.reduce(0) { $0 + $1.data.count }
-            self.send(tile: .tiles(.init(header: hdr, refinement: true, windowFree: true, tiles: tiles)), captureNanos: now, fast: false, refinementBytes: bytes, layer: 0)
+            self.send(tile: .tiles(.init(header: hdr, refinement: true, windowFree: true, tiles: tiles)), captureNanos: now, fast: false, refinementBytes: bytes, layer: 0, ranks: tiles.map { _ in TileKey.lossyStill })
             self.queue.async {
                 self.underlayTokens -= Double(bytes) - est
                 self.statUnderlayTiles += take.count; self.statUnderlayBytes += bytes
@@ -4330,6 +4375,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         l.encoderUseNanos = now
         let captureSeq = self.captureSeq, inputSeq = self.lastInputSeq
         let progressive = l.progressiveKeyframe
+        // TileKey: per masked tile (row-major), its content seq as the canvas was taken and the rung's video rank.
+        var vkeys: [UInt64]? = nil
+        if keysOn {
+            let rank = TileKey.video(rung: rc?.rung ?? 0), cols = l.tracker.cols
+            var k: [UInt64] = []
+            for row in 0..<grid.rows { for col in 0..<grid.cols where mask[col, row] { k.append(TileKey.make(contentSeq: l.tracker.contentSeq((r0 + row) * cols + c0 + col), rank: rank)) } }
+            vkeys = k
+        }
         enc.encode(input, captureNanos: now, options: opts) { [weak self, weak l] result in
             guard let self, let l else { return }
             self.queue.async {
@@ -4341,14 +4394,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     if case MirageError.transport(let t) = e, t.contains("dropped") { self.statDropped += 1 }
                     else { self.log("encode (layer \(l.id)): \(e)"); l.wantKeyframe = true }
                 case .success(let f):
-                    self.send(l, f, recovery: recovery, progressive: progressive, region: region, mask: mask, captureSeq: captureSeq, inputSeq: inputSeq)
+                    self.send(l, f, recovery: recovery, progressive: progressive, region: region, mask: mask, captureSeq: captureSeq, inputSeq: inputSeq, keys: vkeys)
                 }
                 l.submitted = nil
             }
         }
     }
 
-    private func send(_ l: Layer, _ f: HEVCEncoder.Encoded, recovery: Bool, progressive: Bool, region: PixelRect, mask: TileMask, captureSeq: UInt32, inputSeq: UInt64) {
+    private func send(_ l: Layer, _ f: HEVCEncoder.Encoded, recovery: Bool, progressive: Bool, region: PixelRect, mask: TileMask, captureSeq: UInt32, inputSeq: UInt64, keys: [UInt64]? = nil) {
         guard let out = output else { return }
         seq &+= 1
         var flags: VideoFragment.Flags = [.tileMask]
@@ -4357,7 +4410,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if recovery { flags.insert(.recovery) }
         if flags.contains(.recovery) { l.recoverySeq = seq; l.recoverySentNanos = Clock.nowNanos() }
         if !f.parameterSets.isEmpty { flags.insert(.parameterSets) }
-        let payload = VideoFramePayload.encode(parameterSets: f.parameterSets, tileMask: mask.bits, sample: f.sample)
+        if keys != nil { flags.insert(.tileKeys) }
+        let payload = VideoFramePayload.encode(parameterSets: f.parameterSets, tileMask: mask.bits, keys: keys, sample: f.sample)
         let maxPayload = out.maxDatagramSize - VideoFragment.headerSize
         var frags = VideoFragment.fragments(frameSeq: seq, flags: flags, captureNanos: f.captureNanos, payload: payload, maxPayload: maxPayload,
                                             captureSeq: captureSeq, inputSeq: inputSeq, region: region, layerID: l.id)

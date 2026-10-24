@@ -45,6 +45,20 @@ public struct PixelRect: Equatable, Hashable, Sendable, Codable {
     }
 }
 
+/// One write's priority on a 64-px tile (DESIGN §3.3, "one rule"): the capture at which that tile's pixels last changed,
+/// then the write's quality rank, packed (contentSeq << 8 | rank). A write lands on a tile, canvas or staged level, iff its
+/// key is greater than the tile's; equal keys keep what is there. So lossless of unchanged content beats any later video or
+/// lossy write of it, and changed content always wins (phrz and the coordinator, 2026-10-24, after three stale/supersede
+/// bugs left lossless pixels replaced by soft ones the host counted delivered).
+public enum TileKey {
+    public static let placeholder: UInt8 = 0, provisional: UInt8 = 1, lossyStill: UInt8 = 2, middle: UInt8 = 7, lossyFinal: UInt8 = 7, nearLossless: UInt8 = 8, lossless: UInt8 = 9
+    /// Video by rung: the native scale 6 down to 3 for the tiny rung and anything below it.
+    public static func video(rung: Int) -> UInt8 { UInt8(max(3, 6 - max(0, rung))) }
+    public static func make(contentSeq: UInt32, rank: UInt8) -> UInt64 { UInt64(contentSeq) << 8 | UInt64(rank) }
+    public static func contentSeq(_ k: UInt64) -> UInt32 { UInt32(truncatingIfNeeded: k >> 8) }
+    public static func rank(_ k: UInt64) -> UInt8 { UInt8(truncatingIfNeeded: k) }
+}
+
 /// Messages on the tile stream, host → client. Framing: [type u8][msgSeq u32][length u32][body].
 /// Every message carries the host's capture sequence (shared with video frames, for ordering
 /// against the window list) and the last input sequence reflected in those pixels (for the
@@ -96,7 +110,9 @@ public enum TileMessage: Equatable, Sendable {
         public var rect: PixelRect
         public var format: TileCodec.Format
         public var data: Data
-        public init(rect: PixelRect, format: TileCodec.Format, data: Data) { self.rect = rect; self.format = format; self.data = data }
+        /// One TileKey per 64-px tile the rect covers (the layer's grid, row-major), when the host sent them.
+        public var keys: [UInt64]?
+        public init(rect: PixelRect, format: TileCodec.Format, data: Data, keys: [UInt64]? = nil) { self.rect = rect; self.format = format; self.data = data; self.keys = keys }
     }
     public struct Tiles: Equatable, Sendable {
         public var header: Header
@@ -132,13 +148,15 @@ public enum TileMessage: Equatable, Sendable {
         case .tiles(let t):
             kind = .tiles
             t.header.write(to: &body)
-            body.append((t.refinement ? 1 : 0) | (t.staged ? 2 : 0) | (t.windowFree ? 4 : 0))
+            let keyed = t.tiles.contains { $0.keys != nil }
+            body.append((t.refinement ? 1 : 0) | (t.staged ? 2 : 0) | (t.windowFree ? 4 : 0) | (keyed ? 8 : 0))
             body.appendBE(UInt16(t.tiles.count))
             for tile in t.tiles {
                 tile.rect.write(to: &body)
                 body.append(tile.format.rawValue)
                 body.appendBE(UInt32(tile.data.count))
                 body.append(tile.data)
+                if keyed { let k = tile.keys ?? []; body.appendBE(UInt16(k.count)); for v in k { body.appendBE(v) } }
             }
         case .copyRect(let c):
             kind = .copyRect
@@ -179,7 +197,7 @@ public enum TileMessage: Equatable, Sendable {
         case .tiles:
             guard r.remaining >= 24 + 1 + 2, let h = Header.read(&r) else { return nil }
             let flags = r.readByte()
-            let refinement = flags & 1 != 0, staged = flags & 2 != 0, windowFree = flags & 4 != 0
+            let refinement = flags & 1 != 0, staged = flags & 2 != 0, windowFree = flags & 4 != 0, keyed = flags & 8 != 0
             let n: UInt16 = r.read()
             var tiles: [Tile] = []
             tiles.reserveCapacity(Int(n))
@@ -190,12 +208,20 @@ public enum TileMessage: Equatable, Sendable {
                 guard r.remaining >= Int(len) else { return nil }
                 // A format this build does not know (a newer host) is skipped, never fatal: the stream
                 // must stay up and the ack must still go out.
+                let data = body.subdata(in: r.offset..<r.offset + Int(len))
+                r.offset += Int(len)
+                var keys: [UInt64]? = nil
+                if keyed {
+                    guard r.remaining >= 2 else { return nil }
+                    let n: UInt16 = r.read()
+                    guard r.remaining >= 8 * Int(n) else { return nil }
+                    keys = (0..<Int(n)).map { _ in r.read() }
+                }
                 if let f = TileCodec.Format(rawValue: formatByte) {
-                    tiles.append(Tile(rect: rect, format: f, data: body.subdata(in: r.offset..<r.offset + Int(len))))
+                    tiles.append(Tile(rect: rect, format: f, data: data, keys: keys))
                 } else {
                     skippedUnknownFormats += 1
                 }
-                r.offset += Int(len)
             }
             return .tiles(Tiles(header: h, refinement: refinement, staged: staged, windowFree: windowFree, tiles: tiles))
         case .copyRect:

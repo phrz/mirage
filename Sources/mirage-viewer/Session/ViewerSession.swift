@@ -567,6 +567,7 @@ final class ViewerSession: @unchecked Sendable {
             req.stageTransaction = true
             req.alphaMask = true
             req.transactionalVersion = 1
+            req.tileKeys = true
             if req == lastRequest { return }
             guard let sender else { pendingRequest = req; log("stream request \(width)x\(height) queued until connected"); return }
             lastRequest = req; lastRequestSent = req
@@ -840,11 +841,13 @@ final class ViewerSession: @unchecked Sendable {
                 preExclusionDrops += m - candidates.count
                 _ = dropped   // the canvas keeps what it had there; a dropped write contaminates nothing
             }
-            let fresh = candidates.filter { isFresh(v, $0.rect, captureSeq: t.header.captureSeq) }
+            // Keyed (TileKey): the compositor decides per tile; capture-order freshness is the older host's rule.
+            let keyed = t.tiles.contains { $0.keys != nil }
+            let fresh = keyed ? candidates : candidates.filter { isFresh(v, $0.rect, captureSeq: t.header.captureSeq) }
             // A lossy desktop refinement is that tile's final quality (photographic rects end at q90 on links ≤ 2 Mbps): it counts
             // as final for the lossless measurements, like a lossless tile. (A window's lossy refinement is its middle level.)
             let finalLossy = v.id == 0 && t.refinement
-            for tile in fresh where wouldBeStale(v, tile.rect, captureSeq: t.header.captureSeq) { staleCommits += 1 }   // must never happen
+            if !keyed { for tile in fresh where wouldBeStale(v, tile.rect, captureSeq: t.header.captureSeq) { staleCommits += 1 } }   // must never happen
             // Staged tiles build the layer's next level off-screen (DESIGN §3.3); where one lands on desktop the scene
             // draws as fill (nothing clean known there, not under a window layer), that part is shown at once too: any
             // clean picture beats the fill.
@@ -898,7 +901,7 @@ final class ViewerSession: @unchecked Sendable {
             sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: t.header.captureNanos, receivedNanos: now, bytes: bytes)))
         case .copyRect(let c):
             guard let v = layerView(c.header.windowID) else { sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: c.header.captureNanos, receivedNanos: now, bytes: bytes))); return }
-            v.compositor.applyCopyRect(c.rect, dx: c.dx, dy: c.dy, transaction: transactional)
+            v.compositor.applyCopyRect(c.rect, dx: c.dx, dy: c.dy, transaction: transactional, contentSeq: c.header.captureSeq)   // (used only once keyed writes landed)
             if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) seq \(seq): copy \(c.rect.x),\(c.rect.y) \(c.rect.width)x\(c.rect.height) by \(c.dx),\(c.dy) capture \(c.header.captureSeq)") }
             markCapture(v, c.rect.union(c.rect.offset(c.dx, c.dy)), captureSeq: c.header.captureSeq)
             statsLock.lock(); sCopyRects += 1; statsLock.unlock()
@@ -1155,10 +1158,17 @@ final class ViewerSession: @unchecked Sendable {
                         else if v.id == 0, preExclusion(tr, captureSeq: frame.captureSeq) { mask[c, r] = false; preExclusionDrops += 1 }
                         // Video rides datagrams, copy-rects and tiles the stream: a frame from an older capture than what already
                         // landed here (a scroll's copy-rect that overtook it) would put pre-scroll pixels back (striped Finder icons).
-                        else if wouldBeStale(v, tr, captureSeq: frame.captureSeq) { mask[c, r] = false; staleVideoTiles += 1 }
+                        else if frame.keys == nil, wouldBeStale(v, tr, captureSeq: frame.captureSeq) { mask[c, r] = false; staleVideoTiles += 1 }
                         else { written.append(tr) }
                     } }
-                    compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive), captureSeq: frame.captureSeq)
+                    // Keyed: the keys follow the host's mask order; tiles the guard dropped take their keys with them.
+                    var keys: [UInt64]? = nil
+                    if let fk = frame.keys, let sent = frame.tileMask.flatMap({ TileMask(cols: grid.cols, rows: grid.rows, bits: $0) }) {
+                        var kept: [UInt64] = [], ki = 0
+                        for r in 0..<grid.rows { for c in 0..<grid.cols where sent[c, r] { if mask[c, r], ki < fk.count { kept.append(fk[ki]) }; ki += 1 } }
+                        keys = kept
+                    }
+                    compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive), captureSeq: frame.captureSeq, keys: keys)
                     if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) video \(frame.seq) capture \(frame.captureSeq)\(frame.flags.contains(.keyframe) ? " key" : "")\(frame.flags.contains(.progressive) ? " progressive" : "") region \(region) tiles \(written.count)") }
                     if frame.flags.contains(.keyframe), region.area * 10 >= compositor.width * compositor.height * 9 { v.step(frame.flags.contains(.progressive) ? "fade" : "key", now: now) }
                     if v.id == 0 { markDesktopClean(written) }
