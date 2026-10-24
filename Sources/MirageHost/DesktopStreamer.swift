@@ -2037,6 +2037,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
             for (name, f) in ref.regions { log("sharp model \(name) \(String(format: "%.2f", Self.edgeEnergy(model, width: w, height: h, f)))") }
             for (name, f) in ref.regions { log("sharp desktop \(name) \(String(format: "%.2f", Self.edgeEnergy(dp, width: w, height: h, f)))") }
+            // The desktop tracker's view of each cell's tiles: hidden (occluded, under a layer, off-display), soft (why), or
+            // lossless; a viewer shortfall where the host counts lossless is a delivery or presentation fault.
+            for (name, f) in ref.regions where name.hasPrefix("g") {
+                let r = PixelRect(x: Int(f[0] * Double(w)), y: Int(f[1] * Double(h)), width: Int((f[2] - f[0]) * Double(w)), height: Int((f[3] - f[1]) * Double(h)))
+                var occ = 0, under = 0, off = 0, soft: [String: Int] = [:], ok = 0
+                for i in d.tracker.tiles(covering: [r]) {
+                    if d.occludedTiles.contains(i) { occ += 1 } else if d.underLayer.contains(i) { under += 1 } else if d.offDisplayTiles.contains(i) { off += 1 }
+                    else if let (why, _) = d.tracker.soft(i, now: now) { soft[why.rawValue, default: 0] += 1 } else { ok += 1 }
+                }
+                log("sharp tiles \(name) occluded \(occ) under \(under) off \(off) lossless \(ok)" + soft.map { " \($0.key) \($0.value)" }.joined())
+            }
             // The overlay alone in the menu bar and the Dock rows: its colour energy and mean alpha (vibrant text captured over
             // transparency would show as low alpha where the screen has text).
             if let o = layers[ControlMessage.WindowInfo.overlayID], let op = Self.pixels(o.lastFrame, width: w, height: h) {
