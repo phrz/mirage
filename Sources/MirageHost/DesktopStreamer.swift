@@ -771,7 +771,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // A still first (~100 ms), then the stream (a display stream start costs ~1.2 s); both concurrent with the rest.
             Task { [weak self] in
                 guard let px = await ScreenCapturer.bandShot(t, r) else { return }
-                self?.queue.async { guard let self, i < self.bands.count, self.bands[i].rect == r, self.bands[i].px == nil else { return }; self.bands[i].px = px; self.reprocessOverlay() }
+                self?.queue.async { guard let self, i < self.bands.count, self.bands[i].rect == r, self.bands[i].px == nil else { return }; self.bands[i].px = px; self.reprocessOverlay(in: r) }
             }
             Task { [weak self] in
                 guard let self else { return }
@@ -779,10 +779,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 c.source = .band; c.bandRect = r; c.keepsDisplayAwake = false
                 let onFrame: (CVPixelBuffer, UInt64, [PixelRect]) -> Void = { [weak self] pb, _, _ in
                     guard let self, i < self.bands.count, self.bands[i].rect == r, let px = Self.tight(pb, r) else { return }
-                    self.bands[i].px = px; self.reprocessOverlay()
+                    // An unfiltered display stream delivers a frame for changes anywhere on the screen: only a band whose
+                    // own pixels changed re-runs the overlay (each re-run copied and diffed the whole overlay: WindowServer
+                    // 40 -> 77 %, miraged 41 -> 70 % on a passive stream, 2026-10-24).
+                    if self.bands[i].px == px { self.statBandSame += 1; return }
+                    self.bands[i].px = px; self.statBandChanged += 1; self.reprocessOverlay(in: r)
                 }
                 do {
-                    _ = try await ScreenCapturer.bounded(seconds: 4, { try await c.start(maxFPS: req.maxFPS, target: t, onFrame: onFrame) }, late: { _ in Task { await c.stop() } })
+                    // At most 10 fps: a clock, a status item, the Dock's glass over a moving window.
+                    _ = try await ScreenCapturer.bounded(seconds: 4, { try await c.start(maxFPS: min(10, req.maxFPS), target: t, onFrame: onFrame) }, late: { _ in Task { await c.stop() } })
                     self.queue.async { if i < self.bands.count, self.bands[i].rect == r { self.bands[i].cap = c } else { Task { await c.stop() } } }
                 } catch { self.log("band capture \(r) did not start: \(error)") }
             }
@@ -793,10 +798,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         for b in old { if let c = b.cap { Task { await Self.bounded("band capture", log: self.log) { await c.stop() } } } }
     }
     /// A band's pixels changed: the overlay's last frame again, with the new band (same diff, same queue turn).
-    private func reprocessOverlay() {
+    private func reprocessOverlay(in rect: PixelRect) {
         guard let raw = overlayRaw else { return }
-        captured(raw, Clock.nowNanos(), dirtyRects: [], layerID: ControlMessage.WindowInfo.overlayID, fromBand: true)
+        captured(raw, Clock.nowNanos(), dirtyRects: [rect], layerID: ControlMessage.WindowInfo.overlayID, fromBand: true)
     }
+    private var statBandSame = 0, statBandChanged = 0
     /// A band frame's pixels as tight BGRA (nil when its size is not the band's).
     static func tight(_ pb: CVPixelBuffer, _ r: PixelRect) -> [UInt8]? {
         guard CVPixelBufferGetWidth(pb) == r.width, CVPixelBufferGetHeight(pb) == r.height else { return nil }
@@ -2085,6 +2091,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         let gates = refineGates.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
         refineGates = [:]
+        if !bands.isEmpty { lines.append("bands: \(statBandChanged) changed, \(statBandSame) same frames"); statBandChanged = 0; statBandSame = 0 }
         log("visibility: crisp: \(crispLayers) of \(visibleLayers) visible layers" + (lines.isEmpty ? "" : " | " + lines.joined(separator: " | ")) + " || refine stopped at: " + gates)
     }
     private func opaqueTile(_ f: ShiftDetector.Frame, _ r: PixelRect) -> Bool {
@@ -2330,7 +2337,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // and the next capture already held the cleared desktop, so nothing ever found them). The tolerant diff below
         // starts with a row-wise memcmp, so unchanged tiles cost little; changes outside the reported rects are counted.
         let reported = layer.isDisplay ? Set(tracker.tiles(covering: dirtyRects)) : []
-        var dirty = Array(0..<tracker.tileCount)
+        // A band's re-run: only its rect changed (the rest of the overlay frame is the one already diffed).
+        var dirty = fromBand ? tracker.tiles(covering: dirtyRects) : Array(0..<tracker.tileCount)
         layer.forceFullDiff = false
         let prev = layer.lastFrame
         var old: ShiftDetector.Frame? = nil
