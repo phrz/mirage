@@ -114,7 +114,9 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         self.onFrame = onFrame
         self.target = t
         excluded = excluding
-        let filter = source == .desktop ? try await Self.desktopFilter(t.display) : try await Self.displayFilter(t.display, excluding: excluding)
+        let filter: SCContentFilter
+        if source == .desktop { let (f, ex) = try await Self.desktopFilterAndExcluded(t.display); filter = f; setDesktopExcluded(ex) }
+        else { filter = try await Self.displayFilter(t.display, excluding: excluding) }
         let config = configuration(for: t, maxFPS: maxFPS)
         let s = SCStream(filter: filter, configuration: config, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
@@ -212,25 +214,32 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// transparency, comes back (check 5: titles at 0.03-0.23 of the screen in the host's model, status items exact).
     static let testMenuBarInDesktop = ProcessInfo.processInfo.environment["MIRAGE_TEST_MENUBAR_IN_DESKTOP"] == "1"
     static let menuBarLevel = 24
-    static let testDesktopExclude = ProcessInfo.processInfo.environment["MIRAGE_TEST_DESKTOP_EXCLUDE"] == "1"
+    static let testDesktopInclude = ProcessInfo.processInfo.environment["MIRAGE_TEST_DESKTOP_INCLUDE"] == "1"
+    /// Desktop sources: the windows the running filter leaves out (nil: the include filter, nothing to wait for).
+    private let excludedLock = NSLock()
+    private var _desktopExcluded: Set<UInt32>? = nil
+    var desktopExcluded: Set<UInt32>? { excludedLock.lock(); defer { excludedLock.unlock() }; return _desktopExcluded }
+    private func setDesktopExcluded(_ s: Set<UInt32>) { excludedLock.lock(); _desktopExcluded = Self.testDesktopInclude ? nil : s; excludedLock.unlock() }
 
-    /// The desktop alone: the display's desktop-level windows (window layer below zero: the wallpaper, the desktop icons and
-    /// widgets). No app window can ever be in it.
-    static func desktopFilter(_ display: SCDisplay) async throws -> SCContentFilter {
+    /// The desktop alone: the display minus every window at the normal level or above, from one catalog sample (the window
+    /// ids it leaves out are kept in `desktopExcluded`; the streamer drops desktop frames while a window it shows is not among
+    /// them, until the filter catches up). Including the desktop-level windows by name instead left Finder's desktop icons
+    /// out (their window listed, captured empty: check 5, 2026-10-24, the top-right cells at 0.16-0.25 of the screen).
+    /// MIRAGE_TEST_DESKTOP_INCLUDE=1: the include filter.
+    static func desktopFilter(_ display: SCDisplay) async throws -> SCContentFilter { try await desktopFilterAndExcluded(display).0 }
+    static func desktopFilterAndExcluded(_ display: SCDisplay) async throws -> (SCContentFilter, Set<UInt32>) {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let desk = content.windows.filter { ($0.windowLayer < 0 || testMenuBarInDesktop && $0.windowLayer == menuBarLevel) && $0.frame.intersects(display.frame) }
         guard !desk.isEmpty else { throw MirageError.transport("no desktop-level windows on display \(display.displayID)") }
-        // Test knob MIRAGE_TEST_DESKTOP_EXCLUDE=1: the display minus every window at the normal level or above, instead of the
-        // desktop-level windows included by name: whether Finder's desktop icons, absent from the host's desktop layer though
-        // their window is listed (check 5, 2026-10-24: top-right cells at 0.16-0.25 of the screen), come back that way.
-        if testDesktopExclude { return SCContentFilter(display: display, excludingWindows: content.windows.filter { $0.windowLayer >= 0 }) }
-        return SCContentFilter(display: display, including: desk)
+        if testDesktopInclude { return (SCContentFilter(display: display, including: desk), []) }
+        let above = content.windows.filter { $0.windowLayer >= 0 }
+        return (SCContentFilter(display: display, excludingWindows: above), Set(above.map(\.windowID)))
     }
     /// Re-reads the desktop-level windows (a widget added or removed) and applies them; desktop sources only.
     func refreshDesktop(log: @escaping (String) -> Void) {
         guard source == .desktop, let stream, let t = target else { return }
         Task {
-            do { try await stream.updateContentFilter(Self.desktopFilter(t.display)) } catch { log("desktop filter update failed: \(error)") }
+            do { let (f, ex) = try await Self.desktopFilterAndExcluded(t.display); try await stream.updateContentFilter(f); self.setDesktopExcluded(ex) } catch { log("desktop filter update failed: \(error)") }
         }
     }
 

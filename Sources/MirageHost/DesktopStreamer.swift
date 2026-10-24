@@ -192,6 +192,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var statEncodeNanos: UInt64 = 0
     /// Overlay sprite shifts (a bouncing Dock icon) and their residual bytes (estimated), this session.
     private var statSpriteShifts = 0, statSpriteBytes = 0
+    /// Desktop frames dropped while a shown window was not yet left out of the desktop capture (ScreenCapturer.desktopFilter).
+    private var statDesktopHeld = 0, desktopHoldSince: UInt64 = 0, desktopHoldGaveUp = false
     private var statInput = 0, statTileBytes = 0, statTileRects = 0, statRefineBytes = 0, statCopyRects = 0, statDirtyTiles = 0, statDiffPruned = 0, statTileSkipped = 0, statFoveaTiles = 0, statStills = 0, statOccluded = 0
     private var secTileBytes = 0, secVideoBytes = 0, secVideoFrames = 0, secSkippedBudget = 0   // per rateState second
     private var statCaptures = 0
@@ -859,7 +861,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
             ov.requestExcluded(excl, log: { [weak self] in self?.log($0) })
         }
-        let desk = Set(excl.filter { $0.windowLayer < 0 }.map(\.windowID))
+        // The desktop capture leaves out every window at the normal level or above (ScreenCapturer.desktopFilter): a new one
+        // (or one gone) re-makes its filter, as a desktop-level change does.
+        let desk = Set(catalog.all.filter { $0.frame.intersects(t.display.frame) }.map { $0.windowLayer < 0 ? $0.windowID : $0.windowID | 0x8000_0000 })
         if desk != desktopLevelIDs { desktopLevelIDs = desk; capturer?.refreshDesktop(log: { [weak self] in self?.log($0) }) }
     }
 
@@ -2108,6 +2112,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let gates = refineGates.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
         refineGates = [:]
         if !bands.isEmpty { lines.append("bands: \(statBandChanged) changed, \(statBandSame) same frames"); statBandChanged = 0; statBandSame = 0 }
+        if statDesktopHeld > 0 { lines.append("desktop frames held for a window not yet left out: \(statDesktopHeld)"); statDesktopHeld = 0 }
         if statRefineOvertaken > 0 { lines.append("refinement overtaken by direct writes: \(statRefineOvertaken) tiles again"); statRefineOvertaken = 0 }
         log("visibility: crisp: \(crispLayers) of \(visibleLayers) visible layers" + (lines.isEmpty ? "" : " | " + lines.joined(separator: " | ")) + " || refine stopped at: " + gates)
     }
@@ -2293,6 +2298,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             log("layer 0: the real desktop frame replaces the provisional one (\(Clock.elapsed(since: provisionalSince, now: Clock.nowNanos()) / 1_000_000) ms after it)")
             refine(now: Clock.nowNanos())
             return
+        }
+        // The desktop capture leaves windows out by a catalog sample: a window on screen that the running filter does not leave
+        // out yet (just opened) may be in this frame. Such frames are dropped until the filter catches up (refreshDesktop on
+        // the window-list change); a window still not left out after 2 s (one ScreenCaptureKit cannot list) stops holding them.
+        if compositor, layer.isDisplay, !provisionalFrame, let ex = capturer?.desktopExcluded, let s = windows.current {
+            let now = Clock.nowNanos()
+            let missing = s.windows.filter { $0.windowLevel >= 0 && !ex.contains($0.id) && catalog.window($0.id) != nil && !$0.frame.intersection(layer.bounds).isEmpty }
+            if missing.isEmpty { desktopHoldSince = 0 }
+            else {
+                if desktopHoldSince == 0 { desktopHoldSince = now; capturer?.refreshDesktop(log: { [weak self] in self?.log($0) }) }
+                if Clock.elapsed(since: desktopHoldSince, now: now) < 2_000_000_000 { statDesktopHeld += 1; return }
+                if !desktopHoldGaveUp { desktopHoldGaveUp = true; log("desktop: windows \(missing.map(\.id)) still not left out of the desktop capture after 2 s; its frames go again") }
+            }
         }
         // Opaque pure-black pixels in the overlay, outside the menu bar's and the Dock bar's rects, are not on the host's screen:
         // during Show Desktop the Dock's full-screen window held a 70-px band at the left edge that ScreenCaptureKit captured
