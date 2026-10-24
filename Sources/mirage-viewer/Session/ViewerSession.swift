@@ -754,6 +754,7 @@ final class ViewerSession: @unchecked Sendable {
                 for (seq, bytes, msg) in try parser.feed(d) {
                     let now = Clock.nowNanos()
                     noteHostPacket(now)
+                    tileFlowNote(received: bytes, now: now)
                     if Self.testDelayNanos > 0 {
                         videoQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(Self.testDelayNanos))) { guard myGen == self.gen else { return }; self.apply(msg, seq: seq, bytes: bytes, now: Clock.nowNanos()) }
                     } else {
@@ -824,8 +825,24 @@ final class ViewerSession: @unchecked Sendable {
         return r.offset(f.x, f.y)
     }
 
+    /// The in-flight stall (2026-10-24: the host's refinement in flight stuck over its cap, acks not returning): per 5 s, tile
+    /// messages and bytes read off the tile streams, how many were applied (each sends its ack), and the longest wait between
+    /// reading one and applying it on the video queue. Read but not applied: the ack path; not read: the transport.
+    private let flowLock = NSLock()
+    private var flowRx = 0, flowRxBytes = 0, flowApplied = 0, flowMaxWaitNanos: UInt64 = 0, flowSince: UInt64 = 0
+    private func tileFlowNote(received bytes: Int, now: UInt64) {
+        flowLock.lock()
+        flowRx += 1; flowRxBytes += bytes
+        if flowSince == 0 { flowSince = now }
+        let due = Clock.elapsed(since: flowSince, now: now) >= 5_000_000_000
+        let line = due ? "tile flow: read \(flowRx) messages \(flowRxBytes / 1000) KB, applied \(flowApplied), longest queue wait \(flowMaxWaitNanos / 1_000_000) ms" : nil
+        if due { flowRx = 0; flowRxBytes = 0; flowApplied = 0; flowMaxWaitNanos = 0; flowSince = now }
+        flowLock.unlock()
+        if let line { log(line) }
+    }
     private func apply(_ msg: TileMessage, seq: UInt32, bytes: Int, now: UInt64) {
         statsLock.lock(); sTotalBytes += bytes; statsLock.unlock()
+        do { let w = Clock.elapsed(since: now, now: Clock.nowNanos()); flowLock.lock(); flowApplied += 1; flowMaxWaitNanos = max(flowMaxWaitNanos, w); flowLock.unlock() }
         switch msg {
         case .tiles(let t):
             guard let v = layerView(t.header.windowID) else { sender?.send(.tileAck(.init(msgSeq: seq, captureNanos: t.header.captureNanos, receivedNanos: now, bytes: bytes))); return }

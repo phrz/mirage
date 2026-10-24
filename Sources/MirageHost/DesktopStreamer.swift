@@ -194,6 +194,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var statSpriteShifts = 0, statSpriteBytes = 0
     /// Desktop frames dropped while a shown window was not yet left out of the desktop capture (ScreenCapturer.desktopFilter).
     private var statDesktopHeld = 0, desktopHoldSince: UInt64 = 0, desktopHoldGaveUp = false
+    private var statTileAcks = 0
     private var statInput = 0, statTileBytes = 0, statTileRects = 0, statRefineBytes = 0, statCopyRects = 0, statDirtyTiles = 0, statDiffPruned = 0, statTileSkipped = 0, statFoveaTiles = 0, statStills = 0, statOccluded = 0
     private var secTileBytes = 0, secVideoBytes = 0, secVideoFrames = 0, secSkippedBudget = 0   // per rateState second
     private var statCaptures = 0
@@ -994,7 +995,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     public func handle(tileAck: ControlMessage.TileAck) {
         queue.async {
-            self.overtakenBlocks.remove(tileAck.msgSeq)
+            self.overtakenBlocks.remove(tileAck.msgSeq); self.statTileAcks += 1
             guard let sent = self.tileSent.removeValue(forKey: tileAck.msgSeq) else { return }
             let now = Clock.nowNanos()
             self.tileInflightBytes = max(0, self.tileInflightBytes - sent.bytes)
@@ -2112,6 +2113,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let gates = refineGates.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
         refineGates = [:]
         if !bands.isEmpty { lines.append("bands: \(statBandChanged) changed, \(statBandSame) same frames"); statBandChanged = 0; statBandSame = 0 }
+        // The in-flight stall: unacked tile messages by kind, their bytes and the oldest's age (acks returning or not).
+        do {
+            let now2 = Clock.nowNanos()
+            let ref = tileSent.values.filter { $0.refinement > 0 }, direct = tileSent.values.filter { $0.refinement == 0 }
+            let oldest = tileSent.values.map { Clock.elapsed(since: $0.nanos, now: now2) }.max() ?? 0
+            if !tileSent.isEmpty { lines.append("unacked: \(ref.count) refinement \(ref.reduce(0) { $0 + $1.bytes } / 1000) KB, \(direct.count) direct \(direct.reduce(0) { $0 + $1.bytes } / 1000) KB, oldest \(oldest / 1_000_000) ms, acks \(statTileAcks)") }
+            statTileAcks = 0
+        }
         if statDesktopHeld > 0 { lines.append("desktop frames held for a window not yet left out: \(statDesktopHeld)"); statDesktopHeld = 0 }
         if statRefineOvertaken > 0 { lines.append("refinement overtaken by direct writes: \(statRefineOvertaken) tiles again"); statRefineOvertaken = 0 }
         log("visibility: crisp: \(crispLayers) of \(visibleLayers) visible layers" + (lines.isEmpty ? "" : " | " + lines.joined(separator: " | ")) + " || refine stopped at: " + gates)
