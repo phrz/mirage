@@ -4183,7 +4183,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
         var opts = HEVCEncoder.FrameOptions()
         var region = l.pendingWholeFrame ? l.bounds : l.pendingVideoRegion
-        var tiles = l.pendingVideoTiles
+        // (Pending video that has since gone crisp, a lossless block sent after the change, is not repainted soft: see below.)
+        var tiles = l.pendingVideoTiles.filter { !l.tracker.isCrisp($0) }
         if l.wantKeyframe, !l.progressiveKeyframe, var rc, rc.rung != RateController.tinyRung, l.isDisplay {
             // Lossy-first on recovery too: a keyframe at the current rung that would take more than ~1 s
             // of the video budget goes out on the tiny rung instead (the ladder climbs back afterwards).
@@ -4204,7 +4205,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             CVPixelBufferUnlockBaseAddress(canvas, [])
             region = l.bounds
             tiles = Set((0..<l.tracker.tileCount).filter { !l.tracker.isCrisp($0) })
-            tiles.formUnion(l.pendingVideoTiles)
+            // Never a crisp tile, even one pending video asked for: its lossless pixels are on the viewer or on their way
+            // (a staged block not yet committed), and the viewer writes video into its staged level too. The pending set can
+            // still hold every tile (the fresh picture's base request), and the tiny-rung keyframe then replaced lossless blocks
+            // the tracker counted delivered: phrz's desktop at 0.04-0.10 of the host's edge energy for good (check 5,
+            // 2026-10-24, "keyframe ... 1450 tiles masked" after the left strip's blocks had gone).
+            tiles.formUnion(l.pendingVideoTiles.filter { !l.tracker.isCrisp($0) })
             l.tracker.markVideo(Array(tiles), now: now)
             // Review #6: tiles the client already has crisp are masked out of this keyframe, so their
             // pixels are wasted bits; flatten each to its mean colour before encoding.
