@@ -33,12 +33,8 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// (`display`, the seam design), only the desktop-level windows (`desktop`: wallpaper, desktop icons, widgets; never an
     /// app window), or everything above the normal level (`overlay`: the menu bar, the Dock, menus, popovers, tooltips,
     /// notifications) on a clear background, for a layer of its own on top of the window layers.
-    /// `band`: one rect of the whole, unfiltered display (stream pixels): the menu bar's and the Dock's bands, carried into the
-    /// overlay as the screen shows them. Filtered captures lose the frontmost app's menu titles (they go with its excluded
-    /// windows) and the Dock's dots (drawn against the real wallpaper): check 5, 2026-10-23.
-    enum Source { case display, desktop, overlay, band }
+    enum Source { case display, desktop, overlay }
     var source: Source = .display
-    var bandRect: PixelRect = .zero
 
     /// Resolves the display and the stream size (display aspect fitted into the request).
     static func resolve(_ req: ControlMessage.StreamRequest) async throws -> Target {
@@ -118,7 +114,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         self.onFrame = onFrame
         self.target = t
         excluded = excluding
-        let filter = source == .desktop ? try await Self.desktopFilter(t.display) : try await Self.displayFilter(t.display, excluding: source == .band ? [] : excluding)
+        let filter = source == .desktop ? try await Self.desktopFilter(t.display) : try await Self.displayFilter(t.display, excluding: excluding)
         let config = configuration(for: t, maxFPS: maxFPS)
         let s = SCStream(filter: filter, configuration: config, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
@@ -140,11 +136,6 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             config.backgroundColor = CGColor.clear
             config.ignoreShadowsDisplay = false
         }
-        if source == .band {
-            config.width = bandRect.width; config.height = bandRect.height
-            config.sourceRect = Self.points(bandRect, t)
-            config.ignoreShadowsDisplay = false
-        }
         return config
     }
     /// A rect in stream pixels as display points (a stream's sourceRect).
@@ -152,13 +143,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         let k = Double(t.display.width) / Double(max(1, t.pixelWidth))
         return CGRect(x: Double(r.x) * k, y: Double(r.y) * k, width: Double(r.width) * k, height: Double(r.height) * k)
     }
-    /// A band capture's rect changed (the Dock resized or moved).
-    func updateBand(_ r: PixelRect, maxFPS: Int) async throws {
-        guard let stream, let t = target else { return }
-        queue.sync { self.bandRect = r; self.forceNextFrame = true }
-        try await stream.updateConfiguration(configuration(for: t, maxFPS: maxFPS))
-    }
-    /// One still of a band of the unfiltered display (tight BGRA), to stand in until its stream's first frame.
+    /// One still of a rect of the unfiltered display (tight BGRA): the menu bar's and the Dock's bands (DesktopStreamer.Band).
     static func bandShot(_ t: Target, _ r: PixelRect) async -> [UInt8]? {
         let c = SCStreamConfiguration()
         c.width = r.width; c.height = r.height; c.showsCursor = false; c.sourceRect = points(r, t)

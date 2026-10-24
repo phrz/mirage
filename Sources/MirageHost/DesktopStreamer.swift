@@ -748,54 +748,65 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         log("compositor model: desktop-only display layer, overlay layer above the normal level (\(excl.count) windows left out of it)")
         return (result, last)
     }
-    /// The menu bar's and the Dock's bands from the unfiltered display (ScreenCapturer.Source.band), pasted into every overlay
-    /// frame: the overlay's own capture (display minus the window layers, on clear) loses the frontmost app's menu titles and
-    /// the Dock's dots, both there on the screen (check 5 bisect, 2026-10-23). Exactly the AX rects (chromeRects), restarted
-    /// when they change; their changes go through the overlay's diff, so a static band costs nothing.
-    struct Band { var rect: PixelRect; var cap: ScreenCapturer?; var px: [UInt8]? }
+    /// The menu bar's and the Dock's bands from the unfiltered display, pasted into every overlay frame: the overlay's own
+    /// capture (display minus the window layers, on clear) loses the frontmost app's menu titles and the Dock's dots, both
+    /// there on the screen (check 5 bisect, 2026-10-23). Exactly the AX rects (chromeRects). Stills (SCScreenshotManager), not
+    /// streams: an unfiltered display stream cost WindowServer ~30 points of CPU on its own (42 -> 72 %, passive stream,
+    /// 2026-10-24). A still is taken when the overlay's own capture changes inside a band, when the frontmost app changes (its
+    /// menu titles), and once a second regardless (the dots, anything the overlay cannot see); a changed band re-diffs only
+    /// its tiles, so a static band costs nothing on the link.
+    struct Band { var rect: PixelRect; var px: [UInt8]? }
     private var bands: [Band] = []
     /// The overlay's latest frame as captured (before the bands): a band's change re-runs it with the new band.
     private var overlayRaw: CVPixelBuffer?
-    /// Test knob MIRAGE_TEST_NO_BANDS=1: no band streams (the A/B of their cost).
+    private var bandShotNanos: UInt64 = 0, bandShotRunning = false, bandShotWanted = false, bandFront = ""
+    /// Test knob MIRAGE_TEST_NO_BANDS=1: no bands (the A/B of their cost).
     static let testNoBands = ProcessInfo.processInfo.environment["MIRAGE_TEST_NO_BANDS"] == "1"
     private func ensureBands(_ chrome: [PixelRect]) {
-        guard compositor, overlay != nil, !Self.testNoBands, let t = target, let req = request else { return }
+        guard compositor, overlay != nil, !Self.testNoBands, let t = target else { return }
         let display = PixelRect(x: 0, y: 0, width: t.pixelWidth, height: t.pixelHeight)
         let want = chrome.map { $0.intersection(display) }.filter { $0.width >= 16 && $0.height >= 8 }
         guard want != bands.map(\.rect) else { return }
-        let old = bands
-        bands = want.map { Band(rect: $0, cap: nil, px: nil) }
-        for b in old { if let c = b.cap { Task { await Self.bounded("band capture", log: self.log) { await c.stop() } } } }
+        bands = want.map { Band(rect: $0, px: nil) }
         log("chrome bands from the unfiltered display: " + want.map { "\($0.x),\($0.y) \($0.width)x\($0.height)" }.joined(separator: " | "))
-        for (i, r) in want.enumerated() {
-            // A still first (~100 ms), then the stream (a display stream start costs ~1.2 s); both concurrent with the rest.
-            Task { [weak self] in
-                guard let px = await ScreenCapturer.bandShot(t, r) else { return }
-                self?.queue.async { guard let self, i < self.bands.count, self.bands[i].rect == r, self.bands[i].px == nil else { return }; self.bands[i].px = px; self.reprocessOverlay(in: r) }
-            }
-            Task { [weak self] in
+        bandShotWanted = true; shootBands(now: Clock.nowNanos())
+    }
+    /// On `queue`: stills of the bands when one is wanted (at most 10 a second) or a second has passed.
+    private func shootBands(now: UInt64, front: String? = nil) {
+        guard !bands.isEmpty, let t = target else { return }
+        if let front, front != bandFront { bandFront = front; bandShotWanted = true }
+        let since = Clock.elapsed(since: bandShotNanos, now: now)
+        guard !bandShotRunning, bandShotWanted ? since >= 100_000_000 : since >= 1_000_000_000 else { return }
+        bandShotRunning = true; bandShotWanted = false; bandShotNanos = now
+        let rects = bands.map(\.rect)
+        Task { [weak self] in
+            var shots: [[UInt8]?] = []
+            for r in rects { shots.append(await ScreenCapturer.bandShot(t, r)) }
+            self?.queue.async {
                 guard let self else { return }
-                let c = ScreenCapturer(queue: self.queue)
-                c.source = .band; c.bandRect = r; c.keepsDisplayAwake = false
-                let onFrame: (CVPixelBuffer, UInt64, [PixelRect]) -> Void = { [weak self] pb, _, _ in
-                    guard let self, i < self.bands.count, self.bands[i].rect == r, let px = Self.tight(pb, r) else { return }
-                    // An unfiltered display stream delivers a frame for changes anywhere on the screen: only a band whose
-                    // own pixels changed re-runs the overlay (each re-run copied and diffed the whole overlay: WindowServer
-                    // 40 -> 77 %, miraged 41 -> 70 % on a passive stream, 2026-10-24).
-                    if self.bands[i].px == px { self.statBandSame += 1; return }
-                    self.bands[i].px = px; self.statBandChanged += 1; self.reprocessOverlay(in: r)
+                self.bandShotRunning = false
+                guard self.bands.map(\.rect) == rects else { return }
+                for (i, px) in shots.enumerated() {
+                    guard let px else { continue }
+                    if self.bands[i].px == px { self.statBandSame += 1; continue }
+                    self.bands[i].px = px; self.statBandChanged += 1; self.reprocessOverlay(in: rects[i])
                 }
-                do {
-                    // At most 10 fps: a clock, a status item, the Dock's glass over a moving window.
-                    _ = try await ScreenCapturer.bounded(seconds: 4, { try await c.start(maxFPS: min(10, req.maxFPS), target: t, onFrame: onFrame) }, late: { _ in Task { await c.stop() } })
-                    self.queue.async { if i < self.bands.count, self.bands[i].rect == r { self.bands[i].cap = c } else { Task { await c.stop() } } }
-                } catch { self.log("band capture \(r) did not start: \(error)") }
+                if self.bandShotWanted { self.shootBands(now: Clock.nowNanos()) }
             }
         }
     }
-    private func stopBands() {
-        let old = bands; bands = []; overlayRaw = nil
-        for b in old { if let c = b.cap { Task { await Self.bounded("band capture", log: self.log) { await c.stop() } } } }
+    private func stopBands() { bands = []; overlayRaw = nil }
+    /// Whether two same-size BGRA buffers differ inside `r` (row memcmp).
+    static func differs(_ a: CVPixelBuffer, _ b: CVPixelBuffer, in r: PixelRect) -> Bool {
+        guard CVPixelBufferGetWidth(a) == CVPixelBufferGetWidth(b), CVPixelBufferGetHeight(a) == CVPixelBufferGetHeight(b) else { return true }
+        let rr = r.intersection(PixelRect(x: 0, y: 0, width: CVPixelBufferGetWidth(a), height: CVPixelBufferGetHeight(a)))
+        guard !rr.isEmpty else { return false }
+        CVPixelBufferLockBaseAddress(a, .readOnly); CVPixelBufferLockBaseAddress(b, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(b, .readOnly); CVPixelBufferUnlockBaseAddress(a, .readOnly) }
+        guard let pa = CVPixelBufferGetBaseAddress(a), let pb = CVPixelBufferGetBaseAddress(b) else { return true }
+        let sa = CVPixelBufferGetBytesPerRow(a), sb = CVPixelBufferGetBytesPerRow(b)
+        for y in rr.y..<rr.maxY where memcmp(pa + y * sa + rr.x * 4, pb + y * sb + rr.x * 4, rr.width * 4) != 0 { return true }
+        return false
     }
     /// A band's pixels changed: the overlay's last frame again, with the new band (same diff, same queue turn).
     private func reprocessOverlay(in rect: PixelRect) {
@@ -803,16 +814,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         captured(raw, Clock.nowNanos(), dirtyRects: [rect], layerID: ControlMessage.WindowInfo.overlayID, fromBand: true)
     }
     private var statBandSame = 0, statBandChanged = 0
-    /// A band frame's pixels as tight BGRA (nil when its size is not the band's).
-    static func tight(_ pb: CVPixelBuffer, _ r: PixelRect) -> [UInt8]? {
-        guard CVPixelBufferGetWidth(pb) == r.width, CVPixelBufferGetHeight(pb) == r.height else { return nil }
-        CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
-        let rb = CVPixelBufferGetBytesPerRow(pb)
-        var out = [UInt8](repeating: 0, count: r.width * r.height * 4)
-        out.withUnsafeMutableBytes { o in for y in 0..<r.height { memcpy(o.baseAddress! + y * r.width * 4, base + y * rb, r.width * 4) } }
-        return out
-    }
     /// `pb` with the bands pasted in (a copy), or `pb` when no band has pixels yet.
     private func withBands(_ pb: CVPixelBuffer) -> CVPixelBuffer {
         let ready = bands.filter { $0.px != nil }
@@ -2297,7 +2298,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if n > 0 { pb = copy; if n != lastOverlayCleared { lastOverlayCleared = n; log("overlay: \(n) opaque black pixels outside the menu bar and the Dock made transparent") } }
         }
         if layerID == ControlMessage.WindowInfo.overlayID {
-            if !fromBand { overlayRaw = pb }
+            if !fromBand {
+                // The overlay's own capture changed inside a band (a status item, a Dock icon): a still of the bands now.
+                if let prev = overlayRaw, bands.contains(where: { Self.differs(prev, pb, in: $0.rect) }) { bandShotWanted = true; shootBands(now: Clock.nowNanos()) }
+                overlayRaw = pb
+            }
             pb = withBands(pb)
         }
         captureSeq &+= 1
@@ -4534,6 +4539,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let front: (app: String, id: UInt32, title: String) = self.windows?.frontmost() ?? (app: "", id: 0, title: "")
             let chrome = self.display.flatMap { d in self.windows?.chromeRects(width: d.width, height: d.height) }
             if let chrome { self.ensureBands(chrome) }
+            self.shootBands(now: tnow, front: front.app)
             if let chrome, chrome != self.loggedChrome {
                 self.loggedChrome = chrome
                 self.log("desktop chrome (menu bar, Dock): " + chrome.map { "\($0.x),\($0.y) \($0.width)x\($0.height)" }.joined(separator: " | "))
