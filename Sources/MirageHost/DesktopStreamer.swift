@@ -276,6 +276,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var plannedFrames: [UInt32: PixelRect] = [:]
     private var recentFrames: [(rect: PixelRect, nanos: UInt64)] = []
     private var statTaintResent = 0, statExclusionLag = 0
+    /// Tiles re-sent because a direct write overtook a refinement block in flight over them (DesktopStreamer.send).
+    private var statRefineOvertaken = 0, overtakenBlocks = Set<UInt32>()
     /// Compositor model: when each desktop tile was last re-sent at the viewer's ask (it holds no clean pixels there).
     private var unknownResent: [Int: UInt64] = [:]
     private var lastLagLogNanos: UInt64 = 0
@@ -988,6 +990,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     public func handle(tileAck: ControlMessage.TileAck) {
         queue.async {
+            self.overtakenBlocks.remove(tileAck.msgSeq)
             guard let sent = self.tileSent.removeValue(forKey: tileAck.msgSeq) else { return }
             let now = Clock.nowNanos()
             self.tileInflightBytes = max(0, self.tileInflightBytes - sent.bytes)
@@ -996,7 +999,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if sent.block != nil, self.pacer.acked(msgSeq: tileAck.msgSeq) { self.refine(now: now) }
             self.rc?.delaySample(sentNanos: sent.nanos, receivedNanos: tileAck.receivedNanos, bytes: sent.bytes, now: now)
             // Prune by age (a big refinement block legitimately outlives dozens of interactive acks).
-            for (k, v) in self.tileSent where Clock.elapsed(since: v.nanos, now: now) > 20_000_000_000 { self.tileSent[k] = nil; self.refinementInFlight = max(0, self.refinementInFlight - v.refinement); self.tileInflightBytes = max(0, self.tileInflightBytes - v.bytes) }
+            for (k, v) in self.tileSent where Clock.elapsed(since: v.nanos, now: now) > 20_000_000_000 { self.tileSent[k] = nil; self.overtakenBlocks.remove(k); self.refinementInFlight = max(0, self.refinementInFlight - v.refinement); self.tileInflightBytes = max(0, self.tileInflightBytes - v.bytes) }
         }
     }
 
@@ -2105,6 +2108,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let gates = refineGates.sorted { $0.value > $1.value }.map { "\($0.key) \($0.value)" }.joined(separator: ", ")
         refineGates = [:]
         if !bands.isEmpty { lines.append("bands: \(statBandChanged) changed, \(statBandSame) same frames"); statBandChanged = 0; statBandSame = 0 }
+        if statRefineOvertaken > 0 { lines.append("refinement overtaken by direct writes: \(statRefineOvertaken) tiles again"); statRefineOvertaken = 0 }
         log("visibility: crisp: \(crispLayers) of \(visibleLayers) visible layers" + (lines.isEmpty ? "" : " | " + lines.joined(separator: " | ")) + " || refine stopped at: " + gates)
     }
     private func opaqueTile(_ f: ShiftDetector.Frame, _ r: PixelRect) -> Bool {
@@ -3662,7 +3666,23 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         case .copyRect(let c): rects = [c.rect, c.rect.offset(c.dx, c.dy)]
         case .reset, .commit, .commitSet, .alphaMask, .frameEnd: rects = []
         }
+        let direct: Bool
+        switch m { case .tiles(let t): direct = !t.refinement; case .copyRect: direct = true; default: direct = false }
         queue.async {
+            // A direct write (fast stream) on tiles a refinement block still in flight covers: the viewer stamps the tile with
+            // the newer capture and discards the older block whole when it lands after, though the write may cover only part
+            // of the tile (a status item), while the tracker counts the block delivered: the rest stayed at the still for good
+            // (check 5, 2026-10-24: "stale discard L4294967040 1792,0 256x256 capture 350 < 419"). Those tiles go again.
+            if direct, !rects.isEmpty, let l = self.layers[layer] {
+                let hit = Set(l.tracker.tiles(covering: rects))
+                var again = Set<Int>()
+                // (Once per block: the re-sent tiles are direct writes too.)
+                for (k, v) in self.tileSent where v.refinement > 0 && v.layer == layer && !self.overtakenBlocks.contains(k) {
+                    let t = l.tracker.tiles(covering: v.rects).filter { hit.contains($0) }
+                    if !t.isEmpty { again.formUnion(t); self.overtakenBlocks.insert(k) }
+                }
+                if !again.isEmpty { l.tracker.markDirect(Array(again), now: Clock.nowNanos()); self.statRefineOvertaken += again.count }
+            }
             self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes, block, layer, rects); self.refinementInFlight += refinementBytes; self.tileInflightBytes += d.count
             if let block { self.pacer.sent(id: block, msgSeq: seq, bytes: d.count, now: Clock.nowNanos()) }
             if refinementBytes == 0 { self.secInteractiveBytes += d.count }
