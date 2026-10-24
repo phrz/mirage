@@ -2035,10 +2035,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 }
             }
             for (name, f) in ref.regions { log("sharp model \(name) \(String(format: "%.2f", Self.edgeEnergy(model, width: w, height: h, f)))") }
+            for (name, f) in ref.regions { log("sharp desktop \(name) \(String(format: "%.2f", Self.edgeEnergy(dp, width: w, height: h, f)))") }
             // The overlay alone in the menu bar and the Dock rows: its colour energy and mean alpha (vibrant text captured over
             // transparency would show as low alpha where the screen has text).
             if let o = layers[ControlMessage.WindowInfo.overlayID], let op = Self.pixels(o.lastFrame, width: w, height: h) {
-                for (name, f) in ref.regions where name.hasPrefix("mb") || name.hasPrefix("dk") {
+                for (name, f) in ref.regions {
                     let x0 = Int(f[0] * Double(w)), y0 = Int(f[1] * Double(h)), x1 = min(w, Int(f[2] * Double(w))), y1 = min(h, Int(f[3] * Double(h)))
                     var a = 0, n = 0, amax = 0
                     for y in y0..<y1 { for x in x0..<x1 { let v = Int(op[(y * w + x) * 4 + 3]); a += v; amax = max(amax, v); n += 1 } }
