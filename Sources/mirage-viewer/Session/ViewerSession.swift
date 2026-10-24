@@ -858,8 +858,8 @@ final class ViewerSession: @unchecked Sendable {
             var n = 0
             if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) seq \(seq) capture \(t.header.captureSeq): shown \(shown.map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)\($0.format == .lossy ? "L" : "")" }.joined(separator: " ")) staged \(staged.map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))\(t.refinement ? " (refinement)" : "")") }
             // TRUTH: a capture's direct change waits for its frameEnd (refinement keeps its own crossfades and levels).
-            if !shown.isEmpty { n += v.compositor.applyTiles(shown, crossfade: t.refinement && !t.staged, transaction: transactional && !t.refinement) }
-            if !staged.isEmpty { n += v.compositor.applyTiles(staged, staged: true, alsoShow: fillParts); v.stagedLossless += staged.filter { $0.format != .lossy || finalLossy }.map(\.rect) }
+            if !shown.isEmpty { n += v.compositor.applyTiles(shown, crossfade: t.refinement && !t.staged, transaction: transactional && !t.refinement, captureSeq: t.header.captureSeq) }
+            if !staged.isEmpty { n += v.compositor.applyTiles(staged, staged: true, alsoShow: fillParts, captureSeq: t.header.captureSeq); v.stagedLossless += staged.filter { $0.format != .lossy || finalLossy }.map(\.rect) }
             if !t.staged, !shown.isEmpty {
                 let area = shown.reduce(0) { $0 + $1.rect.area }, whole = area * 10 >= max(1, v.compositor.width * v.compositor.height) * 9
                 if shown.contains(where: { $0.format == .lossy }) && whole { v.step(t.refinement ? "fade" : "still", now: now) }
@@ -1158,7 +1158,7 @@ final class ViewerSession: @unchecked Sendable {
                         else if wouldBeStale(v, tr, captureSeq: frame.captureSeq) { mask[c, r] = false; staleVideoTiles += 1 }
                         else { written.append(tr) }
                     } }
-                    compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive))
+                    compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive), captureSeq: frame.captureSeq)
                     if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) video \(frame.seq) capture \(frame.captureSeq)\(frame.flags.contains(.keyframe) ? " key" : "")\(frame.flags.contains(.progressive) ? " progressive" : "") region \(region) tiles \(written.count)") }
                     if frame.flags.contains(.keyframe), region.area * 10 >= compositor.width * compositor.height * 9 { v.step(frame.flags.contains(.progressive) ? "fade" : "key", now: now) }
                     if v.id == 0 { markDesktopClean(written) }

@@ -150,6 +150,36 @@ final class CompositorTests: XCTestCase {
         XCTAssertEqual(c.stagedTiles, 0)
     }
 
+    /// Quality never goes down for the same content: a video frame from the same or an older capture than a staged lossless
+    /// tile leaves it alone, and the commit presents the lossless pixels; a newer capture's video still supersedes it (newer
+    /// content). The 2026-10-24 permablur: a tiny-rung keyframe replaced staged lossless desktop blocks before their commit.
+    func testOlderOrSameVideoNeverReplacesStagedLossless() throws {
+        guard let c = Compositor() else { throw XCTSkip("no Metal device") }
+        c.configure(width: 192, height: 64)
+        var pb: CVPixelBuffer?
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary, kCVPixelBufferMetalCompatibilityKey: true]
+        XCTAssertEqual(CVPixelBufferCreate(nil, 192, 64, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attrs as CFDictionary, &pb), kCVReturnSuccess)
+        CVPixelBufferLockBaseAddress(pb!, [])
+        memset(CVPixelBufferGetBaseAddressOfPlane(pb!, 0), 235, CVPixelBufferGetBytesPerRowOfPlane(pb!, 0) * 64)
+        memset(CVPixelBufferGetBaseAddressOfPlane(pb!, 1), 128, CVPixelBufferGetBytesPerRowOfPlane(pb!, 1) * 32)
+        CVPixelBufferUnlockBaseAddress(pb!, [])
+        // Three tiles staged lossless (green) from capture 10.
+        let lossless = (0..<3).map { i -> TileMessage.Tile in
+            var px = [UInt8](repeating: 0, count: 64 * 64 * 4); for p in 0..<(64 * 64) { px[p * 4 + 1] = 255; px[p * 4 + 3] = 255 }
+            return .init(rect: PixelRect(x: i * 64, y: 0, width: 64, height: 64), format: .lossless, data: px.withUnsafeBytes { TileCodec.encode(base: $0.baseAddress!, width: 64, height: 64, stride: 256, format: .lossless)! })
+        }
+        XCTAssertEqual(c.applyTiles(lossless, staged: true, captureSeq: 10), 3)
+        // A white keyframe over the whole region: capture 10 on tile 0's column, 9 on tile 1's, 11 on tile 2's (three frames).
+        func video(_ seq: UInt32, tile: Int) { var m = TileMask(cols: 3, rows: 1); m[tile, 0] = true; c.applyVideo(pb!, region: PixelRect(x: 0, y: 0, width: 192, height: 64), mask: m, captureSeq: seq) }
+        video(10, tile: 0); video(9, tile: 1); video(11, tile: 2)
+        XCTAssertGreaterThan(c.commitStaged(durationNanos: 1_000_000), 0)
+        usleep(5_000); c.settle()
+        let px = try readback(c)
+        XCTAssertEqual(pixel(px, 192, 10, 10).1, 255); XCTAssertLessThan(pixel(px, 192, 10, 10).2, 20, "same capture: the staged lossless pixels win")
+        XCTAssertEqual(pixel(px, 192, 70, 10).1, 255); XCTAssertLessThan(pixel(px, 192, 70, 10).2, 20, "older capture: the staged lossless pixels win")
+        XCTAssertGreaterThan(pixel(px, 192, 140, 10).2, 240, "a newer capture's video supersedes the staged tile")
+    }
+
     /// A commit while a fade runs waits for it (a level never jumps mid-fade), then lands on its own.
     func testCommitWaitsForRunningFade() throws {
         guard let c = Compositor() else { throw XCTSkip("no Metal device") }

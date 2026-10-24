@@ -274,7 +274,9 @@ public final class Compositor {
         blit.endEncoding()
     }
     /// The textures a write of `rect` lands on.
-    private func targets(_ rect: PixelRect, staged: Bool, crossfade: Bool, transaction: Bool = false, _ cb: MTLCommandBuffer) -> [MTLTexture] {
+    /// `lowerFrom`: a write of lower quality (video, a lossy still) from that capture; it leaves the staged level alone where
+    /// that holds lossless pixels of the same or a later capture.
+    private func targets(_ rect: PixelRect, staged: Bool, crossfade: Bool, transaction: Bool = false, lowerFrom: UInt32? = nil, _ cb: MTLCommandBuffer) -> [MTLTexture] {
         guard let canvas else { return [] }
         if transaction, !staged, let p = pending {
             markPending(rect)
@@ -291,7 +293,7 @@ public final class Compositor {
             out.append(canvas)
             if let incoming, fadeIntersects(rect) { out.append(incoming) }
         }
-        if let staging { out.append(staging) }
+        if let staging, !(lowerFrom.map { stagedLosslessCovers(rect, seq: $0) } ?? false) { out.append(staging) }
         if let pending { out.append(pending) }
         return out
     }
@@ -304,6 +306,30 @@ public final class Compositor {
         let c0 = max(0, r.x / 64), c1 = min(cols - 1, (r.maxX - 1) / 64), r0 = max(0, r.y / 64), r1 = min(rows - 1, (r.maxY - 1) / 64)
         guard c1 >= c0, r1 >= r0 else { return }
         for y in r0...r1 { for x in c0...c1 { stagedMask[y * cols + x] = true } }
+    }
+    /// Per staged tile: the capture its pixels came from and whether they were lossless (meaningful where stagedMask is set).
+    /// A write of lower quality from the same or an older capture never replaces them: quality never goes down for the same
+    /// content (a tiny-rung keyframe replaced staged lossless desktop blocks the host counted delivered, 2026-10-24).
+    private var stagedSeq: [UInt32] = [], stagedLossless: [Bool] = []
+    private func noteStagedQuality(_ r: PixelRect, seq: UInt32, lossless: Bool) {
+        let cols = tileCols, rows = tileRows, n = cols * rows
+        if stagedSeq.count != n { stagedSeq = Array(repeating: 0, count: n); stagedLossless = Array(repeating: false, count: n) }
+        guard !r.isEmpty else { return }
+        let c0 = max(0, r.x / 64), c1 = min(cols - 1, (r.maxX - 1) / 64), r0 = max(0, r.y / 64), r1 = min(rows - 1, (r.maxY - 1) / 64)
+        guard c1 >= c0, r1 >= r0 else { return }
+        for y in r0...r1 { for x in c0...c1 { stagedSeq[y * cols + x] = seq; stagedLossless[y * cols + x] = lossless } }
+    }
+    /// Whether every tile of `r` holds staged lossless pixels from capture `seq` or later (wrap-aware).
+    func stagedLosslessCovers(_ r: PixelRect, seq: UInt32) -> Bool {
+        let cols = tileCols, rows = tileRows
+        guard stagedSeq.count == cols * rows, stagedMask.count == cols * rows, !r.isEmpty else { return false }
+        let c0 = max(0, r.x / 64), c1 = min(cols - 1, (r.maxX - 1) / 64), r0 = max(0, r.y / 64), r1 = min(rows - 1, (r.maxY - 1) / 64)
+        guard c1 >= c0, r1 >= r0 else { return false }
+        for y in r0...r1 { for x in c0...c1 {
+            let i = y * cols + x
+            guard stagedMask[i], stagedLossless[i], Int32(bitPattern: stagedSeq[i] &- seq) >= 0 else { return false }
+        } }
+        return true
     }
     /// Tiles of the next level written off-screen and not yet presented.
     /// Whether a 64-px tile holds a staged level not yet presented (the audit does not compare those).
@@ -429,7 +455,7 @@ public final class Compositor {
 
     /// Writes the masked tiles of a decoded NV12 frame into `region` of the canvas (scaling if the
     /// frame is smaller than the region, i.e. the host is on a lower rung).
-    public func applyVideo(_ image: CVImageBuffer, region: PixelRect, mask: TileMask?, tile: Int = 64, crossfade: Bool = false) {
+    public func applyVideo(_ image: CVImageBuffer, region: PixelRect, mask: TileMask?, tile: Int = 64, crossfade: Bool = false, captureSeq: UInt32? = nil) {
         guard canvas != nil, CVPixelBufferGetPlaneCount(image) == 2 else { return }
         let full = region.isEmpty ? PixelRect(x: 0, y: 0, width: width, height: height) : region
         let vw = CVPixelBufferGetWidthOfPlane(image, 0), vh = CVPixelBufferGetHeightOfPlane(image, 0)
@@ -481,7 +507,8 @@ public final class Compositor {
                 let t = PixelRect(x: r.x + col * tile, y: r.y + row * tile, width: tile, height: tile).intersection(r)
                 guard !t.isEmpty, t.maxX <= source.width, t.maxY <= source.height else { continue }
                 if tile == 64, alphaPlane != nil, alphaTiles.contains((t.y / 64) * cols + t.x / 64) { withAlpha.append(t); continue }
-                for dst in outs { copy(source, to: dst, rect: t, blit: blit) }
+                let keepStaged = captureSeq.map { stagedLosslessCovers(t, seq: $0) } ?? false
+                for dst in outs where !(keepStaged && dst === staging) { copy(source, to: dst, rect: t, blit: blit) }
             }
         }
         blit.endEncoding()
@@ -550,7 +577,9 @@ public final class Compositor {
     /// (the desktop where the viewer shows fill: any clean picture beats the fill). Lossless and solid tiles only.
     @discardableResult
     /// `transaction`: a capture's direct change under TRUTH, collected in `pending` until `commitTransaction`.
-    public func applyTiles(_ tiles: [TileMessage.Tile], crossfade: Bool = false, staged: Bool = false, alsoShow: [PixelRect] = [], transaction: Bool = false) -> Int {
+    /// `captureSeq`: the capture the tiles came from (staged quality bookkeeping, and lossy writes never replace staged lossless
+    /// pixels of the same or a later capture).
+    public func applyTiles(_ tiles: [TileMessage.Tile], crossfade: Bool = false, staged: Bool = false, alsoShow: [PixelRect] = [], transaction: Bool = false, captureSeq: UInt32? = nil) -> Int {
         guard canvas != nil, let cb = commandQueue.makeCommandBuffer() else { return 0 }
         let bounds = PixelRect(x: 0, y: 0, width: width, height: height)
         if crossfade && !staged { for t in tiles { finishFades(intersecting: t.rect, cb) } }
@@ -575,7 +604,8 @@ public final class Compositor {
                 if hasAlpha { Self.clampPremultiplied(&pixels) }
                 tex.replace(region: MTLRegionMake2D(0, 0, dw, dh), mipmapLevel: 0, withBytes: pixels, bytesPerRow: dw * 4)
                 blit?.endEncoding(); blit = nil
-                for dst in targets(r, staged: staged, crossfade: crossfade, transaction: transaction, cb) { drawScaled(tex, into: dst, rect: r, commandBuffer: cb) }
+                for dst in targets(r, staged: staged, crossfade: crossfade, transaction: transaction, lowerFrom: staged ? nil : captureSeq, cb) { drawScaled(tex, into: dst, rect: r, commandBuffer: cb) }
+                if staged, let s = captureSeq { noteStagedQuality(r, seq: s, lossless: false) }
                 if crossfade && !staged { faded.append(r) }
                 n += 1
                 continue
@@ -587,6 +617,7 @@ public final class Compositor {
                 guard let (dw, dh) = TileCodec.size(of: t.data), dw == w, dh == h, TileCodec.decode(t.data, into: buf.contents(), width: w, height: h, stride: stride) else { continue }
             }
             let outs = targets(r, staged: staged, crossfade: crossfade, transaction: transaction, cb)
+            if staged, let s = captureSeq { noteStagedQuality(r, seq: s, lossless: true) }
             if blit == nil { blit = cb.makeBlitCommandEncoder() }
             for dst in outs {
                 blit?.copy(from: buf, sourceOffset: 0, sourceBytesPerRow: stride, sourceBytesPerImage: stride * h, sourceSize: MTLSize(width: r.width, height: r.height, depth: 1),
