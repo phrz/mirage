@@ -1163,7 +1163,10 @@ final class ViewerSession: @unchecked Sendable {
                     if frame.flags.contains(.keyframe), region.area * 10 >= compositor.width * compositor.height * 9 { v.step(frame.flags.contains(.progressive) ? "fade" : "key", now: now) }
                     if v.id == 0 { markDesktopClean(written) }
                     v.receivedBytes += frame.bytes; v.videoFrames += 1
-                    if !frame.flags.contains(.progressive) { markCapture(v, region, captureSeq: frame.captureSeq) }
+                    // Only the tiles the frame wrote: masked-out tiles keep what they hold, and stamping the whole region made the
+                    // lossless blocks already on their way for them "stale" (discarded: capture 179 < 243), while the host counted
+                    // them delivered: soft desktop for good (check 5, 2026-10-24).
+                    if !frame.flags.contains(.progressive) { for r in written { markCapture(v, r, captureSeq: frame.captureSeq) } }
                     notePictureChange(now)
                     statsLock.lock(); let since = connectedAtNanos; statsLock.unlock()
                     if lastVideoNanos > 0, since > 0, now > since &+ steadyAfterNanos, now > lastVideoNanos {
