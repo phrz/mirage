@@ -1174,6 +1174,194 @@ Testing: use the Japan link while we have it, and reproduce Antarctica on demand
 macOS's own link conditioner (`dnctl`/`pfctl` pipes: bandwidth, delay, loss, queue size) in a
 script, so every tier is a repeatable CI-style run against loopback or mac-daddy.
 
+### 3.10 Host updates and distribution (design, 2026-10-25; for phrz's approval)
+
+Today every host is updated by `scripts/deploy-host.sh` from phrz's MacBook: an Apple Development build copied by rsync,
+one host at a time. That does not scale past mac-daddy. The goal: every Mac running Mirage knows its version and channel.
+Every viewer shows when a host is behind. One tap in the viewer, or one command over SSH, updates a host safely.
+A bad build rolls itself back.
+
+**Version identity.**
+- Every build carries `MirageVersion { version: "0.4.0", build: 412, commit: "69bb8ba", channel: nightly|beta|stable }`.
+  - `build` is monotonic: the count of commits on main, stamped by the release script into `CURRENT_PROJECT_VERSION`.
+  - `version` is `MARKETING_VERSION`.
+  - The channel a build was published to is stamped in `Info.plist` (`MirageChannel`). A host can follow a different
+    channel than the one its build came from (a setting, below).
+- Handshake fields:
+  - `Hello.viewerVersion` and `Welcome.hostVersion` (structured; `hostBuild` stays for older viewers).
+  - `Welcome.latestAvailable`: the newest build the host's last feed check found on its channel. The host is the source
+    of truth, so an iOS viewer never fetches the feed itself.
+  - `Welcome.updatePolicy`: what that viewer may do, below.
+- **Protocol compatibility:** today `HostSession` rejects any `protocolVersion` other than its own. Mixed versions across a
+  fleet make that untenable. The host accepts `Mirage.minProtocolVersion ... Mirage.protocolVersion` and gates newer
+  features on the peer's version (as `StreamRequest.tileKeys` already does). `Reject` gains `code: .viewerTooOld |
+  .hostTooOld`, so the viewer can say which side to update instead of showing a string.
+
+**The outdated marker.**
+- Host row in the viewer's list of hosts: a small "Update" badge when `latestAvailable.build > hostVersion.build`. A red
+  "Update required" badge when the host rejected the viewer as too old, or the reverse. The row's detail shows
+  "0.4.0 (412) → 0.4.1 (420), nightly".
+- The host's menu-bar item shows "Update available: 0.4.1" with Install now / Later.
+- The Mac viewer's About shows both its own version and the host's (already partly there through `hostBuild`).
+
+**The remote trigger.**
+- New control messages (paired, authenticated session only):
+  - viewer → host: `updateHost { targetBuild }` and `rollbackHost`;
+  - host → viewer: `updateStatus { phase: checking|downloading|verifying|installing|restarting|done|failed|rolledBack,
+    progress, message }`.
+- **The viewer never sends code.** The host fetches the build from the feed and verifies it itself. The trigger only names
+  a build that the feed already lists. A compromised viewer can therefore install at most a genuine, newer, signed Mirage.
+- **Who may trigger:** any paired device. Pairing already grants full keyboard and mouse control of the Mac, so installing
+  a signed newer build adds no power. A per-host setting can restrict it to "this Mac only" (menu bar or SSH).
+- **Restart during a stream:** the triggering viewer shows "Updating mac-daddy…", keeps its last picture dimmed, and
+  reconnects on its own once the new host listens. Other viewers with a stream open get a notice first. The host never
+  restarts on its own (policy below) while any stream is open.
+
+**Feed and channels (GitHub Releases on the public `phrz/mirage`; no token needed).**
+- Channels:
+  - **stable:** tags `vX.Y.Z`;
+  - **beta:** `vX.Y.Z-beta.N`;
+  - **nightly:** any main commit that passes the suite, published as a release `nightly-<build>`. The release script
+    prunes nightlies older than the newest 10.
+- Each release carries:
+  - `Mirage-<version>-<build>.zip` (`ditto -c -k --keepParent` of the notarized, stapled app);
+  - `manifest.json`: `{channel, version, build, commit, minProtocol, protocol, minOS, zipURL, zipSHA256, zipSize,
+    notes, published, expires}`;
+  - `manifest.json.sig`: an Ed25519 signature over the manifest bytes. The key lives in phrz's keychain (and later a CI
+    secret); the public key is compiled into the app. CryptoKit's `Curve25519.Signing`, as for the host identity.
+- The channel heads are three small rolling releases (`channel-stable`, `channel-beta`, `channel-nightly`) whose only
+  asset is the current manifest and its signature. A check is then one unauthenticated GET of
+  `releases/download/channel-<name>/manifest.json`, which needs no GitHub API rate limit.
+- `expires` (published + 30 days for nightly, + 1 year for stable) stops a stale or replayed manifest from freezing a
+  host on an old build.
+- **When the host checks:** at start, every 6 h, and on a viewer's request. The check uses jitter and is skipped on
+  metered or Extreme links: the host's own uplink, not the viewer's.
+- **Host settings** (`updates.json` in Application Support; the menu bar and `miraged update --set` edit them):
+  - `channel`: stable by default; mac-daddy is on nightly.
+  - `policy`: `notify` (default) | `autoWhenIdle` | `manual`. `autoWhenIdle` installs only when no stream has been open
+    for 30 min, between 02:00 and 05:00 local time.
+
+**Verification before anything is replaced (all public API).**
+1. The zip's SHA-256 and size match the signed manifest. The manifest's `build` is greater than the running build;
+   rollback to the kept previous bundle is the only way down. Its `minOS` and `minProtocol` are satisfied.
+2. Extract with `ditto -x -k` into `~/Library/Application Support/Mirage/Updates/<build>/`.
+3. Check the code signature: `SecStaticCodeCheckValidity` with `kSecCSCheckAllArchitectures | kSecCSStrictValidate`,
+   against a requirement pinned in the running binary:
+   `anchor apple generic and identifier "com.paulherz.mirage" and certificate leaf[subject.OU] = "M8MME6Q9DA"`.
+   The embedded `miraged` is checked the same way with `identifier "com.paulherz.mirage.host"`.
+4. Check notarization: `SecAssessmentCreate` (the Gatekeeper assessment `spctl` uses) on the staged bundle must accept
+   it, with the ticket stapled.
+5. Run a self-test: the staged `Contents/MacOS/miraged --self-test` must exit 0 within 10 s. It loads (catching
+   dyld/architecture breakage), opens its stores read-only, binds no port and prints its `MirageVersion`. That version
+   must match the manifest.
+
+**Atomic swap with rollback.**
+- Stage the verified bundle on the same volume as `/Applications`. That is the normal case: `~/Library` and
+  `/Applications` share the Data volume. Check `st_dev`; if they differ, copy into `/Applications/.Mirage-staged.app`
+  first.
+- Write `pending-update.json {from, to, attempts: 0, deadline: now + 5 min}`.
+- `renamex_np(staged, "/Applications/Mirage.app", RENAME_SWAP)`: one atomic APFS swap, with no instant at which the app
+  is missing. The old bundle ends up at the staged path and is moved to `…/Mirage/Previous/Mirage.app`.
+  - Exactly one previous bundle is kept. It is kept outside `/Applications`, so Launch Services and Spotlight don't list
+    two Mirages.
+  - Running processes keep their mapped old code.
+- `exit(0)`: the login-item agent is `KeepAlive`, so launchd starts the new `miraged` from the same path. The
+  `SMAppService` registration and the TCC grants follow the bundle path and the designated requirement, both unchanged.
+- **Commit:** the new host's `main` first increments `attempts` in `pending-update.json`, then starts normally. It commits
+  (deletes the file, logs "update committed 412 → 420") once it is healthy:
+  - the QUIC listener is ready;
+  - the local control socket is up;
+  - a capture probe returns a frame, or reports exactly which TCC grant is missing.
+- **Rollback:** if `attempts` reaches 3, or the deadline passes without a commit, the new binary swaps
+  `Previous/Mirage.app` back with the same `renamex_np` and exits. The old host starts and reports `rolledBack` with the
+  new build's last log lines to the viewer that triggered the update. The bad build is marked skipped in `updates.json`
+  until a newer one appears.
+- **The one hole:** a build that dies before `main` runs (a dyld failure) would never count its attempts. The self-test
+  in step 5 catches that before the swap. `scripts/rollback-host.sh HOST` does the same swap over SSH as a last resort.
+- A Mirage viewer window open on the host Mac keeps running the old code. It shows "Mirage was updated: Relaunch".
+
+**Developer ID, notarization, and the one-time re-grant.**
+- Release builds are signed with the Developer ID Application certificate of team M8MME6Q9DA, with hardened runtime
+  (required for notarization; capture, input injection and QUIC need no exceptions), notarized with
+  `xcrun notarytool submit --wait --keychain-profile mirage`, and stapled.
+- Builds downloaded from Developer ID releases open without right-click → Open or removing the quarantine flag. That is
+  what phrz's other Macs need.
+- **The cost:** the designated requirement of a Developer ID build differs from that of an Apple Development build (a
+  different certificate chain, same team). So the Screen Recording and Accessibility grants on mac-daddy must be given
+  once more at the switch. After that they survive every update, because every release keeps the same requirement.
+  - `deploy-host.sh` keeps Apple Development signing for quick inner-loop deploys only if phrz accepts flipping grants.
+  - Recommended instead: `deploy-host.sh` signs with Developer ID too, without notarizing (notarization isn't needed for
+    rsync-copied bundles, which carry no quarantine flag). One re-grant then, and none afterwards.
+- `scripts/release.sh [nightly|beta|stable]` runs on phrz's MacBook, where the identities and the notarytool profile
+  live:
+  1. runs the suite;
+  2. stamps the version;
+  3. builds the app; signs, notarizes and staples it;
+  4. zips it and writes and signs the manifest;
+  5. publishes the release and moves the channel head with `gh release`.
+- GitHub Actions comes later, when macOS runners carry the Xcode beta this repo needs. The script is written so a CI job
+  can call it unchanged.
+
+**First install over SSH, and the fleet.**
+- `scripts/install-host.sh HOST`, a generalisation of `deploy-host.sh` and `migrate-host-to-app.sh`:
+  1. checks SSH and the macOS version;
+  2. copies the newest release zip for the chosen channel (or a local build) and extracts it into `/Applications`;
+  3. runs `open -a Mirage --args --allow-connections` to register the login-item agent;
+  4. waits for the agent;
+  5. prints what still needs a person at that Mac: the Screen Recording and Accessibility grants, which TCC never allows
+     remotely (not even MDM can pre-grant Screen Recording), and Login Items approval if `SMAppService` reports
+     `requiresApproval`;
+  6. prints the pairing code (`miraged pair --code`), so the device can be paired from the iPhone at once.
+- `scripts/fleet.sh hosts.txt status|install|update|rollback` runs the per-host scripts in parallel and prints one line
+  per host:
+  `mac-daddy  0.4.0 (412) nightly  latest 420  streaming: no  grants: ok`.
+- `miraged update [--channel c] [--check|--now|--rollback]` is the same updater the remote trigger uses, so SSH and the
+  viewer share one code path. `fleet.sh update` is `ssh HOST miraged update --now` for each host.
+
+**Homebrew (a complement, not the main path).**
+- A tap `phrz/homebrew-mirage` with a cask that installs the stable zip. The cask is `mirage`: no cask of that name exists
+  in Homebrew today, and the tap prefix keeps it unambiguous if one appears.
+- It sets `auto_updates true`, so `brew upgrade` doesn't fight the in-app updater, and `zap` removes Application Support
+  and the LaunchAgent registration.
+- `release.sh stable` bumps the cask's version and SHA-256.
+
+**Viewers.**
+- The iOS viewer updates through TestFlight and the App Store.
+- The Mac viewer is the same bundle as the host. On a Mac with the host enabled, the host's updater updates both. On a
+  viewer-only Mac (phrz's MacBook), the app runs the same updater in-process, from the menu bar and About, with the same
+  verification and swap, and relaunches itself.
+- A viewer that the host rejects as too old says so in the host row and offers its own update.
+
+**Boundaries for the build session.**
+- **It owns:**
+  - a new `Sources/MirageUpdater` module (Feed, Manifest, Verifier, Installer, Health, Settings);
+  - the version and update fields and the update messages in `Wire.swift`;
+  - the protocol range in `HostSession`'s handshake;
+  - update status in the menu-bar app;
+  - the badge in the device and host lists;
+  - `scripts/release.sh`, `install-host.sh`, `fleet.sh`, `rollback-host.sh`;
+  - the signing settings in `App/project.yml` and `embed-host.sh`;
+  - the `miraged update` and `--self-test` commands.
+- **It must not touch:** `DesktopStreamer`, `ScreenCapturer`, `Rate/`, `Render/`, `Tiles/`, the tile and video message
+  formats, `ViewerSession`'s streaming paths, or the test bench.
+
+**Milestones.**
+
+| # | Deliverable | Done when |
+|---|---|---|
+| U1 | Version identity, protocol range, structured reject, outdated badge | An older viewer connects to a newer host (and the reverse), and the row says which to update |
+| U2 | Developer ID + notarized `release.sh`, signed manifest, channel heads | A nightly zip downloaded with Safari on a fresh Mac opens with no Gatekeeper warning; mac-daddy re-granted once |
+| U3 | `miraged update` with verification, swap, health commit, rollback | Updating mac-daddy over SSH takes < 30 s to "committed"; a deliberately broken build (exits in main) rolls back by itself |
+| U4 | Remote trigger and status from the viewer | One tap on the iPhone updates mac-daddy, and the viewer reconnects on its own |
+| U5 | `install-host.sh`, `fleet.sh` | A second Mac goes from nothing to paired with one command plus the two grants |
+| U6 | Homebrew tap; `autoWhenIdle` policy | `brew install --cask phrz/mirage/mirage` gives a working host |
+
+**Open questions for phrz.**
+1. Switch `deploy-host.sh` to Developer ID now: one Screen Recording and Accessibility re-grant on mac-daddy, then never
+   again? (recommended)
+2. Should any paired device be able to trigger an update, or only devices he marks as owner?
+3. Default policy `notify`, with mac-daddy on nightly plus `autoWhenIdle`?
+
 ## 4. Milestones
 
 | # | Deliverable | Done when |
