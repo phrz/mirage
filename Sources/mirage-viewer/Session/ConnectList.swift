@@ -227,6 +227,9 @@ final class HostUpdateCenter: ObservableObject {
 struct HostUpdateBadge: View {
     let host: PairedHost
     @ObservedObject var center = HostUpdateCenter.shared
+    /// On a selected row (the accent-coloured selection) the badge inverts, as the system's own list badges do: a white
+    /// circle with the arrow cut out, so the selection shows through it (phrz, 2026-10-26).
+    @Environment(\.backgroundProminence) private var prominence
 
     var body: some View {
         if center.isRunning(host.alias) {
@@ -238,15 +241,29 @@ struct HostUpdateBadge: View {
                 .help("Updating")
                 .accessibilityLabel("\(host.title) is updating")
         } else if case .updateAvailable = host.update {
-            Button { center.prompt = host } label: {
-                Image(systemName: "arrow.up.circle.fill")
-                    .symbolRenderingMode(.palette)
-                    .foregroundStyle(.black, .yellow)
-                    .font(.system(size: 20))
-            }
+            Button { center.prompt = host } label: { UpdateArrow(selected: prominence == .increased) }
             .buttonStyle(.borderless)
             .help("Update available")
             .accessibilityLabel("Update \(host.title)")
+        }
+    }
+}
+
+/// The update arrow: black on a yellow circle; on a selected row, a white circle with the arrow cut out (monochrome
+/// rendering knocks the arrow out of the fill), so the selection's colour shows through it.
+struct UpdateArrow: View {
+    var selected: Bool
+    var body: some View {
+        if selected {
+            Image(systemName: "arrow.up.circle.fill")
+                .symbolRenderingMode(.monochrome)
+                .foregroundStyle(.white)
+                .font(.system(size: 20))
+        } else {
+            Image(systemName: "arrow.up.circle.fill")
+                .symbolRenderingMode(.palette)
+                .foregroundStyle(.black, .yellow)
+                .font(.system(size: 20))
         }
     }
 }
