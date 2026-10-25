@@ -1385,9 +1385,8 @@ A bad build rolls itself back.
 | U6 | Homebrew tap; `autoWhenIdle` policy | `brew install --cask phrz/mirage/mirage` gives a working host |
 
 **Open questions for phrz.**
-1. Switch `deploy-host.sh` to Developer ID now: one Screen Recording and Accessibility re-grant on mac-daddy, then never
-   again? (recommended)
-2. Should any paired device be able to trigger an update, or only devices he marks as owner?
+1. ~~Switch `deploy-host.sh` to Developer ID now?~~ **Yes** (phrz, 2026-10-25): he re-grants on mac-daddy once.
+2. ~~Any paired device, or only owner devices?~~ **Any paired device** (phrz, 2026-10-25).
 3. Default policy `notify`, with mac-daddy on nightly plus `autoWhenIdle`?
 
 ## 4. Milestones
