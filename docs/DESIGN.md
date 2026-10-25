@@ -1474,6 +1474,27 @@ A bad build rolls itself back.
 - Not yet: a notice inside a viewer window that is streaming from the host. That window reconnects by itself after the
   restart, but showing the notice needs a hook in ViewerSession's control path, which this work does not touch.
 
+**As built: U5 (2026-10-26).**
+- `scripts/install-host.sh` works from the release feed. A person at the new Mac runs it, or `fleet.sh install` runs it
+  over SSH with `sh -s`. No repository checkout is needed. The chain of trust:
+  1. it checks the zip's size and SHA-256 against the channel head;
+  2. it checks the bundle with the Mac's own tools before running anything from it: `codesign -R` with the pinned
+     requirements, and `spctl` reporting "Notarized Developer ID";
+  3. only then does the bundle's own miraged run (`update --install-bundle`, hidden). It verifies the manifest's
+     signature with its compiled keys and that the manifest describes this very bundle, runs the updater's checks
+     again, self-test included, and decides fresh / replace / current / refuse;
+  4. it installs, applies the channel and policy, turns the host on (`--allow-connections`: the agent and Mirage at
+     login; over SSH through a one-shot gui job), and prints the grant steps through PrivacyPane.
+- It never changes a signing identity without `--allow-identity-change`, never downgrades without `--force`, and
+  `--dry-run` changes nothing. Checked here (dry runs) against the real nightly-449: the signature verified with the
+  compiled keys, the bundle passed Gatekeeper and its self-test, and an install over an Apple Development bundle was
+  refused.
+- Builds before U5 have no installer half. install-host.sh says so instead of installing without the manifest's
+  signature checked, so it works from the first nightly that carries U5.
+- `scripts/fleet.sh HOSTS status|install|update [--dry-run]` runs over SSH in parallel, then prints one line per host
+  (`miraged update --status-line`: version, channel, latest, agent, streaming, grants, policy, trigger). It refuses
+  `--allow-identity-change` outright.
+
 **Milestones.**
 
 | # | Deliverable | Done when |

@@ -29,6 +29,12 @@ struct Update: AsyncParsableCommand {
     @Flag(help: "Install even a build signed with another identity (Apple Development ↔ Developer ID): the agent is registered again, and a person must give the Screen Recording and Device Control (Accessibility) grants again.") var allowIdentityChange = false
     @Flag(help: ArgumentHelp("Print what a person must do at this Mac after a signing identity change (deploy-host.sh).", visibility: .hidden)) var grantSteps = false
     @Flag(help: ArgumentHelp("After the agent swapped in an update (a remote trigger): restart it onto the new build and watch it start, as --now does.", visibility: .hidden)) var supervise = false
+    @Option(help: ArgumentHelp("Install this verified bundle (scripts/install-host.sh, with --manifest and --sigs).", visibility: .hidden)) var installBundle: String?
+    @Option(help: ArgumentHelp("The channel head's manifest.json, for --install-bundle.", visibility: .hidden)) var manifest: String?
+    @Option(help: ArgumentHelp("Its manifest.sigs.json.", visibility: .hidden)) var sigs: String?
+    @Flag(help: ArgumentHelp("With --install-bundle: reinstall even when this build or a newer one is installed.", visibility: .hidden)) var force = false
+    @Flag(help: ArgumentHelp("With --install-bundle: verify and decide, change nothing.", visibility: .hidden)) var dryRun = false
+    @Flag(help: "Print this Mac's host in one line (scripts/fleet.sh).") var statusLine = false
     @Flag(help: "Restart the host agent and make sure it runs: if launchd refuses to start it (a launch constraint from another signature), register it again through Mirage.app (deploy and install scripts).") var ensureAgent = false
 
     func run() async throws {
@@ -37,6 +43,18 @@ struct Update: AsyncParsableCommand {
         let appURL = app.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true) }
             ?? InstallPaths.installedApp(support: store.root)
         let paths = InstallPaths(app: appURL, support: store.root)
+        // Before anything prints or saves: the fleet table's line, and install-host.sh's install (it applies --set itself).
+        if statusLine { print(MirageUpdate_statusLine(paths: paths, store: store)); return }
+        if let b = installBundle {
+            guard let manifest, let sigs else { throw ValidationError("--install-bundle needs --manifest and --sigs") }
+            func url(_ p: String) -> URL { URL(fileURLWithPath: (p as NSString).expandingTildeInPath) }
+            do {
+                try await MirageUpdate_installBundle(url(b), manifest: url(manifest), sigs: url(sigs), channel: channel,
+                                                     appPath: app.map { url($0) } ?? URL(fileURLWithPath: "/Applications/Mirage.app", isDirectory: true),
+                                                     store: store, assignments: assignments, force: force, allowIdentityChange: allowIdentityChange, dryRun: dryRun)
+            } catch let e as ExitCode { throw e } catch { print("error: \(error)"); throw ExitCode(1) }
+            return
+        }
         let running = Installer.version(of: paths.app) ?? .current
         let updater = Updater(paths: paths, feed: Feed(override: feed ?? ProcessInfo.processInfo.environment["MIRAGE_UPDATE_FEED"]),
                               running: running, report: { phase, msg in print("[\(phase.rawValue)] \(msg)") })
