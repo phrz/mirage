@@ -1274,8 +1274,8 @@ A bad build rolls itself back.
       menu bar, the app's bar, or `miraged update --now`.
     - **Automatic:** installs on its own when no stream has been open for 30 min, between 02:00 and 05:00 local time.
       The indicator still shows until then, and a trigger installs at once.
-  - mac-daddy: nightly with Ask until the rollback path is proven (U3's broken-build test), then Automatic. The
-    Automatic step is a recommendation that phrz hasn't confirmed yet.
+  - mac-daddy: nightly with Ask until the rollback path is proven (U3's broken-build test), then Automatic. Decided
+    (phrz, 2026-10-25): "Yes: mac-daddy on nightly, Ask for now, Automatic once rollback is proven."
 
 **Verification before anything is replaced (all public API).**
 1. The zip's SHA-256 and size match the signed manifest. The manifest's `build` is greater than the running build;
@@ -1402,8 +1402,8 @@ A bad build rolls itself back.
 **Open questions for phrz.**
 1. ~~Switch `deploy-host.sh` to Developer ID now?~~ **Yes** (phrz, 2026-10-25): he re-grants on mac-daddy once.
 2. ~~Any paired device, or only owner devices?~~ **Any paired device** (phrz, 2026-10-25).
-3. ~~Policies~~ **Ask (default) and Automatic only** (phrz, 2026-10-25). Open: mac-daddy to Automatic once the rollback
-   path is proven?
+3. ~~Policies~~ **Ask (default) and Automatic only**; mac-daddy on nightly, Ask, then Automatic once rollback is proven
+   (phrz, 2026-10-25).
 
 ## 4. Milestones
 
