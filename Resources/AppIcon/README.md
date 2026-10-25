@@ -2,6 +2,7 @@
 
 - `Mirage.icon` — Icon Composer source (macOS 26+ layered icon; Default and Dark final, Mono still being tuned).
 - `Mirage-1024.png` — flat composite, squircle-masked.
+- `Mirage-1024-square.png` — the same composite unmasked (full-bleed square) for platforms that apply their own mask, such as iOS.
 - `Mirage.icns` — fallback for pre-Tahoe and for the ad-hoc viewer bundle (`scripts/make-viewer-app.sh`).
 
 ## Source

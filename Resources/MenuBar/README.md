@@ -1,6 +1,6 @@
 # Menu-bar icon
 
-Template images (monochrome, alpha only) for the menu-bar app, 18×18 pt at 1x/2x/3x, `template-rendering-intent: template`
+Template images (monochrome, alpha only) for the menu-bar app, 18×18 pt at 1x and 2x (the mac idiom has no 3x), `template-rendering-intent: template`
 so AppKit tints them for light, dark and highlighted menu bars.
 
 - `MirageMenuBar.imageset` — pointer over two parallel heat-shimmer waves (same phase, constant gap, round caps).

@@ -65,6 +65,12 @@ doc = {
 json.dump(doc, open(f"{ICON}/icon.json", "w"), indent=2)
 # flat PNG and legacy icns next to the bundle
 shutil.copy("export/layers/00 Composite.png", "../Mirage-1024.png")
+# unmasked full-bleed square for platforms that apply their own mask (iOS): composite the layers without the squircle
+from PIL import Image as _I
+sq = _I.open("export/layers/01 Sky.png").convert("RGBA")
+for n in ("02 Sand.png", "03 Cursor.png"):
+    sq.alpha_composite(_I.open(f"export/layers/{n}").convert("RGBA"))
+sq.save("../Mirage-1024-square.png", optimize=True)
 shutil.rmtree("Mirage.iconset", ignore_errors=True); os.makedirs("Mirage.iconset")
 for sz in (16, 32, 128, 256, 512):
     for scale, suffix in ((1, ""), (2, "@2x")):

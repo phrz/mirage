@@ -75,9 +75,12 @@ function glyph(ab, kind, status) {
   poly(ab, 'Pointer', arrowPts(ax, ay, sc));
   // two heat waves that interlock: same wavelength, half a cycle apart, spaced closer than twice the amplitude
   if (kind === 'wavesB') {
-    // B: the second wave is the first translated down, same period, amplitude and phase: parallel rails
-    sineStroke(ab, 'Wave 1', xl, xr, yTop, 0.7, 6.2, 0.35, w, 60);
-    sineStroke(ab, 'Wave 2', xl, xr, yTop + 2.6, 0.7, 6.2, 0.35, w, 60);
+    // B: the second wave is the first translated down, same period, amplitude and phase: parallel rails.
+    // Centre lines sit on half-pixel rows (12.5, 15.5) with a 1 pt stroke so each wave fills one clean 1x row
+    // at its crests/troughs and the 2 px gap between them survives at 18 pt.
+    var yA = 12.5, yB = 15.5, wv = 1.0, ampv = 0.5;
+    sineStroke(ab, 'Wave 1', xl, xr, yA, ampv, 6.2, 0.35, wv, 60);
+    sineStroke(ab, 'Wave 2', xl, xr, yB, ampv, 6.2, 0.35, wv, 60);
   } else {
     // A: half a cycle apart, close enough to touch at the crossings (braid)
     sineStroke(ab, 'Wave 1', xl, xr, yTop, 0.7, 6.2, 0.35, w, 60);
@@ -98,7 +101,7 @@ function onRun(context) {
     return ab;
   });
   sketch.export(boards, { formats: 'pdf', output: OUT + '/export/menubar', overwriting: true });
-  sketch.export(boards, { formats: 'png', scales: '1,2,3', output: OUT + '/export/menubar', overwriting: true, 'save-for-web': true });
+  sketch.export(boards, { formats: 'png', scales: '1,2', output: OUT + '/export/menubar', overwriting: true, 'save-for-web': true });   // mac idiom has no 3x
   dbg('exported ' + boards.length);
   doc.save(function (err) { dbg(err ? 'save err ' + err : 'saved'); });
 }
