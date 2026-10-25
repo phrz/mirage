@@ -21,6 +21,9 @@ final class IdentityTests: XCTestCase {
         XCTAssertNotNil(SigningIdentity.change(from: SigningIdentity(app: nil, host: nil), to: dev), "unsigned to signed is a change")
         XCTAssertNil(SigningIdentity.change(from: SigningIdentity(app: nil, host: nil), to: SigningIdentity(app: nil, host: nil)))
         XCTAssertTrue(SigningIdentity.refusal(c!).contains("--allow-identity-change"))
+        XCTAssertTrue(SigningIdentity.refusal(c!, osMajor: 27).contains("Device Control and Data Access"), "macOS 27's name (PrivacyPane)")
+        XCTAssertTrue(SigningIdentity.tccSteps(osMajor: 26).contains("→ Accessibility"))
+        XCTAssertTrue(SigningIdentity.tccSteps(osMajor: 27).contains("Screen & System Audio Recording"))
     }
 
     func testReadsARealSignature() {

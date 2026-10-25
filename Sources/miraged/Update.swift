@@ -26,7 +26,8 @@ struct Update: AsyncParsableCommand {
     @Option(help: ArgumentHelp("The installed bundle to update (default: the one this miraged runs from, else /Applications/Mirage.app).", visibility: .hidden)) var app: String?
     @Option(help: ArgumentHelp("Install only if the feed's newest is this build (what a remote trigger names).", visibility: .hidden)) var targetBuild: Int?
     @Flag(help: "Swap only: do not restart the host agent or wait for its commit.") var noRestart = false
-    @Flag(help: "Install even a build signed with another identity (Apple Development ↔ Developer ID): the agent is registered again, and a person must give the Screen Recording and Accessibility grants again.") var allowIdentityChange = false
+    @Flag(help: "Install even a build signed with another identity (Apple Development ↔ Developer ID): the agent is registered again, and a person must give the Screen Recording and Device Control (Accessibility) grants again.") var allowIdentityChange = false
+    @Flag(help: ArgumentHelp("Print what a person must do at this Mac after a signing identity change (deploy-host.sh).", visibility: .hidden)) var grantSteps = false
     @Flag(help: "Restart the host agent and make sure it runs: if launchd refuses to start it (a launch constraint from another signature), register it again through Mirage.app (deploy and install scripts).") var ensureAgent = false
 
     func run() async throws {
@@ -49,6 +50,7 @@ struct Update: AsyncParsableCommand {
         let s = updater.settings()
         print("\(DeviceNames.current()): Mirage \(running.display) \(running.commit) (built for \(running.channelName)), following \(channel?.rawValue ?? s.channel.rawValue) at \(paths.app.path)")
 
+        if grantSteps { print(SigningIdentity.tccSteps()); return }
         if ensureAgent {
             let agent = AgentControl(app: paths.app, storeRoot: paths.support)
             let v = agent.ensureRunning(restart: true, log: { print($0) })
@@ -70,7 +72,7 @@ struct Update: AsyncParsableCommand {
                 case .swapped(let p, let change):
                     if let change { print("[installing] \(change): allowed (--allow-identity-change)") }
                     try await afterSwap(p, paths: paths, identityChanged: change != nil)
-                    if change != nil { print(SigningIdentity.tccSteps) }
+                    if change != nil { print(SigningIdentity.tccSteps()) }
                 }
             } catch {
                 print("[failed] \(error)")

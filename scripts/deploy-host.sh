@@ -21,8 +21,8 @@ if ! codesign -dvv "$APP" 2>&1 | grep -q "Authority=Developer ID Application"; t
     echo "######## WARNING: deploying an Apple Development build to $HOST (no Developer ID here, or MIRAGE_SIGN=dev)." >&2
 fi
 codesign -dv "$APP/Contents/MacOS/miraged" 2>&1 | grep -q "Identifier=com.paulherz.mirage.host" || { echo "error: miraged is not signed as com.paulherz.mirage.host" >&2; exit 1; }
-# A change of signing identity (Apple Development ↔ Developer ID) costs the host's Screen Recording and Accessibility
-# grants (TCC follows the designated requirement) and the agent's registration: refused unless
+# A change of signing identity (Apple Development ↔ Developer ID) costs the host's Screen Recording and Device Control
+# (Accessibility before macOS 27) grants (TCC follows the designated requirement) and the agent's registration: refused unless
 # MIRAGE_ALLOW_IDENTITY_CHANGE=1, as `miraged update` refuses it without --allow-identity-change.
 dr() { codesign -d -r- "$1" 2>&1 | sed -n 's/^designated => //p'; }
 REMOTE_DR=$(ssh "$HOST" 'for b in /Applications/Mirage.app /Applications/Mirage.app/Contents/MacOS/miraged; do [ -e "$b" ] && codesign -d -r- "$b" 2>&1 | sed -n "s/^designated => //p"; done' || true)
@@ -49,10 +49,7 @@ if ! ssh "$HOST" '/Applications/Mirage.app/Contents/MacOS/miraged update --ensur
     exit 1
 fi
 if [ -n "$IDENTITY_CHANGE" ]; then
-    cat >&2 <<EOF
-######## $HOST was signed with another identity: at $HOST, once,
-  System Settings > Privacy & Security > Screen & System Audio Recording, and then Accessibility: remove the old
-  Mirage / miraged rows (−), add /Applications/Mirage.app/Contents/MacOS/miraged (+) and switch it on; then
-  launchctl kickstart -k gui/\$(id -u)/com.paulherz.mirage.host
-EOF
+    # The steps as the host words them (its System Settings' pane names: PrivacyPane).
+    echo "######## $HOST was signed with another identity:" >&2
+    ssh "$HOST" '/Applications/Mirage.app/Contents/MacOS/miraged update --grant-steps' >&2
 fi

@@ -29,16 +29,19 @@ public struct SigningIdentity: Codable, Equatable, Sendable {
     }
 
     /// The refusal, and what `--allow-identity-change` costs.
-    public static func refusal(_ change: String) -> String {
-        "\(change). The Screen Recording and Accessibility grants and the host agent's registration will need a person at the Mac; to go ahead anyway: miraged update --now --allow-identity-change"
+    public static func refusal(_ change: String, osMajor: Int = ProcessInfo.processInfo.operatingSystemVersion.majorVersion) -> String {
+        "\(change). The \(PrivacyPane.screenRecording) and \(PrivacyPane.accessibility(osMajor: osMajor)) grants and the host agent's registration will need a person at the Mac; to go ahead anyway: miraged update --now --allow-identity-change"
     }
 
-    /// What a person must do at the Mac after an identity change.
-    public static let tccSteps = """
+    /// What a person must do at the Mac after an identity change, with the panes named as that Mac's System Settings
+    /// names them (PrivacyPane).
+    public static func tccSteps(osMajor: Int = ProcessInfo.processInfo.operatingSystemVersion.majorVersion) -> String {
+        """
         On this Mac, once (the grants follow the old signature):
-          System Settings > Privacy & Security > Screen & System Audio Recording, and then Accessibility:
+          \(PrivacyPane.path(PrivacyPane.screenRecording)), and then \(PrivacyPane.path(PrivacyPane.accessibility(osMajor: osMajor))):
           select the old Mirage / miraged rows and remove them (−), add /Applications/Mirage.app/Contents/MacOS/miraged (+)
           and switch it on; then restart the host: launchctl kickstart -k gui/$(id -u)/com.paulherz.mirage.host
         If the host agent does not start, open Mirage.app once (it registers the agent again).
         """
+    }
 }
