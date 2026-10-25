@@ -1572,6 +1572,136 @@ without connections").**
 3. ~~Policies~~ **Ask (default) and Automatic only**; mac-daddy on nightly, Ask, then Automatic once rollback is proven
    (phrz, 2026-10-25).
 
+### 3.11 iPhone Duo poses and Unified mode on mobile (design, 2026-10-25; for phrz's review)
+
+phrz's requests (2026-10-25):
+- every iPhone Duo pose, with the clamshell (laptop) pose working like a laptop: picture on top, keyboard below;
+- the Stats button gone (done, 83224a7);
+- a Unified toggle on mobile, Sill-style by default: a strip of window thumbnails with titles at the top, one window at a
+  time, no desktop behind it;
+- on big screens (the Duo's inner display unfolded, an iPad), two or more windows side by side, without moving them on
+  the host;
+- an evaluation of a Workbench-style "Unified Display" (the host display resized to the device).
+
+His next hands-on test is LAN as good as Workbench on the Duo, plus these interface changes and the Unified toggle, as one
+TestFlight build.
+
+**What Apple's platform gives (iOS 27.1 SDK; tech talks 111461 "Prepare your app for iPhone Duo" and 111463 "Strike a
+pose with adaptive layouts on iPhone Duo").**
+- **Size classes:** the outer display is an ordinary iPhone (compact width); the inner display is regular × regular. The
+  inner display ignores supported orientations, so layout follows size classes and geometry, never orientation checks.
+- **The fold:** a `.division` reserved region (`GeometryProxy.reservedRegions(kind: .division)`, UIKit
+  `UIView.reservedRegions(kind:)`). It's active only while the device is partly folded, and its frame says where the
+  hinge runs.
+  - The cameras are `.occlusion` regions.
+  - There is no fold-angle API, so the region's geometry is the only pose signal.
+- **Displacement:**
+  - folded like a book: alerts move to the trailing side;
+  - propped on a table: glanceable content goes to the top region, interactive controls to the bottom ("a more stable
+    surface for touch");
+  - continuously scrolling content doesn't displace.
+- **`ArrangementView` / `UIArrangementViewController`:** split (side by side, or 50/50 around the hinge) and overlay
+  arrangements.
+- **Safe areas and bars:** safe areas are often asymmetric, so each side is handled on its own. Standard bars lay out
+  vertically where Apple puts them; custom bars use `ReservedRegion` to stay clear of system UI.
+- **Simulation:** Xcode's Device Hub simulates every pose, both displays and Split View.
+
+**The remote picture is a canvas, not app UI.** The desktop (or a window) is continuous content, like a document: it may
+cross the hinge in the open and book poses. Mirage's own controls (the bar, the window strip, the keyboard row) displace
+around the hinge like any app UI.
+
+**Poses, by what the geometry says** (no orientation checks):
+
+| Pose | Signal | Desktop mode | Unified mode | Bar |
+|---|---|---|---|---|
+| Closed (outer display) | compact width, no division | the display, zoom and pan as today | one window, fitted to width; the strip on top | bottom capsule, as today |
+| Open flat (inner) | regular × regular, division inactive | the whole display fits better (4:3-ish) | two windows side by side (split), the strip on top | bottom capsule |
+| Book (inner, partly folded, hinge vertical) | division active, taller than wide | the display across both halves (a canvas may cross) | one window per half, never across the hinge | trailing half, bottom |
+| **Laptop / clamshell** (inner, hinge horizontal, lower half flat) | division active, wider than tall, hinge across | the picture fills the top region | the focused window in the top region, the strip along its top edge | the bottom region's top edge, the keyboard below it |
+| Tent / propped (inner, landscape on its edges) | division active, wider than tall, the device standing | the picture in the top region | the focused window in the top region | the bottom region; auto-hides after 3 s |
+
+- **Laptop and tent** look alike to the geometry (a horizontal hinge). They differ in whether a keyboard is wanted:
+  - with the software keyboard up (or a hardware keyboard attached), the lower region is the keyboard deck;
+  - without one, the lower region is a trackpad surface with the bar.
+  - phrz asked for the laptop arrangement; the tent behaviour is Apple's propped guidance.
+- **The keyboard deck (laptop pose)** is the lower region:
+  - the system keyboard, as iOS places it there in this pose; whether iOS 27.1 pins it to the lower region by itself is
+    to be checked in Device Hub;
+  - Mirage's accessory row (⌘ ⌥ ⌃ ⇧ esc tab arrows) docked above it, just under the hinge;
+  - with a hardware keyboard: the lower region becomes a trackpad (relative pointer, two-finger scroll, as the trackpad
+    touch mode today), and the remote picture keeps the whole upper region.
+- **The bar in the laptop pose:** a horizontal capsule at the top edge of the lower region, under the hinge where a
+  MacBook's function row is. Per Apple, controls go to the lower, stable surface.
+  - phrz asked whether it belongs on the right of the folded screen. Recommendation: no. A vertical bar on the right of
+    the upper region takes width from the remote picture, and reaching up to tap it on a propped half is unstable.
+  - Open question 1 below lets him choose.
+- **Implementation:**
+  - `DesktopScreen` reads the division region with `onGeometryChange` and classifies the pose: inactive, vertical,
+    horizontal. Size classes choose compact or regular.
+  - Desktop mode places `DesktopView` in the upper region (laptop/tent) or across everything (open/book).
+  - The keyboard deck and the bar are a separate view in the lower region.
+  - `safeInsets` (already passed to `DesktopView`) gains the hinge band, so zoom-to-fit and the caret-follow scroll never
+    put the caret under the hinge.
+
+**Unified mode on mobile.**
+- **The toggle:** a bar button showing SF Symbol `interface.window.on.rectangle.dashed` (iOS 27 / macOS 27), falling back
+  to `rectangle.on.rectangle.dashed` (iOS 18 / macOS 15; the app targets both). The same symbol goes on the Mac viewer's
+  View › Unified item and its toolbar.
+- **Wire:** nothing new. `ViewInterest(unified: true, displayRects: [], hiddenLayers: …)` already makes the host stop the
+  desktop layer (0 KB per 30 s in M3.2's loopback) and treat window layers by the viewer's arrangement, not the host's
+  stacking. So a window covered on the host is still captured, and only windows the viewer doesn't show are listed as
+  hidden.
+- **The strip (Sill-style):** a horizontal row of window cards at the top, each with:
+  - a live thumbnail: the window layer's canvas drawn small, from textures the viewer already has, at a few fps;
+  - the app icon (the host's chrome icon request, as the Mac's Unified menus use);
+  - the window title;
+  - the order the host's stacking gives, frontmost first;
+  - Unified's current window highlighted.
+- **Choosing a card** shows that window and sends `windowCommand(.raise)`, so the host's keyboard focus follows. No host
+  window moves or resizes (phrz's requirement): the viewer fits the window's own pixels to the space it has.
+- **Compact (outer display, a phone):**
+  - one window at a time, fitted to width, pinch to zoom and pan as Desktop mode does today;
+  - swiping along the strip, or sideways with two fingers on the window, goes to the next window.
+- **Regular (inner display open, iPad):**
+  - `ArrangementView(.split)` with two panes, 50/50 around the division region when folded like a book; a card dragged
+    onto a pane puts that window there;
+  - touching a pane raises its window on the host before the touch is forwarded, so clicks land in the window you touched;
+  - a third pane on iPad widths later.
+- **Refinement priority:** the shown windows refine first, the thumbnails' windows after. `hiddenLayers` names the windows
+  with no card visible (strip scrolled away, minimized), so the host spends nothing on them.
+- **Menus and dialogs:**
+  - the frontmost window's app menu is a button in the strip, showing the host's AX menu tree (M3.2's native chrome) as a
+    `UIMenu`;
+  - sheets and popovers belonging to a window ride its layer;
+  - system dialogs (child windows the host reports) open as their own card and take over the pane until dismissed.
+
+**Unified Display (the host display resized to the device), evaluated.**
+- **A virtual display matched to the phone:** `CGVirtualDisplay` is private API, which this project excludes.
+- **Switching the physical display's mode** (`CGDisplaySetDisplayMode`, public):
+  - it changes phrz's real monitor for anyone at the Mac;
+  - a Studio Display offers only 16:9 modes, so no phone aspect;
+  - it would be reasonable only for a headless host, and even then the mode list rarely fits a phone.
+- **Resizing host windows to the device** (AX): phrz ruled out moving host windows.
+- **Recommendation: not now.** Unified on mobile gives each window the whole screen at its own pixels, which is what
+  Unified Display is for. Revisit if Apple ships a public virtual-display API.
+
+**Build plan (after TRUTH step 2, which is done) and estimate.**
+1. Pose classifier and Desktop-mode layout per pose; the keyboard deck and bar in the laptop pose; hinge-aware safe
+   insets. Device Hub checks for every pose. About 1.5 days.
+2. Unified on iOS: the toggle (symbol with fallback), `ViewInterest`, the strip with live thumbnails, icons and titles,
+   one-window compact view, raise on select. About 2 days.
+3. Regular-width split (two panes, card drag, raise on touch) and refinement priority by what is shown. About 1 day.
+4. The Mac viewer's toggle gets the same symbol. A few minutes.
+5. TestFlight build with the LAN work (crisp-first, TRUTH) for phrz's Duo test.
+
+About 4.5–5 days for 1–4.
+
+**Open questions for phrz.**
+1. Laptop pose: is the bar under the hinge, at the top of the lower half (recommended), or vertical on the right of the
+   upper half?
+2. On the outer display (closed), should a connect start in Desktop or Unified, or the last one used?
+3. Open inner display: two windows side by side by default, or one window with the strip until you drag a second?
+
 ## 4. Milestones
 
 | # | Deliverable | Done when |
