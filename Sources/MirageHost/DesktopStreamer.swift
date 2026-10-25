@@ -1133,6 +1133,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let rtt = Double(Clock.nowNanos() &- sentNanos)
                 if self.trainReceived.isEmpty { self.rc?.seedRTT(rtt) }
                 self.trainMinRTT = min(self.trainMinRTT, rtt)
+                self.rc?.noteTrainRTT(rtt, now: Clock.nowNanos())
                 self.trainEcho(receivedNanos: receivedNanos); return
             }
             self.rc?.probeSample(sentNanos: sentNanos, receivedNanos: receivedNanos, now: Clock.nowNanos()); self.applyBudget(now: Clock.nowNanos())
@@ -3024,7 +3025,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 rc?.seedTargetFromProbe(kbps: min(whole, 4 * Int(hostTunables[.startKbps]), Int(hostTunables[.autoMaxKbps])))
                 log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read (min RTT \(String(format: "%.1f", lanRTTMs)) ms); whole train \(whole) kbps; target \(rc?.targetKbps ?? 0) kbps (unconfirmed)")
                 applyBudget(now: Clock.nowNanos())
-            } else { log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read") }
+            } else if rc != nil, lanRTTMs < 20, r.count >= 20, let f = r.first, let l = r.last, l &- f < 5_000_000, request?.throttle == nil {
+                // Too fast to read at all: 20+ echoes inside 5 ms (over 40 Mbit/s; the viewer's receive batching hands them over
+                // together). MacBook to mac-daddy, 2026-10-25: 40 of 40 at min RTT 4-10 ms, and this branch only logged.
+                rc?.seedLAN()
+                log("connect probe: \(r.count) of \(Self.trainCount) echoes within \(String(format: "%.1f", Double(l &- f) / 1e6)) ms at min RTT \(String(format: "%.1f", lanRTTMs)) ms: a LAN, faster than the train reads; starting at \(rc?.targetKbps ?? 0) kbps")
+                applyBudget(now: Clock.nowNanos())
+            } else { log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read (min RTT \(String(format: "%.1f", lanRTTMs)) ms)") }
             return
         }
         // A cross-check that can only raise the start (careful resume and the doubling startup lead), and by at most 4 x the

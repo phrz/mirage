@@ -76,6 +76,11 @@ public struct TierSelector: Equatable {
         tier = LinkTier.classify(rateKbps: rateKbps, limitedByLink: limitedByLink, rttMs: rttMs, lossPercent: lossPercent); candidate = tier; candidateSince = now
     }
 
+    /// A measurement that settles the tier outright (the connect probe found a LAN): no dwell, whatever was adopted before.
+    public mutating func adopt(_ t: LinkTier, now: UInt64) {
+        measured = true; tier = t; candidate = t; candidateSince = now
+    }
+
     @discardableResult
     public mutating func update(rateKbps: Int, limitedByLink: Bool, rttMs: Double, lossPercent: Double, now: UInt64) -> LinkTier {
         let wanted = LinkTier.classify(rateKbps: rateKbps, limitedByLink: limitedByLink, rttMs: rttMs, lossPercent: lossPercent)

@@ -416,6 +416,22 @@ final class LANRecognitionTests: XCTestCase {
         XCTAssertEqual(rc.targetKbps, 50_000)
         XCTAssertEqual(rc.deliveryCeilingKbps, 50_000, "the pre-estimate ceiling is the cap on a LAN")
         XCTAssertEqual(rc.bestRung(), 0, "50 Mbps pays for the native rung of a 3200x1800 display")
+        XCTAssertEqual(rc.tier, .local)
+    }
+    /// 2026-10-25 12:58Z: one delay probe (20 ms) classified first, Normal; the probe then found the LAN, and seedLAN's
+    /// adoptFirst was a no-op, so Local waited 10 s of dwell. The train's echoes also feed min-RTT now.
+    func testLANAfterAnEarlierClassification() {
+        var rc = RateController(initialKbps: 2000, maxKbps: 50_000, nativePixels: 3200 * 1800)
+        rc.probeSample(sentNanos: 1_000_000_000, receivedNanos: 0, now: 1_020_000_000)
+        rc.noteTrainRTT(4_000_000, now: 1_100_000_000)
+        XCTAssertEqual(rc.minRttMs, 4, accuracy: 0.01)
+        var sel = TierSelector(initial: .constrained)
+        sel.adoptFirst(rateKbps: 2000, limitedByLink: false, rttMs: 20, lossPercent: 0, now: 1)
+        XCTAssertEqual(sel.tier, .normal)
+        sel.adopt(.local, now: 2)
+        XCTAssertEqual(sel.tier, .local, "a settling measurement overrides the first guess")
+        rc.seedLAN()
+        XCTAssertEqual(rc.tier, .local)
     }
 }
 

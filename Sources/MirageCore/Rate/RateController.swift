@@ -212,6 +212,13 @@ public struct RateController {
         guard !srttSeeded, rtt > 0 else { return }
         srttNanos = rtt; srttSeeded = true
     }
+    /// A connect-train echo's round trip: min-RTT only. The tier reads min-RTT, and before this the first classification
+    /// came from one delay probe (20 ms on a LAN whose train echoed in 4-10 ms: Normal, then 10 s of dwell to Local).
+    public mutating func noteTrainRTT(_ rtt: Double, now: UInt64) {
+        guard rtt > 0 else { return }
+        if minRTTWindowStart == 0 { minRTTWindowStart = now }
+        minRTTCandidate = min(minRTTCandidate, rtt); minRTTNanos = min(minRTTNanos, rtt)
+    }
     public mutating func probeSample(sentNanos: UInt64, receivedNanos: UInt64, now: UInt64) {
         // RTT and min-RTT only (mac-daddy, 2026-10-17 night: the probe datagram itself queues in the
         // host's QUIC send path behind refinement blocks, so its one-way delay read 91–98 ms of our own
@@ -385,7 +392,9 @@ public struct RateController {
         targetKbps = maxKbps
         // The probe already measured the round trip: Local now, not at the first ack window (the in-flight cap and the
         // ceiling read the tier; at +0.63 s a LAN's cap was still 32 KB and its ceiling 11 Mbps, 2026-10-25 12:21Z).
-        tiers.adoptFirst(rateKbps: maxKbps, limitedByLink: false, rttMs: srttNanos / 1e6, lossPercent: 0, now: Clock.nowNanos())
+        // Local outright (the caller's LAN test is classify's Local rule: min RTT under 20 ms, no throttle), even when a tier
+        // was already taken: an update before the train's echoes classified on one probe (Normal at 20 ms, 2026-10-25 12:58Z).
+        tiers.adopt(.local, now: Clock.nowNanos())
     }
     /// The highest rung (largest scale) the target pays for now (what a LAN starts on instead of the tiny rung).
     public func bestRung() -> Int {
