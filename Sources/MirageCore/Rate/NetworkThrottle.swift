@@ -67,6 +67,10 @@ public enum BitratePolicy {
         if req.bitrateKbps <= 0 { return true }
         return req.explicitBitrate != true && req.bitrateKbps == legacyDefaultKbps
     }
+    /// Whether a request the host already resolved (`resolved`: the cap filled in, explicitBitrate set) was automatic: its
+    /// cap is the host's automatic maximum. (`isAutomatic` on a resolved request is always false; reading it so stopped every
+    /// session saving its delivery estimate, 8243b14.)
+    public static func isAutomatic(resolvedKbps: Int, hostMaxKbps: Int) -> Bool { resolvedKbps >= max(startKbps, hostMaxKbps) }
     /// The controller's ceiling for this request: the host's maximum when automatic, else the viewer's cap.
     public static func maxKbps(_ req: ControlMessage.StreamRequest, hostMaxKbps: Int) -> Int {
         isAutomatic(req) ? max(startKbps, hostMaxKbps) : max(minimumCapKbps, req.bitrateKbps)

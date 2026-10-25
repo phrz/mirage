@@ -418,3 +418,20 @@ final class LANRecognitionTests: XCTestCase {
         XCTAssertEqual(rc.bestRung(), 0, "50 Mbps pays for the native rung of a 3200x1800 display")
     }
 }
+
+/// An automatic request saves a delivery estimate, a capped one does not: read on the request as the streamer gets it
+/// (resolved), where isAutomatic is always false (8243b14 silently stopped every save that way).
+final class AutomaticAfterResolveTests: XCTestCase {
+    func testResolvedAutomaticAndCappedRequests() {
+        let auto = BitratePolicy.resolved(ControlMessage.StreamRequest(width: 100, height: 100, bitrateKbps: 0, explicitBitrate: true), hostMaxKbps: 50_000)
+        let capped = BitratePolicy.resolved(ControlMessage.StreamRequest(width: 100, height: 100, bitrateKbps: 800, explicitBitrate: true), hostMaxKbps: 50_000)
+        XCTAssertFalse(BitratePolicy.isAutomatic(auto), "the trap: resolved requests never read as automatic")
+        XCTAssertTrue(BitratePolicy.isAutomatic(resolvedKbps: auto.bitrateKbps, hostMaxKbps: 50_000), "automatic: saves an estimate")
+        XCTAssertFalse(BitratePolicy.isAutomatic(resolvedKbps: capped.bitrateKbps, hostMaxKbps: 50_000), "capped at 800: saves none")
+    }
+    func testLANInflightFloor() {
+        var rc = RateController(initialKbps: 2000, maxKbps: 50_000, nativePixels: 3200 * 1800)
+        rc.seedLAN()
+        XCTAssertGreaterThanOrEqual(rc.inflightCapBytes, 64_000)
+    }
+}

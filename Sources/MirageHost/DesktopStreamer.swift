@@ -3041,7 +3041,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// The stream's rate is the host's to choose: the request reaches the streamer resolved (BitratePolicy.resolved: the cap
     /// filled in, explicitBitrate set), so `isAutomatic` on it is always false; an automatic request resolves to the host's
     /// automatic maximum. (8243b14 read it the first way: no session saved an estimate.)
-    private var automaticBitrate: Bool { (request?.bitrateKbps ?? 0) >= Int(hostTunables[.autoMaxKbps]) }
+    private var automaticBitrate: Bool { BitratePolicy.isAutomatic(resolvedKbps: request?.bitrateKbps ?? 0, hostMaxKbps: Int(hostTunables[.autoMaxKbps])) }
     private var priorDeliveryNetwork: String? {
         guard let req = request, req.throttle == nil, automaticBitrate else { return nil }
         return req.networkFingerprint
