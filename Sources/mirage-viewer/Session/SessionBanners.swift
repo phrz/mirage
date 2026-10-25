@@ -19,6 +19,7 @@ struct SessionBanners: View {
             } else if model.streamInfo == nil {
                 banner(model.status.prefix(1).uppercased() + model.status.dropFirst(), color: .gray)
             }
+            if let n = model.hostNotice { banner(n, color: .indigo) }   // U4: the host restarts into an update
             if model.hostStatus?.consoleLocked == true {
                 banner("\(model.hostName)'s screen is locked. Unlock it to see its windows.", color: .black)
             }

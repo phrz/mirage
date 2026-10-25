@@ -27,6 +27,8 @@ final class ViewerModel: ObservableObject {
     /// The host's own name and build, from its Welcome (About).
     @Published var hostDisplayName: String?
     @Published var hostBuild: String?
+    /// U4 hook: the host's notice that it is about to restart into an update someone triggered (SessionBanners shows it).
+    @Published var hostNotice: String?
     @Published var pixelFactor: Double
     var statsLog: URL?
     /// Forward no local input (a scripted run is being watched).
@@ -375,7 +377,7 @@ final class ViewerSession: @unchecked Sendable {
                 }
             }
             log("connect timing: control stream open at \(since())")
-            let welcome = try await session.authenticate(resumeToken: resumeToken)
+            let welcome = try await session.authenticate(resumeToken: resumeToken, features: [ControlMessage.Feature.updateStatus])   // U4 hook: notices
             log("connect timing: authenticated at \(since())")
             let resumed = welcome.resumed == true
             hostProtocol = welcome.protocolVersion ?? 5
@@ -692,6 +694,14 @@ final class ViewerSession: @unchecked Sendable {
             case .reject(let r):
                 log("host: \(r.reason)")
                 Task { @MainActor in model.error = r.reason; model.status = "host refused"; lastRequest = nil }   // a later resize/bitrate change retries
+            case .updateStatus(let u):
+                // U4 hook: the host restarts into an update; the session reconnects by itself. The banner goes after a minute.
+                log("host update: \(u.message)")
+                Task { @MainActor in
+                    model.hostNotice = u.message
+                    try? await Task.sleep(for: .seconds(60))
+                    if model.hostNotice == u.message { model.hostNotice = nil }
+                }
             default:
                 log("unexpected control message: \(msg)")
             }
