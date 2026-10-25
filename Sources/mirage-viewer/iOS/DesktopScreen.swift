@@ -112,7 +112,6 @@ struct DesktopScreen: View {
             }
             .accessibilityLabel("Touch: \(touchMode.title)")
             .onChange(of: touchMode) { showToolbar() }
-            barButton("chart.bar.xaxis", "Stats", on: model.showStats) { model.showStats.toggle(); showToolbar() }
             barButton("gearshape", "Settings", on: false) { settingsShown = true; hideToolbar?.cancel() }
             barButton("xmark", "Disconnect", on: false) { onDisconnect() }
         }

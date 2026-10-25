@@ -1,7 +1,8 @@
 import SwiftUI
 import MirageCore
 
-/// The gear in the button bar: Connection (bitrate cap; the network throttle under Developer), Input, Display, About.
+/// The gear in the button bar: Connection (bitrate cap; the network throttle under Developer), Input, Display, Diagnostics
+/// (the stats overlay: no longer a button in the bar, phrz 2026-10-25), About.
 /// Every change applies at once to the session on screen.
 struct SettingsSheet: View {
     @ObservedObject var model: ViewerModel
@@ -26,7 +27,6 @@ struct SettingsSheet: View {
                     Toggle("Keyboard Accessory Row", isOn: $accessoryRow)
                 }
                 Section {
-                    Toggle("Stats Overlay", isOn: Binding(get: { model.showStats }, set: { model.showStats = $0; statsOnConnect = $0 }))
                     Picker("On Connect", selection: $startAtOneToOne) {
                         Text("Fit to Screen").tag(false)
                         Text("1:1 Pixels").tag(true)
@@ -35,6 +35,9 @@ struct SettingsSheet: View {
                     Text("Display")
                 } footer: {
                     Text("1:1 shows the Mac's pixels at their real size from its top-left corner; pinch or double-tap with two fingers to switch.")
+                }
+                Section("Diagnostics") {
+                    Toggle("Stats Overlay", isOn: Binding(get: { model.showStats }, set: { model.showStats = $0; statsOnConnect = $0 }))
                 }
                 AboutSettingsSection(model: model)
             }
