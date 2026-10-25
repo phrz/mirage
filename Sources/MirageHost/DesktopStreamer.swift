@@ -1130,7 +1130,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if self.trainSent.contains(sentNanos) {
                 // The train's first echo seeds srtt (only srtt: RateController.seedRTT) ~0.5 s before the first delay
                 // probe, for startup's delivery window.
-                if self.trainReceived.isEmpty { self.rc?.seedRTT(Double(Clock.nowNanos() &- sentNanos)) }
+                let rtt = Double(Clock.nowNanos() &- sentNanos)
+                if self.trainReceived.isEmpty { self.rc?.seedRTT(rtt) }
+                self.trainMinRTT = min(self.trainMinRTT, rtt)
                 self.trainEcho(receivedNanos: receivedNanos); return
             }
             self.rc?.probeSample(sentNanos: sentNanos, receivedNanos: receivedNanos, now: Clock.nowNanos()); self.applyBudget(now: Clock.nowNanos())
@@ -2979,10 +2981,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var trainSent = Set<UInt64>()
     private var trainReceived: [UInt64] = []
     private var trainStartNanos: UInt64 = 0
+    /// The train's lowest echo round trip, ns: the LAN test. The first echo (srtt's seed) queues behind stage 1 and a Wi-Fi
+    /// LAN's smoothed RTT jitters (MacBook to mac-daddy on 2026-10-25: ping min 4 ms, average 30, max 88; srtt 45 ms at the
+    /// probe), so srtt < 20 never saw the LAN and the session started at 4 x the start rate.
+    private var trainMinRTT = Double.infinity
     static let trainCount = 40, trainSize = 1200
     private func sendProbeTrain() {
         guard let out = output else { return }
-        trainSent = []; trainReceived = []; trainStartNanos = Clock.nowNanos()
+        trainSent = []; trainReceived = []; trainStartNanos = Clock.nowNanos(); trainMinRTT = .infinity
         // Refinement waits while the train is out (until its echoes are in, 300 ms at most): sent after stage 1, the train's
         // datagrams were interleaved with refinement blocks and no dense burst was left to read on a fast link (20 Mbps read
         // 54 Mbps one connect, a whole-train 5.2 Mbps the next).
@@ -3003,33 +3009,34 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard !trainSent.isEmpty else { return }
         let r = trainReceived.sorted()
         trainSent = []
+        let lanRTTMs = min(trainMinRTT / 1e6, rc?.minRttMs ?? .infinity)
         guard let kbps = RateController.trainRate(r, packetBytes: Self.trainSize + 40) else {
             // The whole train instead: raises the target only, at most to the pre-estimate ceiling (4 x the start rate, under
             // the cap), never the delivery estimate or delivery.json: delivery samples must confirm it (the 231 Mbps misread).
             if let whole = RateController.trainRateWhole(r, packetBytes: Self.trainSize + 40) {
                 // A LAN (srtt from the train's first echo under 20 ms, no throttle): faster than the train can read.
-                if let c = rc, c.srttMs < 20, whole >= 5_000, request?.throttle == nil {
+                if rc != nil, lanRTTMs < 20, whole >= 5_000, request?.throttle == nil {
                     rc?.seedLAN()
-                    log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read at srtt \(String(format: "%.1f", c.srttMs)) ms: a LAN, faster than the train reads (whole train \(whole) kbps); starting at \(rc?.targetKbps ?? 0) kbps")
+                    log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read at min RTT \(String(format: "%.1f", lanRTTMs)) ms: a LAN, faster than the train reads (whole train \(whole) kbps); starting at \(rc?.targetKbps ?? 0) kbps")
                     applyBudget(now: Clock.nowNanos())
                     return
                 }
                 rc?.seedTargetFromProbe(kbps: min(whole, 4 * Int(hostTunables[.startKbps]), Int(hostTunables[.autoMaxKbps])))
-                log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read; whole train \(whole) kbps; target \(rc?.targetKbps ?? 0) kbps (unconfirmed)")
+                log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read (min RTT \(String(format: "%.1f", lanRTTMs)) ms); whole train \(whole) kbps; target \(rc?.targetKbps ?? 0) kbps (unconfirmed)")
                 applyBudget(now: Clock.nowNanos())
             } else { log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read") }
             return
         }
         // A cross-check that can only raise the start (careful resume and the doubling startup lead), and by at most 4 x the
         // start rate: receive-side batching can still flatter a burst.
-        if let c = rc, c.srttMs < 20, request?.throttle == nil {
+        if rc != nil, lanRTTMs < 20, request?.throttle == nil {
             rc?.seedLAN()   // (a LAN: start at the cap; delivery samples and the stress rules take it from there)
-            log("connect probe: \(r.count) of \(Self.trainCount) echoes: \(kbps) kbps from the densest burst at srtt \(String(format: "%.1f", c.srttMs)) ms: a LAN; starting at \(rc?.targetKbps ?? 0) kbps")
+            log("connect probe: \(r.count) of \(Self.trainCount) echoes: \(kbps) kbps from the densest burst at min RTT \(String(format: "%.1f", lanRTTMs)) ms: a LAN; starting at \(rc?.targetKbps ?? 0) kbps")
             applyBudget(now: Clock.nowNanos())
             return
         }
         rc?.seedFromProbe(kbps: min(kbps, 4 * Int(hostTunables[.startKbps])))
-        log("connect probe: \(r.count) of \(Self.trainCount) echoes: \(kbps) kbps from the densest burst; target \(rc?.targetKbps ?? 0) kbps")
+        log("connect probe: \(r.count) of \(Self.trainCount) echoes: \(kbps) kbps from the densest burst (min RTT \(String(format: "%.1f", lanRTTMs)) ms); target \(rc?.targetKbps ?? 0) kbps")
         applyBudget(now: Clock.nowNanos())
     }
     /// Per pairing and viewer network (the request's fingerprint), the last session's delivery estimate in kbit/s, if from
@@ -4660,7 +4667,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if rc.tier != self.lastTier {
                 let first = self.lastTier == nil
                 let previous = self.lastTier
-                self.lastTier = rc.tier; self.log("link tier: \(rc.tier.name) (capacity \(rc.capacityKbps) kbps, srtt \(Int(rc.srttMs)) ms, loss \(String(format: "%.1f", rc.lossPercent)) %)")
+                self.lastTier = rc.tier; self.log("link tier: \(rc.tier.name) (capacity \(rc.capacityKbps) kbps, srtt \(Int(rc.srttMs)) ms, min RTT \(Int(rc.minRttMs)) ms, loss \(String(format: "%.1f", rc.lossPercent)) %)")
                 // A worse tier restarts lossy-first from the tiny rung; a better one just lets the ladder climb.
                 // Only when the worse tier's policy differs (Normal and Constrained share one: a restart between them
                 // bought nothing and dropped the whole screen to the tiny rung, phrz's session 22:48:22Z).
