@@ -498,7 +498,8 @@ public struct RateController {
         // A LAN: acks come back after the viewer decodes and applies, not after the 4 ms round trip, so 2 x (delivery x min
         // RTT) was 32 KB, held delivery at ~15 Mbps, and delivery then measured that (phrz's iPhone on the LAN, 2026-10-25
         // 12:04Z: "inflight-cap" 406 times while the desktop took 3 s to crisp). At least 512 KB or 50 ms at the target.
-        if tier == .local { return min(8_000_000, max(cap, 512_000, Int(Double(max(targetKbps, deliveryKbps)) * 1000 / 8 * 0.05))) }
+        // (Not while the path shows stress: a "Local" round trip can still be a congested Wi-Fi hop.)
+        if tier == .local, !pathStressedNow { return min(8_000_000, max(cap, 512_000, Int(Double(max(targetKbps, deliveryKbps)) * 1000 / 8 * 0.05))) }
         return cap
     }
 
