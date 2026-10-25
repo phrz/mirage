@@ -3,6 +3,10 @@ import Foundation
 /// Protocol constants shared by host and clients.
 public enum Mirage {
     public static let protocolVersion = 5
+    /// The oldest protocol this build still speaks (DESIGN §3.10): the host accepts viewers in
+    /// `minProtocolVersion ... protocolVersion` (and newer ones, which speak down), and gates newer features on the peer's
+    /// version, so a fleet can run mixed builds. Raise it only when dropping support for an old peer.
+    public static let minProtocolVersion = 5
     public static let alpn = "mirage/1"
     public static let defaultPort: UInt16 = 7799
     /// Domain-separation prefix for every hash/signature in the protocol.
@@ -185,9 +189,15 @@ public enum ControlMessage: Codable, Equatable {
         /// The device's model identifier ("iPhone17,1", "Mac16,6"; `DeviceModel.current`), for its icon in the host's list
         /// of paired devices. nil from older viewers.
         public var deviceModel: String?
-        public init(protocolVersion: Int, deviceID: String, deviceName: String, clientNonce: Data, resumeToken: Data? = nil, deviceModel: String? = nil) {
+        /// The viewer's build (DESIGN §3.10). nil from older viewers.
+        public var viewerVersion: MirageVersion?
+        /// The oldest protocol the viewer speaks: a host below it rejects with `.hostTooOld`. nil from older viewers.
+        public var minProtocolVersion: Int?
+        public init(protocolVersion: Int, deviceID: String, deviceName: String, clientNonce: Data, resumeToken: Data? = nil, deviceModel: String? = nil,
+                    viewerVersion: MirageVersion? = nil, minProtocolVersion: Int? = nil) {
             self.protocolVersion = protocolVersion; self.deviceID = deviceID
             self.deviceName = deviceName; self.clientNonce = clientNonce; self.resumeToken = resumeToken; self.deviceModel = deviceModel
+            self.viewerVersion = viewerVersion; self.minProtocolVersion = minProtocolVersion
         }
     }
     public struct Challenge: Codable, Equatable {
@@ -225,14 +235,42 @@ public enum ControlMessage: Codable, Equatable {
         /// from older hosts.
         public var hostModel: String?
         public var hostFamily: String?
-        public init(hostName: String, sessionID: String, resumeToken: Data? = nil, resumed: Bool? = nil, hostBuild: String? = nil, hostModel: String? = nil, hostFamily: String? = nil) {
+        /// DESIGN §3.10, all nil from older hosts. The host's build, structured (`hostBuild` stays for older viewers).
+        public var hostVersion: MirageVersion?
+        /// The newest build the host's last feed check found on its channel (the host is the source of truth: an iOS
+        /// viewer never reads the feed). Greater than `hostVersion.build`: the update indicator.
+        public var latestAvailable: MirageVersion?
+        /// What this viewer may do about updates.
+        public var updatePolicy: UpdatePermission?
+        /// The host's own protocol version; the connection speaks `min(Hello.protocolVersion, this)`.
+        public var protocolVersion: Int?
+        public init(hostName: String, sessionID: String, resumeToken: Data? = nil, resumed: Bool? = nil, hostBuild: String? = nil, hostModel: String? = nil, hostFamily: String? = nil,
+                    hostVersion: MirageVersion? = nil, latestAvailable: MirageVersion? = nil, updatePolicy: UpdatePermission? = nil, protocolVersion: Int? = nil) {
             self.hostName = hostName; self.sessionID = sessionID; self.resumeToken = resumeToken; self.resumed = resumed; self.hostBuild = hostBuild
             self.hostModel = hostModel; self.hostFamily = hostFamily
+            self.hostVersion = hostVersion; self.latestAvailable = latestAvailable; self.updatePolicy = updatePolicy; self.protocolVersion = protocolVersion
         }
     }
     public struct Reject: Codable, Equatable {
+        /// Why, structured (DESIGN §3.10): which side to update, so the viewer says that instead of showing `reason`.
+        public enum Code: String, Codable, Sendable {
+            case viewerTooOld, hostTooOld
+        }
         public var reason: String
-        public init(reason: String) { self.reason = reason }
+        /// nil for every other refusal, and from older hosts.
+        public var code: Code?
+        /// The refusing host's build, with a version code. nil otherwise.
+        public var hostVersion: MirageVersion?
+        public init(reason: String, code: Code? = nil, hostVersion: MirageVersion? = nil) { self.reason = reason; self.code = code; self.hostVersion = hostVersion }
+
+        enum CodingKeys: String, CodingKey { case reason, code, hostVersion }
+        /// A code from a later build decodes as nil: the reject still arrives, with its reason.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            reason = try c.decode(String.self, forKey: .reason)
+            code = (try? c.decodeIfPresent(String.self, forKey: .code)).flatMap { $0.flatMap(Code.init(rawValue:)) }
+            hostVersion = try? c.decodeIfPresent(MirageVersion.self, forKey: .hostVersion)
+        }
     }
 
     public struct PairRequest: Codable, Equatable {

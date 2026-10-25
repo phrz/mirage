@@ -331,6 +331,8 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
+				MIRAGE_CHANNEL = "";
+				MIRAGE_COMMIT = "";
 				MIRAGE_DISPLAY_NAME = Mirage;
 				PRODUCT_BUNDLE_IDENTIFIER = com.paulherz.mirage;
 				PRODUCT_MODULE_NAME = MirageViewer;
@@ -494,6 +496,8 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
+				MIRAGE_CHANNEL = "";
+				MIRAGE_COMMIT = "";
 				MIRAGE_DISPLAY_NAME = Mirage;
 				PRODUCT_BUNDLE_IDENTIFIER = com.paulherz.mirage;
 				PRODUCT_MODULE_NAME = MirageViewer;

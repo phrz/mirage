@@ -166,6 +166,25 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertEqual(PairedHost(alias: "10.0.0.2", name: "").title, "10.0.0.2", "a host with no name shows its address")
     }
 
+    /// DESIGN §3.10 U1: when one side refused the other for its version, the row says which to update in place of the rest.
+    func testRowSaysWhichSideToUpdate() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        var k = known("mac-daddy", last: now)
+        k.incompatibility = "hostTooOld"
+        let row = ConnectList.hosts(known: ["mac-daddy": k], recent: [])[0]
+        XCTAssertEqual(row.update, .hostTooOld)
+        XCTAssertEqual(row.detail(now: now), "Mirage on mac-daddy is too old for this device: update mac-daddy")
+        k.incompatibility = "viewerTooOld"
+        XCTAssertEqual(ConnectList.hosts(known: ["mac-daddy": k], recent: [])[0].detail(now: now), "This Mirage is too old for mac-daddy: update this device")
+        // A newer build on the host's feed: the arrow's data (U4 draws it); the line stays as it was.
+        k.incompatibility = nil
+        k.hostVersion = MirageVersion(version: "0.4.0", build: 412, commit: "a", channel: .nightly)
+        k.latestAvailable = MirageVersion(version: "0.4.1", build: 420, commit: "b", channel: .nightly)
+        let r2 = ConnectList.hosts(known: ["mac-daddy": k], recent: [])[0]
+        XCTAssertEqual(r2.update, .updateAvailable(from: k.hostVersion!, to: k.latestAvailable!))
+        XCTAssertEqual(r2.detail(now: now, locale: Locale(identifier: "en_US")), "Connected just now")
+    }
+
     func testAddSheetNeedsACodeOnlyForANewMac() {
         let paired = [PairedHost(alias: "mac-daddy", name: "mac-daddy")]
         var f = AddHostForm()

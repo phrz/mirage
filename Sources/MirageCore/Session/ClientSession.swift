@@ -54,8 +54,20 @@ public struct ClientSession {
             throw MirageError.authenticationFailed("not paired with \(alias); run `mirage connect \(alias) --pair CODE`")
         }
         let clientNonce = DeviceIdentity.nonce()
-        try await stream.send(.hello(.init(protocolVersion: Mirage.protocolVersion, deviceID: identity.id, deviceName: identity.name, clientNonce: clientNonce, resumeToken: resumeToken, deviceModel: DeviceModel.current)))
-        let ch = try await stream.expect("challenge") { if case .challenge(let c) = $0 { return c } else { return nil } }
+        try await stream.send(.hello(.init(protocolVersion: Mirage.protocolVersion, deviceID: identity.id, deviceName: identity.name, clientNonce: clientNonce, resumeToken: resumeToken, deviceModel: DeviceModel.current,
+                                           viewerVersion: .current, minProtocolVersion: Mirage.minProtocolVersion)))
+        // A version refusal comes in place of the challenge: remember which side to update (the device list says so).
+        let first = try await stream.receive()
+        if case .reject(let r) = first {
+            if let code = r.code ?? ProtocolCompat.legacyCode(reason: r.reason) {
+                try? store.updateKnownHost(alias) { h in
+                    h.incompatibility = code.rawValue
+                    if let v = r.hostVersion { h.hostVersion = v }
+                }
+            }
+            throw MirageError.authenticationFailed("host rejected: \(r.reason)")
+        }
+        guard case .challenge(let ch) = first else { throw MirageError.protocolViolation("expected challenge, got \(first)") }
         guard ch.hostID == known.hostID, ch.hostPublicKey == known.publicKey else {
             throw MirageError.authenticationFailed("host key for \(alias) changed (was \(known.hostID.prefix(12)), now \(ch.hostID.prefix(12))). Re-pair if this is expected.")
         }
@@ -66,11 +78,19 @@ public struct ClientSession {
         let clientTranscript = DeviceIdentity.clientAuthTranscript(tlsFingerprint: tlsFingerprint, clientNonce: clientNonce, hostNonce: ch.hostNonce, hostID: ch.hostID)
         try await stream.send(.authenticate(.init(clientPublicKey: identity.publicKey, clientSignature: try identity.sign(clientTranscript))))
         let welcome = try await stream.expect("welcome") { if case .welcome(let w) = $0 { return w } else { return nil } }
-        // What the host is (its icon in the connect list) and when it was last reached.
+        let tooOld = ProtocolCompat.viewerCheck(hostProtocol: welcome.protocolVersion)
+        // What the host is (its icon in the connect list), its build and its feed's newest (the update indicator), and when
+        // it was last reached.
         try? store.updateKnownHost(alias) { h in
             if let m = welcome.hostModel { h.model = m }
             if let f = welcome.hostFamily ?? DeviceModel.family(of: welcome.hostModel)?.rawValue { h.family = f }
-            h.lastConnected = Date()
+            h.hostVersion = welcome.hostVersion
+            h.latestAvailable = welcome.latestAvailable
+            h.incompatibility = tooOld?.rawValue
+            if tooOld == nil { h.lastConnected = Date() }
+        }
+        if tooOld != nil {
+            throw MirageError.authenticationFailed("host rejected: \(welcome.hostName) (Mirage \(welcome.hostVersion?.display ?? "older"), protocol \(welcome.protocolVersion ?? 0)) is too old for this viewer (needs protocol \(Mirage.minProtocolVersion)): update \(welcome.hostName)")
         }
         return welcome
     }

@@ -22,6 +22,12 @@
 			</array>
 		</dict>
 	</array>
+	<!-- Version identity (DESIGN §3.10): the commit and the channel the build was published to, stamped by
+	     scripts/release.sh (and make-viewer-app.sh for local builds, whose channel stays empty: "local"). -->
+	<key>MirageCommit</key>
+	<string>$(MIRAGE_COMMIT)</string>
+	<key>MirageChannel</key>
+	<string>$(MIRAGE_CHANNEL)</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Mirage uses the camera to scan the pairing code your Mac shows.</string>
 </dict>

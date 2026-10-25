@@ -56,6 +56,10 @@ targets:
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
         SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
         MIRAGE_DISPLAY_NAME: Mirage
+        # Version identity (DESIGN §3.10), stamped on the xcodebuild command line: CURRENT_PROJECT_VERSION is the build (the
+        # commit count), MIRAGE_COMMIT the short hash, MIRAGE_CHANNEL the channel a release goes to (empty: a local build).
+        MIRAGE_COMMIT: ""
+        MIRAGE_CHANNEL: ""
         INFOPLIST_KEY_CFBundleDisplayName: $(MIRAGE_DISPLAY_NAME)
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Paul Herz. MIT License."

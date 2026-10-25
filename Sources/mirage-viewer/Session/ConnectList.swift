@@ -14,12 +14,19 @@ struct PairedHost: Identifiable, Equatable {
     var model: String?
     var family: DeviceFamily?
     var lastConnected: Date?
+    /// DESIGN §3.10: an update for it (the yellow arrow, U4), or which side to update when one refused the other.
+    var update: HostUpdateState = .current
     var id: String { alias }
 
     var title: String { name.isEmpty ? alias : name }
 
     /// The second line: the address when it is not just the name, and when this viewer last connected.
     func detail(now: Date = Date(), locale: Locale = .current) -> String? {
+        // A version refusal says which side to update, in place of the rest: connecting cannot work until then.
+        switch update {
+        case .hostTooOld, .viewerTooOld: return update.note(hostName: title)
+        case .current, .updateAvailable: break
+        }
         var parts: [String] = []
         let bare = alias.lowercased().replacingOccurrences(of: ".local", with: "")
         if !name.isEmpty, bare != name.lowercased() { parts.append(alias) }
@@ -45,7 +52,7 @@ enum ConnectList {
         }
         return (recentPaired + rest).map { alias in
             let h = known[alias]!
-            return PairedHost(alias: alias, name: h.hostName, model: h.model, family: h.deviceFamily, lastConnected: h.lastConnected)
+            return PairedHost(alias: alias, name: h.hostName, model: h.model, family: h.deviceFamily, lastConnected: h.lastConnected, update: h.updateState)
         }
     }
 

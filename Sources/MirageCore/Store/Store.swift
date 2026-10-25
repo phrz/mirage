@@ -155,6 +155,17 @@ public final class Store: @unchecked Sendable {
         public var family: String?
         /// The last time this viewer authenticated to it.
         public var lastConnected: Date?
+        /// DESIGN §3.10 (the device lists' update indicator): the build its last Welcome reported, the newest build its
+        /// feed check had found, and, when it refused this viewer for its version (or the reverse), which side to update
+        /// (`ControlMessage.Reject.Code` raw value). Cleared by the next successful connection.
+        public var hostVersion: MirageVersion?
+        public var latestAvailable: MirageVersion?
+        public var incompatibility: String?
+        /// Its update state as the device list shows it.
+        public var updateState: HostUpdateState {
+            .evaluate(hostVersion: hostVersion, latestAvailable: latestAvailable,
+                      incompatibility: incompatibility.flatMap(ControlMessage.Reject.Code.init(rawValue:)))
+        }
         public init(hostID: String, hostName: String, publicKey: Data, endpoint: String, pairedAt: Date, model: String? = nil, family: String? = nil, lastConnected: Date? = nil) {
             self.hostID = hostID; self.hostName = hostName; self.publicKey = publicKey; self.endpoint = endpoint; self.pairedAt = pairedAt
             self.model = model; self.family = family; self.lastConnected = lastConnected

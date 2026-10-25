@@ -12,11 +12,21 @@ public struct HostContext: Sendable {
     public let connections = HostConnections()
     /// The pairing window and the Allow/Deny question, set by the host's UI (DESIGN §3.1 pairing).
     public let pairing = PairingSlot()
+    /// What the Welcome says about updates (DESIGN §3.10): the newest build the last feed check found, and the policy.
+    /// Set by the host (`miraged`), read at each authentication; nil = nothing to report.
+    public var updateInfo: (@Sendable () -> HostUpdateInfo)?
 
     public init(identity: DeviceIdentity, store: Store, tlsFingerprint: Data, log: @escaping @Sendable (String) -> Void,
                 makeStreamer: (@Sendable () -> DesktopStreamer)? = nil) {
         self.identity = identity; self.store = store; self.tlsFingerprint = tlsFingerprint; self.log = log; self.makeStreamer = makeStreamer
     }
+}
+
+/// The host's update state for its Welcome.
+public struct HostUpdateInfo: Sendable {
+    public var latestAvailable: MirageVersion?
+    public var permission: UpdatePermission?
+    public init(latestAvailable: MirageVersion?, permission: UpdatePermission?) { self.latestAvailable = latestAvailable; self.permission = permission }
 }
 
 /// Handles one incoming stream or datagram flow on the host.
@@ -202,8 +212,16 @@ public enum HostSession {
     // MARK: Authentication of a paired device
 
     static func authenticate(_ hello: ControlMessage.Hello, _ stream: MessageStream, conn: HostConnection, remote: String, ctx: HostContext) async throws -> DeviceRecord {
-        guard hello.protocolVersion == Mirage.protocolVersion else {
-            try await stream.send(.reject(.init(reason: "protocol version \(hello.protocolVersion) unsupported")))
+        // Protocol range (DESIGN §3.10): a mixed fleet works; only a viewer too old for this host, or one that needs more
+        // than this host speaks, is refused, with a code saying which side to update.
+        if let code = ProtocolCompat.check(viewerProtocol: hello.protocolVersion, viewerMinProtocol: hello.minProtocolVersion) {
+            let host = MirageVersion.current
+            let viewer = hello.viewerVersion.map { " \($0.display)" } ?? ""
+            let reason = code == .viewerTooOld
+                ? "this viewer\(viewer) (protocol \(hello.protocolVersion)) is too old for \(ctx.identity.name) (Mirage \(host.display), protocol \(Mirage.minProtocolVersion)–\(Mirage.protocolVersion)): update the viewer"
+                : "\(ctx.identity.name) (Mirage \(host.display), protocol \(Mirage.protocolVersion)) is too old for this viewer\(viewer) (needs protocol \(hello.minProtocolVersion ?? hello.protocolVersion)): update \(ctx.identity.name)"
+            ctx.log("[\(remote)] refused \(hello.deviceName): \(reason)")
+            try await stream.send(.reject(.init(reason: reason, code: code, hostVersion: host)))
             throw MirageError.protocolViolation("version")
         }
         // Auth timing (M-FIVE: ~320 ms of a connect is authentication on the viewer's clock): each step, logged with the welcome.
@@ -244,8 +262,11 @@ public enum HostSession {
             conn.streamer = claimed.streamer; conn.resumed = true; conn.lastRequest = claimed.request; resumed = true
         }
         let token = resumed ? conn.resumeToken! : await ctx.connections.issueToken(for: conn.id, deviceID: device.id)
+        let updates = ctx.updateInfo?()
         try await stream.send(.welcome(.init(hostName: ctx.identity.name, sessionID: session, resumeToken: token, resumed: resumed, hostBuild: BuildInfo.current,
-                                             hostModel: DeviceModel.current, hostFamily: DeviceModel.currentFamily?.rawValue)))
+                                             hostModel: DeviceModel.current, hostFamily: DeviceModel.currentFamily?.rawValue,
+                                             hostVersion: .current, latestAvailable: updates?.latestAvailable, updatePolicy: updates?.permission,
+                                             protocolVersion: Mirage.protocolVersion)))
         ctx.log("[\(remote)] auth timing: challenge sent at \(tChallenge) ms, authenticate in at \(tAuth) ms, welcome sent at \(ms()) ms (from the hello)")
         ctx.log("[\(remote)] authenticated \(device.name) (\(device.id.prefix(12)))\(resumed ? ", resuming its session" : hello.resumeToken != nil ? " (resume token unknown or expired: new session)" : "")")
         return device
