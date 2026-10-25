@@ -6,3 +6,4 @@ DerivedData/
 !App/Mirage.xcodeproj
 App/Mirage.xcodeproj/xcuserdata/
 App/Mirage.xcodeproj/project.xcworkspace/xcuserdata/
+.claude/settings.local.json
