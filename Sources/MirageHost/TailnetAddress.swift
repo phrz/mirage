@@ -1,22 +1,58 @@
 import Foundation
 
-/// This Mac's tailnet name and address, for the pairing link: Tailscale's own status when its CLI is installed, else the
-/// first 100.64.0.0/10 IPv4 address (Tailscale's range) and this Mac's local host name.
+/// This Mac's tailnet address and name, for the pairing link. The address from the interfaces (the first 100.64.0.0/10
+/// IPv4: Tailscale's range), at once; the name by a reverse lookup of it (Tailscale's resolver answers with the MagicDNS
+/// name), else a standalone `tailscale` CLI if one is installed, off the caller's queue, at most 2 s each. Never the
+/// Tailscale app's own binary: run as a CLI from the login-item host it blocked ~15 s and raised Tailscale's network-extension
+/// prompt on the host at every "Pair a Device…" (2026-10-25, 10:31 and 11:36Z).
 public enum TailnetAddress {
-    public static func current() -> (name: String?, address: String?) {
-        for path in ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"]
-        where FileManager.default.isExecutableFile(atPath: path) {
-            let p = Process(); p.executableURL = URL(fileURLWithPath: path); p.arguments = ["status", "--self", "--json"]
-            let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
-            guard (try? p.run()) != nil else { continue }
-            let data = out.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
-            if let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let me = j["Self"] as? [String: Any] {
-                let dns = (me["DNSName"] as? String).map { $0.hasSuffix(".") ? String($0.dropLast()) : $0 }
-                let ip = (me["TailscaleIPs"] as? [String])?.first { !$0.contains(":") }
-                if ip != nil { return (dns.flatMap { $0.isEmpty ? nil : $0 }, ip) }
+    /// The tailnet IPv4 address now (no process, no lookup), nil off the tailnet.
+    public static func address() -> String? { cgnatAddress() }
+
+    /// The MagicDNS name of `address` (no trailing dot), or nil, on `completion` (any queue).
+    public static func name(of address: String, completion: @escaping @Sendable (String?) -> Void) {
+        DispatchQueue.global(qos: .utility).async {
+            if let n = reverseName(address) { completion(n); return }
+            for path in ["/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"] where FileManager.default.isExecutableFile(atPath: path) {
+                if let n = cliName(path) { completion(n); return }
             }
+            completion(nil)
         }
-        return (Host.current().localizedName, cgnatAddress())
+    }
+
+    /// getnameinfo with a name required (a fully qualified one), bounded at 2 s.
+    static func reverseName(_ address: String) -> String? {
+        var sa = sockaddr_in(); sa.sin_len = UInt8(MemoryLayout<sockaddr_in>.size); sa.sin_family = sa_family_t(AF_INET)
+        guard inet_pton(AF_INET, address, &sa.sin_addr) == 1 else { return nil }
+        let box = ResultBox()
+        let t = Thread {
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            let r = withUnsafePointer(to: &sa) { p in p.withMemoryRebound(to: sockaddr.self, capacity: 1) { getnameinfo($0, socklen_t(MemoryLayout<sockaddr_in>.size), &host, socklen_t(host.count), nil, 0, NI_NAMEREQD) } }
+            if r == 0 { box.set(String(cString: host)) }
+            box.done.signal()
+        }
+        t.start()
+        guard box.done.wait(timeout: .now() + 2) == .success, var n = box.get() else { return nil }
+        if n.hasSuffix(".") { n.removeLast() }
+        return n.contains(".") ? n : nil   // a bare local name is not the tailnet's
+    }
+    /// A standalone CLI's `status --self --json` DNSName, killed after 2 s.
+    static func cliName(_ path: String) -> String? {
+        let p = Process(); p.executableURL = URL(fileURLWithPath: path); p.arguments = ["status", "--self", "--json"]
+        let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2, execute: killer)
+        let data = out.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit(); killer.cancel()
+        guard let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let me = j["Self"] as? [String: Any], var dns = me["DNSName"] as? String, !dns.isEmpty else { return nil }
+        if dns.hasSuffix(".") { dns.removeLast() }
+        return dns
+    }
+    final class ResultBox: @unchecked Sendable {
+        let done = DispatchSemaphore(value: 0)
+        private let lock = NSLock(); private var value: String?
+        func set(_ v: String) { lock.lock(); value = v; lock.unlock() }
+        func get() -> String? { lock.lock(); defer { lock.unlock() }; return value }
     }
 
     static func cgnatAddress() -> String? {

@@ -137,10 +137,21 @@ public final class LocalControlServer: @unchecked Sendable {
 
     private func openPairing() {
         if let w = ctx.pairing.window, w.isOpen() { shownIssue = nil; tick(); return }
-        net = TailnetAddress.current()
+        // At once with the address; the name (MagicDNS, by reverse lookup) fills in when it comes: nothing here may block
+        // the control socket (the Tailscale app's binary did, ~15 s, and raised a prompt on the host).
+        net = (nil, TailnetAddress.address())
         ctx.pairing.window = PairingWindow()
         shownIssue = nil
-        log("pairing window opened (\(net.address ?? "no tailnet address"), link host \(net.name ?? "-"))")
+        log("pairing window opened (\(net.address ?? "no tailnet address"))")
+        if let a = net.address {
+            TailnetAddress.name(of: a) { [weak self] name in
+                self?.queue.async {
+                    guard let self, let name, self.ctx.pairing.window?.isOpen() == true, self.net.address == a else { return }
+                    self.net.name = name; self.shownIssue = nil   // the next tick sends the link with the name
+                    self.log("pairing link host \(name)")
+                }
+            }
+        }
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now(), repeating: .milliseconds(250))
         t.setEventHandler { [weak self] in self?.tick() }
