@@ -25,8 +25,7 @@ final class HostMenu: NSObject, NSMenuDelegate {
         store = try? Store()
         super.init()
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.image = NSImage(systemSymbolName: "display", accessibilityDescription: "Mirage host")
-        item.button?.image?.isTemplate = true
+        item.button?.image = MenuBarGlyph.image(update: false)
         let menu = NSMenu(); menu.delegate = self
         item.menu = menu
         statusItem = item
@@ -113,20 +112,16 @@ final class HostMenu: NSObject, NSMenuDelegate {
     private var updateDot: CALayer?
     private func setUpdateDot(_ on: Bool) {
         guard let button = statusItem?.button else { return }
+        // The glyph: with an update, the variant whose top-right 6×6 pt is left empty for the dot (the icon work's art).
+        button.image = MenuBarGlyph.image(update: on)
+        button.setAccessibilityLabel(on ? "Mirage host: update available" : "Mirage host")
         if !on { updateDot?.removeFromSuperlayer(); updateDot = nil; return }
         button.wantsLayer = true
-        guard updateDot == nil, let layer = button.layer else { return }
-        let d: CGFloat = 7
-        let dot = CALayer()
-        dot.frame = CGRect(x: button.bounds.maxX - d - 1, y: button.bounds.maxY - d - 2, width: d, height: d)
-        dot.cornerRadius = d / 2
-        dot.backgroundColor = NSColor.systemYellow.cgColor
-        dot.borderColor = NSColor.black.withAlphaComponent(0.35).cgColor
-        dot.borderWidth = 0.5
-        dot.autoresizingMask = [.layerMinXMargin, .layerMinYMargin]
-        layer.addSublayer(dot)
-        updateDot = dot
-        button.setAccessibilityLabel("Mirage host: update available")
+        guard let layer = button.layer else { return }
+        let dot = updateDot ?? MenuBarGlyph.dotLayer()
+        dot.frame = MenuBarGlyph.dotFrame(in: button.bounds, flipped: button.isFlipped)
+        dot.autoresizingMask = [.layerMinXMargin, .layerMaxXMargin, .layerMinYMargin, .layerMaxYMargin]   // stays on the centred glyph
+        if updateDot == nil { layer.addSublayer(dot); updateDot = dot }
     }
 
     // MARK: Menu
@@ -515,5 +510,48 @@ struct LocalUpdateBar: View {
                 .background(Color.yellow.opacity(0.18))
             Divider()
         }
+    }
+}
+
+/// The menu-bar item's glyph (the icon work's Waves B template images, Resources/MenuBar, in App/Assets.xcassets) and the
+/// update dot, a separate layer over it (U4): the glyph's art is never drawn into.
+enum MenuBarGlyph {
+    /// The template images are 18×18 pt.
+    static let size = CGSize(width: 18, height: 18)
+    /// The dot: a 5 pt circle centred in the glyph's empty top-right 6×6 pt (MirageMenuBarStatus).
+    static let dotDiameter: CGFloat = 5
+    static let dotCell: CGFloat = 6
+
+    /// The plain glyph, or the variant with room for the dot. A build without the asset catalog (the SwiftPM viewer)
+    /// falls back to a system symbol.
+    static func image(update: Bool) -> NSImage {
+        let img = NSImage(named: update ? "MirageMenuBarStatus" : "MirageMenuBar")
+            ?? NSImage(systemSymbolName: "display", accessibilityDescription: "Mirage host") ?? NSImage()
+        img.isTemplate = true
+        return img
+    }
+
+    /// Where the 18 pt glyph sits in the status button: centred.
+    static func glyphRect(in bounds: CGRect) -> CGRect {
+        CGRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height)
+    }
+
+    /// The dot's frame in the button's coordinates (a flipped view's y grows downwards).
+    static func dotFrame(in bounds: CGRect, flipped: Bool) -> CGRect {
+        let g = glyphRect(in: bounds)
+        let inset = (dotCell - dotDiameter) / 2
+        let x = g.maxX - dotCell + inset
+        let y = flipped ? g.minY + inset : g.maxY - dotCell + inset
+        return CGRect(x: x, y: y, width: dotDiameter, height: dotDiameter)
+    }
+
+    static func dotLayer() -> CALayer {
+        let dot = CALayer()
+        dot.cornerRadius = dotDiameter / 2
+        dot.backgroundColor = NSColor.systemYellow.cgColor
+        // A hairline keeps it apart from a light bar and from the active item's highlight.
+        dot.borderColor = NSColor.black.withAlphaComponent(0.35).cgColor
+        dot.borderWidth = 0.5
+        return dot
     }
 }
