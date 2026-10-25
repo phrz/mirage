@@ -1197,11 +1197,21 @@ A bad build rolls itself back.
   features on the peer's version (as `StreamRequest.tileKeys` already does). `Reject` gains `code: .viewerTooOld |
   .hostTooOld`, so the viewer can say which side to update instead of showing a string.
 
-**The outdated marker.**
-- Host row in the viewer's list of hosts: a small "Update" badge when `latestAvailable.build > hostVersion.build`. A red
-  "Update required" badge when the host rejected the viewer as too old, or the reverse. The row's detail shows
-  "0.4.0 (412) → 0.4.1 (420), nightly".
-- The host's menu-bar item shows "Update available: 0.4.1" with Install now / Later.
+**The update indicator (phrz, 2026-10-25).**
+- **On the host Mac:**
+  - a yellow dot over the menu-bar icon while an update is available; the menu shows "Update available: 0.4.0 (412) →
+    0.4.1 (420)" with Update now;
+  - a bar across the top of the Mac app's window with the same text and an Update button.
+- **iOS device list:**
+  - a yellow circle with an up-arrow next to each device that has an update available
+    (`latestAvailable.build > hostVersion.build`);
+  - tapping the arrow opens a prompt with the old and new versions ("mac-daddy: 0.4.0 (412) → 0.4.1 (420), nightly")
+    and Update / Cancel;
+  - long-pressing the device row offers "Update" in its menu, which sends the same trigger.
+- **macOS device list:** the same yellow indicator, prompt and context-menu Update for the other paired Macs it lists,
+  so any Mac can update the fleet.
+- When the host rejected the viewer as too old, or the reverse, the row instead says which side to update, in place of
+  the arrow.
 - The Mac viewer's About shows both its own version and the host's (already partly there through `hostBuild`).
 
 **The remote trigger.**
@@ -1259,8 +1269,13 @@ A bad build rolls itself back.
   metered or Extreme links: the host's own uplink, not the viewer's.
 - **Host settings** (`updates.json` in Application Support; the menu bar and `miraged update --set` edit them):
   - `channel`: stable by default; mac-daddy is on nightly.
-  - `policy`: `notify` (default) | `autoWhenIdle` | `manual`. `autoWhenIdle` installs only when no stream has been open
-    for 30 min, between 02:00 and 05:00 local time.
+  - `policy` (phrz, 2026-10-25: only two):
+    - **Ask** (the default): shows the indicator and installs only when someone triggers it, from a device list, the
+      menu bar, the app's bar, or `miraged update --now`.
+    - **Automatic:** installs on its own when no stream has been open for 30 min, between 02:00 and 05:00 local time.
+      The indicator still shows until then, and a trigger installs at once.
+  - mac-daddy: nightly with Ask until the rollback path is proven (U3's broken-build test), then Automatic. The
+    Automatic step is a recommendation that phrz hasn't confirmed yet.
 
 **Verification before anything is replaced (all public API).**
 1. The zip's SHA-256 and size match the signed manifest. The manifest's `build` is greater than the running build;
@@ -1366,7 +1381,7 @@ A bad build rolls itself back.
   - the version and update fields and the update messages in `Wire.swift`;
   - the protocol range in `HostSession`'s handshake;
   - update status in the menu-bar app;
-  - the badge in the device and host lists;
+  - the update indicator and prompt in the iOS and macOS device lists, and the host Mac's menu-bar dot and app bar;
   - `scripts/release.sh`, `install-host.sh`, `fleet.sh`, `rollback-host.sh`;
   - the signing settings in `App/project.yml` and `embed-host.sh`;
   - the `miraged update` and `--self-test` commands.
@@ -1380,14 +1395,15 @@ A bad build rolls itself back.
 | U1 | Version identity, protocol range, structured reject, outdated badge | An older viewer connects to a newer host (and the reverse), and the row says which to update |
 | U2 | Developer ID + notarized `release.sh`, signed manifest, channel heads | A nightly zip downloaded with Safari on a fresh Mac opens with no Gatekeeper warning; mac-daddy re-granted once |
 | U3 | `miraged update` with verification, swap, health commit, rollback | Updating mac-daddy over SSH takes < 30 s to "committed"; a deliberately broken build (exits in main) rolls back by itself |
-| U4 | Remote trigger and status from the viewer | One tap on the iPhone updates mac-daddy, and the viewer reconnects on its own |
+| U4 | Remote trigger and status; the indicator on the host's menu bar and app bar and in the iOS and macOS device lists | Tapping the arrow on the iPhone, then Update, updates mac-daddy, and the viewer reconnects on its own; the same from the MacBook's device list |
 | U5 | `install-host.sh`, `fleet.sh` | A second Mac goes from nothing to paired with one command plus the two grants |
-| U6 | Homebrew tap; `autoWhenIdle` policy | `brew install --cask phrz/mirage/mirage` gives a working host |
+| U6 | Homebrew tap; the Automatic policy | `brew install --cask phrz/mirage/mirage` gives a working host |
 
 **Open questions for phrz.**
 1. ~~Switch `deploy-host.sh` to Developer ID now?~~ **Yes** (phrz, 2026-10-25): he re-grants on mac-daddy once.
 2. ~~Any paired device, or only owner devices?~~ **Any paired device** (phrz, 2026-10-25).
-3. Default policy `notify`, with mac-daddy on nightly plus `autoWhenIdle`?
+3. ~~Policies~~ **Ask (default) and Automatic only** (phrz, 2026-10-25). Open: mac-daddy to Automatic once the rollback
+   path is proven?
 
 ## 4. Milestones
 
