@@ -163,10 +163,12 @@ public final class Store: @unchecked Sendable {
         public var incompatibility: String?
         /// The host takes an update trigger from this viewer (it has U4's trigger, and does not restrict updates to itself).
         public var updateTrigger: Bool?
+        /// An update the host was running at the last connection (its Welcome's updateResult, not yet final).
+        public var updating: ControlMessage.UpdateStatus?
         /// Its update state as the device list shows it.
         public var updateState: HostUpdateState {
             .evaluate(hostVersion: hostVersion, latestAvailable: latestAvailable,
-                      incompatibility: incompatibility.flatMap(ControlMessage.Reject.Code.init(rawValue:)))
+                      incompatibility: incompatibility.flatMap(ControlMessage.Reject.Code.init(rawValue:)), updating: updating)
         }
         public init(hostID: String, hostName: String, publicKey: Data, endpoint: String, pairedAt: Date, model: String? = nil, family: String? = nil, lastConnected: Date? = nil) {
             self.hostID = hostID; self.hostName = hostName; self.publicKey = publicKey; self.endpoint = endpoint; self.pairedAt = pairedAt

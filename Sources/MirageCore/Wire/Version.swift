@@ -136,13 +136,18 @@ public enum HostUpdateState: Equatable, Sendable {
     /// The host refused this viewer, or the reverse: which side to update, in place of the arrow.
     case hostTooOld
     case viewerTooOld
+    /// The host is installing an update already (its Automatic policy, or another device's trigger): "updating", not
+    /// an Update offer.
+    case updating(to: MirageVersion?)
 
-    public static func evaluate(hostVersion: MirageVersion?, latestAvailable: MirageVersion?, incompatibility: ControlMessage.Reject.Code?) -> HostUpdateState {
+    public static func evaluate(hostVersion: MirageVersion?, latestAvailable: MirageVersion?, incompatibility: ControlMessage.Reject.Code?,
+                                updating: ControlMessage.UpdateStatus? = nil) -> HostUpdateState {
         switch incompatibility {
         case .hostTooOld: return .hostTooOld
         case .viewerTooOld: return .viewerTooOld
         case nil: break
         }
+        if let u = updating, !u.isFinal, u.phase != .unknown { return .updating(to: u.to) }
         if let h = hostVersion, let l = latestAvailable, l.build > h.build { return .updateAvailable(from: h, to: l) }
         return .current
     }
@@ -154,6 +159,7 @@ public enum HostUpdateState: Equatable, Sendable {
         case .updateAvailable(let from, let to): return "Update available: \(from.display) → \(to.display)"
         case .hostTooOld: return "Mirage on \(hostName) is too old for this device: update \(hostName)"
         case .viewerTooOld: return "This Mirage is too old for \(hostName): update this device"
+        case .updating(let to): return "Updating\(to.map { " to \($0.display)" } ?? "")…"
         }
     }
 }

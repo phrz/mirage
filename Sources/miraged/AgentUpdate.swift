@@ -1,5 +1,7 @@
 import Foundation
+import CoreGraphics
 import MirageCore
+import MirageHost
 import MirageUpdater
 
 /// The host agent's updater for triggers (DESIGN §3.10, U4): a paired viewer's `updateHost`/`rollbackHost`, or this Mac's
@@ -8,7 +10,9 @@ import MirageUpdater
 /// the new build, watch it start, register it again or roll back, as from SSH). That job outlives the agent it restarts,
 /// and runs the binary this agent runs (the build already proven here), never the new one.
 func makeUpdateHandler(paths: InstallPaths, ctx: HostContext, log: @escaping @Sendable (String) -> Void) -> HostUpdateHandler {
-    { command, requester, reply in
+    { command, requester, replyTo in
+        // Every step is also the host's "in progress" state (Welcome, local control): the lists say "updating".
+        let reply: @Sendable (ControlMessage.UpdateStatus) -> Void = { st in updateInProgress.set(st.isFinal ? nil : st); replyTo(st) }
         let host = ctx.identity.name
         let running = Installer.version(of: paths.app) ?? .current
         let updater = Updater(paths: paths, feed: Feed(override: ProcessInfo.processInfo.environment["MIRAGE_UPDATE_FEED"]),
@@ -82,6 +86,56 @@ extension UpdateDecision {
         switch self {
         case .upToDate, .channelBehind: return true
         case .available, .skipped, .incompatible: return false
+        }
+    }
+}
+
+/// The update the agent is running now, if any (one at a time: the updater's lock).
+final class UpdateInProgress: @unchecked Sendable {
+    private let lock = NSLock()
+    private var status: ControlMessage.UpdateStatus?
+    var current: ControlMessage.UpdateStatus? { lock.lock(); defer { lock.unlock() }; return status }
+    func set(_ s: ControlMessage.UpdateStatus?) { lock.lock(); status = s; lock.unlock() }
+}
+let updateInProgress = UpdateInProgress()
+
+/// What the Welcome and local control say about updates: an update running now first, else the recorded outcome.
+func hostUpdateInfo(paths: InstallPaths) -> HostUpdateInfo {
+    var info = Updater.hostUpdateInfo(paths: paths)
+    if let now = updateInProgress.current { info.lastResult = now }
+    return info
+}
+
+/// The Automatic policy (U6): once a minute, when the policy is automatic and an update is available, install it at a
+/// quiet moment (no viewer streaming or having streamed in the last 10 min, no system prompt on screen, nobody at this
+/// Mac for 10 min), through the same handler as a trigger, so the same trial, commit and rollback; each build once.
+func scheduleAutomaticUpdates(paths: InstallPaths, ctx: HostContext, handler: @escaping HostUpdateHandler, log: @escaping @Sendable (String) -> Void) {
+    Task.detached {
+        // The agent's own start counts as a stream's end: never right after a restart.
+        var lastStreamEnded: Date? = Date()
+        var wasStreaming = false
+        var lastReason = ""
+        while true {
+            try? await Task.sleep(for: .seconds(AutomaticUpdate.every))
+            let streaming = await ctx.connections.streamingDeviceIDs().count
+            if wasStreaming, streaming == 0 { lastStreamEnded = Date() }
+            wasStreaming = streaming > 0
+            let settings = UpdateSettings.load(paths.settings)
+            guard settings.policy == .automatic, updateInProgress.current == nil else { continue }
+            let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+            let moment = AutomaticUpdate.Moment(streaming: streaming, lastStreamEnded: lastStreamEnded, systemPrompt: !WarmPool.systemPromptWindows().isEmpty,
+                                                idleSeconds: idle, now: Date())
+            switch AutomaticUpdate.decide(settings: settings, running: Installer.version(of: paths.app) ?? .current, moment: moment) {
+            case .wait(let why):
+                if why != lastReason, !why.hasPrefix("up to date") { log("automatic update: waiting (\(why))") }
+                lastReason = why
+            case .install(let v):
+                log("automatic update: installing \(v.display) now (a quiet moment)")
+                AutomaticUpdate.recordAttempt(v.build, settings: paths.settings)   // once per build, whatever happens
+                await handler(.update(targetBuild: v.build), UpdateRequester(name: "the Automatic policy", connectionID: nil), { st in
+                    if st.isFinal { log("automatic update: \(st.phase.rawValue): \(st.message)") }
+                })
+            }
         }
     }
 }

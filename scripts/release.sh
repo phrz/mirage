@@ -104,6 +104,22 @@ if [ "${1:-}" = --check ]; then
     exit $ok
 fi
 
+# MARK: Homebrew (U6)
+
+# The tap's cask for a stable or beta release: version "VERSION,BUILD", the zip's SHA-256 and URL. Nightlies never go to
+# Homebrew. `scripts/release.sh cask-bump stable|beta VERSION BUILD SHA256 URL [CASK_FILE]` does it by hand (and in tests).
+cask_bump() {
+    case "$1" in stable) f=${6:-homebrew/Casks/mirage.rb} ;; beta) f=${6:-homebrew/Casks/mirage@beta.rb} ;; *) die "Homebrew carries stable and beta only" ;; esac
+    [ -f "$f" ] || die "no cask at $f"
+    printf '%s' "$4" | grep -Eq '^[0-9a-f]{64}$' || die "not a SHA-256: $4"
+    sed -i '' -e "s|^  version \".*\"|  version \"$2,$3\"|" \
+        -e "s|^  sha256 .*|  sha256 \"$4\"|" \
+        -e "s|^  url \".*\"|  url \"$5\"|" "$f"
+    grep -q "^  version \"$2,$3\"$" "$f" && grep -q "^  sha256 \"$4\"$" "$f" && grep -q "^  url \"$5\"$" "$f" || die "could not rewrite $f"
+    echo "== $f: $2 ($3). Commit it, then copy it to github.com/phrz/homebrew-mirage as Casks/$(basename "$f") and push."
+}
+if [ "${1:-}" = cask-bump ]; then shift; cask_bump "$@"; exit 0; fi
+
 # MARK: keys-init
 
 if [ "${1:-}" = keys-init ]; then
@@ -268,6 +284,7 @@ gh release upload "channel-$CHANNEL" "$OUT/manifest.json" "$OUT/manifest.sigs.js
 FLOORVAR=MIN_BUILD_$(echo "$CHANNEL" | tr 'a-z' 'A-Z')
 sed -i '' "s/^$FLOORVAR=[0-9]*$/$FLOORVAR=$BUILD/" scripts/install-host.sh
 echo "== scripts/install-host.sh: $FLOORVAR=$BUILD (commit it)"
+case "$CHANNEL" in stable|beta) cask_bump "$CHANNEL" "$VERSION" "$BUILD" "$(shasum -a 256 "$OUT/$ZIPNAME" | cut -d' ' -f1)" "$ZIPURL" ;; esac
 
 if [ "$CHANNEL" = nightly ]; then
     echo "== prune nightlies beyond the newest 10"

@@ -98,6 +98,8 @@ final class HostMenu: NSObject, NSMenuDelegate {
             model.line = line
             model.canUpdate = can
             if let step { model.step = step.isFinal && step.phase == .done ? nil : step }
+            // No new step: a running update follows the host's status (Automatic, or another device), and ends with it.
+            else if model.step == nil || model.step?.isFinal == false { model.step = self.status?.updating }
             model.updateNow = { [weak self] in self?.updateNow() }
         }
     }
@@ -157,7 +159,7 @@ final class HostMenu: NSObject, NSMenuDelegate {
         case .notFound: label("The host is missing from this copy of Mirage")
         default: break
         }
-        if isConnected, let u = updateStatus { label("Updating: \(u.message)") }
+        if isConnected, let u = updateStatus ?? status?.updating { label("Updating: \(u.message)") }
         else if isConnected, let line = status?.updateLine {
             label("Update available: \(line)")
             if status?.canUpdate == true { _ = item("Update Now", #selector(updateNow)) }

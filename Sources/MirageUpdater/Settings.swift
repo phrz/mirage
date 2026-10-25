@@ -25,10 +25,13 @@ public struct UpdateSettings: Codable, Equatable, Sendable {
     public var lastCheckError: String?
     /// The running build's signing identity, recorded at its commit (so the next update compares without reading it).
     public var identity: SigningIdentity?
+    /// Builds the Automatic policy has tried to install: never tried on its own again, whatever the outcome (a trigger or
+    /// `miraged update --now` still can).
+    public var automaticTried: [Int] = []
 
     public init() {}
 
-    enum CodingKeys: String, CodingKey { case channel, policy, trigger, learnedKeys, skippedBuilds, lastCheck, latest, lastCheckError, identity }
+    enum CodingKeys: String, CodingKey { case channel, policy, trigger, learnedKeys, skippedBuilds, lastCheck, latest, lastCheckError, identity, automaticTried }
     /// Every field optional, and a value this build does not know falls back to the default: a settings file from a newer
     /// build never stops an older one from updating.
     public init(from decoder: Decoder) throws {
@@ -44,6 +47,7 @@ public struct UpdateSettings: Codable, Equatable, Sendable {
         latest = opt(MirageVersion.self, .latest)
         lastCheckError = opt(String.self, .lastCheckError)
         identity = opt(SigningIdentity.self, .identity)
+        automaticTried = opt([Int].self, .automaticTried) ?? []
     }
 
     public var trust: ManifestTrust { ManifestTrust(learned: learnedKeys) }

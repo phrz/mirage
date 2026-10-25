@@ -138,6 +138,7 @@ public final class LocalControlServer: @unchecked Sendable {
                 s.hostVersion = .current
                 s.latestAvailable = self.ctx.updateInfo?().latestAvailable
                 s.canUpdate = self.ctx.updateHandler != nil
+                s.updating = self.ctx.updateInfo?().lastResult.flatMap { $0.isFinal || $0.phase == .unknown ? nil : $0 }
                 s.connected = ids.map { id in devices.first { $0.id == id }?.name ?? String(id.prefix(12)) }
                 if self.clients[c.fd] === c { self.send(.status(s), to: c) }
             }

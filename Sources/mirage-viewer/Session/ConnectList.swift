@@ -26,7 +26,7 @@ struct PairedHost: Identifiable, Equatable {
     func detail(now: Date = Date(), locale: Locale = .current) -> String? {
         // A version refusal says which side to update, in place of the rest: connecting cannot work until then.
         switch update {
-        case .hostTooOld, .viewerTooOld: return update.note(hostName: title)
+        case .hostTooOld, .viewerTooOld, .updating: return update.note(hostName: title)
         case .current, .updateAvailable: break
         }
         var parts: [String] = []
@@ -232,6 +232,11 @@ struct HostUpdateBadge: View {
         if center.isRunning(host.alias) {
             ProgressView().controlSize(.small)
                 .accessibilityLabel("Updating \(host.title)")
+        } else if case .updating = host.update {
+            // The host is installing one already (Automatic, or another device): "updating", no offer.
+            ProgressView().controlSize(.small)
+                .help("Updating")
+                .accessibilityLabel("\(host.title) is updating")
         } else if case .updateAvailable = host.update {
             Button { center.prompt = host } label: {
                 Image(systemName: "arrow.up.circle.fill")

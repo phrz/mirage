@@ -1505,6 +1505,31 @@ A bad build rolls itself back.
   (perl's alarm: 60 s for status, 20 min for install, 15 min for update). It rejects host tokens that start with "-",
   never glob-expands the list, and exits non-zero when any host is unreachable, lacks Mirage, times out or fails.
 
+**As built: U6 (2026-10-26).**
+- Homebrew: `homebrew/Casks/mirage.rb` (stable) and `mirage@beta.rb` (beta) in this repo, for the tap
+  github.com/phrz/homebrew-mirage. Nightlies never go to Homebrew.
+  - The casks carry `auto_updates true`, so `brew upgrade` leaves the app to its own updater; the two casks conflict
+    with each other.
+  - `binary` links miraged into the PATH. `uninstall` removes the agent job and quits the app; only `zap` removes
+    Previous/, Updates/, the update settings and records, and the logs. Pairings and identities stay.
+  - The caveats name the grant panes (both macOS 27's names and the older ones), Allow Connections, and
+    `miraged update --set channel=`.
+  - `release.sh stable|beta` rewrites the channel's cask (version "VERSION,BUILD", sha256, url) and says to copy it to
+    the tap and push; `release.sh cask-bump` does the same by hand. Until the first stable or beta release the casks
+    hold placeholders (`sha256 :no_check`), so the tap is not worth publishing before then.
+- The Automatic policy: once a minute the agent asks `AutomaticUpdate.decide` whether to install the newest build on
+  its own.
+  - It waits while any viewer streams or a stream ended less than 10 min ago (the agent's own start counts as one),
+    while a system prompt is on screen, and until nobody has used the Mac for 10 min (HID idle time). This replaces the
+    02:00–05:00 window above (the coordinator's U6 spec).
+  - It goes through the trigger's handler: the same lock, verification, swap, supervisor, trial, commit and rollback.
+    It never crosses a signing-identity change.
+  - Each build is tried once on its own: `updates.json`'s `automaticTried` is written before the attempt, whatever the
+    outcome. A trigger or `miraged update --now` can still install that build.
+  - While any update runs (Automatic, a trigger, this Mac), the Welcome's `updateResult` and local control's
+    `Status.updating` carry its step. The device lists then show "Updating to …" and a spinner instead of the arrow,
+    and the host Mac's menu and window bar say "Updating".
+
 **Milestones.**
 
 | # | Deliverable | Done when |

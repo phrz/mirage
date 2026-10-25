@@ -261,4 +261,15 @@ final class UpdateTriggerTests: XCTestCase {
         XCTAssertTrue(st.message.contains("no longer paired"), st.message)
         XCTAssertEqual(calls.all, [])
     }
+
+    /// U6: a host installing an update on its own (Automatic) says so in its Welcome; the row shows "updating", not Update.
+    func testAHostUpdatingOnItsOwnShowsUpdating() async throws {
+        let running = ControlMessage.UpdateStatus(phase: .downloading, message: "downloading 0.1 (9999)", from: .current,
+                                                  to: MirageVersion(version: "0.1", build: 9999, commit: "b", channel: .nightly))
+        let r = try await rig(permission: anyDevice, lastResult: running, handler: nil)
+        defer { r.host.stop(); try? FileManager.default.removeItem(at: r.tmp) }
+        let (s, close) = try await connect(r)(); defer { close() }
+        _ = try await s.authenticate(features: [ControlMessage.Feature.updateStatus])
+        XCTAssertEqual(try r.viewerStore.knownHosts()["test-host"]?.updateState, .updating(to: running.to))
+    }
 }

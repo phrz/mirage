@@ -87,6 +87,7 @@ public struct ClientSession {
             h.hostVersion = welcome.hostVersion
             h.latestAvailable = welcome.latestAvailable
             h.updateTrigger = welcome.acceptsUpdateTrigger
+            h.updating = welcome.updateResult.flatMap { $0.isFinal ? nil : $0 }
             h.incompatibility = tooOld?.rawValue
             if tooOld == nil { h.lastConnected = Date() }
         }
