@@ -433,6 +433,16 @@ final class LANRecognitionTests: XCTestCase {
         rc.seedLAN()
         XCTAssertEqual(rc.tier, .local)
     }
+    /// Wi-Fi jitter is not a queue: min RTT 4 ms, probes at 30 ms keep the LAN's ceiling at the cap; 60 ms over is a queue.
+    func testWiFiJitterIsNotPathStress() {
+        var rc = RateController(initialKbps: 2000, maxKbps: 50_000, nativePixels: 3200 * 1800)
+        rc.noteTrainRTT(4_000_000, now: 1_000_000_000)
+        rc.seedLAN()
+        rc.probeSample(sentNanos: 2_000_000_000, receivedNanos: 0, now: 2_030_000_000)
+        XCTAssertFalse(rc.rttRising, "26 ms over a 4 ms minimum")
+        rc.probeSample(sentNanos: 3_000_000_000, receivedNanos: 0, now: 3_120_000_000)
+        XCTAssertTrue(rc.rttRising, "probe EWMA 75 ms over the minimum")
+    }
 }
 
 /// An automatic request saves a delivery estimate, a capped one does not: read on the request as the streamer gets it

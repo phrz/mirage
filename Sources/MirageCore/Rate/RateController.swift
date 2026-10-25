@@ -539,6 +539,13 @@ public struct RateController {
     }
     private var inflightLog: [(nanos: UInt64, under: Bool)] = []
     private var pathStressedNow = false
+    /// The probes' round trip rising over the minimum: 25 % over it and more than the underuse threshold (40 ms). Wi-Fi
+    /// jitters by tens of ms with no queue: MacBook to mac-daddy, min RTT 4-11 ms from the connect train, probes 10-80 ms;
+    /// 25 % alone (3 ms) read stress all session and held a LAN at 8-14 Mbps with a 32 KB in-flight cap (2026-10-25 13:07Z).
+    var rttRising: Bool {
+        guard !probeRTT.isNaN, minRTTNanos.isFinite else { return false }
+        return probeRTT > minRTTNanos * 1.25 && (probeRTT - minRTTNanos) / 1e6 > tuning.underuseMs
+    }
     /// Most of the window the acks at `now` answer (shifted back an RTT) had little in flight (at least 5 samples).
     private func underusedWindow(now: UInt64) -> Bool {
         let hi = now &- UInt64(srttNanos), lo = hi &- deliveryWindowNanos
@@ -610,7 +617,7 @@ public struct RateController {
         let kbps = Double(acked) * 8 / (Double(w) / 1e9) / 1000
         // App-limited: the host ran out of things to send during the window these acks answer (shifted by an RTT). Held
         // back by the in-flight cap is not app-limited: that is the link's rate.
-        let pathStressed = (!probeRTT.isNaN && minRTTNanos.isFinite && probeRTT > minRTTNanos * 1.25) || lossPercent > 1
+        let pathStressed = rttRising || lossPercent > 1
         pathStressedNow = pathStressed
         // Little in flight for most of the window counts too, unless the path itself says the link is the limit.
         let appLimited = (lastIdleNanos > 0 && now &- lastIdleNanos < w + UInt64(srttNanos)) || (!pathStressed && underusedWindow(now: now))
@@ -651,7 +658,7 @@ public struct RateController {
             }
         }
         // Startup ends on a rising round trip too (> 25 % over the minimum: a queue building).
-        if inStartup, !probeRTT.isNaN, minRTTNanos.isFinite, probeRTT > minRTTNanos * 1.25, now &- firstAckNanos > 2 * UInt64(srttNanos) { inStartup = false }
+        if inStartup, rttRising, now &- firstAckNanos > 2 * UInt64(srttNanos) { inStartup = false }
         if !inStartup {
             if probeUpActive, now &- lastProbeUpNanos > max(UInt64(srttNanos), 250_000_000) { probeUpActive = false }
             if !probeUpActive, now &- lastProbeUpNanos > 6_000_000_000 { probeUpActive = true; lastProbeUpNanos = now }
