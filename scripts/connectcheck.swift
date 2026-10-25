@@ -63,7 +63,7 @@ func blockMad(_ a: [UInt8], _ b: [UInt8], _ m: [Bool]) -> Double {
     } }
     return n > 0 ? s / Double(n) : 0
 }
-struct R { var coherent: Int?; var crisp: Int?; var changes = 0; var inChange = false; var bestToFinal = Double.infinity; var regress = false; var content = 0 }
+struct R { var coherent: Int?; var crisp: Int?; var changes = 0; var inChange = false; var bestToFinal = Double.infinity; var regress = false; var content = 0; var reachedFinal = false }
 // Content vs quality steps (M-FIVE: a live window's own changes are not flicker). The viewer's log (MIRAGE_DEBUG_PRESENT, the
 // run's viewer.log next to the frames directory) says per layer what it presented: "shown <rects>" outside a refinement and
 // video frames are content; refinement tiles and level commits are quality steps. A change is content when its layer
@@ -91,6 +91,8 @@ var firstPictureMs: Int? = nil
 let verbose = ProcessInfo.processInfo.environment["CONNECTCHECK_VERBOSE"] != nil
 var res = [R](repeating: R(), count: regions.count)
 var prev: [UInt8]? = nil
+var prevIndex: Int? = nil
+var beforeContent = [Int?](repeating: nil, count: regions.count)   // per region: the frame before its first content change
 var prevClock = 0
 for line in lines {
     guard let f = load(line.i) else { continue }
@@ -98,19 +100,29 @@ for line in lines {
     for (k, r) in regions.enumerated() {
         let reg = r
         let toFinal = mad(f, final, r.mask)
-        if res[k].coherent == nil, blockMad(f, final, r.mask) < 6 { res[k].coherent = line.ms }
         if toFinal < 1.5 { if res[k].crisp == nil { res[k].crisp = line.ms } } else if res[k].crisp != nil, toFinal > 4 { res[k].crisp = nil }
-        if res[k].coherent != nil, toFinal > res[k].bestToFinal + 8 { res[k].regress = true }
+        if blockMad(f, final, r.mask) < 6 { res[k].reachedFinal = true }
+        if res[k].reachedFinal, toFinal > res[k].bestToFinal + 8 { res[k].regress = true }
         res[k].bestToFinal = min(res[k].bestToFinal, toFinal)
         if let p = prev, res[k].crisp == nil || res[k].crisp == line.ms {
             let moving = mad(f, p, r.mask) > 2
             let isContent = moving && !res[k].inChange && presentedContent(reg.id, from: prevClock, to: line.clock ?? 0)
-            if isContent { res[k].content += 1; if verbose { print(String(format: "  %@: content change at %.1f s", reg.name, Double(line.ms) / 1000)) } }
+            if isContent { res[k].content += 1; if beforeContent[k] == nil { beforeContent[k] = prevIndex }; if verbose { print(String(format: "  %@: content change at %.1f s", reg.name, Double(line.ms) / 1000)) } }
             if moving, !res[k].inChange, !isContent { res[k].changes += 1; if verbose { print(String(format: "  %@: change %d at %.1f s (%.1f levels; %.1f from the final)", reg.name, res[k].changes, Double(line.ms) / 1000, mad(f, p, r.mask), toFinal)) } }
             res[k].inChange = moving
         }
     }
-    prev = f; prevClock = line.clock ?? 0
+    prev = f; prevClock = line.clock ?? 0; prevIndex = line.i
+}
+// Coherent against the content of the time: a region whose window changed its own content (a VM's screen repainting at +25 s
+// on 2026-10-25) is measured against its last frame before that change, not against the final picture, which it could
+// not have shown earlier.
+for line in lines {
+    guard res.contains(where: { $0.coherent == nil }), let f = load(line.i) else { continue }
+    for (k, r) in regions.enumerated() where res[k].coherent == nil {
+        let ref = beforeContent[k].flatMap { load($0) } ?? final
+        if blockMad(f, ref, r.mask) < 6 { res[k].coherent = line.ms }
+    }
 }
 var pass = true
 func t(_ ms: Int?) -> String { ms.map { String(format: "%.1f s", Double($0) / 1000) } ?? "never" }
