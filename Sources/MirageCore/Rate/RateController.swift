@@ -353,7 +353,10 @@ public struct RateController {
         // after a delay- or loss-driven decrease in the last few seconds.
         let limitedByLink = targetKbps < maxKbps * 8 / 10 && lastLinkDecreaseNanos > 0 && Clock.elapsed(since: lastLinkDecreaseNanos, now: now) < 5_000_000_000
         if srttSeeded || minRTTNanos.isFinite { tiers.adoptFirst(rateKbps: targetKbps, limitedByLink: limitedByLink, rttMs: minRttMs, lossPercent: frameLossPercent, now: now) }
+        let wasLocal = tiers.tier == .local
         tiers.update(rateKbps: targetKbps, limitedByLink: limitedByLink, rttMs: minRttMs, lossPercent: frameLossPercent, now: now)
+        // Local found mid-session (the connect probe missed it): the LAN start now, the target to the cap.
+        if !wasLocal, tiers.tier == .local, lanSeedAllowed, !lanStart { seedLAN() }
         liftCapOnLAN()
         updateRung(now: now)
     }
@@ -388,6 +391,8 @@ public struct RateController {
     /// target starts at the cap and the pre-estimate ceiling is the cap; the path-stress rules still bring it down at the
     /// first loss or delay (2026-10-25: "no burst" read as unknown kept a LAN at 2-15 Mbps for seconds).
     public private(set) var lanStart = false
+    /// Whether a LAN start may happen (the streamer: not under a test throttle, whose shaped link is never a LAN).
+    public var lanSeedAllowed = false
     public mutating func seedLAN() {
         lanStart = true
         targetKbps = maxKbps

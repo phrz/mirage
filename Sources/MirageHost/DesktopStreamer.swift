@@ -139,6 +139,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var tileTokens: Double = 0
     private var tileMsgSeq: UInt32 = 0
     private var tileSent: [UInt32: (nanos: UInt64, bytes: Int, refinement: Int, block: Int?, layer: UInt32, rects: [PixelRect])] = [:]
+    /// Protocol 6: tile messages the viewer has read (`tileReceived`) but not yet applied (`tileAck`), and their bytes: the
+    /// viewer's apply backlog ("viewer behind" in the stats), kept apart from the link's in flight, so a slow viewer shows as
+    /// itself and not as a slow link.
+    private var tileReceivedSeqs = Set<UInt32>()
+    /// Refinement messages' encoded size over their estimate (EWMA, 0.5-8): scales the in-flight gate's count of blocks
+    /// still encoding.
+    private var estimateRatio = 1.0
+    private var viewerBehindBytes = 0
     /// Tile-stream bytes sent and not yet acked (RateController.inflightCapBytes bounds refinement by it).
     private var tileInflightBytes = 0
     private var refineDesktopFirst = false
@@ -621,6 +629,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 log("careful resume: this pairing's last estimate on this network \(k) kbps; starting at \(controller.targetKbps) kbps")
             }
             controller.automaticCap = automaticBitrate
+            controller.lanSeedAllowed = req.throttle == nil
             rc = controller
         }
         let controller = rc!
@@ -994,18 +1003,71 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         return end
     }
 
+    /// Protocol 6: a tile message read by the viewer, not yet applied. The network part of the ack: in flight, the rate
+    /// estimate, delay and the pacer move on it, so the in-flight cap measures the link again. Before, the viewer acked only
+    /// after applying (WebP decode and blits, serially, on its video queue): its apply backlog counted as in flight and
+    /// held a 45 Mbps LAN at ~8 Mbps behind the 512 KB cap (queue waits to 533 ms, 2026-10-25). What it has applied
+    /// (crisp, the picture audit, resends) still waits for `tileAck`; the gap shows as "viewer behind".
+    public func handle(tileReceived ack: ControlMessage.TileAck) {
+        queue.async {
+            guard let sent = self.tileSent[ack.msgSeq], !self.tileReceivedSeqs.contains(ack.msgSeq) else { return }
+            self.tileReceivedSeqs.insert(ack.msgSeq)
+            self.viewerBehindBytes += sent.bytes
+            self.tileNetworkAcked(ack, sent: sent, now: Clock.nowNanos())
+        }
+    }
+
     public func handle(tileAck: ControlMessage.TileAck) {
         queue.async {
             self.overtakenBlocks.remove(tileAck.msgSeq); self.statTileAcks += 1
             guard let sent = self.tileSent.removeValue(forKey: tileAck.msgSeq) else { return }
             let now = Clock.nowNanos()
+            if self.tileReceivedSeqs.remove(tileAck.msgSeq) != nil { self.viewerBehindBytes = max(0, self.viewerBehindBytes - sent.bytes) }
+            else { self.tileNetworkAcked(tileAck, sent: sent, now: now) }   // a protocol-5 viewer: applied is all it says
+            // Prune by age (a big refinement block legitimately outlives dozens of interactive acks).
+            for (k, v) in self.tileSent where Clock.elapsed(since: v.nanos, now: now) > 20_000_000_000 {
+                self.tileSent[k] = nil; self.overtakenBlocks.remove(k)
+                if self.tileReceivedSeqs.remove(k) != nil { self.viewerBehindBytes = max(0, self.viewerBehindBytes - v.bytes); continue }
+                self.refinementInFlight = max(0, self.refinementInFlight - v.refinement); self.tileInflightBytes = max(0, self.tileInflightBytes - v.bytes)
+            }
+        }
+    }
+    /// A refinement message encoded and waiting for the wire (SendGate).
+    struct HeldTiles { var tiles: TileMessage.Tiles; var nanos: UInt64; var bytes: Int; var block: Int?; var layer: UInt32; var ranks: [UInt8]; var rects: [PixelRect] }
+    private var sendGate = SendGate<HeldTiles>()
+    /// Bytes handed to the tile queue and not yet in `tileInflightBytes` (send() records them a hop later).
+    private var gateInTransit = 0
+    private var gateInflight: Int { tileInflightBytes + gateInTransit }
+    private var statGateHeldBytes = 0, statGateDropped = 0
+    /// On `queue`: a refinement message onto the tile stream.
+    private func dispatch(_ h: HeldTiles) {
+        gateInTransit += h.bytes
+        tileQueue.async {
+            self.send(tile: .tiles(h.tiles), captureNanos: h.nanos, fast: false, refinementBytes: h.bytes, block: h.block, layer: h.layer, ranks: h.ranks)
+            self.queue.async { self.gateInTransit = max(0, self.gateInTransit - h.bytes) }   // after send()'s own hop recorded it
+        }
+    }
+    /// On `queue`: held refinement that fits now goes; held refinement whose tiles changed since it was encoded is dropped
+    /// (the tracker holds those changes, so the tiles are refined again from the newer pixels), as the stale check does.
+    private func releaseSendGate() {
+        guard !sendGate.held.isEmpty, let rc else { return }
+        let (go, stale) = sendGate.release(inflight: gateInflight, cap: rc.inflightCapBytes, local: rc.tier == .local) { h in
+            self.layers[h.layer]?.tracker.changedSince(nanos: h.nanos, in: h.rects) ?? true
+        }
+        for h in stale {
+            if let l = layers[h.layer], l.isDisplay { let ts = l.tracker.tiles(covering: h.rects); l.taint.sent(ts, tracker: l.tracker, windowAreas: [l.bounds]); l.taintScheduled.subtract(ts) }
+            statStaleDropped += h.rects.count; statGateDropped += 1; debit("gate-stale-refund", -Double(h.bytes)); if let b = h.block { pacer.dropped(id: b) }
+        }
+        for h in go { dispatch(h) }
+    }
+    private func tileNetworkAcked(_ tileAck: ControlMessage.TileAck, sent: (nanos: UInt64, bytes: Int, refinement: Int, block: Int?, layer: UInt32, rects: [PixelRect]), now: UInt64) {
+        defer { releaseSendGate() }
+        do {
             self.tileInflightBytes = max(0, self.tileInflightBytes - sent.bytes)
             self.rc?.streamAcked(bytes: sent.bytes, receivedNanos: tileAck.receivedNanos, now: now)
             self.refinementInFlight = max(0, self.refinementInFlight - sent.refinement)
             if sent.block != nil, self.pacer.acked(msgSeq: tileAck.msgSeq) { self.refine(now: now) }
             self.rc?.delaySample(sentNanos: sent.nanos, receivedNanos: tileAck.receivedNanos, bytes: sent.bytes, now: now)
-            // Prune by age (a big refinement block legitimately outlives dozens of interactive acks).
-            for (k, v) in self.tileSent where Clock.elapsed(since: v.nanos, now: now) > 20_000_000_000 { self.tileSent[k] = nil; self.overtakenBlocks.remove(k); self.refinementInFlight = max(0, self.refinementInFlight - v.refinement); self.tileInflightBytes = max(0, self.tileInflightBytes - v.bytes) }
         }
     }
 
@@ -1155,6 +1217,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let (cap, caps): (ScreenCapturer?, [WindowCapturer]) = await withCheckedContinuation { c in
             queue.async {
                 let now = Clock.nowNanos()
+                for h in self.sendGate.drain() { if let b = h.block { self.pacer.dropped(id: b) } }   // re-encoded after a resume
                 let cap = self.capturer
                 let caps = self.layers.values.compactMap { l in let w = l.capturer; l.capturer = nil; return w }
                 let und = self.underlay; self.underlay = nil; self.underlayFor = nil
@@ -2893,10 +2956,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let sent = statTileBytes >= traceBytes ? statTileBytes - traceBytes : statTileBytes; traceBytes = statTileBytes   // (the 5 s stats reset it)
         let fresh = layers.values.filter { $0.fresh != .done }.count
         let blocks = layers.values.reduce(0) { n, l in if case .blocks(let r) = l.fresh { return n + r.count }; return n }
-        log(String(format: "trace +%.2f s: target %d ceiling %d delivery %d kbps | in flight %d KB (refine %d KB) cap %d KB, capped %d× | tokens %.0f KB fresh %.0f KB | sent %d KB | %d layers fresh, %d blocks left, %d block(s) encoding",
+        log(String(format: "trace +%.2f s: target %d ceiling %d delivery %d kbps | in flight %d KB (refine %d KB) cap %d KB, capped %d×, viewer behind %d KB | tokens %.0f KB fresh %.0f KB | sent %d KB | %d layers fresh, %d blocks left, %d block(s) encoding (estimates x%.1f)",
                    Double(Clock.elapsed(since: traceUntil - 8_000_000_000, now: now)) / 1e9, rc.targetKbps, rc.deliveryCeilingKbps, rc.deliveryKbps,
-                   tileInflightBytes / 1000, refinementInFlight / 1000, rc.inflightCapBytes / 1000, traceCapped, tileTokens / 1000, freshTokens / 1000, sent / 1000,
-                   fresh, blocks, pacer.blocks.filter { $0.msgSeq == nil }.count)
+                   tileInflightBytes / 1000, refinementInFlight / 1000, rc.inflightCapBytes / 1000, traceCapped, viewerBehindBytes / 1000, tileTokens / 1000, freshTokens / 1000, sent / 1000,
+                   fresh, blocks, pacer.blocks.filter { $0.msgSeq == nil }.count, estimateRatio)
             + (traceDebits.isEmpty ? "" : " | charged " + traceDebits.sorted { abs($0.value) > abs($1.value) }.map { "\($0.key) \(Int($0.value / 1000))" }.joined(separator: " ") + " KB"))
         traceCapped = 0; traceDebits = [:]
     }
@@ -2984,6 +3047,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// within `windowCaptureBudgetFPS`: the idle rates first, then the animating windows, frontmost first and then by
     /// visible area; none drops below its idle rate. Visibility is the previous reconcile's.
     static let windowCaptureBudgetFPS = 120
+    /// Every tick: a window that starts or stops animating in place changes no window list, so `reconcileLayers` (run on
+    /// list changes) never raised its rate: the LAN row's bench stayed at 7-10 fps on 327ecc2. Only captures whose rate
+    /// changes are touched.
+    private func applyCaptureRates(now: UInt64) {
+        guard let s = windows?.current else { return }
+        let frontID = s.windows.first(where: { $0.windowLevel == 0 })?.id
+        let rates = windowCaptureRates(layers.values.filter { !$0.isDisplay && $0.capturer != nil }, frontID: frontID, now: now)
+        for l in layers.values where !l.isDisplay {
+            guard let cap = l.capturer, l.visibleFraction > 0.001, let fps = rates[l.id], fps != cap.fps else { continue }
+            cap.follow(pointFrame: cap.pointFrame, width: l.width, height: l.height, fps: fps)
+            if debugLayers { log("layer \(l.id): capture at \(fps) fps") }
+        }
+    }
     func windowCaptureRates(_ ls: [Layer], frontID: UInt32?, now: UInt64) -> [UInt32: Int] {
         let videoFPS = min(request?.maxFPS ?? 30, rc?.policy.maxVideoFPS ?? 30)
         var rates: [UInt32: Int] = [:]
@@ -3600,7 +3676,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if staged { layer.stagedEncoding += 1; layer.lastStagedNanos = nanos; if layer.stagedOpenSince == nil { layer.stagedOpenSince = nanos } }
         // On `queue`: this message is on the tile stream (or dropped), so a commit sent after it follows it.
         let settled: (Layer?) -> Void = { l in if staged, let l { l.stagedEncoding = max(0, l.stagedEncoding - 1) } }
-        let webp = effort.webpEffort
+        // Local: the fastest lossless preset. Bytes are cheap there and encoding was what crisp waited for: the LAN row on
+        // 327ecc2 kept 9-12 blocks encoding for 3 s at preset 4 (13-18 Mbps out of a 50 Mbps target, crisp at 3.6 s); on UI
+        // and text, preset 0 encodes ~7x faster for ~1.5x the bytes (358 vs 51 MP/s, 2026-10-25 bench).
+        let webp = rc?.tier == .local ? 0 : effort.webpEffort
         let alpha = !layer.isDisplay
         let layerID = layer.id
         let photoLossy = photographicFinalIsLossy
@@ -3648,9 +3727,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     if l.isDisplay { let ts = l.tracker.tiles(covering: out.map(\.rect)); l.taint.sent(ts, tracker: l.tracker, windowAreas: [l.bounds]); l.taintScheduled.subtract(ts) }
                     self.statStaleDropped += out.count; self.debit("stale-refund", -Double(estimate)); if let block { self.pacer.dropped(id: block) }; settled(self.layers[layerID]); return
                 }
-                if !early { self.tileQueue.async { self.send(tile: .tiles(.init(header: hdr, refinement: refinement, staged: staged, tiles: out)), captureNanos: nanos, fast: !refinement, refinementBytes: refinement ? bytes : 0, block: block, layer: layerID, ranks: ranks) } }
+                if !early {
+                    let msg = HeldTiles(tiles: .init(header: hdr, refinement: refinement, staged: staged, tiles: out), nanos: nanos, bytes: bytes, block: block, layer: layerID, ranks: ranks, rects: out.map(\.rect))
+                    // Staged tiles go at once: their level's commit follows them on the stream. The rest waits at the send gate
+                    // when the link already has its fill.
+                    if staged { self.dispatch(msg) }
+                    else if let now = self.sendGate.offer(msg, bytes: bytes, inflight: self.gateInflight, cap: self.rc?.inflightCapBytes ?? .max, local: self.rc?.tier == .local) { self.dispatch(now) }
+                    else { self.statGateHeldBytes += bytes }
+                }
                 settled(self.layers[layerID])
                 self.debit("trueup", Double(bytes - estimate))   // true up the estimate
+                if refinement, estimate > 0 { self.estimateRatio = min(8, max(0.5, self.estimateRatio * 0.8 + Double(bytes) / Double(estimate) * 0.2)) }
                 self.statTileBytes += bytes; self.statTileRects += out.count; self.secTileBytes += bytes
                 if refinement { self.statRefineBytes += bytes }
                 if let l = self.layers[layerID] {
@@ -3920,7 +4007,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // and the connect took 58 s to crisp.
         if let rc {
             let cap = rc.inflightCapBytes
-            let pendingEncode = pacer.blocks.reduce(0) { $1.msgSeq == nil ? $0 + $1.bytes : $0 }
+            // Blocks still encoding count at their estimate times what estimates have been running at: on phrz's iPhone
+            // (2026-10-25 18:16Z) blocks came out ~5x their estimates (photographic windows), 12 started under a 148 KB
+            // cap, and the 2.5 MB they sent on completion queued ~3 s in the path (srtt 3 s, target 24 -> 7 Mbps for good).
+            let pendingEncode = Int(Double(pacer.blocks.reduce(0) { $1.msgSeq == nil ? $0 + $1.bytes : $0 }) * estimateRatio)
             if refinementInFlight + pendingEncode >= cap || tileInflightForCap >= cap * 2 { self.rc?.noteCapped(now: now); traceCapped += 1; gate("inflight-cap"); return }
         }
         let ordered = layersByPriority()
@@ -4615,11 +4705,17 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // During sustained motion refinement is frozen, so only the interactive tile bytes (changed
         // pixels near the locus, copy-rects) are reserved and video gets the rest of the target.
         let b = rc.budget(videoActive: Clock.elapsed(since: videoActiveNanos, now: now) < 500_000_000, recentTileKbps: Int(motionSustained(now) ? interactiveKbpsEWMA : tileKbpsEWMA))
-        let wantedWidth = max(64, Int(Double(d.width) * rc.scale)) & ~1
-        let rungChanged = d.encoder.map { wantedWidth != $0.width } ?? false
+        // Any live encoder, the display's or a window's, at another scale than the rung's (a window's alone never counted: the
+        // compositor model's desktop rarely has one).
+        let live = layers.values.filter { $0.encoder != nil }
+        func wantedWidth(_ l: Layer) -> Int { max(64, Int(Double(l.width) * rc.scale)) & ~1 }
+        let rungChanged = live.contains { wantedWidth($0) != $0.encoder!.width }
         // A rung change costs a keyframe: at most one per 5 s, and never to a *larger* picture while the link is queuing.
-        let growing = d.encoder.map { wantedWidth > $0.width } ?? false
-        if rungChanged, d.fresh == .done, Clock.elapsed(since: lastRebuildNanos, now: now) > 5_000_000_000, !(growing && rc.queueMs > 60) {
+        let growing = live.contains { wantedWidth($0) > $0.encoder!.width }
+        // Not during the desktop's fresh picture, unless motion holds it (sustained motion freezes refinement, so it never
+        // finished, and video built at the tiny rung before a LAN start stayed at 400x224 for good: the LAN row, 2026-10-25).
+        let freshAllows = d.fresh == .done || motionSustained(now)
+        if rungChanged, freshAllows, Clock.elapsed(since: lastRebuildNanos, now: now) > 5_000_000_000, !(growing && rc.queueMs > 60) {
             lastBudget = b
             lastRebuildNanos = now
             rebuildAllEncoders(keyframes: true)
@@ -4666,6 +4762,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 if w.changed { self.reconcileLayers(w.sample, now: now); if !w.moved.isEmpty { self.lastMotionNanos = now } }
                 self.publishWindows(now: now, full: false)
             }
+            self.applyCaptureRates(now: now)
             for l in self.layers.values {
                 if l.encoding, Clock.elapsed(since: l.encodingSince, now: now) > 2_000_000_000 {
                     // Safety net: an encode whose completion never came (encoder replaced underneath it).
@@ -4693,6 +4790,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         s.schedule(deadline: .now() + 1, repeating: 1)
         s.setEventHandler { [weak self] in
             guard let self, let rc = self.rc else { return }
+            self.releaseSendGate()   // stale held refinement goes even without acks
             // Delay estimate upkeep: decay a stale estimate (probes lost), and send the 32-byte delay
             // probe: every second, unconditionally. Probe and video acks are the only path-delay inputs.
             let tnow = Clock.nowNanos()
@@ -4775,7 +4873,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                        statCaptures, capMs, statDirtyTiles, statDiffPruned, rc?.targetKbps ?? 0, rc?.capacityKbps ?? 0, rc?.queueMs ?? 0, rc?.rung ?? 0, srttNanos / 1e6,
                        unacked.count, statSkippedBudget, statDropped, statLost, enc, statInput)
                 + (statNacks > 0 ? " nacks \(statNacks) resent \(statNackResent)" : "") + " fresh \(d?.fresh.description ?? "-")"
-                + " delivery \(rc?.deliveryKbps ?? 0) kbps\(rc?.inStartup ?? false ? " (startup)" : "") tile-inflight \(tileInflightBytes / 1000)/\((rc?.inflightCapBytes ?? 0) / 1000) KB"
+                + " delivery \(rc?.deliveryKbps ?? 0) kbps\(rc?.inStartup ?? false ? " (startup)" : "") tile-inflight \(tileInflightBytes / 1000)/\((rc?.inflightCapBytes ?? 0) / 1000) KB viewer behind \(viewerBehindBytes / 1000) KB send gate: held \(statGateHeldBytes / 1000) KB, dropped \(statGateDropped) stale"
                 + String(format: " control %.0f kbps effort %@ fovea %@%@", Double(statControlBytes) * 8 / 5 / 1000, effortLevel, foveaActive ? "on" : "off", statFoveaTiles > 0 ? " (\(statFoveaTiles) tiles)" : "")
                 + String(format: " delay src %@ age %d ms tile-backlog %.0f ms motion %@ interactive %.0f kbps stale-dropped %d", rc?.lastSampleSource ?? "none", Int((rc?.sampleAgeNanos(now: Clock.nowNanos()) ?? 0) / 1_000_000), rc?.tileDelayMs ?? 0, motionSustained(Clock.nowNanos()) ? "yes" : "no", interactiveKbpsEWMA, statStaleDropped)
                 + " | layers \(windowLayers.count) (\(windowLayers.filter { $0.capturer != nil }.count) capturing, \(windowLayers.filter { $0.encoder != nil }.count) encoders, \(windowLayers.filter { !$0.exposed }.count) pending) stills \(statStills) occluded \(statOccluded) window-cmds \(statWindowCommands) taint-resent \(statTaintResent) exclusion-lag \(statExclusionLag)"
@@ -4786,7 +4884,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             auditVisibleUnsent(now: Clock.nowNanos())
             statStaleDropped = 0; statStills = 0; statOccluded = 0; statWindowCommands = 0; statTaintResent = 0; statExclusionLag = 0
             statControlBytes = 0; statFoveaTiles = 0
-            statFrames = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0
+            statFrames = 0; statGateHeldBytes = 0; statGateDropped = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0
             visibilityReport(now: Clock.nowNanos())
             if statAlphaMaskTiles > 0 { log("alpha mask: \(statAlphaMaskTiles) tiles (\(statAlphaPlane) planes, \(statAlphaClear) clear, \(statAlphaOpaque) back to opaque), \(statAlphaMaskBytes) bytes in 5 s") }
             statAlphaMaskTiles = 0; statAlphaMaskBytes = 0; statAlphaPlane = 0; statAlphaClear = 0; statAlphaOpaque = 0

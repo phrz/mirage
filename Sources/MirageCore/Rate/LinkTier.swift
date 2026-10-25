@@ -65,6 +65,9 @@ public struct TierSelector: Equatable {
     private var candidateSince: UInt64 = 0
     public var dwellNanosDown: UInt64 = 2_000_000_000   // to a worse tier
     public var dwellNanosUp: UInt64 = 10_000_000_000    // to a better tier
+    /// To Local (min RTT under 20 ms, no loss) mid-session: 1 s. A phone's connect probe read 74 ms (iOS Wi-Fi power save
+    /// until traffic flows) on a path that pinged 4 ms a minute later (2026-10-25): the LAN shows once data flows.
+    public var dwellNanosUpLocal: UInt64 = 1_000_000_000
     public var dwellNanosExtreme: UInt64 = 10_000_000_000  // into Extreme
 
     public init(initial: LinkTier = .normal) { tier = initial; candidate = initial }
@@ -89,7 +92,7 @@ public struct TierSelector: Equatable {
         // Extreme (video on the tiny rung, a whole fresh picture on entry) needs its condition for 10 s: a target that dips
         // under our own burst (a window resent after a move) took a Constrained session to Extreme and back within 15 s,
         // restarting the whole picture each time (mac-daddy, 2026-10-20).
-        let dwell = candidate.rawValue > tier.rawValue ? (candidate == .extreme ? max(dwellNanosDown, dwellNanosExtreme) : dwellNanosDown) : dwellNanosUp
+        let dwell = candidate.rawValue > tier.rawValue ? (candidate == .extreme ? max(dwellNanosDown, dwellNanosExtreme) : dwellNanosDown) : (candidate == .local ? dwellNanosUpLocal : dwellNanosUp)
         if now &- candidateSince >= dwell { tier = candidate }
         return tier
     }
