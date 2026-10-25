@@ -1456,6 +1456,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // overlay in front of everything (the M3.1 field regression) must not hold every layer's pixels back.
         let displayArea = displayRect.area
         let occluders = s.windows.filter { plannedIDs.contains($0.id) || Self.cutoutSafe($0, displayArea: displayArea) }
+        let captureFPS = windowCaptureRates(planned.compactMap { layers[$0.id] }, frontID: frontID, now: now)
         for w in planned {
             guard let l = layers[w.id] else { continue }
             var (fraction, covering) = WindowTracker.occlusion(of: w, in: occluders, display: displayRect)
@@ -1497,7 +1498,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // Their changes while off the display were deferred (captured): due now, from the frame of this moment.
             if !returned.isEmpty { _ = l.tracker.expedite(in: l.bounds, now: now, only: returned) }
             l.offDisplayTiles = offDisplay
-            let fps = l.frontmost ? 30 : (fraction <= 0.001 ? 2 : 10)
+            let fps = fraction <= 0.001 ? 2 : (captureFPS[l.id] ?? (l.frontmost ? 30 : 10))
             if let cap = l.capturer {
                 // The capture follows the window (sourceRect on its frame) and leaves out every window that comes over it.
                 if let pf = s.pointBounds[w.id] { cap.follow(pointFrame: pf, width: l.width, height: l.height, fps: fps) }
@@ -2460,6 +2461,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             refine(now: now)
             return
         }
+        if !dirty.isEmpty { layer.contentChangedNanos = now }
         if debugLayers, dirty.count >= 4 { log("layer \(layer.id) capture \(captureSeq): \(dirty.count) dirty tiles, bb \(tracker.boundingRect(dirty))" + (dirty.count <= 8 ? " boxes " + dirty.map { "\(tightBoxes[$0].map { "\($0.x),\($0.y) \($0.width)x\($0.height)" } ?? "?")" }.joined(separator: " | ") : "")) }
 
         // Copy-rects: window drags (display layer, for windows it still carries) from the window list,
@@ -2973,6 +2975,34 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Full, never throttled: the windows become layers on the viewer with this list (exposed). A throttled delta was
         // dropped when a still had just published one, and the windows showed ~0.9 s after their commit (Japan bus).
         publishWindows(now: now, full: true)
+    }
+
+    /// Window capture rates. Idle: 30 frontmost, 10 visible (2 hidden, set by the caller). A visible window whose content
+    /// changed in the last 2 s (a video, an animation, a progress bar) runs at the tier's video rate, frontmost or not: at a
+    /// fixed 10 fps a background window's animation never beat 10 on a LAN, whatever the link (the LAN row's bench,
+    /// 2026-10-25 13:18Z: 7-10 fps at a 50 Mbps target). Every capture costs WindowServer, so all of them together stay
+    /// within `windowCaptureBudgetFPS`: the idle rates first, then the animating windows, frontmost first and then by
+    /// visible area; none drops below its idle rate. Visibility is the previous reconcile's.
+    static let windowCaptureBudgetFPS = 120
+    func windowCaptureRates(_ ls: [Layer], frontID: UInt32?, now: UInt64) -> [UInt32: Int] {
+        let videoFPS = min(request?.maxFPS ?? 30, rc?.policy.maxVideoFPS ?? 30)
+        var rates: [UInt32: Int] = [:]
+        var animating: [Layer] = []
+        for l in ls where l.visibleFraction > 0.001 {
+            let idle = l.id == frontID ? 30 : 10
+            rates[l.id] = idle
+            if l.contentChangedNanos > 0, Clock.elapsed(since: l.contentChangedNanos, now: now) < 2_000_000_000, videoFPS > idle { animating.append(l) }
+        }
+        var left = Self.windowCaptureBudgetFPS - rates.values.reduce(0, +)
+        animating.sort { a, b in
+            if (a.id == frontID) != (b.id == frontID) { return a.id == frontID }
+            return a.visibleFraction * Double(a.width * a.height) > b.visibleFraction * Double(b.width * b.height)
+        }
+        for l in animating where left > 0 {
+            let idle = rates[l.id] ?? 10, extra = min(videoFPS - idle, left)
+            rates[l.id] = idle + extra; left -= extra
+        }
+        return rates
     }
 
     // MARK: Connect probe (DESIGN M-FIVE)
@@ -4510,7 +4540,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let paceEnd = pace(frags, frame: sent)
         tokens -= Double(payload.count)
         unacked[seq] = InFlight(layer: l.id, sentNanos: Clock.nowNanos(), bytes: payload.count, ltrToken: f.ltrToken, paceEndNanos: paceEnd)
-        statFrames += 1; statBytes += payload.count; statEncodeNanos += f.encodeNanos; secVideoBytes += payload.count; secVideoFrames += 1
+        statFrames += 1; l.statVideoFrames += 1; statBytes += payload.count; statEncodeNanos += f.encodeNanos; secVideoBytes += payload.count; secVideoFrames += 1
         l.account.video += payload.count
         if f.keyframe {
             log("keyframe \(payload.count) bytes (layer \(l.id), \(frags.count) datagrams, \(mask.count) tiles masked, paced over \(paceEnd > Clock.nowNanos() ? (paceEnd - Clock.nowNanos()) / 1_000_000 : 0) ms)")
@@ -4734,8 +4764,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let backlog = layers.values.reduce(0) { $0 + $1.tracker.pendingTotal }
             let d = display
             let windowLayers = layers.values.filter { !$0.isDisplay }
-            log(String(format: "video %.1f fps %.0f kbps (%dx%d) | tiles %.0f kbps %d rects (refine %.0f kbps) copy-rects %d backlog %d skipped %d | captures %d (%.1f ms each) dirty %d pruned %d | target %d cap %d queue %.0f ms rung %d srtt %.0f ms | inflight %d skipped %d dropped %d lost %d encode %.1f ms input %d",
-                       fps, vkbps, d?.encoder?.width ?? 0, d?.encoder?.height ?? 0, tkbps, statTileRects, Double(statRefineBytes) * 8 / 5 / 1000, statCopyRects, backlog, statTileSkipped,
+            // Every layer's encoder (the display's alone read "400x224" for a 1280x960 window's video, 2026-10-25), as
+            // "layer:WxH@fps sent over the last 5 s".
+            let encoders = layers.values.filter { $0.encoder != nil }.sorted { $0.id < $1.id }.map { l in
+                "\(l.isDisplay ? "display" : String(l.id)):\(l.encoder!.width)x\(l.encoder!.height)@\(l.statVideoFrames / 5)"
+            }.joined(separator: " ")
+            for l in layers.values { l.statVideoFrames = 0 }
+            log(String(format: "video %.1f fps %.0f kbps (%@) | tiles %.0f kbps %d rects (refine %.0f kbps) copy-rects %d backlog %d skipped %d | captures %d (%.1f ms each) dirty %d pruned %d | target %d cap %d queue %.0f ms rung %d srtt %.0f ms | inflight %d skipped %d dropped %d lost %d encode %.1f ms input %d",
+                       fps, vkbps, encoders as NSString, tkbps, statTileRects, Double(statRefineBytes) * 8 / 5 / 1000, statCopyRects, backlog, statTileSkipped,
                        statCaptures, capMs, statDirtyTiles, statDiffPruned, rc?.targetKbps ?? 0, rc?.capacityKbps ?? 0, rc?.queueMs ?? 0, rc?.rung ?? 0, srttNanos / 1e6,
                        unacked.count, statSkippedBudget, statDropped, statLost, enc, statInput)
                 + (statNacks > 0 ? " nacks \(statNacks) resent \(statNackResent)" : "") + " fresh \(d?.fresh.description ?? "-")"

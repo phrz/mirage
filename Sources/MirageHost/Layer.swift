@@ -55,6 +55,10 @@ final class Layer {
     /// Visible tiles held back (not due) at the last invariant audit.
     var auditHeldVisible = Set<Int>()
     var frontmost = false
+    /// When a capture last found changed tiles (0: never): the window capture runs at the tier's video rate while it moves.
+    var contentChangedNanos: UInt64 = 0
+    /// Video frames sent since the last 5-s stats line.
+    var statVideoFrames = 0
     var absentSince: UInt64 = 0
     /// When the layer's own capture was (re)started and has not delivered since (0: it has, or none is wanted).
     var awaitingOwnSince: UInt64 = 0
