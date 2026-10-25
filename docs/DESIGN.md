@@ -1464,6 +1464,13 @@ the codec. Built 2026-10-17 as M2.5 (§3.3c); loopback measurements in §6.
   05:57:32 and 06:19:57Z), but two cued restarts mid-run (2026-10-25, 22 s and 32 s into 60 s check-5 runs) and six plain
   runs did not reproduce it: the viewer applied every message it read (queue waits under 70 ms) and refinement in flight
   drained within ~10 s. Unexplained; the 5-s logging (viewer "tile flow", host "unacked") stays on to catch the next one.
+- Path stress has a blind spot for the first ~3 s of a session (0034f4b, accepted 2026-10-25). It reads the median of the
+  last five delay probes (one a second), needs at least three, and needs the median both 25 % and 40 ms over the minimum
+  RTT. Wi-Fi jitter (min RTT 4-11 ms, probes 10-80 ms on the MacBook to mac-daddy) otherwise read as a queue and held a
+  LAN at 8-14 Mbps.
+  - The cost: a queue that builds in the first 3 s doesn't end startup early through this rule; loss and the delivery
+    estimate still act.
+  - To watch: a slow link that overshoots right after connect (Japan bus delivery over 1.1 x in the first window).
 
 ## 6. Status
 
