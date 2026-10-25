@@ -383,6 +383,9 @@ public struct RateController {
     public mutating func seedLAN() {
         lanStart = true
         targetKbps = maxKbps
+        // The probe already measured the round trip: Local now, not at the first ack window (the in-flight cap and the
+        // ceiling read the tier; at +0.63 s a LAN's cap was still 32 KB and its ceiling 11 Mbps, 2026-10-25 12:21Z).
+        tiers.adoptFirst(rateKbps: maxKbps, limitedByLink: false, rttMs: srttNanos / 1e6, lossPercent: 0, now: Clock.nowNanos())
     }
     /// The highest rung (largest scale) the target pays for now (what a LAN starts on instead of the tiny rung).
     public func bestRung() -> Int {
@@ -472,6 +475,9 @@ public struct RateController {
     /// ceiling and the in-flight cap below), and is never saved or taken as delivery.
     public private(set) var probeKbps = 0
     public var deliveryCeilingKbps: Int {
+        // A LAN without stress: the cap. Delivery measured at connect is what the host had to send (stills, refinement),
+        // not what the link carries, and 1.1 x it held a 50 Mbps start at 11 Mbps (2026-10-25 12:21Z).
+        if tier == .local, !pathStressedNow { return maxKbps }
         if deliveryKbps > 0 { return min(maxKbps, max(tuning.minKbps, Int(Double(deliveryKbps) * deliveryGain))) }
         if lanStart { return maxKbps }
         // Before any delivery sample: 4 x the start. (Not lowered by the probe: sent behind stage 1's traffic, its train read
