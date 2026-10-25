@@ -83,3 +83,26 @@ public enum HostProbe {
         }
     }
 }
+
+/// The notice a viewer gets when it resumes its session (U6 review): it may have been away (suspended) while the host
+/// updated or began to, and missed the notice sent then.
+public enum ResumeNotice {
+    public static let within: TimeInterval = 10 * 60
+
+    public static func make(lastResult r: ControlMessage.UpdateStatus?, hostName: String, now: Date) -> ControlMessage.UpdateStatus? {
+        guard let r, r.phase != .unknown else { return nil }
+        var n = r; n.yours = false
+        if !r.isFinal && r.phase != .trial { return n }   // under way now
+        guard let at = r.at else { return nil }
+        let age = now.timeIntervalSince(at)
+        guard age >= 0, age < within else { return nil }
+        let to = r.to.map { " \($0.display)" } ?? ""
+        switch r.phase {
+        case .done, .trial: n.message = "\(hostName) was updated to\(to) while you were away"
+        case .rolledBack: n.message = "\(hostName) tried to update to\(to) while you were away, and rolled back"
+        case .failed: return nil
+        default: break
+        }
+        return n
+    }
+}

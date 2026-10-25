@@ -273,6 +273,31 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertNotNil(try store.knownHosts()["mac-daddy"]?.unreachableSince)
     }
 
+    /// U6 review 6: a status never overwrites a step under way from this app's own update; a rollback reported after the
+    /// restart shows once.
+    @MainActor
+    func testTheHostBarsStep() {
+        let m = LocalHostUpdate()
+        let mine = ControlMessage.UpdateStatus(phase: .downloading, message: "downloading", yours: true)
+        m.apply(event: mine, updating: nil, lastUpdate: nil)
+        m.apply(event: nil, updating: nil, lastUpdate: nil)
+        XCTAssertEqual(m.step, mine, "a status without an update does not clear this app's step")
+        let elsewhere = ControlMessage.UpdateStatus(phase: .verifying, message: "verifying (Automatic)", yours: true)
+        m.apply(event: nil, updating: elsewhere, lastUpdate: nil)
+        XCTAssertEqual(m.step, mine, "nor does one running elsewhere replace it")
+        let fresh = LocalHostUpdate()
+        fresh.apply(event: nil, updating: elsewhere, lastUpdate: nil)
+        XCTAssertEqual(fresh.step, elsewhere)
+        fresh.apply(event: nil, updating: nil, lastUpdate: nil)
+        XCTAssertNil(fresh.step, "it goes when the host's update ends")
+        let rolled = ControlMessage.UpdateStatus(phase: .rolledBack, message: "started 3 times", at: Date(timeIntervalSince1970: 100))
+        fresh.apply(event: nil, updating: nil, lastUpdate: rolled)
+        XCTAssertEqual(fresh.step, rolled, "the rollback shows")
+        fresh.dismissStep()
+        fresh.apply(event: nil, updating: nil, lastUpdate: rolled)
+        XCTAssertNil(fresh.step, "once")
+    }
+
     func testAddSheetNeedsACodeOnlyForANewMac() {
         let paired = [PairedHost(alias: "mac-daddy", name: "mac-daddy")]
         var f = AddHostForm()

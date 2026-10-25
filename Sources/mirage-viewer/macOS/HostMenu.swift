@@ -97,16 +97,15 @@ final class HostMenu: NSObject, NSMenuDelegate {
             model.hostName = name
             model.line = line
             model.canUpdate = can
-            if let step { model.step = step.isFinal && step.phase == .done ? nil : step }
-            // No new step: a running update follows the host's status (Automatic, or another device), and ends with it.
-            else if model.step == nil || model.step?.isFinal == false { model.step = self.status?.updating }
+            let status = self.status
+            model.apply(event: step, updating: status?.updating, lastUpdate: status?.lastUpdate)
             model.updateNow = { [weak self] in self?.updateNow() }
         }
     }
 
     @objc private func updateNow() {
         do { try client?.send(.updateNow) } catch { AppLog.write("update now: \(error)") }
-        MainActor.assumeIsolated { LocalHostUpdate.shared.step = .init(phase: .checking, message: "Checking for the update…", yours: true) }
+        MainActor.assumeIsolated { LocalHostUpdate.shared.apply(event: .init(phase: .checking, message: "Checking for the update…", yours: true), updating: nil, lastUpdate: nil) }
     }
 
     /// The overlay hook on the status item: one small layer over the icon's top-right corner. The icon itself (its image)
@@ -457,6 +456,31 @@ final class LocalHostUpdate: ObservableObject {
     /// Later: hidden until another build comes out.
     @Published var dismissed: String?
     var updateNow: (() -> Void)?
+    /// The step came from the host's status (an update running there), not from this app's own events.
+    private(set) var stepFromStatus = false
+    /// The outcome already shown (or dismissed), so a status does not bring it back.
+    private var shownOutcome: Date?
+
+    /// One place decides the bar's step (U6 review): an event from this app's update wins; a status never overwrites a
+    /// step under way from an event; a running update elsewhere shows while it runs and goes with it; a rollback (or
+    /// failure) the host reports after its restart shows once.
+    func apply(event: ControlMessage.UpdateStatus?, updating: ControlMessage.UpdateStatus?, lastUpdate: ControlMessage.UpdateStatus?) {
+        if let e = event {
+            step = e.isFinal && e.phase == .done ? nil : e
+            stepFromStatus = false
+            if e.isFinal { shownOutcome = e.at ?? Date() }
+            return
+        }
+        if let u = updating {
+            if step == nil || stepFromStatus || step?.isFinal == true { step = u; stepFromStatus = true }
+            return
+        }
+        if stepFromStatus, step?.isFinal == false { step = nil; stepFromStatus = false }
+        if let l = lastUpdate, [.rolledBack, .failed].contains(l.phase), step == nil, let at = l.at, shownOutcome.map({ at > $0 }) ?? true {
+            step = l; stepFromStatus = true; shownOutcome = at
+        }
+    }
+    func dismissStep() { if let at = step?.at { shownOutcome = at }; step = nil; stepFromStatus = false }
 }
 
 /// "Mirage host mac-daddy is out of date: 0.1 (448) → 0.1 (449)" with Update and Later, across the top of the window.
@@ -470,7 +494,7 @@ struct LocalUpdateBar: View {
                 Text(step.phase == .failed ? "Update failed: \(step.message)" : step.phase == .rolledBack ? "Update rolled back: \(step.message)" : step.message)
                     .lineLimit(2)
                 Spacer()
-                if step.isFinal { Button("Dismiss") { model.step = nil } }
+                if step.isFinal { Button("Dismiss") { model.dismissStep() } }
             }
         } else if let line = model.line, model.dismissed != line {
             bar {

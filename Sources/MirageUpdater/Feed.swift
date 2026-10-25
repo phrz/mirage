@@ -55,6 +55,17 @@ public enum UpdateError: Error, CustomStringConvertible, Equatable {
     case verification(String)
     case install(String)
     case busy
+    /// Not now (the Automatic policy's quiet moment ended): nothing was replaced; try again later.
+    case deferred(String)
+
+    /// A failure that says nothing about the build (the network, another update running, a moment that was not quiet):
+    /// it does not use up the build's one automatic try.
+    public var isTransient: Bool {
+        switch self {
+        case .feed, .download, .busy, .deferred: return true
+        case .manifest, .refused, .verification, .install: return false
+        }
+    }
 
     public var description: String {
         switch self {
@@ -65,6 +76,7 @@ public enum UpdateError: Error, CustomStringConvertible, Equatable {
         case .verification(let s): return "verification failed: \(s)"
         case .install(let s): return "install: \(s)"
         case .busy: return "another update is in progress"
+        case .deferred(let s): return "deferred: \(s)"
         }
     }
 }

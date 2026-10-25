@@ -192,6 +192,8 @@ public actor HostConnections {
     public init() {}
     /// Devices with a stream right now (the host's status for the Mirage app's menu).
     public func streamingDeviceIDs() -> [String] { connections.values.compactMap { $0.streamer != nil ? $0.deviceID : nil } }
+    /// When each suspended session was suspended (the Automatic update gate: a viewer that just dropped comes back).
+    public func suspendedSince() -> [Date] { suspended.values.map(\.since) }
 
     public func connection(_ id: UUID) -> HostConnection {
         if let c = connections[id] { return c }

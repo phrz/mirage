@@ -149,7 +149,13 @@ public enum HostSession {
                 let probe = (hello.features ?? []).contains(ControlMessage.Feature.probe)
                 if probe { ctx.probes.mark(conn.id) }
                 authenticated = try await authenticate(hello, stream, conn: conn, remote: remote, ctx: ctx, quiet: probe)
-                if !probe, (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) { await ctx.updateListeners.add(conn.id, sendUpdate) }
+                if !probe, (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) {
+                    await ctx.updateListeners.add(conn.id, sendUpdate)
+                    // A viewer back from a suspended session hears what happened (or is happening) while it was away.
+                    if hello.resumeToken != nil, let n = ResumeNotice.make(lastResult: ctx.updateInfo?().lastResult, hostName: ctx.identity.name, now: Date()) {
+                        sendUpdate(.updateStatus(n))
+                    }
+                }
             case .updateHost(let u):
                 guard let device = authenticated else { throw MirageError.protocolViolation("updateHost before auth") }
                 trigger(.update(targetBuild: u.targetBuild), device: device, connection: conn.id, reply: { sendUpdate(.updateStatus($0)) }, remote: remote, ctx: ctx)

@@ -176,10 +176,15 @@ public final class Store: @unchecked Sendable {
         public var hostProtocol: Int?
         public var hostMinProtocol: Int?
         /// Its update state as the device list shows it.
-        public var updateState: HostUpdateState {
-            .evaluate(hostVersion: hostVersion, latestAvailable: latestAvailable,
-                      incompatibility: incompatibility.flatMap(ControlMessage.Reject.Code.init(rawValue:)), updating: updating)
+        public var updateState: HostUpdateState { updateState(now: Date()) }
+        /// An "updating" learned more than `updatingFreshFor` ago (no newer Welcome or probe since) is stale: it never hides
+        /// the Update offer behind a spinner.
+        public func updateState(now: Date) -> HostUpdateState {
+            let fresh = updating.flatMap { u in lastSeen.flatMap { now.timeIntervalSince($0) < Self.updatingFreshFor ? u : nil } }
+            return .evaluate(hostVersion: hostVersion, latestAvailable: latestAvailable,
+                             incompatibility: incompatibility.flatMap(ControlMessage.Reject.Code.init(rawValue:)), updating: fresh)
         }
+        public static let updatingFreshFor: TimeInterval = 10 * 60
         public init(hostID: String, hostName: String, publicKey: Data, endpoint: String, pairedAt: Date, model: String? = nil, family: String? = nil, lastConnected: Date? = nil) {
             self.hostID = hostID; self.hostName = hostName; self.publicKey = publicKey; self.endpoint = endpoint; self.pairedAt = pairedAt
             self.model = model; self.family = family; self.lastConnected = lastConnected

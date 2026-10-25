@@ -11,6 +11,8 @@ public final class Updater: @unchecked Sendable {
     public let verifier: BundleVerifying
     public let running: MirageVersion
     public var report: @Sendable (UpdatePhase, String) -> Void
+    /// The build being installed, as soon as the feed names it (before the download): progress says "updating to …".
+    public var learnedTarget: @Sendable (MirageVersion) -> Void = { _ in }
 
     /// A bundle's signing identity (tests: a stand-in).
     public let identityOf: @Sendable (URL) -> SigningIdentity
@@ -91,7 +93,10 @@ public final class Updater: @unchecked Sendable {
 
     /// Checks, then installs the channel's newest when it is an update. `targetBuild`: the build the trigger named, which
     /// must be the one the feed lists now (a viewer never names code, only a build the signed feed already offers).
-    public func install(channel: UpdateChannel? = nil, targetBuild: Int? = nil, allowIdentityChange: Bool = false, now: Date = Date()) async throws -> Outcome {
+    /// `gate`: asked again right before the swap (the download can take minutes); a reason defers the update (nothing
+    /// replaced, the staging removed: `UpdateError.deferred`).
+    public func install(channel: UpdateChannel? = nil, targetBuild: Int? = nil, allowIdentityChange: Bool = false, now: Date = Date(),
+                        gate: (@Sendable () async -> String?)? = nil) async throws -> Outcome {
         let fd = try installer.lock()
         defer { flock(fd, LOCK_UN); close(fd) }
         report(.checking, "checking \(channel?.rawValue ?? settings().channel.rawValue)")
@@ -99,6 +104,7 @@ public final class Updater: @unchecked Sendable {
         let m = c.manifest.manifest
         if let t = targetBuild, t != m.build { throw UpdateError.refused("the feed lists build \(m.build), not \(t)") }
         guard case .available(let from, let to) = c.decision else { return .nothing(c.decision) }
+        learnedTarget(to)
 
         report(.downloading, "downloading \(to.display) (\(m.zipSize / 1_000_000) MB)")
         let zip = try await installer.download(m, manifestURL: c.manifestURL)
@@ -111,6 +117,7 @@ public final class Updater: @unchecked Sendable {
             // A different signing identity costs the TCC grants and the agent's registration: never by surprise.
             change = SigningIdentity.change(from: runningIdentity(), to: identityOf(app))
             if let change, !allowIdentityChange { throw UpdateError.refused(SigningIdentity.refusal(change)) }
+            if let gate, let why = await gate() { throw UpdateError.deferred(why) }
             staged = try installer.stageOnAppVolume(app)
         } catch {
             try? FileManager.default.removeItem(at: paths.staging(m.build))

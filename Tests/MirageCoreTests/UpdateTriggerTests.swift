@@ -345,4 +345,48 @@ final class UpdateTriggerTests: XCTestCase {
         XCTAssertTrue(p.shouldLog("d", now: t0.addingTimeInterval(600)))
         XCTAssertTrue(p.shouldLog("d", now: t0.addingTimeInterval(-10)), "a clock set back logs rather than going quiet")
     }
+
+    // MARK: U6 review
+
+    /// 2: a viewer that resumes its session hears what happened while it was away; a trigger or probe (no resume token)
+    /// does not.
+    func testAResumingViewerGetsTheNotice() async throws {
+        let rolled = ControlMessage.UpdateStatus(phase: .rolledBack, message: "started 3 times", from: .current,
+                                                 to: MirageVersion(version: "0.1", build: 9999, commit: "b", channel: .nightly), at: Date())
+        let r = try await rig(permission: anyDevice, lastResult: rolled, handler: nil)
+        defer { r.host.stop(); try? FileManager.default.removeItem(at: r.tmp) }
+        let (s, close) = try await connect(r)(); defer { close() }
+        _ = try await s.authenticate(resumeToken: Data(repeating: 7, count: 32), features: [ControlMessage.Feature.updateStatus])
+        guard case .updateStatus(let n) = try await s.stream.receive() else { return XCTFail("expected the notice") }
+        XCTAssertEqual(n.yours, false)
+        XCTAssertTrue(n.message.contains("while you were away, and rolled back"), n.message)
+    }
+
+    func testResumeNoticeRules() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let to = MirageVersion(version: "0.1", build: 457, commit: "b", channel: .nightly)
+        XCTAssertEqual(ResumeNotice.make(lastResult: .init(phase: .downloading, message: "downloading", to: to), hostName: "m", now: now)?.phase, .downloading,
+                       "an update under way: as it is")
+        XCTAssertEqual(ResumeNotice.make(lastResult: .init(phase: .done, message: "x", to: to, at: now.addingTimeInterval(-60)), hostName: "m", now: now)?.message,
+                       "m was updated to 0.1 (457) while you were away")
+        XCTAssertNil(ResumeNotice.make(lastResult: .init(phase: .done, message: "x", to: to, at: now.addingTimeInterval(-700)), hostName: "m", now: now), "too old")
+        XCTAssertNil(ResumeNotice.make(lastResult: .init(phase: .done, message: "x", to: to, at: now.addingTimeInterval(60)), hostName: "m", now: now), "from the future")
+        XCTAssertNil(ResumeNotice.make(lastResult: .init(phase: .failed, message: "x", to: to, at: now), hostName: "m", now: now))
+        XCTAssertNil(ResumeNotice.make(lastResult: nil, hostName: "m", now: now))
+    }
+
+    /// 4: a persisted "updating" goes stale 10 min after the last Welcome or probe: the Update offer comes back.
+    func testAStaleUpdatingExpires() {
+        var k = Store.KnownHost(hostID: "h", hostName: "m", publicKey: Data(), endpoint: "m", pairedAt: Date(timeIntervalSince1970: 0))
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        k.hostVersion = MirageVersion(version: "0.1", build: 456, commit: "a", channel: .nightly)
+        k.latestAvailable = MirageVersion(version: "0.1", build: 457, commit: "b", channel: .nightly)
+        k.updating = .init(phase: .trial, message: "start 1", to: k.latestAvailable)
+        k.lastSeen = now.addingTimeInterval(-60)
+        XCTAssertEqual(k.updateState(now: now), .updating(to: k.latestAvailable))
+        k.lastSeen = now.addingTimeInterval(-601)
+        XCTAssertEqual(k.updateState(now: now), .updateAvailable(from: k.hostVersion!, to: k.latestAvailable!), "stale: the offer is back")
+        k.lastSeen = nil
+        XCTAssertEqual(k.updateState(now: now), .updateAvailable(from: k.hostVersion!, to: k.latestAvailable!), "never seen since: stale")
+    }
 }

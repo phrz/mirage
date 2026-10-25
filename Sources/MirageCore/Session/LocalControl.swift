@@ -75,6 +75,8 @@ public enum LocalControl {
         public var canUpdate: Bool?
         /// An update in progress on the host (Automatic, or a trigger from anywhere): the menu and bar say "updating".
         public var updating: ControlMessage.UpdateStatus?
+        /// The last update's outcome when it ended within the last minutes (a rollback the bar shows after the restart).
+        public var lastUpdate: ControlMessage.UpdateStatus?
         /// An update is available: the version line the menu and the window bar show, else nil.
         public var updateLine: String? {
             guard let h = hostVersion, let l = latestAvailable, l.build > h.build else { return nil }
