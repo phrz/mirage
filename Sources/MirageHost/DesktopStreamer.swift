@@ -3679,7 +3679,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Local: the fastest lossless preset. Bytes are cheap there and encoding was what crisp waited for: the LAN row on
         // 327ecc2 kept 9-12 blocks encoding for 3 s at preset 4 (13-18 Mbps out of a 50 Mbps target, crisp at 3.6 s); on UI
         // and text, preset 0 encodes ~7x faster for ~1.5x the bytes (358 vs 51 MP/s, 2026-10-25 bench).
-        let webp = rc?.tier == .local ? 0 : effort.webpEffort
+        // The same on any link with room for it (12 Mbps and up: preset 4's output on the M4 Max was 13-18 Mbps): a phone on
+        // Wi-Fi reads as Normal from its first probe (62-74 ms in power save) and waited on preset 4 the same way.
+        let webp = rc.map { $0.tier == .local || $0.targetKbps >= 12_000 } == true ? 0 : effort.webpEffort
         let alpha = !layer.isDisplay
         let layerID = layer.id
         let photoLossy = photographicFinalIsLossy
@@ -4011,7 +4013,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // (2026-10-25 18:16Z) blocks came out ~5x their estimates (photographic windows), 12 started under a 148 KB
             // cap, and the 2.5 MB they sent on completion queued ~3 s in the path (srtt 3 s, target 24 -> 7 Mbps for good).
             let pendingEncode = Int(Double(pacer.blocks.reduce(0) { $1.msgSeq == nil ? $0 + $1.bytes : $0 }) * estimateRatio)
-            if refinementInFlight + pendingEncode >= cap || tileInflightForCap >= cap * 2 { self.rc?.noteCapped(now: now); traceCapped += 1; gate("inflight-cap"); return }
+            if refinementInFlight >= cap || tileInflightForCap >= cap * 2 { self.rc?.noteCapped(now: now); traceCapped += 1; gate("inflight-cap"); return }
+            // Held by blocks still encoding, not by the network: the host's own pace (app-limited), never the link's rate. Counted
+            // as capped, an encode-bound connect at preset 4 read 6.25 Mbps as the link and took the target from 18 to 6 Mbps
+            // (the LAN row on 7fb44e5, 19:51Z: the probe read Wi-Fi's 62 ms, tier Normal).
+            if refinementInFlight + pendingEncode >= cap { self.rc?.noteBudgetLimited(now: now); gate("encode-pending"); return }
         }
         let ordered = layersByPriority()
         // Fresh pictures: the display's ladder gates everything until its base is acked; window stills
