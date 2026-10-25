@@ -228,6 +228,7 @@ public struct RateController {
         // stayed near the default for the connect, and startup's delivery window (4 srtt) stayed ~1 s on a 30 ms link.
         srttNanos = srttSeeded ? srttNanos * 0.8 + rtt * 0.2 : rtt; srttSeeded = true
         probeRTT = probeRTT.isNaN ? rtt : probeRTT * 0.5 + rtt * 0.5; lastProbeSampleNanos = now
+        recentProbeRTTs.append(rtt); if recentProbeRTTs.count > 5 { recentProbeRTTs.removeFirst() }
         if minRTTWindowStart == 0 { minRTTWindowStart = now }
         minRTTCandidate = min(minRTTCandidate, rtt); minRTTNanos = min(minRTTNanos, rtt)
         if Clock.elapsed(since: minRTTWindowStart, now: now) > 30_000_000_000 { minRTTNanos = minRTTCandidate; minRTTCandidate = .infinity; minRTTWindowStart = now }
@@ -542,10 +543,14 @@ public struct RateController {
     /// The probes' round trip rising over the minimum: 25 % over it and more than the underuse threshold (40 ms). Wi-Fi
     /// jitters by tens of ms with no queue: MacBook to mac-daddy, min RTT 4-11 ms from the connect train, probes 10-80 ms;
     /// 25 % alone (3 ms) read stress all session and held a LAN at 8-14 Mbps with a 32 KB in-flight cap (2026-10-25 13:07Z).
+    /// Read on the median of the last 5 probes (one a second; 3 at least): a queue persists across samples, a jittery echo
+    /// doesn't, and the 50/50 average let one 80 ms echo read as a queue.
     var rttRising: Bool {
-        guard !probeRTT.isNaN, minRTTNanos.isFinite else { return false }
-        return probeRTT > minRTTNanos * 1.25 && (probeRTT - minRTTNanos) / 1e6 > tuning.underuseMs
+        guard recentProbeRTTs.count >= 3, minRTTNanos.isFinite else { return false }
+        let rtt = recentProbeRTTs.sorted()[recentProbeRTTs.count / 2]
+        return rtt > minRTTNanos * 1.25 && (rtt - minRTTNanos) / 1e6 > tuning.underuseMs
     }
+    private var recentProbeRTTs: [Double] = []
     /// Most of the window the acks at `now` answer (shifted back an RTT) had little in flight (at least 5 samples).
     private func underusedWindow(now: UInt64) -> Bool {
         let hi = now &- UInt64(srttNanos), lo = hi &- deliveryWindowNanos

@@ -438,10 +438,11 @@ final class LANRecognitionTests: XCTestCase {
         var rc = RateController(initialKbps: 2000, maxKbps: 50_000, nativePixels: 3200 * 1800)
         rc.noteTrainRTT(4_000_000, now: 1_000_000_000)
         rc.seedLAN()
-        rc.probeSample(sentNanos: 2_000_000_000, receivedNanos: 0, now: 2_030_000_000)
-        XCTAssertFalse(rc.rttRising, "26 ms over a 4 ms minimum")
-        rc.probeSample(sentNanos: 3_000_000_000, receivedNanos: 0, now: 3_120_000_000)
-        XCTAssertTrue(rc.rttRising, "probe EWMA 75 ms over the minimum")
+        func probe(_ second: UInt64, ms: UInt64) { rc.probeSample(sentNanos: second * 1_000_000_000, receivedNanos: 0, now: second * 1_000_000_000 + ms * 1_000_000) }
+        probe(2, ms: 30); probe(3, ms: 12); probe(4, ms: 88)
+        XCTAssertFalse(rc.rttRising, "one 88 ms echo among 12-30 ms ones: jitter (median 30)")
+        probe(5, ms: 70); probe(6, ms: 75)
+        XCTAssertTrue(rc.rttRising, "70 ms and more for most of the last five: a queue")
     }
 }
 
