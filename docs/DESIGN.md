@@ -1226,9 +1226,30 @@ A bad build rolls itself back.
 - Each release carries:
   - `Mirage-<version>-<build>.zip` (`ditto -c -k --keepParent` of the notarized, stapled app);
   - `manifest.json`: `{channel, version, build, commit, minProtocol, protocol, minOS, zipURL, zipSHA256, zipSize,
-    notes, published, expires}`;
-  - `manifest.json.sig`: an Ed25519 signature over the manifest bytes. The key lives in phrz's keychain (and later a CI
-    secret); the public key is compiled into the app. CryptoKit's `Curve25519.Signing`, as for the host identity.
+    notes, published, expires, nextKey?}`;
+  - `manifest.sigs.json`: `{keyID: signature}`, Ed25519 signatures over the manifest bytes, one per signing key (one key
+    normally, two during a rotation). CryptoKit's `Curve25519.Signing`, as for the host identity. `keyID` is the first
+    8 bytes of the public key's SHA-256, hex.
+- **Manifest keys and rotation.**
+  - The app compiles in a small list of trusted public keys: `current` and `next`. The current key's private half lives
+    in phrz's keychain (later a CI secret). The next key's private half is generated at the same time and kept offline
+    (1Password, never on a build machine).
+  - A manifest is accepted when at least one signature verifies under a trusted key that isn't revoked.
+  - **Rotation without a reinstall:** a manifest may carry `nextKey`, a new public key. It is covered by the manifest's
+    signature, so only the current key can introduce it. A host that accepts such a manifest adds the key to the
+    learned keys in `updates.json`. From then on, releases are signed by both keys for one cycle, then by the new key
+    alone. The release after that drops the old key from the compiled list. The old key is thereby retired: hosts on that
+    build no longer trust it, and nobody had to reinstall.
+  - **Compromise procedure:** if the current key leaks:
+    1. Promote `next` (whose private half was never online) to current, and generate a new `next`.
+    2. Ship a build signed by both the new and the old key (old hosts trust only the old one) whose compiled list drops
+       the old key and carries it in `revokedKeys`.
+    3. On start, that build removes revoked keys from the learned set. From then on, hosts refuse a manifest signed only
+       by the old key, whatever else it claims.
+  - **The window:** a host that hasn't installed the revoking build still trusts the old key. An attacker holding it can
+    then offer that host a build. But that build must still pass the Team ID requirement and notarization (verification
+    steps 3–4), so a leaked manifest key alone cannot install foreign code. It can only steer a host among genuine
+    notarized Mirage builds that are newer than the running one.
 - The channel heads are three small rolling releases (`channel-stable`, `channel-beta`, `channel-nightly`) whose only
   asset is the current manifest and its signature. A check is then one unauthenticated GET of
   `releases/download/channel-<name>/manifest.json`, which needs no GitHub API rate limit.
@@ -1244,6 +1265,13 @@ A bad build rolls itself back.
 **Verification before anything is replaced (all public API).**
 1. The zip's SHA-256 and size match the signed manifest. The manifest's `build` is greater than the running build;
    rollback to the kept previous bundle is the only way down. Its `minOS` and `minProtocol` are satisfied.
+   - **Switching channel never downgrades.** Moving a host from nightly to stable (or beta) changes which feed it reads,
+     not what it runs. It stays on its current build until the new channel publishes a build greater than the running
+     one, then updates normally.
+   - The menu bar, the viewer's host row and `miraged update --check` say so: "Stable catches up at 0.5.0 (build
+     ≥ 413); staying on nightly 0.4.1 (412) until then."
+   - To get onto an older stable build sooner, phrz has to reinstall deliberately (`install-host.sh --channel stable
+     --force`), never through the updater.
 2. Extract with `ditto -x -k` into `~/Library/Application Support/Mirage/Updates/<build>/`.
 3. Check the code signature: `SecStaticCodeCheckValidity` with `kSecCSCheckAllArchitectures | kSecCSStrictValidate`,
    against a requirement pinned in the running binary:
