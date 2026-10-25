@@ -829,18 +829,21 @@ final class ViewerSession: @unchecked Sendable {
     /// messages and bytes read off the tile streams, how many were applied (each sends its ack), and the longest wait between
     /// reading one and applying it on the video queue. Read but not applied: the ack path; not read: the transport.
     private let flowLock = NSLock()
-    private var flowRx = 0, flowRxBytes = 0, flowApplied = 0, flowMaxWaitNanos: UInt64 = 0, flowSince: UInt64 = 0
+    private var flowRx = 0, flowRxBytes = 0, flowApplied = 0, flowMaxWaitNanos: UInt64 = 0, flowSince: UInt64 = 0, flowApplyNanos: UInt64 = 0, flowMaxApplyNanos: UInt64 = 0
     private func tileFlowNote(received bytes: Int, now: UInt64) {
         flowLock.lock()
         flowRx += 1; flowRxBytes += bytes
         if flowSince == 0 { flowSince = now }
         let due = Clock.elapsed(since: flowSince, now: now) >= 5_000_000_000
-        let line = due ? "tile flow: read \(flowRx) messages \(flowRxBytes / 1000) KB, applied \(flowApplied), longest queue wait \(flowMaxWaitNanos / 1_000_000) ms" : nil
-        if due { flowRx = 0; flowRxBytes = 0; flowApplied = 0; flowMaxWaitNanos = 0; flowSince = now }
+        let line = due ? "tile flow: read \(flowRx) messages \(flowRxBytes / 1000) KB, applied \(flowApplied), longest queue wait \(flowMaxWaitNanos / 1_000_000) ms, applying \(flowApplyNanos / 1_000_000) ms (longest \(flowMaxApplyNanos / 1_000_000) ms)" : nil
+        if due { flowRx = 0; flowRxBytes = 0; flowApplied = 0; flowMaxWaitNanos = 0; flowSince = now; flowApplyNanos = 0; flowMaxApplyNanos = 0 }
         flowLock.unlock()
         if let line { log(line) }
     }
     private func apply(_ msg: TileMessage, seq: UInt32, bytes: Int, now: UInt64) {
+        // Crisp-first: the video queue's time in tile messages (WebP decode and blits), against the queue wait above.
+        let applyStart = Clock.nowNanos()
+        defer { let d = Clock.nowNanos() &- applyStart; flowLock.lock(); flowApplyNanos += d; flowMaxApplyNanos = max(flowMaxApplyNanos, d); flowLock.unlock() }
         statsLock.lock(); sTotalBytes += bytes; statsLock.unlock()
         do { let w = Clock.elapsed(since: now, now: Clock.nowNanos()); flowLock.lock(); flowApplied += 1; flowMaxWaitNanos = max(flowMaxWaitNanos, w); flowLock.unlock() }
         switch msg {
