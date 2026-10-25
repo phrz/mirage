@@ -1272,8 +1272,9 @@ A bad build rolls itself back.
   - `policy` (phrz, 2026-10-25: only two):
     - **Ask** (the default): shows the indicator and installs only when someone triggers it, from a device list, the
       menu bar, the app's bar, or `miraged update --now`.
-    - **Automatic:** installs on its own when no stream has been open for 30 min, between 02:00 and 05:00 local time.
-      The indicator still shows until then, and a trigger installs at once.
+    - **Automatic:** installs on its own at a quiet moment: no viewer streaming, none suspended or having streamed in
+      the last 10 min, no system prompt on screen, and nobody at the Mac for 10 min (as built in U6; this replaced the
+      first draft's 02:00–05:00 window). The indicator still shows until then, and a trigger installs at once.
   - mac-daddy: nightly with Ask until the rollback path is proven (U3's broken-build test), then Automatic. Decided
     (phrz, 2026-10-25): "Yes: mac-daddy on nightly, Ask for now, Automatic once rollback is proven."
 
@@ -1510,8 +1511,10 @@ A bad build rolls itself back.
   github.com/phrz/homebrew-mirage. Nightlies never go to Homebrew.
   - The casks carry `auto_updates true`, so `brew upgrade` leaves the app to its own updater; the two casks conflict
     with each other.
-  - `binary` links miraged into the PATH. `uninstall` removes the agent job and quits the app; only `zap` removes
-    Previous/, Updates/, the update settings and records, and the logs. Pairings and identities stay.
+  - `binary` links miraged into the PATH. `uninstall` only quits the app (an upgrade or reinstall leaves the agent
+    registered); `zap` removes the agent job, Previous/, Updates/, the update settings and records, and the logs.
+    Pairings and identities stay even then. A `preflight` refuses to replace a build newer than the cask's (the installed
+    bundle's, or the one the host committed last), so a greedy upgrade never downgrades a self-updated host.
   - The caveats name the grant panes (both macOS 27's names and the older ones), Allow Connections, and
     `miraged update --set channel=`.
   - `release.sh stable|beta` rewrites the channel's cask (version "VERSION,BUILD", sha256, url) and says to copy it to

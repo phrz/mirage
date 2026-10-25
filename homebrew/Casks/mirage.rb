@@ -21,20 +21,40 @@ cask "mirage" do
   app "Mirage.app"
   binary "#{appdir}/Mirage.app/Contents/MacOS/miraged"
 
-  # The host agent goes with the app; its settings, pairings and the kept previous build stay until zap.
-  uninstall launchctl: "com.paulherz.mirage.host",
-            quit:      "com.paulherz.mirage"
+  # Never replace a build Mirage's own updater installed since (a greedy upgrade or a reinstall would downgrade it):
+  # the newer of the installed bundle's build and the build the host committed last (updates.json) wins.
+  preflight_steps do
+    run "/bin/sh", args: ["-c", <<~SH, "sh", version, "{{user}}"]
+      ours=${1##*,}
+      home=${HOME:-/Users/$2}
+      app=${3:-/Applications/Mirage.app}
+      installed=$(/usr/bin/plutil -extract CFBundleVersion raw -o - "$app/Contents/Info.plist" 2>/dev/null || echo 0)
+      committed=$(/usr/bin/plutil -extract identity.build raw -o - "$home/Library/Application Support/Mirage/updates.json" 2>/dev/null || echo 0)
+      newest=$installed
+      [ "$committed" -gt "$newest" ] 2>/dev/null && newest=$committed
+      if [ "$newest" -gt "$ours" ] 2>/dev/null; then
+        echo "Mirage build $newest is installed (it updates itself), newer than this cask's $ours: not replacing it." >&2
+        echo "To go back deliberately: brew uninstall --cask mirage first." >&2
+        exit 1
+      fi
+    SH
+  end
 
-  zap trash: [
-    "~/Library/Application Support/Mirage/host-registration.json",
-    "~/Library/Application Support/Mirage/pending-update.json",
-    "~/Library/Application Support/Mirage/Previous",
-    "~/Library/Application Support/Mirage/update-result.json",
-    "~/Library/Application Support/Mirage/Updates",
-    "~/Library/Application Support/Mirage/updates.json",
-    "~/Library/Logs/mirage-app.log",
-    "~/Library/Logs/mirage-host.log",
-  ]
+  # Only the app: an upgrade or reinstall leaves the host agent registered (Mirage registers it again if needed). The
+  # agent's job goes with zap. Pairings and the host's identity stay even then.
+  uninstall quit: "com.paulherz.mirage"
+
+  zap launchctl: "com.paulherz.mirage.host",
+      trash:     [
+        "~/Library/Application Support/Mirage/host-registration.json",
+        "~/Library/Application Support/Mirage/pending-update.json",
+        "~/Library/Application Support/Mirage/Previous",
+        "~/Library/Application Support/Mirage/update-result.json",
+        "~/Library/Application Support/Mirage/Updates",
+        "~/Library/Application Support/Mirage/updates.json",
+        "~/Library/Logs/mirage-app.log",
+        "~/Library/Logs/mirage-host.log",
+      ]
 
   caveats <<~EOS
     To let your other devices connect to this Mac, open Mirage and choose Allow Connections to This Mac in its
