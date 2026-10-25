@@ -7,8 +7,11 @@
 #   scripts/testflight.sh --no-upload   archive + export an .ipa into .build/testflight/export only
 set -e
 cd "$(dirname "$0")/.."
-if [ -z "${DEVELOPER_DIR:-}" ] && [ -d /Applications/Xcode-27.1.0-Beta.app ]; then
-    export DEVELOPER_DIR=/Applications/Xcode-27.1.0-Beta.app/Contents/Developer
+# Xcode's toolchain, not the Command Line Tools (their manifest API can't read Package.swift on macOS 27).
+if [ -z "${DEVELOPER_DIR:-}" ]; then
+    for x in /Applications/Xcode.app /Applications/Xcode-27.1.0-Beta.app; do
+        [ -d "$x" ] && { export DEVELOPER_DIR="$x/Contents/Developer"; break; }
+    done
 fi
 BUILD=${BUILD:-$(date -u +%Y%m%d%H%M)}
 DEST=upload; [ "${1:-}" = "--no-upload" ] && DEST=export

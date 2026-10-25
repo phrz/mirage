@@ -51,11 +51,11 @@ the menu bar shows the host's third-party status items. In Unified mode the desk
 
 ## Build
 
-The Command Line Tools' package manifest API is broken on macOS 27 with Xcode 27 beta
-installed; build with Xcode's toolchain:
+The Command Line Tools' package manifest API can't read this package on macOS 27; build with
+Xcode's toolchain (Xcode 27.1 or later):
 
 ```bash
-export DEVELOPER_DIR=/Applications/Xcode-27.1.0-Beta.app/Contents/Developer
+export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 swift build -c release
 swift test
 ```
