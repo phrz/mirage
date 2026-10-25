@@ -2680,8 +2680,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             let inPlan = Set(plan.lossless).union(plan.video)
             let held = dirty.filter { !inPlan.contains($0) && tracker.isDirectPending($0) && !layer.occludedTiles.contains($0) }
             if !held.isEmpty { tracker.sent(lossless: held, now: now); plan.lossless.append(contentsOf: held) }
-            // One path: a capture that video takes part of goes to video whole (its direct tiles too).
-            if !plan.video.isEmpty, !plan.lossless.isEmpty, (layer.encoder != nil || ensureEncoder(layer)) {
+            // One path: a capture that real video takes part of goes to video whole (its direct tiles too). Small video (under the
+            // motion gate) becomes small-animation tiles below, which go with the capture's direct tiles instead.
+            let realVideo = !plan.video.isEmpty && (plan.wholeFrame || MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount, screenTiles: display?.tracker.tileCount ?? 0))
+            if realVideo, !plan.lossless.isEmpty, (layer.encoder != nil || ensureEncoder(layer)) {
                 plan.video.append(contentsOf: plan.lossless)
                 plan.videoRegion = plan.videoRegion.union(tracker.boundingRect(plan.lossless))
                 tracker.markVideo(plan.lossless, now: now)
@@ -2735,7 +2737,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 else { fps = min(maxFPS, max(fps, share / max(1, layer.smallAnimLossyBytes))); quality = 90; full = true }
             }
             let interval = UInt64(1e9 / fps)
-            if !small.isEmpty, Clock.elapsed(since: layer.smallAnimNanos, now: now) >= interval {
+            // TRUTH step 2: in a capture with other direct changes (a caret that blinks, then moves with the text), the small
+            // tiles go with them now, not at the small-animation rate a moment later.
+            let withCapture = atomic && !plan.lossless.isEmpty
+            if !small.isEmpty, withCapture || Clock.elapsed(since: layer.smallAnimNanos, now: now) >= interval {
                 layer.smallAnimNanos = now
                 if layer.isDisplay { displaySent(small) }
                 let bytes = submitLossless(layer: layer, tiles: small, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: quality, lossyFull: full)
