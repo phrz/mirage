@@ -9,6 +9,7 @@ let package = Package(
         .executable(name: "miraged", targets: ["miraged"]),
         .executable(name: "mirage", targets: ["mirage"]),
         .executable(name: "mirage-viewer", targets: ["mirage-viewer"]),
+        .executable(name: "mirage-release", targets: ["mirage-release"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.5.0"),
@@ -37,6 +38,23 @@ let package = Package(
             dependencies: ["MirageCore"],
             swiftSettings: [.swiftLanguageMode(.v5)],
             linkerSettings: [.linkedFramework("ScreenCaptureKit"), .linkedFramework("VideoToolbox"), .linkedFramework("AppKit")]
+        ),
+        // Host updates (DESIGN §3.10): feed, signed manifests, verification, the atomic swap, health commit and rollback.
+        // macOS only (Security's code-signing and Gatekeeper APIs); the iOS viewer never reads the feed.
+        .target(
+            name: "MirageUpdater",
+            dependencies: ["MirageCore"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        // The release script's helper (scripts/release.sh): manifest keys, writing and signing manifests, verifying them
+        // with the same code the host runs.
+        .executableTarget(
+            name: "mirage-release",
+            dependencies: [
+                "MirageCore", "MirageUpdater",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+            ],
+            swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .executableTarget(
             name: "miraged",
@@ -67,6 +85,11 @@ let package = Package(
         .testTarget(
             name: "MirageViewerTests",
             dependencies: ["mirage-viewer", "MirageCore"],
+            swiftSettings: [.swiftLanguageMode(.v5)]
+        ),
+        .testTarget(
+            name: "MirageUpdaterTests",
+            dependencies: ["MirageUpdater", "MirageCore"],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .testTarget(
