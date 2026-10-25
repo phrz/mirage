@@ -1418,7 +1418,33 @@ A bad build rolls itself back.
   Screen Recording it reports the missing grant instead of capturing.
 - Signing: `make-viewer-app.sh` and `deploy-host.sh` use Developer ID when this Mac has it, and otherwise Apple
   Development with a loud warning, so a missing certificate never blocks a deploy. `MIRAGE_SIGN=developer-id` requires
-  Developer ID (release.sh sets it); `MIRAGE_SIGN=dev` forces Apple Development.
+  Developer ID (release.sh sets it); `MIRAGE_SIGN=dev` forces Apple Development. The hardened runtime and the secure
+  timestamp come with Developer ID only; an Apple Development miraged is signed exactly as before.
+- **The agent's launch constraint (incident, mac-daddy, 2026-10-26).** BTM keeps a lightweight code requirement (LWCR:
+  signing identifier, team, validation category) for the agent, derived from the signature SMAppService registered.
+  After the first Developer ID deploy, every later deploy failed to spawn: "job state = spawn failed", exit 78
+  (EX_CONFIG), "needs LWCR update", and the old registration still reported `.enabled`. Only registering again from the
+  app refreshes it. So:
+  - `Mirage.app --reregister-host ID` unregisters and registers the agent (and the app's own login item), logs both
+    statuses and launchd's job state, writes `host-registration.json` (with miraged's designated requirement), and quits.
+  - At every launch, the app registers again by itself when launchd refuses the agent or miraged's designated
+    requirement differs from the recorded one. "Open Mirage.app once" is therefore always the manual fix.
+  - `miraged update --ensure-agent` (deploy-host.sh, rollback-host.sh, and later install-host.sh) kickstarts the agent,
+    and on a spawn failure asks the app to register again: `open -n -g -a Mirage.app --args --reregister-host ID` from
+    the GUI session, else (`open` fails over SSH: "Could not switch to audit session") a one-shot job bootstrapped into
+    the gui launchd domain that runs that `open`. If neither reaches the app, it says a person must open Mirage.app once.
+  - After a swap, the updater watches launchd for 20 s. A build that never spawns never counts an attempt (the
+    dyld-class hole), so the swapping process registers the agent again, and if launchd still refuses it, swaps the
+    previous build back itself, registers that, and checks it runs. `pending-update.json` records `reregistered`, so a
+    rollback by the new build itself registers the old build again too.
+- **A change of signing identity is never silent (same incident).** TCC's Screen Recording and Accessibility rows
+  matched the Apple Development requirement; the Developer ID build did not match them although the switches showed on,
+  and they had to be removed and added again by hand. So before staging, the updater compares the staged bundle's
+  designated requirements (the app's and miraged's) with the running build's (recorded in `updates.json` at its
+  commit). If they differ, it refuses: "signing identity change: … will need a person at the Mac". With
+  `--allow-identity-change` it installs, registers the agent for the new identity at once, and prints the TCC steps.
+  `deploy-host.sh` makes the same check against the installed bundle, with `MIRAGE_ALLOW_IDENTITY_CHANGE=1` as its
+  override; install-host.sh (U5) must too.
 - `Mirage.minProtocolVersion` = `protocolVersion` = 5 for now: every build in the fleet still connects. A newer viewer
   that can speak down is accepted; `Hello.minProtocolVersion` lets a viewer that can't be refused as `.hostTooOld`.
 - `TrustedKeys.compiled` is empty until phrz runs `release.sh keys-init` and commits it. Until then no build verifies a
