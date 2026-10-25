@@ -49,7 +49,8 @@ public struct ClientSession {
 
     /// Mutual Ed25519 authentication, channel-bound to the TLS leaf fingerprint. `resumeToken` (from an
     /// earlier Welcome) asks the host to resume that session once this connection is authenticated.
-    public func authenticate(resumeToken: Data? = nil, features: [String]? = nil) async throws -> ControlMessage.Welcome {
+    /// `probe`: a status probe (U7): the record learns the host's state and when it was seen, but not "connected".
+    public func authenticate(resumeToken: Data? = nil, features: [String]? = nil, probe: Bool = false) async throws -> ControlMessage.Welcome {
         guard let known = try store.knownHosts()[alias] else {
             throw MirageError.authenticationFailed("not paired with \(alias); run `mirage connect \(alias) --pair CODE`")
         }
@@ -89,7 +90,12 @@ public struct ClientSession {
             h.updateTrigger = welcome.acceptsUpdateTrigger
             h.updating = welcome.updateResult.flatMap { $0.isFinal ? nil : $0 }
             h.incompatibility = tooOld?.rawValue
-            if tooOld == nil { h.lastConnected = Date() }
+            h.lastSeen = Date(); h.unreachableSince = nil
+            h.triggerFeature = (welcome.features ?? []).contains(ControlMessage.Feature.updateTrigger)
+            h.hostPolicy = welcome.updatePolicy
+            h.hostStreaming = welcome.hostStreaming
+            h.hostProtocol = welcome.protocolVersion; h.hostMinProtocol = welcome.minProtocolVersion
+            if tooOld == nil, !probe { h.lastConnected = Date() }
         }
         if tooOld != nil {
             throw MirageError.authenticationFailed("host rejected: \(welcome.hostName) (Mirage \(welcome.hostVersion?.display ?? "older"), protocol \(welcome.protocolVersion ?? 0)) is too old for this viewer (needs protocol \(Mirage.minProtocolVersion)): update \(welcome.hostName)")

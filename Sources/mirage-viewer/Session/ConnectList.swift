@@ -18,6 +18,14 @@ struct PairedHost: Identifiable, Equatable {
     var update: HostUpdateState = .current
     /// It takes an update trigger from this device (U4): the prompt's Update button, else how to update it instead.
     var canTrigger = false
+    /// U7, from the last Welcome (a session's or a status probe's): when it last answered, whether it does not now,
+    /// whether it has the remote trigger at all (nil: never learned) and lets this device use it, and whether another
+    /// device streams from it.
+    var lastSeen: Date?
+    var unreachable = false
+    var triggerFeature: Bool?
+    var viewerMayTrigger: Bool?
+    var streamingElsewhere = false
     var id: String { alias }
 
     var title: String { name.isEmpty ? alias : name }
@@ -32,9 +40,16 @@ struct PairedHost: Identifiable, Equatable {
         var parts: [String] = []
         let bare = alias.lowercased().replacingOccurrences(of: ".local", with: "")
         if !name.isEmpty, bare != name.lowercased() { parts.append(alias) }
-        if let t = lastConnected {
-            let f = RelativeDateTimeFormatter(); f.locale = locale; f.unitsStyle = .full; f.dateTimeStyle = .named
-            parts.append(now.timeIntervalSince(t) < 60 ? "Connected just now" : "Connected \(f.localizedString(for: t, relativeTo: now))")
+        let f = RelativeDateTimeFormatter(); f.locale = locale; f.unitsStyle = .full; f.dateTimeStyle = .named
+        func ago(_ t: Date) -> String { now.timeIntervalSince(t) < 60 ? "just now" : f.localizedString(for: t, relativeTo: now) }
+        // What it is now, as far as known: unreachable, seen (by a probe or a session), else when this device connected.
+        if unreachable {
+            parts.append(lastSeen.map { "Unreachable · last seen \(ago($0))" } ?? "Unreachable")
+        } else if let t = lastSeen {
+            parts.append("Seen \(ago(t))")
+            if streamingElsewhere { parts.append("In use by another device") }
+        } else if let t = lastConnected {
+            parts.append("Connected \(ago(t))")
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
@@ -55,7 +70,8 @@ enum ConnectList {
         return (recentPaired + rest).map { alias in
             let h = known[alias]!
             return PairedHost(alias: alias, name: h.hostName, model: h.model, family: h.deviceFamily, lastConnected: h.lastConnected, update: h.updateState,
-                              canTrigger: h.updateTrigger ?? false)
+                              canTrigger: h.updateTrigger ?? false, lastSeen: h.lastSeen, unreachable: h.unreachableSince != nil,
+                              triggerFeature: h.triggerFeature, viewerMayTrigger: h.hostPolicy?.viewerMayTrigger, streamingElsewhere: h.hostStreaming ?? false)
         }
     }
 
@@ -183,16 +199,7 @@ final class HostUpdateCenter: ObservableObject {
         guard !isRunning(h.alias), case .updateAvailable(_, let to) = h.update else { return }
         let alias = h.alias, name = h.title
         status[alias] = .init(phase: .checking, message: "Asking \(name) to update…", yours: true)
-        let (host, port) = ConnectList.parseAddress(alias)
-        let connect: HostUpdateTrigger.Connect = {
-            let store = try Store()
-            let identity = try ViewerCredentials.clientIdentity(store: store)
-            let client = QUICClient(host: host, port: port)
-            try await client.connect(timeout: 10)
-            guard let fp = client.tlsFingerprint else { client.close(); throw MirageError.transport("no TLS fingerprint") }
-            let stream = try await client.openStream()
-            return (ClientSession(identity: identity, store: store, alias: alias, tlsFingerprint: fp, stream: stream), { client.close() })
-        }
+        let connect = HostConnector.connect(alias: alias, timeout: 10)
         Task.detached {
             let end = await HostUpdateTrigger.run(connect: connect, command: .update(targetBuild: to.build), hostName: name) { st in
                 Task { @MainActor in HostUpdateCenter.shared.status[alias] = st }
@@ -215,11 +222,127 @@ final class HostUpdateCenter: ObservableObject {
         }
     }
 
-    /// The prompt's text: the Mac, its current and new build and channel.
-    static func promptText(_ h: PairedHost) -> String {
+    /// Opens the prompt for a row; a Mac whose trigger was never learned is probed first (the prompt says "Checking…").
+    func ask(_ h: PairedHost) {
+        prompt = h
+        guard UpdatePrompt.state(h) == .checking else { return }
+        let alias = h.alias
+        Task {
+            await HostProbeCenter.shared.probeNow(alias)
+            if prompt?.alias == alias { prompt = ConnectList.load().first { $0.alias == alias } ?? prompt }
+        }
+    }
+
+    /// The prompt's text: the Mac, its current and new build and channel, and what can be done about it.
+    static func promptText(_ h: PairedHost) -> String { UpdatePrompt.text(h) }
+}
+
+/// The update prompt's states (U7): never claim a Mac "doesn't take updates" from a missing or stale record.
+enum UpdatePrompt: Equatable {
+    /// Its trigger was never learned (no probe or session since it had one): ask it now.
+    case checking
+    case unreachable
+    /// It has no remote trigger (a build from before U4).
+    case olderHost
+    /// It has one, but allows updates only on itself.
+    case restricted
+    case canUpdate
+
+    static func state(_ h: PairedHost) -> UpdatePrompt {
+        if h.unreachable { return .unreachable }
+        if h.canTrigger { return .canUpdate }
+        guard let feature = h.triggerFeature else { return .checking }
+        if !feature { return .olderHost }
+        if h.viewerMayTrigger == false { return .restricted }
+        return .checking   // the feature, but no permission learned: ask again
+    }
+
+    static func text(_ h: PairedHost) -> String {
         guard case .updateAvailable(let from, let to) = h.update else { return "" }
         let base = "\(h.title): \(from.display) → \(to.display), \(to.channelName)"
-        return h.canTrigger ? base : base + "\n\nThis Mac doesn't take updates from other devices (it is older, or allows updates only on itself). Update it from its menu bar, or over SSH: miraged update --now"
+        switch state(h) {
+        case .canUpdate: return base
+        case .checking: return base + "\n\nChecking \(h.title)…"
+        case .unreachable: return base + "\n\n\(h.title) can't be reached right now. Try again when it is online."
+        case .olderHost: return base + "\n\nThis build of Mirage on \(h.title) can't be updated from another device. Update it from its menu bar, or over SSH: miraged update --now"
+        case .restricted: return base + "\n\n\(h.title) allows updates only on itself: its menu bar, or over SSH: miraged update --now"
+        }
+    }
+}
+
+/// A fresh authenticated session to a paired host, for the trigger and the status probe: its own connection, never a
+/// viewer's.
+enum HostConnector {
+    static func connect(alias: String, timeout: TimeInterval) -> HostUpdateTrigger.Connect {
+        let (host, port) = ConnectList.parseAddress(alias)
+        return {
+            let store = try Store()
+            let identity = try ViewerCredentials.clientIdentity(store: store)
+            let client = QUICClient(host: host, port: port)
+            do { try await client.connect(timeout: timeout) } catch { client.close(); throw error }
+            guard let fp = client.tlsFingerprint else { client.close(); throw MirageError.transport("no TLS fingerprint") }
+            let stream: MessageStream
+            do { stream = try await client.openStream() } catch { client.close(); throw MirageError.transport("\(error)") }
+            return (ClientSession(identity: identity, store: store, alias: alias, tlsFingerprint: fp, stream: stream), { client.close() })
+        }
+    }
+}
+
+/// The device lists' status probes (U7): each paired Mac learns about the others without a screen share. One host at a
+/// time, 3 s to connect, never one this device has a session with (that session's own Welcome keeps the record): when a
+/// list appears or the app comes to the foreground, then every 60 s while a list shows, and (on the Mac) every 10 min in
+/// the background. iOS probes only while its list shows.
+@MainActor
+final class HostProbeCenter: ObservableObject {
+    static let shared = HostProbeCenter()
+    /// Bumped after each probe: the lists reload known-hosts.
+    @Published private(set) var revision = 0
+    private var listsVisible = 0
+    private var loop: Task<Void, Never>?
+    static let visibleEvery: TimeInterval = 60
+    #if os(macOS)
+    static let backgroundEvery: TimeInterval? = 600
+    #else
+    static let backgroundEvery: TimeInterval? = nil
+    #endif
+
+    /// A session open to this alias right now (its control channel is the source then). Tests replace it.
+    var sessionOpen: (String) -> Bool = { ViewerPreferences.shared.session?.host == $0 }
+    /// Where the records live (tests: a throwaway store), and how a host is reached.
+    var store: () -> Store? = { try? Store() }
+    var connector: (String) -> HostUpdateTrigger.Connect = { HostConnector.connect(alias: $0, timeout: 3) }
+    /// Probes actually made (not skipped).
+    private(set) var probesRun = 0
+
+    func listAppeared() { listsVisible += 1; restart() }
+    func listDisappeared() { listsVisible = max(0, listsVisible - 1) }
+    func appBecameActive() { restart() }
+
+    private func restart() {
+        loop?.cancel()
+        loop = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.probeAll()
+                guard let self, let every = self.listsVisible > 0 ? Self.visibleEvery : Self.backgroundEvery else { return }
+                try? await Task.sleep(for: .seconds(every * Double.random(in: 0.9...1.1)))   // jitter
+            }
+        }
+    }
+
+    private func probeAll() async {
+        for h in ConnectList.load(store: store()) where !Task.isCancelled {
+            try? await Task.sleep(for: .milliseconds(Int.random(in: 0...400)))
+            await probeNow(h.alias)
+        }
+    }
+
+    /// One host now, unless a session to it is open.
+    func probeNow(_ alias: String) async {
+        guard !sessionOpen(alias), let store = store() else { return }
+        let connect = connector(alias)
+        probesRun += 1
+        _ = await Task.detached { await HostProbe.probe(connect: connect, store: store, alias: alias) }.value
+        revision += 1
     }
 }
 
@@ -241,7 +364,7 @@ struct HostUpdateBadge: View {
                 .help("Updating")
                 .accessibilityLabel("\(host.title) is updating")
         } else if case .updateAvailable = host.update {
-            Button { center.prompt = host } label: { UpdateArrow(selected: prominence == .increased) }
+            Button { center.ask(host) } label: { UpdateArrow(selected: prominence == .increased) }
             .buttonStyle(.borderless)
             .help("Update available")
             .accessibilityLabel("Update \(host.title)")
@@ -274,10 +397,13 @@ extension View {
         alert(center.prompt.map { "Update \($0.title)?" } ?? "",
               isPresented: Binding(get: { center.prompt != nil }, set: { if !$0 { center.prompt = nil } }),
               presenting: center.prompt) { h in
-            if h.canTrigger {
+            switch UpdatePrompt.state(h) {
+            case .canUpdate:
                 Button("Update") { center.update(h) }
                 Button("Cancel", role: .cancel) {}
-            } else {
+            case .checking:
+                Button("Cancel", role: .cancel) {}
+            case .unreachable, .olderHost, .restricted:
                 Button("OK", role: .cancel) {}
             }
         } message: { h in

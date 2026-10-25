@@ -20,6 +20,8 @@ public struct HostContext: Sendable {
     public var updateHandler: HostUpdateHandler?
     /// Viewers to tell before the host restarts into an update.
     public let updateListeners = UpdateListeners()
+    /// Status probes from viewers' device lists (U7): quiet, never streams, never listeners.
+    public let probes = ProbeRegistry()
 
     public init(identity: DeviceIdentity, store: Store, tlsFingerprint: Data, log: @escaping @Sendable (String) -> Void,
                 makeStreamer: (@Sendable () -> DesktopStreamer)? = nil) {
@@ -74,6 +76,8 @@ public enum HostSession {
                 isControl = true
                 try await serveStream(stream, conn: conn, remote: remote, ctx: ctx)
             }
+        } catch where ctx.probes.isProbe(connectionID) {
+            // A status probe's end: not logged.
         } catch {
             let text = "\(error)"
             // ECONNREFUSED(61)/ENOTCONN(57)/ETIMEDOUT(60)/cancelled are how QUIC stream closes surface; keep them quiet.
@@ -100,6 +104,7 @@ public enum HostSession {
             }
             _ = await ctx.connections.remove(connectionID)
             await ctx.updateListeners.remove(connectionID)
+            ctx.probes.end(connectionID)
         } else if conn.streamer != nil {
             ctx.log("[\(remote)] datagram flow closed while streaming")
         }
@@ -141,8 +146,10 @@ public enum HostSession {
             let msg = try await stream.receive()
             switch msg {
             case .hello(let hello):
-                authenticated = try await authenticate(hello, stream, conn: conn, remote: remote, ctx: ctx)
-                if (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) { await ctx.updateListeners.add(conn.id, sendUpdate) }
+                let probe = (hello.features ?? []).contains(ControlMessage.Feature.probe)
+                if probe { ctx.probes.mark(conn.id) }
+                authenticated = try await authenticate(hello, stream, conn: conn, remote: remote, ctx: ctx, quiet: probe)
+                if !probe, (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) { await ctx.updateListeners.add(conn.id, sendUpdate) }
             case .updateHost(let u):
                 guard let device = authenticated else { throw MirageError.protocolViolation("updateHost before auth") }
                 trigger(.update(targetBuild: u.targetBuild), device: device, connection: conn.id, reply: { sendUpdate(.updateStatus($0)) }, remote: remote, ctx: ctx)
@@ -257,7 +264,8 @@ public enum HostSession {
 
     // MARK: Authentication of a paired device
 
-    static func authenticate(_ hello: ControlMessage.Hello, _ stream: MessageStream, conn: HostConnection, remote: String, ctx: HostContext) async throws -> DeviceRecord {
+    static func authenticate(_ hello: ControlMessage.Hello, _ stream: MessageStream, conn: HostConnection, remote: String, ctx: HostContext,
+                             quiet: Bool = false) async throws -> DeviceRecord {
         // Protocol range (DESIGN §3.10): a mixed fleet works; only a viewer too old for this host, or one that needs more
         // than this host speaks, is refused, with a code saying which side to update.
         if let code = ProtocolCompat.check(viewerProtocol: hello.protocolVersion, viewerMinProtocol: hello.minProtocolVersion) {
@@ -309,13 +317,20 @@ public enum HostSession {
         }
         let token = resumed ? conn.resumeToken! : await ctx.connections.issueToken(for: conn.id, deviceID: device.id)
         let updates = ctx.updateInfo?()
+        let streamingElsewhere = await !ctx.connections.streamingDeviceIDs().filter { $0 != device.id }.isEmpty
         try await stream.send(.welcome(.init(hostName: ctx.identity.name, sessionID: session, resumeToken: token, resumed: resumed, hostBuild: BuildInfo.current,
                                              hostModel: DeviceModel.current, hostFamily: DeviceModel.currentFamily?.rawValue,
                                              hostVersion: .current, latestAvailable: updates?.latestAvailable, updatePolicy: updates?.permission,
                                              protocolVersion: Mirage.protocolVersion,
                                              features: ctx.updateHandler != nil ? [ControlMessage.Feature.updateTrigger] : nil,
                                              // Only to a viewer that decodes update statuses (one from before U4 never sees it).
-                                             updateResult: (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) ? updates?.lastResult : nil)))
+                                             updateResult: (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) ? updates?.lastResult : nil,
+                                             hostStreaming: streamingElsewhere, minProtocolVersion: Mirage.minProtocolVersion)))
+        if quiet {
+            // A status probe: one line per device every 10 min at most, no timings.
+            if ctx.probes.shouldLog(device.id) { ctx.log("[\(remote)] status probe from \(device.name) (\(device.id.prefix(12))); further probes from it unlogged for \(Int(ctx.probes.logEvery / 60)) min") }
+            return device
+        }
         ctx.log("[\(remote)] auth timing: challenge sent at \(tChallenge) ms, authenticate in at \(tAuth) ms, welcome sent at \(ms()) ms (from the hello)")
         ctx.log("[\(remote)] authenticated \(device.name) (\(device.id.prefix(12)))\(resumed ? ", resuming its session" : hello.resumeToken != nil ? " (resume token unknown or expired: new session)" : "")")
         return device

@@ -165,6 +165,16 @@ public final class Store: @unchecked Sendable {
         public var updateTrigger: Bool?
         /// An update the host was running at the last connection (its Welcome's updateResult, not yet final).
         public var updating: ControlMessage.UpdateStatus?
+        /// U7, from the last Welcome (a session's, or a status probe's): when the host last answered, since when it has
+        /// not, whether it has the remote trigger at all and its update permission, whether it streams to another device,
+        /// and the protocol range it speaks.
+        public var lastSeen: Date?
+        public var unreachableSince: Date?
+        public var triggerFeature: Bool?
+        public var hostPolicy: UpdatePermission?
+        public var hostStreaming: Bool?
+        public var hostProtocol: Int?
+        public var hostMinProtocol: Int?
         /// Its update state as the device list shows it.
         public var updateState: HostUpdateState {
             .evaluate(hostVersion: hostVersion, latestAvailable: latestAvailable,

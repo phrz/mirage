@@ -115,6 +115,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         launchedInBackground = options.host.isEmpty && (loginItem || CommandLine.arguments.contains("--allow-connections") || CommandLine.arguments.contains("--background"))
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        if hostMenu != nil { MainActor.assumeIsolated { HostProbeCenter.shared.appBecameActive() } }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let id = HostMenu.reregisterRequest { HostMenu.reregisterAgent(requestID: id); NSApp.terminate(nil); return }
         installMenu()
@@ -127,6 +131,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             m.onConnectWindow = { [weak self] in MainActor.assumeIsolated { self?.openViewer() } }
             m.onQuit = { [weak self] in self?.requestQuit() }
             hostMenu = m
+            // Status probes of the paired Macs (U7): now, then every 10 min in the background (every 60 s with the list).
+            MainActor.assumeIsolated { HostProbeCenter.shared.appBecameActive() }
         }
         if launchedInBackground {
             // A menu-bar accessory: no Dock icon, no window, until a viewer opens.
@@ -495,6 +501,7 @@ struct ConnectView: View {
     @State private var adding: Bool
     @ObservedObject private var updates = HostUpdateCenter.shared
     @ObservedObject private var localUpdate = LocalHostUpdate.shared
+    @ObservedObject private var probes = HostProbeCenter.shared
     let onConnect: (String, String?) -> Void
 
     init(hosts: [PairedHost], lastHost: String?, openAdd: Bool = false, onConnect: @escaping (String, String?) -> Void) {
@@ -511,6 +518,9 @@ struct ConnectView: View {
             list
         }
         .onChange(of: updates.revision) { hosts = ConnectList.load() }
+        .onChange(of: probes.revision) { hosts = ConnectList.load() }
+        .onAppear { probes.listAppeared() }
+        .onDisappear { probes.listDisappeared() }
         .hostUpdatePrompt(updates)
     }
 
@@ -531,7 +541,7 @@ struct ConnectView: View {
                 .contextMenu(forSelectionType: String.self) { items in
                     if let a = items.first { Button("Connect") { onConnect(a, nil) } }
                     // Right-click → Update, straight away (the arrow asks first).
-                    if let a = items.first, let h = hosts.first(where: { $0.alias == a }), case .updateAvailable = h.update, h.canTrigger, !updates.isRunning(a) {
+                    if let a = items.first, let h = hosts.first(where: { $0.alias == a }), case .updateAvailable = h.update, UpdatePrompt.state(h) == .canUpdate, !updates.isRunning(a) {
                         Button("Update \(h.title)") { updates.update(h) }
                     }
                 } primaryAction: { items in

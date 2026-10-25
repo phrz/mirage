@@ -192,10 +192,13 @@ final class ViewerSettingsTests: XCTestCase {
         k.hostVersion = MirageVersion(version: "0.1", build: 448, commit: "a", channel: .nightly)
         k.latestAvailable = MirageVersion(version: "0.1", build: 449, commit: "b", channel: .nightly)
         var row = ConnectList.hosts(known: ["mac-daddy": k], recent: [])[0]
-        XCTAssertFalse(row.canTrigger, "an older host, or one restricted to itself")
+        XCTAssertFalse(row.canTrigger, "not known to take triggers")
         XCTAssertTrue(HostUpdateCenter.promptText(row).hasPrefix("mac-daddy: 0.1 (448) → 0.1 (449), nightly"))
-        XCTAssertTrue(HostUpdateCenter.promptText(row).contains("miraged update --now"))
-        k.updateTrigger = true
+        XCTAssertTrue(HostUpdateCenter.promptText(row).hasSuffix("Checking mac-daddy…"), "never learned: checked, not refused (U7)")
+        k.triggerFeature = false
+        row = ConnectList.hosts(known: ["mac-daddy": k], recent: [])[0]
+        XCTAssertTrue(HostUpdateCenter.promptText(row).contains("miraged update --now"), "a probed host without the trigger")
+        k.updateTrigger = true; k.triggerFeature = true
         row = ConnectList.hosts(known: ["mac-daddy": k], recent: [])[0]
         XCTAssertTrue(row.canTrigger)
         XCTAssertEqual(HostUpdateCenter.promptText(row), "mac-daddy: 0.1 (448) → 0.1 (449), nightly")
@@ -209,6 +212,65 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertNil(s.updateLine)
         s.latestAvailable = MirageVersion(version: "0.1", build: 449, commit: "b", channel: .nightly)
         XCTAssertEqual(s.updateLine, "0.1 (448) → 0.1 (449)")
+    }
+
+    /// U7: the prompt never claims "can't be updated" from a missing record; it checks first.
+    func testUpdatePromptStates() {
+        var h = PairedHost(alias: "mac-daddy", name: "mac-daddy")
+        h.update = .updateAvailable(from: MirageVersion(version: "0.1", build: 455, commit: "a", channel: .nightly),
+                                    to: MirageVersion(version: "0.1", build: 456, commit: "b", channel: .nightly))
+        XCTAssertEqual(UpdatePrompt.state(h), .checking, "never probed")
+        XCTAssertTrue(UpdatePrompt.text(h).hasSuffix("Checking mac-daddy…"))
+        var older = h; older.triggerFeature = false
+        XCTAssertEqual(UpdatePrompt.state(older), .olderHost)
+        XCTAssertTrue(UpdatePrompt.text(older).contains("miraged update --now"))
+        var restricted = h; restricted.triggerFeature = true; restricted.viewerMayTrigger = false
+        XCTAssertEqual(UpdatePrompt.state(restricted), .restricted)
+        XCTAssertTrue(UpdatePrompt.text(restricted).contains("allows updates only on itself"))
+        var can = h; can.triggerFeature = true; can.viewerMayTrigger = true; can.canTrigger = true
+        XCTAssertEqual(UpdatePrompt.state(can), .canUpdate)
+        XCTAssertEqual(UpdatePrompt.text(can), "mac-daddy: 0.1 (455) → 0.1 (456), nightly")
+        var gone = can; gone.unreachable = true
+        XCTAssertEqual(UpdatePrompt.state(gone), .unreachable)
+        var legacy = h; legacy.canTrigger = true   // a U4 record (no triggerFeature yet) that said it can
+        XCTAssertEqual(UpdatePrompt.state(legacy), .canUpdate)
+    }
+
+    /// U7: the row says what is known now: seen, unreachable, in use elsewhere; "Connected" only without a probe.
+    func testRowSeenAndUnreachable() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let en = Locale(identifier: "en_US")
+        var h = PairedHost(alias: "mac-daddy", name: "mac-daddy", lastConnected: now.addingTimeInterval(-2 * 86_400))
+        XCTAssertEqual(h.detail(now: now, locale: en), "Connected 2 days ago")
+        h.lastSeen = now.addingTimeInterval(-120)
+        XCTAssertEqual(h.detail(now: now, locale: en), "Seen 2 minutes ago")
+        h.streamingElsewhere = true
+        XCTAssertEqual(h.detail(now: now, locale: en), "Seen 2 minutes ago · In use by another device")
+        h.unreachable = true
+        XCTAssertEqual(h.detail(now: now, locale: en), "Unreachable · last seen 2 minutes ago")
+    }
+
+    /// U7: no probe while a session to that host is open (its own Welcome keeps the record); otherwise one is made.
+    @MainActor
+    func testNoProbeWhileASessionIsOpen() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mirage-probes-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = try Store(root: tmp)
+        try store.remember(host: .init(hostID: "h", hostName: "mac-daddy", publicKey: Data(), endpoint: "mac-daddy", pairedAt: Date()), as: "mac-daddy")
+        let center = HostProbeCenter.shared
+        let saved = (center.sessionOpen, center.store, center.connector)
+        defer { (center.sessionOpen, center.store, center.connector) = saved }
+        center.store = { store }
+        center.connector = { _ in { throw MirageError.transport("unreachable in the test") } }
+        center.sessionOpen = { $0 == "mac-daddy" }
+        let before = center.probesRun
+        await center.probeNow("mac-daddy")
+        XCTAssertEqual(center.probesRun, before, "a session is open: no probe")
+        XCTAssertNil(try store.knownHosts()["mac-daddy"]?.unreachableSince)
+        center.sessionOpen = { _ in false }
+        await center.probeNow("mac-daddy")
+        XCTAssertEqual(center.probesRun, before + 1)
+        XCTAssertNotNil(try store.knownHosts()["mac-daddy"]?.unreachableSince)
     }
 
     func testAddSheetNeedsACodeOnlyForANewMac() {

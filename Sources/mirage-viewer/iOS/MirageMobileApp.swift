@@ -111,6 +111,8 @@ struct ConnectScreen: View {
     /// A pairing link from the + sheet, handed to the root once that sheet is gone.
     @State private var pendingLink: PairingLink?
     @ObservedObject private var updates = HostUpdateCenter.shared
+    @ObservedObject private var probes = HostProbeCenter.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
@@ -129,7 +131,7 @@ struct ConnectScreen: View {
                             // Long-press → Update, straight away (the arrow asks first).
                             .contextMenu {
                                 Button { onConnect(h.alias, nil) } label: { Label("Connect", systemImage: "play.display") }
-                                if case .updateAvailable = h.update, h.canTrigger, !updates.isRunning(h.alias) {
+                                if case .updateAvailable = h.update, UpdatePrompt.state(h) == .canUpdate, !updates.isRunning(h.alias) {
                                     Button { updates.update(h) } label: { Label("Update", systemImage: "arrow.up.circle") }
                                 }
                             }
@@ -158,6 +160,11 @@ struct ConnectScreen: View {
         }
         .onAppear { hosts = ConnectList.load() }
         .onChange(of: updates.revision) { hosts = ConnectList.load() }
+        .onChange(of: probes.revision) { hosts = ConnectList.load() }
+        // Status probes (U7): while this list shows, and when the app comes back to the foreground with it showing.
+        .onAppear { probes.listAppeared() }
+        .onDisappear { probes.listDisappeared() }
+        .onChange(of: scenePhase) { if scenePhase == .active { probes.appBecameActive() } }
         .hostUpdatePrompt(updates)
     }
 

@@ -272,4 +272,77 @@ final class UpdateTriggerTests: XCTestCase {
         _ = try await s.authenticate(features: [ControlMessage.Feature.updateStatus])
         XCTAssertEqual(try r.viewerStore.knownHosts()["test-host"]?.updateState, .updating(to: running.to))
     }
+
+    // MARK: Status probes (U7)
+
+    /// A probe fills the record from the Welcome, as "seen", not "connected".
+    func testAProbeFillsTheRecord() async throws {
+        let latest = MirageVersion(version: "0.1", build: 9999, commit: "b", channel: .nightly)
+        let running = ControlMessage.UpdateStatus(phase: .downloading, message: "downloading", to: latest)
+        let r = try await rig(permission: .init(policy: .automatic, viewerMayTrigger: true), lastResult: running, handler: { _, _, _ in })
+        defer { r.host.stop(); try? FileManager.default.removeItem(at: r.tmp) }
+        try r.viewerStore.updateKnownHost("test-host") { $0.unreachableSince = Date(timeIntervalSince1970: 0) }
+        let ok = await HostProbe.probe(connect: connect(r), store: r.viewerStore, alias: "test-host")
+        XCTAssertTrue(ok)
+        let k = try XCTUnwrap(r.viewerStore.knownHosts()["test-host"])
+        XCTAssertEqual(k.hostVersion, .current)
+        XCTAssertEqual(k.updateTrigger, true); XCTAssertEqual(k.triggerFeature, true)
+        XCTAssertEqual(k.hostPolicy, UpdatePermission(policy: .automatic, viewerMayTrigger: true))
+        XCTAssertEqual(k.updating?.phase, .downloading, "an update running there")
+        XCTAssertEqual(k.updateState, .updating(to: latest))
+        XCTAssertEqual(k.hostStreaming, false)
+        XCTAssertEqual(k.hostProtocol, Mirage.protocolVersion); XCTAssertEqual(k.hostMinProtocol, Mirage.minProtocolVersion)
+        XCTAssertNotNil(k.lastSeen); XCTAssertNil(k.unreachableSince)
+        XCTAssertNil(k.lastConnected, "a probe is not a connection: the list's order and \"Connected\" stay")
+    }
+
+    func testAnUnreachableHostIsMarked() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mirage-probe-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = try Store(root: tmp)
+        try store.remember(host: .init(hostID: "h", hostName: "gone", publicKey: Data(), endpoint: "gone", pairedAt: Date()), as: "gone")
+        let ok = await HostProbe.probe(connect: { throw MirageError.transport("connect timed out after 3 s") }, store: store, alias: "gone")
+        XCTAssertFalse(ok)
+        let since = try XCTUnwrap(store.knownHosts()["gone"]?.unreachableSince)
+        _ = await HostProbe.probe(connect: { throw MirageError.transport("again") }, store: store, alias: "gone")
+        XCTAssertEqual(try store.knownHosts()["gone"]?.unreachableSince, since, "since the first failure")
+    }
+
+    /// A probe is never a stream (the Automatic gate counts streams), never a listener for notices, and is logged once
+    /// per device per 10 min at most, its end not at all.
+    func testAProbeIsQuietAndNotAStream() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mirage-quiet-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let hostStore = try Store(root: tmp.appendingPathComponent("host"))
+        let viewerStore = try Store(root: tmp.appendingPathComponent("viewer"))
+        let hostID = try hostStore.identity(role: "host", name: "test-host")
+        let tls = try TLSIdentity.loadOrCreate(store: hostStore)
+        let lines = Log()
+        var ctx = HostContext(identity: hostID, store: hostStore, tlsFingerprint: tls.fingerprint, log: { lines.add($0) })
+        ctx.updateInfo = { HostUpdateInfo(latestAvailable: nil, permission: self.anyDevice) }
+        ctx.updateHandler = { _, _, _ in }
+        let viewer = DeviceIdentity(name: "test-phone")
+        try hostStore.authorize(viewer.record)
+        try viewerStore.remember(host: .init(hostID: hostID.id, hostName: hostID.name, publicKey: hostID.publicKey, endpoint: "test-host", pairedAt: Date()), as: "test-host")
+        let (host, port) = try await Loopback.host(tls: tls, ctx: ctx)
+        defer { host.stop() }
+        let r = Rig(host: host, port: port, viewerStore: viewerStore, viewer: viewer, ctx: ctx, tmp: tmp)
+        for _ in 0..<3 { _ = await HostProbe.probe(connect: connect(r), store: viewerStore, alias: "test-host") }
+        try await Task.sleep(for: .milliseconds(300))
+        let streaming = await ctx.connections.streamingDeviceIDs(), listeners = await ctx.updateListeners.count
+        XCTAssertEqual(streaming, [], "no stream for the Automatic gate or the host's menu")
+        XCTAssertEqual(listeners, 0, "not kept for notices")
+        XCTAssertEqual(lines.all.filter { $0.contains("status probe") }.count, 1, lines.all.joined(separator: "\n"))
+        XCTAssertTrue(lines.all.filter { $0.contains("authenticated") || $0.contains("auth timing") || $0.contains("closed") }.isEmpty, lines.all.joined(separator: "\n"))
+    }
+
+    func testProbeLogRateLimit() {
+        let p = ProbeRegistry()
+        let t0 = Date(timeIntervalSince1970: 1000)
+        XCTAssertTrue(p.shouldLog("d", now: t0))
+        XCTAssertFalse(p.shouldLog("d", now: t0.addingTimeInterval(599)))
+        XCTAssertTrue(p.shouldLog("e", now: t0), "per device")
+        XCTAssertTrue(p.shouldLog("d", now: t0.addingTimeInterval(600)))
+        XCTAssertTrue(p.shouldLog("d", now: t0.addingTimeInterval(-10)), "a clock set back logs rather than going quiet")
+    }
 }

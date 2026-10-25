@@ -1530,6 +1530,31 @@ A bad build rolls itself back.
     `Status.updating` carry its step. The device lists then show "Updating to …" and a spinner instead of the arrow,
     and the host Mac's menu and window bar say "Updating".
 
+**As built: U7, status probes (2026-10-26, phrz: "the nodes should be able to inspect and learn about each other
+without connections").**
+- The viewer probes each paired Mac on a short authenticated control-only connection: the trigger's path, with no
+  stream, no capture and nothing visible on the host. The Hello lists the `probe` feature (protocol 6, min 5,
+  unchanged).
+  - When it probes: when a device list appears or the app comes to the foreground, then every 60 s while a list shows,
+    and on the Mac every 10 min in the background (the menu-bar app). iOS probes only while its list shows.
+  - How: one host at a time with jitter, a 3 s connect timeout, and never a host this device has a session with (that
+    session's own Welcome keeps the record).
+- What the Welcome fills in `KnownHost`: `hostVersion`, `latestAvailable`, `updateTrigger`, `triggerFeature`,
+  `hostPolicy`, `updating`, `hostStreaming` (another device streams from it), `hostProtocol` and `hostMinProtocol`, and
+  `lastSeen`.
+  - A probe never sets `lastConnected`. A host that cannot be reached gets `unreachableSince`.
+  - The row says "Seen 2 minutes ago" (with "In use by another device"), "Unreachable · last seen …", or, never probed,
+    "Connected …".
+- The host side: a probe is never a stream, so it is not counted by the Automatic gate or listed in the menu, and it
+  does not touch the HID idle clock. It is not kept for notices. It is logged once per device per 10 min at most, and
+  its end not at all. The Welcome now also carries `hostStreaming` and `minProtocolVersion`.
+- The prompt never claims "doesn't take updates" from a missing record. Its states:
+  - never learned: "Checking …", and a probe runs now;
+  - unreachable: says so;
+  - probed, no trigger (a build before U4): the menu-bar or SSH text;
+  - probed, this-mac policy: says so;
+  - can trigger: the Update button.
+
 **Milestones.**
 
 | # | Deliverable | Done when |
