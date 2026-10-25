@@ -287,6 +287,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 let json = s.statsJSON()
                 if let path = self.options.statsJSON { try? json.write(to: URL(fileURLWithPath: path)) }
                 FileHandle.standardOutput.write(json); FileHandle.standardOutput.write(Data("\n".utf8))
+                FrameRecorder.drain()
                 exit(0)
             }
         }

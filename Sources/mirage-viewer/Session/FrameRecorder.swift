@@ -18,6 +18,11 @@ final class FrameRecorder {
     private let start = Clock.nowNanos()
     private var log: FileHandle?
     private var target: MTLTexture?
+    /// PNG writes still running. The viewer drains them before it exits: a run under load (2026-10-25 13:19Z, Xcode
+    /// unpacking on the MacBook) logged 376 frames and kept 39, the rest still queued when the duration timer quit.
+    private static let writes = DispatchGroup()
+    /// Waits (at most `timeout` seconds) for every frame queued so far to be on disk.
+    static func drain(timeout: Double = 60) { _ = writes.wait(timeout: .now() + timeout) }
 
     init(dir: URL) {
         self.dir = dir
@@ -64,7 +69,9 @@ final class FrameRecorder {
             } }
         }
         let url = dir.appendingPathComponent(String(format: "frame-%04d.png", i))
+        Self.writes.enter()
         DispatchQueue.global(qos: .utility).async {
+            defer { Self.writes.leave() }
             guard let provider = CGDataProvider(data: data as CFData),
                   let img = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: stride, space: CGColorSpace(name: CGColorSpace.sRGB)!,
                                     bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue), provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
