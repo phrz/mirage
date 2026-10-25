@@ -157,13 +157,16 @@ base = lerp(base, haze_col, haze[..., None])
 sky_h = np.array([0.86, 0.93, 1.00])     # bright sky right at the horizon, as a sheet of light
 band_px = BAND_PT * S
 ypix = np.arange(H, dtype=np.float32)[:, None]
-fall = np.exp(-(ypix / band_px) ** 1.6)                              # smooth falloff with depth
+# the sheet is a bowl: full depth where the line of sight is flattest (centre), shallower toward the sides
+bowl = 0.3 + 0.7 * np.exp(-((xx - 0.5) / (300.0 / 1024)) ** 2)                      # per-column depth factor (1 at centre)
+band_col = band_px * bowl                                                              # (1, W)
+fall = np.exp(-(ypix / band_col) ** (2.2 if BAND_PT >= 100 else 1.6))                # smooth falloff with depth
 # stratification: smooth variation along y with a slow drift along x (sheets of hot air)
 strata = anoise(H, W, 420 * S, 2 * S, octaves=2)
 strata = 0.6 + 0.4 * smooth((strata - 0.25) / 0.5)
 # slow lateral breathing of the band's strength
 breath = 0.75 + 0.25 * anoise(1, W, 120 * S, 1)[0][None, :]
-m = np.clip(fall * strata * breath, 0, 1) * 0.97
+m = np.clip(fall * strata * breath, 0, 1) * (0.99 if BAND_PT >= 100 else 0.97)
 base = lerp(base, sky_h, m[..., None])
 # hairline darkening right at the horizon (the far edge of the ground)
 if WAVER:

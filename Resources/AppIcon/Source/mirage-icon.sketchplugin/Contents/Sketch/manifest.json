@@ -16,13 +16,20 @@
       "identifier": "build2",
       "script": "build2.js",
       "handler": "onRun"
+    },
+    {
+      "name": "Build Menu Bar Glyphs",
+      "identifier": "menubar",
+      "script": "menubar.js",
+      "handler": "onRun"
     }
   ],
   "menu": {
     "title": "Mirage Icon",
     "items": [
       "export",
-      "build2"
+      "build2",
+      "menubar"
     ]
   }
 }

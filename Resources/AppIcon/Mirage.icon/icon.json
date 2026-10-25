@@ -6,14 +6,14 @@
         {
           "image-name": "cursor.png",
           "name": "Cursor",
-          "glass": true
+          "glass": false
         }
       ],
       "shadow": {
         "kind": "neutral",
         "opacity": 0.5
       },
-      "specular": true,
+      "specular": false,
       "translucency": {
         "enabled": true,
         "value": 0.2
@@ -22,20 +22,52 @@
     {
       "layers": [
         {
+          "image-name": "horizon-line.png",
+          "name": "Horizon Line (Mono)",
+          "glass": false,
+          "opacity": 0.9,
+          "hidden-specializations": [
+            {
+              "appearance": "light",
+              "value": true
+            },
+            {
+              "appearance": "dark",
+              "value": true
+            }
+          ],
+          "fill-specializations": [
+            {
+              "appearance": "tinted",
+              "value": "system-light"
+            }
+          ]
+        },
+        {
           "image-name": "sand-relief.png",
           "name": "Sand Relief (Mono)",
-          "glass": true,
-          "hidden": true
+          "glass": false,
+          "opacity": 1.0,
+          "hidden-specializations": [
+            {
+              "appearance": "light",
+              "value": true
+            },
+            {
+              "appearance": "dark",
+              "value": true
+            }
+          ]
         }
       ],
       "shadow": {
         "kind": "neutral",
-        "opacity": 0.35
+        "opacity": 0.0
       },
-      "specular": true,
+      "specular": false,
       "translucency": {
-        "enabled": true,
-        "value": 0.25
+        "enabled": false,
+        "value": 0.0
       }
     },
     {
@@ -43,7 +75,14 @@
         {
           "image-name": "sand.png",
           "name": "Sand",
-          "glass": false
+          "glass": false,
+          "opacity": 1.0,
+          "opacity-specializations": [
+            {
+              "appearance": "tinted",
+              "value": 0.55
+            }
+          ]
         }
       ],
       "shadow": {

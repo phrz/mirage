@@ -73,8 +73,8 @@ var ARROW_PTS = [[0, 0], [0, 82], [19.5, 64], [33.5, 95], [47.5, 88.5], [33.5, 5
 var BAND = 56;   // px below the horizon where the mirage sheet has faded out (matches gen_textures band)
 function warpY(r) { return (0.8 + 0.075 * r) * Math.sin(r / 2.6 + 0.6) + (0.4 + 0.03 * r) * Math.sin(r / 6.1 + 2.0); }
 function warpX(r) { return 1.1 * Math.sin(r / 0.9) + 0.6 * Math.sin(r / 1.7 + 1.0); }
-function displacedReflection(scale, cx, cy) {
-  var squash = 0.5;
+function displacedReflection(scale, cx, cy, opts) {
+  var squash = (opts && opts.squash) || 0.5;
   function map(p) { var X = cx + p[0] * scale, Y = cy + p[1] * scale; return [X, HORIZON + (HORIZON - Y) * squash]; }
   var out = [];
   for (var i = 0; i < ARROW_PTS.length; i++) {
@@ -204,16 +204,24 @@ function buildIcon(ab, opts) {
 
   // ---- MIRAGE REFLECTION (part of the ground, not the pointer): inverted, squashed, outline displaced
   var refl = G('Mirage Reflection', sand);
-  var reflMask = rect(refl, 'Reflection Fade', cx - 80, HORIZON, 60 * scale + 160, BAND, lin([
-    [0, 'rgba(0,0,0,1)'], [0.25, 'rgba(0,0,0,0.9)'], [0.5, 'rgba(0,0,0,0.55)'], [0.75, 'rgba(0,0,0,0.2)'], [1, 'rgba(0,0,0,0)']]));
+  // mask = the same bowl as the texture's sheet (depth 0.3..1 of BAND, Gaussian across x), fading with depth,
+  // blurred so the clip edge is soft; the inverted image can never show outside the puddle
+  var bowlPts = [], bx0 = cx - 120, bx1 = cx + 60 * scale + 120;
+  for (var bi = 0; bi <= 40; bi++) {
+    var bx = bx0 + (bx1 - bx0) * bi / 40, u = (bx - 512) / 300;
+    bowlPts.push(bx.toFixed(1) + ',' + (HORIZON + BAND * (0.3 + 0.7 * Math.exp(-u * u))).toFixed(1));
+  }
+  var reflMask = path(refl, 'Reflection Fade', 'M' + bx0.toFixed(1) + ',' + HORIZON + ' L' + bx1.toFixed(1) + ',' + HORIZON + ' L' + bowlPts.reverse().join(' L') + ' Z',
+    lin([[0, 'rgba(0,0,0,1)'], [0.35, 'rgba(0,0,0,0.85)'], [0.65, 'rgba(0,0,0,0.35)'], [0.9, 'rgba(0,0,0,0)'], [1, 'rgba(0,0,0,0)']]), { blur: blur(6) });
   reflMask.sketchObject.hasClippingMask = true; reflMask.sketchObject.clippingMaskMode = 1;
-  var reflD = displacedReflection(scale, cx, cy);
+  var reflD = displacedReflection(scale, cx, cy, { squash: opts.band ? Math.min(0.75, 0.5 * opts.band / 96) : 0.5 });
   path(refl, 'Reflected Keyline', reflD, solid('rgba(255,255,255,0.7)'), {
     borders: [{ color: 'rgba(255,255,255,0.7)', thickness: 6 * scale / 3 * 0.75, position: Style.BorderPosition.Outside }], blur: blur(3) });
   path(refl, 'Reflected Pointer', reflD,
     lin([[0, 'rgba(62,76,104,' + Math.min(1, 0.78 * (opts.reflBoost || 1)).toFixed(2) + ')'], [1, 'rgba(62,76,104,' + Math.min(1, 0.4 * (opts.reflBoost || 1)).toFixed(2) + ')']]), { blur: blur(3) });
-  // bright turbulent air veils the inverted image
+  // bright turbulent air veils the inverted image at the top, and the image dissolves into the sheet colour toward the bottom
   rect(refl, 'Air Veil', cx - 80, HORIZON, 60 * scale + 160, BAND, lin([[0, 'rgba(226,238,252,0.3)'], [1, 'rgba(226,238,252,0)']]));
+  rect(refl, 'Sheet Dissolve', cx - 80, HORIZON, 60 * scale + 160, BAND, lin([[0, 'rgba(222,236,250,0)'], [0.4, 'rgba(222,236,250,0)'], [1, 'rgba(222,236,250,0.9)']]));
   refl.adjustToFit();
 
   // ---- CURSOR: the macOS pointer standing on the vanishing line
@@ -264,7 +272,7 @@ function onRun(context) {
   var page = doc.selectedPage; page.name = 'Icon';
 
   var A = new Artboard({ name: 'Mirage 1024', parent: page, frame: new Rectangle(0, 0, 1024, 1024), background: { enabled: true, color: '#1E1E1E', includedInExport: false } });
-  buildIcon(A, { window: false, cursorScale: 4.3, cursorX: 400, cursorY: HORIZON - 95 * 4.3 - 2 * 4.3 - 3, features: { sky: true, sand: true }, tex: 'form-wide', band: 96, reflBoost: 1.3 }); // keyline miter at the tail reaches ~2 px past the stroke width
+  buildIcon(A, { window: false, cursorScale: 4.3, cursorX: 400, cursorY: HORIZON - 95 * 4.3 - 2 * 4.3 - 3, features: { sky: true, sand: true }, tex: 'form-pool', band: 82, reflBoost: 1.6 }); // keyline miter at the tail reaches ~2 px past the stroke width
   dbg('A built');
   var variants = new sketch.Page({ name: 'Variants', parent: doc });
   // Previous, wider framing kept as a variant for reference

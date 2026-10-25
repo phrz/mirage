@@ -1,0 +1,26 @@
+{
+  "images": [
+    {
+      "filename": "MirageMenuBarStatus.png",
+      "idiom": "mac",
+      "scale": "1x"
+    },
+    {
+      "filename": "MirageMenuBarStatus@2x.png",
+      "idiom": "mac",
+      "scale": "2x"
+    },
+    {
+      "filename": "MirageMenuBarStatus@3x.png",
+      "idiom": "mac",
+      "scale": "3x"
+    }
+  ],
+  "info": {
+    "author": "xcode",
+    "version": 1
+  },
+  "properties": {
+    "template-rendering-intent": "template"
+  }
+}

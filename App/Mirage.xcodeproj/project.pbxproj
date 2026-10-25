@@ -15,6 +15,7 @@
 		50167F44006E2CAD2E8E0337 /* ViewerSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0E1152201D0785134F2ADEBA /* ViewerSession.swift */; };
 		58C40680A08B27AB9A4F2620 /* MirageMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50E8318C6686CABEEB9AB706 /* MirageMobileApp.swift */; platformFilters = (ios, ); };
 		6C33A1419D1E5EAE62488B3B /* Mirage.icon in Resources */ = {isa = PBXBuildFile; fileRef = C40E9355D3AE6E2F90D4D78B /* Mirage.icon */; };
+		D1A5E77C0B2F4C1E9A3D5B01 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = D1A5E77C0B2F4C1E9A3D5B02 /* Assets.xcassets */; };
 		8B9E3396DF922F97557183F6 /* DesktopUIView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEEE1C67B65AE477DCDF5D99 /* DesktopUIView.swift */; platformFilters = (ios, ); };
 		98A22E05D6AAAC07987921F4 /* Platform.swift in Sources */ = {isa = PBXBuildFile; fileRef = 325AE3F4F8CE4455604ECEFB /* Platform.swift */; };
 		9C8C86E9B0B43EF2040EEF1E /* DesktopScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59942C8471DEE8FACC7C60A6 /* DesktopScreen.swift */; platformFilters = (ios, ); };
@@ -47,6 +48,7 @@
 		7BD487592CA684E9D4C6E42B /* ua */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ua; path = ..; sourceTree = SOURCE_ROOT; };
 		830F2869DAB069200150F308 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		C40E9355D3AE6E2F90D4D78B /* Mirage.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = Mirage.icon; sourceTree = "<group>"; };
+		D1A5E77C0B2F4C1E9A3D5B02 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		CA8357B3AEC263F39103FAC9 /* FrameRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameRecorder.swift; sourceTree = "<group>"; };
 		DA5646FA52FFFCC715643009 /* Keychain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Keychain.swift; sourceTree = "<group>"; };
 		A1B2C3D4E5F6071829304152 /* ViewerSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerSettings.swift; sourceTree = "<group>"; };
@@ -150,6 +152,7 @@
 			children = (
 				FD5E879AF466A9F9F342EACF /* Packages */,
 				FB5F3AF75B9869DD7386C9E1 /* ua */,
+				D1A5E77C0B2F4C1E9A3D5B02 /* Assets.xcassets */,
 				670E76E253BB3EF4D7177FA4 /* Info.plist */,
 				3E514C3C34FE85763C0BDEC4 /* Products */,
 			);
@@ -248,6 +251,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				6C33A1419D1E5EAE62488B3B /* Mirage.icon in Resources */,
+				D1A5E77C0B2F4C1E9A3D5B01 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

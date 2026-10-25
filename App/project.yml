@@ -30,6 +30,10 @@ targets:
         destinationFilters: [iOS]
       - path: ../Resources/AppIcon/Mirage.icon
         buildPhase: resources
+      # The menu-bar glyphs (template images, from ../Resources/MenuBar: copy them again when the icon work changes them)
+      # and AppIcon.appiconset, a flattened 1024 fallback for toolchains without Icon Composer bundles.
+      - path: Assets.xcassets
+        buildPhase: resources
       - path: Info.plist
         buildPhase: none
     dependencies:

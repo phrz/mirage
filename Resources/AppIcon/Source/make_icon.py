@@ -15,26 +15,47 @@ sand = Image.open("export/layers/02 Sand.png").convert("RGBA")
 rgb = np.asarray(sand, np.float32) / 255.0
 lum = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
 alpha = rgb[..., 3]
-low = np.asarray(Image.fromarray((np.clip(lum, 0, 1) * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(7)), np.float32) / 255.0
-detail = lum - low
+# band-pass the luminance so the relief is the ripples (and the reflection), not the fine grain
+lum8 = Image.fromarray((np.clip(lum, 0, 1) * 255).astype(np.uint8))
+mid = np.asarray(lum8.filter(ImageFilter.GaussianBlur(2.2)), np.float32) / 255.0
+low = np.asarray(lum8.filter(ImageFilter.GaussianBlur(9)), np.float32) / 255.0
+detail = mid - low
 # Mono renders each layer as its alpha shape filled with a system colour, so relief must live in alpha.
 # Build a separate "relief" layer: crests opaque, troughs transparent. Hidden by default, shown in Mono.
-relief = np.clip(0.5 + detail * 7.0, 0, 1)
-relief_alpha = alpha * np.clip((relief - 0.42) / 0.5, 0, 1)
+# relief map: ripples and grain as alpha; gentler than the first cut so Mono reads as sand, not etched glass
+relief = np.clip(0.5 + detail * 9.0, 0, 1)
+relief_alpha = alpha * np.clip((relief - 0.5) / 0.5, 0, 1) * 0.9
 white = np.ones_like(relief)
 Image.fromarray((np.dstack([white, white, white, relief_alpha]) * 255).astype(np.uint8), "RGBA").save(f"{ICON}/Assets/sand-relief.png", optimize=True)
 if os.path.exists(f"{ICON}/Assets/sand-mono.png"): os.remove(f"{ICON}/Assets/sand-mono.png")
 
+# Mono renders luminance as opacity of a light tint, so the pale sand plate becomes a washed-out slab.
+# Mono-only helpers restore contrast: a horizon hairline and the sand relief; the pointer keeps its outline.
+HORIZON = 620
+w = np.ones((1024, 1024), np.float32)
+hz = np.zeros((1024, 1024), np.float32); hz[HORIZON - 1:HORIZON + 2, :] = 1.0; hz[HORIZON - 2, :] = 0.5; hz[HORIZON + 2, :] = 0.5
+Image.fromarray((np.dstack([w, w, w, hz]) * 255).astype(np.uint8), "RGBA").save(f"{ICON}/Assets/horizon-line.png", optimize=True)
+
 mono_only = [{"appearance": "tinted", "value": True}]
+def mono_opacity(default, mono):
+    # Icon Composer 27.1 ignores opacity-specializations in Mono but honours visibility specializations
+    # for the light and dark appearances, so a Mono-only layer is: full opacity, hidden in light and dark.
+    if default == 0.0:
+        return {"opacity": mono, "hidden-specializations": [{"appearance": "light", "value": True}, {"appearance": "dark", "value": True}]}
+    return {"opacity": default, "opacity-specializations": [{"appearance": "tinted", "value": mono}]}
+# In Mono every layer is clear glass unless given a system fill for that appearance; this makes a layer solid there
+mono_solid = {"fill-specializations": [{"appearance": "tinted", "value": "system-light"}]}
 doc = {
   "fill": "automatic",
   "groups": [
-    {"layers": [{"image-name": "cursor.png", "name": "Cursor", "glass": True}],
-     "shadow": {"kind": "neutral", "opacity": 0.5}, "specular": True, "translucency": {"enabled": True, "value": 0.2}},
-    {"layers": [{"image-name": "sand-relief.png", "name": "Sand Relief (Mono)", "glass": True, "hidden": True,
-                 }],
-     "shadow": {"kind": "neutral", "opacity": 0.35}, "specular": True, "translucency": {"enabled": True, "value": 0.25}},
-    {"layers": [{"image-name": "sand.png", "name": "Sand", "glass": False}],
+    # Liquid Glass is off on every layer (phrz's call: it added artifacts and nothing the design needs)
+    # In Mono the pointer renders as its keyline outline (phrz prefers that to a solid fill)
+    {"layers": [{"image-name": "cursor.png", "name": "Cursor", "glass": False}],
+     "shadow": {"kind": "neutral", "opacity": 0.5}, "specular": False, "translucency": {"enabled": True, "value": 0.2}},
+    {"layers": [dict({"image-name": "horizon-line.png", "name": "Horizon Line (Mono)", "glass": False}, **mono_opacity(0.0, 0.9), **mono_solid),
+                dict({"image-name": "sand-relief.png", "name": "Sand Relief (Mono)", "glass": False}, **mono_opacity(0.0, 1.0))],
+     "shadow": {"kind": "neutral", "opacity": 0.0}, "specular": False, "translucency": {"enabled": False, "value": 0.0}},
+    {"layers": [dict({"image-name": "sand.png", "name": "Sand", "glass": False}, **mono_opacity(1.0, 0.55))],
      "shadow": {"kind": "neutral", "opacity": 0.0}, "specular": False, "translucency": {"enabled": False, "value": 0.0}},
     {"layers": [{"image-name": "sky.png", "name": "Sky", "glass": False, "hidden-specializations": mono_only}],
      "shadow": {"kind": "neutral", "opacity": 0.0}, "specular": False, "translucency": {"enabled": False, "value": 0.0}}
