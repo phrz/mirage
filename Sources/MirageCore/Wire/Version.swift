@@ -49,6 +49,31 @@ public struct MirageVersion: Codable, Equatable, Hashable, Sendable, Comparable 
     }
 }
 
+/// The phases an update reports (DESIGN §3.10): `miraged update` prints them; the host sends them to the viewer that
+/// triggered it (`ControlMessage.updateStatus`) and to the Mirage app on the host Mac (local control).
+public enum UpdatePhase: String, Codable, Sendable {
+    case checking, downloading, verifying, installing, restarting, done, failed, rolledBack
+}
+
+/// What a trigger asks the host for.
+public enum UpdateCommand: Equatable, Sendable {
+    /// Install the feed's newest; `targetBuild` (from a viewer) must be the build the feed lists now.
+    case update(targetBuild: Int?)
+    case rollback
+}
+
+/// Whether a host takes an update trigger from a paired viewer (DESIGN §3.10, phrz 2026-10-25: any paired device, unless
+/// the host restricts updates to "this Mac only"). Both policies (Ask, Automatic) take triggers: Automatic only adds
+/// installing on its own at night.
+public enum UpdateGate {
+    /// nil: allowed; else why not, for the viewer.
+    public static func refusal(permission: UpdatePermission?, canUpdate: Bool, hostName: String) -> String? {
+        guard canUpdate, let p = permission else { return "\(hostName) cannot update itself from a viewer (an older or a development host): run `miraged update --now` on it" }
+        guard p.viewerMayTrigger else { return "updates on \(hostName) are restricted to that Mac (its menu bar, or `miraged update --now` over SSH)" }
+        return nil
+    }
+}
+
 /// How a host installs updates (DESIGN §3.10, phrz 2026-10-25: only two).
 public enum UpdatePolicy: String, Codable, CaseIterable, Sendable {
     /// The default: shows the indicator; installs only when someone triggers it.

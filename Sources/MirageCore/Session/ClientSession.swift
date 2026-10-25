@@ -49,13 +49,13 @@ public struct ClientSession {
 
     /// Mutual Ed25519 authentication, channel-bound to the TLS leaf fingerprint. `resumeToken` (from an
     /// earlier Welcome) asks the host to resume that session once this connection is authenticated.
-    public func authenticate(resumeToken: Data? = nil) async throws -> ControlMessage.Welcome {
+    public func authenticate(resumeToken: Data? = nil, features: [String]? = nil) async throws -> ControlMessage.Welcome {
         guard let known = try store.knownHosts()[alias] else {
             throw MirageError.authenticationFailed("not paired with \(alias); run `mirage connect \(alias) --pair CODE`")
         }
         let clientNonce = DeviceIdentity.nonce()
         try await stream.send(.hello(.init(protocolVersion: Mirage.protocolVersion, deviceID: identity.id, deviceName: identity.name, clientNonce: clientNonce, resumeToken: resumeToken, deviceModel: DeviceModel.current,
-                                           viewerVersion: .current, minProtocolVersion: Mirage.minProtocolVersion)))
+                                           viewerVersion: .current, minProtocolVersion: Mirage.minProtocolVersion, features: features)))
         // A version refusal comes in place of the challenge: remember which side to update (the device list says so).
         let first = try await stream.receive()
         if case .reject(let r) = first {
@@ -86,6 +86,7 @@ public struct ClientSession {
             if let f = welcome.hostFamily ?? DeviceModel.family(of: welcome.hostModel)?.rawValue { h.family = f }
             h.hostVersion = welcome.hostVersion
             h.latestAvailable = welcome.latestAvailable
+            h.updateTrigger = welcome.acceptsUpdateTrigger
             h.incompatibility = tooOld?.rawValue
             if tooOld == nil { h.lastConnected = Date() }
         }

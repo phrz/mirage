@@ -28,6 +28,7 @@ struct Update: AsyncParsableCommand {
     @Flag(help: "Swap only: do not restart the host agent or wait for its commit.") var noRestart = false
     @Flag(help: "Install even a build signed with another identity (Apple Development ↔ Developer ID): the agent is registered again, and a person must give the Screen Recording and Device Control (Accessibility) grants again.") var allowIdentityChange = false
     @Flag(help: ArgumentHelp("Print what a person must do at this Mac after a signing identity change (deploy-host.sh).", visibility: .hidden)) var grantSteps = false
+    @Flag(help: ArgumentHelp("After the agent swapped in an update (a remote trigger): restart it onto the new build and watch it start, as --now does.", visibility: .hidden)) var supervise = false
     @Flag(help: "Restart the host agent and make sure it runs: if launchd refuses to start it (a launch constraint from another signature), register it again through Mirage.app (deploy and install scripts).") var ensureAgent = false
 
     func run() async throws {
@@ -51,6 +52,12 @@ struct Update: AsyncParsableCommand {
         print("\(DeviceNames.current()): Mirage \(running.display) \(running.commit) (built for \(running.channelName)), following \(channel?.rawValue ?? s.channel.rawValue) at \(paths.app.path)")
 
         if grantSteps { print(SigningIdentity.tccSteps()); return }
+        if supervise {
+            guard let p = Installer(paths: paths).readPending() else { print("supervise: no pending update"); return }
+            print("supervising the update \(p.from.display) → \(p.to.display)")
+            try await afterSwap(p, paths: paths, identityChanged: false)
+            return
+        }
         if ensureAgent {
             let agent = AgentControl(app: paths.app, storeRoot: paths.support)
             let v = agent.ensureRunning(restart: true, log: { print($0) })

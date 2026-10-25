@@ -1,12 +1,6 @@
 import Foundation
 import MirageCore
 
-/// The phases an update reports (DESIGN §3.10): `miraged update` prints them, and in U4 the host sends them to the viewer
-/// that triggered it as `updateStatus`.
-public enum UpdatePhase: String, Codable, Sendable {
-    case checking, downloading, verifying, installing, restarting, done, failed, rolledBack
-}
-
 /// The one updater (DESIGN §3.10): `miraged update` over SSH and the viewer's trigger in the host agent run this, so both
 /// share a code path. It checks the feed, verifies, stages, writes pending-update.json and swaps; restarting the host
 /// (exit under launchd, or `launchctl kickstart` from a terminal) is the caller's, and committing is the new host's
@@ -36,6 +30,17 @@ public final class Updater: @unchecked Sendable {
 
     public var installer: Installer { Installer(paths: paths) }
     public func settings() -> UpdateSettings { UpdateSettings.load(paths.settings) }
+
+    /// What the Welcome says about updates: the newest build found, the trigger permission, and the last update's
+    /// outcome when it ended within `recent` (so the viewer that triggered it hears how it ended after the restart).
+    public static func hostUpdateInfo(paths: InstallPaths, now: Date = Date(), recent: TimeInterval = 15 * 60) -> HostUpdateInfo {
+        var info = UpdateSettings.load(paths.settings).hostUpdateInfo
+        if let r = Installer(paths: paths).readResult(), now.timeIntervalSince(r.at) < recent {
+            let phase: UpdatePhase = r.outcome == .rolledBack ? .rolledBack : .done
+            info.lastResult = .init(phase: phase, message: r.message, from: r.from, to: r.to, at: r.at)
+        }
+        return info
+    }
 
     public struct Check: Sendable {
         public var decision: UpdateDecision

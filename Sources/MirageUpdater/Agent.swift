@@ -98,6 +98,24 @@ public struct AgentControl: Sendable {
         return (code == 0 ? nil : "launchctl bootstrap gui/\(getuid()) failed: \(out.trimmingCharacters(in: .whitespacesAndNewlines))", cleanup)
     }
 
+    /// Starts a command as a one-shot job in the user's gui launchd domain, independent of this process (the agent that
+    /// starts it may be restarted by it). The job's output goes to the host log; it removes itself when the command ends.
+    /// nil on success, else why not.
+    public func runDetached(_ command: [String]) -> String? {
+        let label = "com.paulherz.mirage.supervise.\(UUID().uuidString.prefix(8))"
+        let plist = storeRoot.appendingPathComponent("\(label).plist")
+        let logPath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/mirage-host.log").path
+        let script = "\"$0\" \"$@\"; rm -f '\(plist.path)'; exec /bin/launchctl bootout gui/\(getuid())/\(label)"
+        let job: [String: Any] = ["Label": label, "ProgramArguments": ["/bin/sh", "-c", script] + command, "RunAtLoad": true, "LaunchOnlyOnce": true,
+                                  "StandardOutPath": logPath, "StandardErrorPath": logPath]
+        do { try PropertyListSerialization.data(fromPropertyList: job, format: .xml, options: 0).write(to: plist) }
+        catch { return "cannot write \(plist.path): \(error)" }
+        let (out, code, _) = SystemBundleVerifier.run(Self.launchctl, ["bootstrap", "gui/\(getuid())", plist.path], timeout: 15)
+        if code == 0 { return nil }
+        try? FileManager.default.removeItem(at: plist)
+        return "launchctl bootstrap failed: \(out.trimmingCharacters(in: .whitespacesAndNewlines))"
+    }
+
     /// Polls until the verdict is reached. `attempts` reads the pending update's count (a deploy: always 0).
     public func watch(attempts: () -> Int = { 0 }, window: TimeInterval = AgentWatch.startWindow) -> AgentWatch.Verdict {
         let start = Date()

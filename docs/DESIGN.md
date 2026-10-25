@@ -1450,6 +1450,30 @@ A bad build rolls itself back.
 - `TrustedKeys.compiled` is empty until phrz runs `release.sh keys-init` and commits it. Until then no build verifies a
   manifest, so none updates itself.
 
+**As built: U4 (2026-10-26).**
+- Protocol stays 6 (min 5). The new messages travel only between peers that announce them: a host's Welcome lists the
+  feature `updateTrigger` (it takes `updateHost`/`rollbackHost`), and a viewer's Hello lists `updateStatus` (it decodes
+  notices). Builds before U4, 448 included, list neither, so their rows say how to update them instead of offering
+  Update. 448 → 449 therefore goes over SSH (`miraged update --now`), and later builds can update remotely.
+- The gate is the host's `trigger` setting (any-device by default, or this-mac). Ask and Automatic both take triggers.
+  A refused trigger gets `updateStatus(failed)` with the reason, and the updater does not run.
+- The agent runs the same `Updater` in process and sends each step to the viewer that asked. Before the restart it
+  tells the other viewers that listen. After the swap it starts `miraged update --supervise` as a one-shot job in the
+  gui launchd domain, which outlives the agent it restarts (watch, re-registration, rollback, as from SSH). A remote
+  trigger never crosses a signing-identity change.
+- The viewer triggers on a connection of its own (`HostUpdateTrigger`): ask, follow the steps to `restarting`, then
+  reconnect every 2 s until the Welcome shows the target build (done), or `Welcome.updateResult` (the last outcome,
+  kept for 15 min) says it rolled back.
+- The device lists (iOS and Mac): a yellow circle with an up-arrow; tap → "mac-daddy: 0.1 (448) → 0.1 (449), nightly"
+  with Update / Cancel; long-press (iOS) or right-click (Mac) → Update at once. While an update runs, the row shows its
+  steps in place of its detail.
+- On the host Mac: a yellow dot over the menu-bar icon (one overlay layer: the icon itself is the icon work's), the
+  menu's "Update available: … / Update Now", and a bar across the top of the connect window with Update / Later. They
+  are driven by local control: `Status.hostVersion` and `latestAvailable`, the request `updateNow`, and the event
+  `updateStatus`.
+- Not yet: a notice inside a viewer window that is streaming from the host. That window reconnects by itself after the
+  restart, but showing the notice needs a hook in ViewerSession's control path, which this work does not touch.
+
 **Milestones.**
 
 | # | Deliverable | Done when |

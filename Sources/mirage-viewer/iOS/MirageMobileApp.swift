@@ -110,6 +110,7 @@ struct ConnectScreen: View {
     @State private var adding = ProcessInfo.processInfo.environment["MIRAGE_TEST_OPEN_ADD"] != nil
     /// A pairing link from the + sheet, handed to the root once that sheet is gone.
     @State private var pendingLink: PairingLink?
+    @ObservedObject private var updates = HostUpdateCenter.shared
 
     var body: some View {
         NavigationStack {
@@ -125,6 +126,13 @@ struct ConnectScreen: View {
                     List(hosts) { h in
                         Button { onConnect(h.alias, nil) } label: { row(h) }
                             .tint(.primary)
+                            // Long-press → Update, straight away (the arrow asks first).
+                            .contextMenu {
+                                Button { onConnect(h.alias, nil) } label: { Label("Connect", systemImage: "play.display") }
+                                if case .updateAvailable = h.update, h.canTrigger, !updates.isRunning(h.alias) {
+                                    Button { updates.update(h) } label: { Label("Update", systemImage: "arrow.up.circle") }
+                                }
+                            }
                     }
                 }
             }
@@ -149,6 +157,8 @@ struct ConnectScreen: View {
             }
         }
         .onAppear { hosts = ConnectList.load() }
+        .onChange(of: updates.revision) { hosts = ConnectList.load() }
+        .hostUpdatePrompt(updates)
     }
 
     private func row(_ h: PairedHost) -> some View {
@@ -157,9 +167,10 @@ struct ConnectScreen: View {
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(h.title).foregroundStyle(.primary)
-                if let d = h.detail() { Text(d).font(.caption).foregroundStyle(.secondary) }
+                if let d = updates.line(h.alias) ?? h.detail() { Text(d).font(.caption).foregroundStyle(.secondary) }
             }
             Spacer(minLength: 0)
+            HostUpdateBadge(host: h)
         }
         .contentShape(Rectangle())
     }

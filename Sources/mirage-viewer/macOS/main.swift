@@ -490,19 +490,31 @@ struct MacSettingsView: View {
 /// First window of the app: the paired Macs, each with its device icon, most recently connected first. Double-click or
 /// Return connects; + (the toolbar) adds another Mac by name or address with its pairing code.
 struct ConnectView: View {
-    let hosts: [PairedHost]
+    @State private var hosts: [PairedHost]
     @State private var selection: String?
     @State private var adding: Bool
+    @ObservedObject private var updates = HostUpdateCenter.shared
+    @ObservedObject private var localUpdate = LocalHostUpdate.shared
     let onConnect: (String, String?) -> Void
 
     init(hosts: [PairedHost], lastHost: String?, openAdd: Bool = false, onConnect: @escaping (String, String?) -> Void) {
-        self.hosts = hosts
+        self._hosts = State(initialValue: hosts)
         self._selection = State(initialValue: ConnectList.initialSelection(hosts, lastHost: lastHost))
         self._adding = State(initialValue: openAdd)
         self.onConnect = onConnect
     }
 
     var body: some View {
+        VStack(spacing: 0) {
+            // This Mac's own host, out of date (DESIGN §3.10, U4): the bar across the top of the window.
+            LocalUpdateBar(model: localUpdate)
+            list
+        }
+        .onChange(of: updates.revision) { hosts = ConnectList.load() }
+        .hostUpdatePrompt(updates)
+    }
+
+    private var list: some View {
         Group {
             if hosts.isEmpty {
                 VStack(spacing: 12) {
@@ -518,6 +530,10 @@ struct ConnectView: View {
                 .alternatingRowBackgrounds(.disabled)
                 .contextMenu(forSelectionType: String.self) { items in
                     if let a = items.first { Button("Connect") { onConnect(a, nil) } }
+                    // Right-click → Update, straight away (the arrow asks first).
+                    if let a = items.first, let h = hosts.first(where: { $0.alias == a }), case .updateAvailable = h.update, h.canTrigger, !updates.isRunning(a) {
+                        Button("Update \(h.title)") { updates.update(h) }
+                    }
                 } primaryAction: { items in
                     if let a = items.first { onConnect(a, nil) }   // double-click, Return
                 }
@@ -543,9 +559,10 @@ struct ConnectView: View {
             DeviceIconView(model: h.model, family: h.family, size: 36)
             VStack(alignment: .leading, spacing: 1) {
                 Text(h.title).fontWeight(.medium)
-                if let d = h.detail() { Text(d).font(.caption).foregroundStyle(.secondary) }
+                if let d = updates.line(h.alias) ?? h.detail() { Text(d).font(.caption).foregroundStyle(.secondary) }
             }
             Spacer(minLength: 0)
+            HostUpdateBadge(host: h)
         }
         .padding(.vertical, 3)
         .accessibilityElement(children: .combine)

@@ -15,6 +15,11 @@ public struct HostContext: Sendable {
     /// What the Welcome says about updates (DESIGN §3.10): the newest build the last feed check found, and the policy.
     /// Set by the host (`miraged`), read at each authentication; nil = nothing to report.
     public var updateInfo: (@Sendable () -> HostUpdateInfo)?
+    /// The updater, for triggers from paired viewers and from this Mac (DESIGN §3.10, U4). nil: this host cannot update
+    /// itself, and says so.
+    public var updateHandler: HostUpdateHandler?
+    /// Viewers to tell before the host restarts into an update.
+    public let updateListeners = UpdateListeners()
 
     public init(identity: DeviceIdentity, store: Store, tlsFingerprint: Data, log: @escaping @Sendable (String) -> Void,
                 makeStreamer: (@Sendable () -> DesktopStreamer)? = nil) {
@@ -26,7 +31,11 @@ public struct HostContext: Sendable {
 public struct HostUpdateInfo: Sendable {
     public var latestAvailable: MirageVersion?
     public var permission: UpdatePermission?
-    public init(latestAvailable: MirageVersion?, permission: UpdatePermission?) { self.latestAvailable = latestAvailable; self.permission = permission }
+    /// The last update's outcome, when recent (Welcome.updateResult).
+    public var lastResult: ControlMessage.UpdateStatus?
+    public init(latestAvailable: MirageVersion?, permission: UpdatePermission?, lastResult: ControlMessage.UpdateStatus? = nil) {
+        self.latestAvailable = latestAvailable; self.permission = permission; self.lastResult = lastResult
+    }
 }
 
 /// Handles one incoming stream or datagram flow on the host.
@@ -90,6 +99,7 @@ public enum HostSession {
                 }
             }
             _ = await ctx.connections.remove(connectionID)
+            await ctx.updateListeners.remove(connectionID)
         } else if conn.streamer != nil {
             ctx.log("[\(remote)] datagram flow closed while streaming")
         }
@@ -123,11 +133,22 @@ public enum HostSession {
         var authenticated: DeviceRecord?
         var output: ConnectionOutput?
         var pendingInterest: ControlMessage.ViewInterest?
+        // Update progress and notices (U4): whole framed messages on the control stream, beside anything a stream sends.
+        let updates = OrderedControlSender(stream)
+        defer { updates.finish() }
+        let sendUpdate: @Sendable (ControlMessage) -> Void = { m in updates.send(m) }
         while true {
             let msg = try await stream.receive()
             switch msg {
             case .hello(let hello):
                 authenticated = try await authenticate(hello, stream, conn: conn, remote: remote, ctx: ctx)
+                if (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) { await ctx.updateListeners.add(conn.id, sendUpdate) }
+            case .updateHost(let u):
+                guard let device = authenticated else { throw MirageError.protocolViolation("updateHost before auth") }
+                trigger(.update(targetBuild: u.targetBuild), device: device, connection: conn.id, reply: { sendUpdate(.updateStatus($0)) }, remote: remote, ctx: ctx)
+            case .rollbackHost:
+                guard let device = authenticated else { throw MirageError.protocolViolation("rollbackHost before auth") }
+                trigger(.rollback, device: device, connection: conn.id, reply: { sendUpdate(.updateStatus($0)) }, remote: remote, ctx: ctx)
             case .pairRequest(let req):
                 try await pair(req, stream, remote: remote, ctx: ctx)
             case .ping(var p):
@@ -211,6 +232,23 @@ public enum HostSession {
         }
     }
 
+    // MARK: Update trigger (DESIGN §3.10, U4)
+
+    /// A paired viewer asks the host to update (or roll back): the gate (the host's trigger setting) first, then the
+    /// updater in the background, its progress to this viewer.
+    static func trigger(_ cmd: UpdateCommand, device: DeviceRecord, connection: UUID, reply: @escaping @Sendable (ControlMessage.UpdateStatus) -> Void,
+                        remote: String, ctx: HostContext) {
+        if let why = UpdateGate.refusal(permission: ctx.updateInfo?().permission, canUpdate: ctx.updateHandler != nil, hostName: ctx.identity.name) {
+            ctx.log("[\(remote)] \(device.name) asked to update: refused (\(why))")
+            reply(.init(phase: .failed, message: why, yours: true))
+            return
+        }
+        guard let handler = ctx.updateHandler else { return }
+        ctx.log("[\(remote)] \(device.name) asks to \(cmd)")
+        let requester = UpdateRequester(name: device.name, connectionID: connection)
+        Task { await handler(cmd, requester, reply) }
+    }
+
     // MARK: Authentication of a paired device
 
     static func authenticate(_ hello: ControlMessage.Hello, _ stream: MessageStream, conn: HostConnection, remote: String, ctx: HostContext) async throws -> DeviceRecord {
@@ -268,7 +306,9 @@ public enum HostSession {
         try await stream.send(.welcome(.init(hostName: ctx.identity.name, sessionID: session, resumeToken: token, resumed: resumed, hostBuild: BuildInfo.current,
                                              hostModel: DeviceModel.current, hostFamily: DeviceModel.currentFamily?.rawValue,
                                              hostVersion: .current, latestAvailable: updates?.latestAvailable, updatePolicy: updates?.permission,
-                                             protocolVersion: Mirage.protocolVersion)))
+                                             protocolVersion: Mirage.protocolVersion,
+                                             features: ctx.updateHandler != nil ? [ControlMessage.Feature.updateTrigger] : nil,
+                                             updateResult: updates?.lastResult)))
         ctx.log("[\(remote)] auth timing: challenge sent at \(tChallenge) ms, authenticate in at \(tAuth) ms, welcome sent at \(ms()) ms (from the hello)")
         ctx.log("[\(remote)] authenticated \(device.name) (\(device.id.prefix(12)))\(resumed ? ", resuming its session" : hello.resumeToken != nil ? " (resume token unknown or expired: new session)" : "")")
         return device

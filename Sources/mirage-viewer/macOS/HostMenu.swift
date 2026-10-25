@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import CoreImage
 import ServiceManagement
 import MirageCore
@@ -43,18 +44,27 @@ final class HostMenu: NSObject, NSMenuDelegate {
         connect()
         // Test knob MIRAGE_TEST_OPEN_PAIRING: the pairing window opens at launch (screenshots without clicking the menu bar).
         if ProcessInfo.processInfo.environment["MIRAGE_TEST_OPEN_PAIRING"] != nil { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.pairDevice() } }
-        let t = Timer(timeInterval: 5, repeats: true) { [weak self] _ in if self?.client?.isConnected != true { self?.connect() } }
+        let t = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if self.client?.isConnected != true { self.connect() }
+            // The update dot follows the host's feed checks (U4): a status now and then, besides the menu's own.
+            self.ticks += 1
+            if self.ticks % 12 == 0 { try? self.client?.send(.status) }
+        }
         RunLoop.main.add(t, forMode: .common)
         retry = t
     }
 
     var isConnected: Bool { client?.isConnected == true }
+    private var ticks = 0
+    /// The update's latest step, while one runs (U4).
+    private var updateStatus: ControlMessage.UpdateStatus?
 
     private func connect() {
         guard let store else { return }
         let c = LocalControlClient(store: store)
         c.onEvent = { [weak self] e in DispatchQueue.main.async { self?.handle(e) } }
-        c.onClose = { [weak self] in DispatchQueue.main.async { self?.hostName = nil; self?.status = nil; self?.panel?.hostGone() } }
+        c.onClose = { [weak self] in DispatchQueue.main.async { self?.hostName = nil; self?.status = nil; self?.panel?.hostGone(); self?.updateIndicators() } }
         let was = client?.isConnected == true
         do { try c.connect(client: "Mirage") ; client = c; if !was { AppLog.write("connected to the host's control socket") } } catch { client = nil }
     }
@@ -62,12 +72,60 @@ final class HostMenu: NSObject, NSMenuDelegate {
     private func handle(_ e: LocalControl.Event) {
         switch e {
         case .hello(_, let name, _): hostName = name
-        case .status(let s): status = s
+        case .status(let s): status = s; updateIndicators()
         case .pairing(let p): panel?.show(p)
         case .pairingClosed(let reason): panel?.closed(reason)
         case .paired(let name): panel?.succeeded(name)
         case .confirm(let c): ask(c)
+        case .updateStatus(let u):
+            updateStatus = u.isFinal ? nil : u
+            AppLog.write("update: \(u.phase.rawValue) \(u.message)")
+            updateIndicators(u)
+            if u.isFinal { try? client?.send(.status) }
         }
+    }
+
+    // MARK: Update indicator (DESIGN §3.10, U4)
+
+    /// The yellow dot over the menu-bar icon, and the connect window's bar, from the host's status.
+    private func updateIndicators(_ step: ControlMessage.UpdateStatus? = nil) {
+        let line = isConnected ? status?.updateLine : nil
+        setUpdateDot(line != nil)
+        let name = status?.hostName ?? hostName, can = status?.canUpdate ?? false
+        MainActor.assumeIsolated {   // events arrive on the main queue
+            let model = LocalHostUpdate.shared
+            model.hostName = name
+            model.line = line
+            model.canUpdate = can
+            if let step { model.step = step.isFinal && step.phase == .done ? nil : step }
+            model.updateNow = { [weak self] in self?.updateNow() }
+        }
+    }
+
+    @objc private func updateNow() {
+        do { try client?.send(.updateNow) } catch { AppLog.write("update now: \(error)") }
+        MainActor.assumeIsolated { LocalHostUpdate.shared.step = .init(phase: .checking, message: "Checking for the update…", yours: true) }
+    }
+
+    /// The overlay hook on the status item: one small layer over the icon's top-right corner. The icon itself (its image)
+    /// belongs to the icon work and is never touched here.
+    private var updateDot: CALayer?
+    private func setUpdateDot(_ on: Bool) {
+        guard let button = statusItem?.button else { return }
+        if !on { updateDot?.removeFromSuperlayer(); updateDot = nil; return }
+        button.wantsLayer = true
+        guard updateDot == nil, let layer = button.layer else { return }
+        let d: CGFloat = 7
+        let dot = CALayer()
+        dot.frame = CGRect(x: button.bounds.maxX - d - 1, y: button.bounds.maxY - d - 2, width: d, height: d)
+        dot.cornerRadius = d / 2
+        dot.backgroundColor = NSColor.systemYellow.cgColor
+        dot.borderColor = NSColor.black.withAlphaComponent(0.35).cgColor
+        dot.borderWidth = 0.5
+        dot.autoresizingMask = [.layerMinXMargin, .layerMinYMargin]
+        layer.addSublayer(dot)
+        updateDot = dot
+        button.setAccessibilityLabel("Mirage host: update available")
     }
 
     // MARK: Menu
@@ -98,6 +156,11 @@ final class HostMenu: NSObject, NSMenuDelegate {
         case .enabled where !isConnected: label("Starting the host…")
         case .notFound: label("The host is missing from this copy of Mirage")
         default: break
+        }
+        if isConnected, let u = updateStatus { label("Updating: \(u.message)") }
+        else if isConnected, let line = status?.updateLine {
+            label("Update available: \(line)")
+            if status?.canUpdate == true { _ = item("Update Now", #selector(updateNow)) }
         }
         if isConnected, let s = status, s.restarting == true { label("Restarting to apply permissions…") }
         else if isConnected, let s = status {
@@ -374,5 +437,55 @@ private extension Data {
         var d = Data(); var i = hex.startIndex
         while i < hex.endIndex, let j = hex.index(i, offsetBy: 2, limitedBy: hex.endIndex), let b = UInt8(hex[i..<j], radix: 16) { d.append(b); i = j }
         self = d
+    }
+}
+
+/// This Mac's own host as the connect window's bar shows it (DESIGN §3.10, U4): out of date, and how an update goes.
+@MainActor
+final class LocalHostUpdate: ObservableObject {
+    static let shared = LocalHostUpdate()
+    @Published var hostName: String?
+    /// "0.1 (448) → 0.1 (449)" while an update is available.
+    @Published var line: String?
+    @Published var canUpdate = false
+    /// The update's latest step while one runs (or how it failed).
+    @Published var step: ControlMessage.UpdateStatus?
+    /// Later: hidden until another build comes out.
+    @Published var dismissed: String?
+    var updateNow: (() -> Void)?
+}
+
+/// "Mirage host mac-daddy is out of date: 0.1 (448) → 0.1 (449)" with Update and Later, across the top of the window.
+struct LocalUpdateBar: View {
+    @ObservedObject var model: LocalHostUpdate
+
+    var body: some View {
+        if let step = model.step {
+            bar {
+                if !step.isFinal { ProgressView().controlSize(.small) }
+                Text(step.phase == .failed ? "Update failed: \(step.message)" : step.phase == .rolledBack ? "Update rolled back: \(step.message)" : step.message)
+                    .lineLimit(2)
+                Spacer()
+                if step.isFinal { Button("Dismiss") { model.step = nil } }
+            }
+        } else if let line = model.line, model.dismissed != line {
+            bar {
+                Image(systemName: "arrow.up.circle.fill").symbolRenderingMode(.palette).foregroundStyle(.black, .yellow)
+                Text("Mirage host \(model.hostName ?? "on this Mac") is out of date: \(line)").lineLimit(2)
+                Spacer()
+                Button("Later") { model.dismissed = line }
+                if model.canUpdate { Button("Update") { model.updateNow?() }.keyboardShortcut(.defaultAction) }
+            }
+        }
+    }
+
+    private func bar<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8, content: content)
+                .font(.callout)
+                .padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Color.yellow.opacity(0.18))
+            Divider()
+        }
     }
 }

@@ -61,7 +61,9 @@ struct Serve: AsyncParsableCommand {
         let tls = try TLSIdentity.loadOrCreate(store: store)
         var ctx = HostContext(identity: identity, store: store, tlsFingerprint: tls.fingerprint, log: { log($0) },
                               makeStreamer: { MacDesktopStreamer(log: { log($0) }) })
-        ctx.updateInfo = { UpdateSettings.load(paths.settings).hostUpdateInfo }
+        ctx.updateInfo = { Updater.hostUpdateInfo(paths: paths) }
+        // The agent takes update triggers (U4) from paired viewers and this Mac's app; a test instance does not.
+        if !noLocalControl { ctx.updateHandler = makeUpdateHandler(paths: paths, ctx: ctx, log: { log($0) }) }
         let host = try QUICHost(port: port, tls: tls)
         host.log = { log($0) }
         log("mirage host build \(MirageVersion.current.display) \(MirageVersion.current.commit) (\(MirageVersion.current.channelName))")

@@ -175,6 +175,47 @@ public enum ControlMessage: Codable, Equatable {
     /// for the ones its canvas does not match (`refreshTiles`).
     case tileAudit(TileAuditMessage)
 
+    // Host updates (DESIGN §3.10, U4). Sent only to a peer that says it knows them: a viewer whose Hello lists
+    // `Feature.updateStatus`, a host whose Welcome lists `Feature.updateTrigger` (protocol 6 hosts and viewers from before
+    // U4 decode neither).
+    /// Viewer → host: install the build the host's feed lists now (`targetBuild`, what the viewer showed the person).
+    case updateHost(UpdateHost)
+    /// Viewer → host: put the kept previous build back.
+    case rollbackHost
+    /// Host → viewer: an update's progress (to the viewer that triggered it), or a notice that the host is about to
+    /// restart into an update (to the others).
+    case updateStatus(UpdateStatus)
+
+    /// Optional abilities a peer announces in its Hello or Welcome, so newer messages go only to peers that decode them
+    /// (within one protocol version).
+    public enum Feature {
+        /// A host that accepts `updateHost` and `rollbackHost` from viewers (Welcome).
+        public static let updateTrigger = "updateTrigger"
+        /// A viewer that decodes `updateStatus` (Hello).
+        public static let updateStatus = "updateStatus"
+    }
+
+    public struct UpdateHost: Codable, Equatable {
+        public var targetBuild: Int
+        public init(targetBuild: Int) { self.targetBuild = targetBuild }
+    }
+    public struct UpdateStatus: Codable, Equatable, Sendable {
+        public var phase: UpdatePhase
+        /// 0…1 where it is known (downloading).
+        public var progress: Double?
+        public var message: String
+        public var from: MirageVersion?
+        public var to: MirageVersion?
+        /// When it happened (an update's outcome in a later Welcome: `Welcome.updateResult`).
+        public var at: Date?
+        /// False: a notice about an update someone else triggered.
+        public var yours: Bool?
+        public init(phase: UpdatePhase, progress: Double? = nil, message: String, from: MirageVersion? = nil, to: MirageVersion? = nil, at: Date? = nil, yours: Bool? = nil) {
+            self.phase = phase; self.progress = progress; self.message = message; self.from = from; self.to = to; self.at = at; self.yours = yours
+        }
+        public var isFinal: Bool { [.done, .failed, .rolledBack].contains(phase) }
+    }
+
     // Input, client → host. Coordinates are normalized to the streamed display: (0,0) top-left, (1,1) bottom-right.
     case mouseMove(MouseMove)
     case mouseButton(MouseButton)
@@ -198,11 +239,13 @@ public enum ControlMessage: Codable, Equatable {
         public var viewerVersion: MirageVersion?
         /// The oldest protocol the viewer speaks: a host below it rejects with `.hostTooOld`. nil from older viewers.
         public var minProtocolVersion: Int?
+        /// `Feature` names this viewer supports. nil from older viewers.
+        public var features: [String]?
         public init(protocolVersion: Int, deviceID: String, deviceName: String, clientNonce: Data, resumeToken: Data? = nil, deviceModel: String? = nil,
-                    viewerVersion: MirageVersion? = nil, minProtocolVersion: Int? = nil) {
+                    viewerVersion: MirageVersion? = nil, minProtocolVersion: Int? = nil, features: [String]? = nil) {
             self.protocolVersion = protocolVersion; self.deviceID = deviceID
             self.deviceName = deviceName; self.clientNonce = clientNonce; self.resumeToken = resumeToken; self.deviceModel = deviceModel
-            self.viewerVersion = viewerVersion; self.minProtocolVersion = minProtocolVersion
+            self.viewerVersion = viewerVersion; self.minProtocolVersion = minProtocolVersion; self.features = features
         }
     }
     public struct Challenge: Codable, Equatable {
@@ -249,12 +292,21 @@ public enum ControlMessage: Codable, Equatable {
         public var updatePolicy: UpdatePermission?
         /// The host's own protocol version; the connection speaks `min(Hello.protocolVersion, this)`.
         public var protocolVersion: Int?
+        /// `Feature` names this host supports (U4: `updateTrigger`). nil from older hosts.
+        public var features: [String]?
+        /// The last update's outcome when it ended within the last few minutes (committed or rolled back), so a viewer that
+        /// triggered it learns how it ended when it reconnects after the restart.
+        public var updateResult: UpdateStatus?
         public init(hostName: String, sessionID: String, resumeToken: Data? = nil, resumed: Bool? = nil, hostBuild: String? = nil, hostModel: String? = nil, hostFamily: String? = nil,
-                    hostVersion: MirageVersion? = nil, latestAvailable: MirageVersion? = nil, updatePolicy: UpdatePermission? = nil, protocolVersion: Int? = nil) {
+                    hostVersion: MirageVersion? = nil, latestAvailable: MirageVersion? = nil, updatePolicy: UpdatePermission? = nil, protocolVersion: Int? = nil,
+                    features: [String]? = nil, updateResult: UpdateStatus? = nil) {
             self.hostName = hostName; self.sessionID = sessionID; self.resumeToken = resumeToken; self.resumed = resumed; self.hostBuild = hostBuild
             self.hostModel = hostModel; self.hostFamily = hostFamily
             self.hostVersion = hostVersion; self.latestAvailable = latestAvailable; self.updatePolicy = updatePolicy; self.protocolVersion = protocolVersion
+            self.features = features; self.updateResult = updateResult
         }
+        /// The host accepts update triggers from this viewer.
+        public var acceptsUpdateTrigger: Bool { (features ?? []).contains(Feature.updateTrigger) && (updatePolicy?.viewerMayTrigger ?? false) }
     }
     public struct Reject: Codable, Equatable {
         /// Why, structured (DESIGN §3.10): which side to update, so the viewer says that instead of showing `reason`.

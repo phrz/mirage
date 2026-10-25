@@ -16,6 +16,8 @@ struct PairedHost: Identifiable, Equatable {
     var lastConnected: Date?
     /// DESIGN §3.10: an update for it (the yellow arrow, U4), or which side to update when one refused the other.
     var update: HostUpdateState = .current
+    /// It takes an update trigger from this device (U4): the prompt's Update button, else how to update it instead.
+    var canTrigger = false
     var id: String { alias }
 
     var title: String { name.isEmpty ? alias : name }
@@ -52,7 +54,8 @@ enum ConnectList {
         }
         return (recentPaired + rest).map { alias in
             let h = known[alias]!
-            return PairedHost(alias: alias, name: h.hostName, model: h.model, family: h.deviceFamily, lastConnected: h.lastConnected, update: h.updateState)
+            return PairedHost(alias: alias, name: h.hostName, model: h.model, family: h.deviceFamily, lastConnected: h.lastConnected, update: h.updateState,
+                              canTrigger: h.updateTrigger ?? false)
         }
     }
 
@@ -158,4 +161,105 @@ enum DeviceIcon {
         return img
     }
     #endif
+}
+
+// MARK: - Host updates from the lists (DESIGN §3.10, U4)
+
+/// Updates triggered from this device's lists of paired Macs (DESIGN §3.10, U4): one at a time per Mac, each on a
+/// connection of its own (a viewer window on that Mac is left alone; it reconnects by itself after the restart).
+@MainActor
+final class HostUpdateCenter: ObservableObject {
+    static let shared = HostUpdateCenter()
+    /// The latest step of each update in progress or just ended, by alias.
+    @Published private(set) var status: [String: ControlMessage.UpdateStatus] = [:]
+    /// Bumped when an update ends: the lists reload known-hosts (the new build and feed state came with the last Welcome).
+    @Published private(set) var revision = 0
+    /// The Mac whose update prompt is showing.
+    @Published var prompt: PairedHost?
+
+    func isRunning(_ alias: String) -> Bool { status[alias].map { !$0.isFinal } ?? false }
+
+    func update(_ h: PairedHost) {
+        guard !isRunning(h.alias), case .updateAvailable(_, let to) = h.update else { return }
+        let alias = h.alias, name = h.title
+        status[alias] = .init(phase: .checking, message: "Asking \(name) to update…", yours: true)
+        let (host, port) = ConnectList.parseAddress(alias)
+        let connect: HostUpdateTrigger.Connect = {
+            let store = try Store()
+            let identity = try ViewerCredentials.clientIdentity(store: store)
+            let client = QUICClient(host: host, port: port)
+            try await client.connect(timeout: 10)
+            guard let fp = client.tlsFingerprint else { client.close(); throw MirageError.transport("no TLS fingerprint") }
+            let stream = try await client.openStream()
+            return (ClientSession(identity: identity, store: store, alias: alias, tlsFingerprint: fp, stream: stream), { client.close() })
+        }
+        Task.detached {
+            let end = await HostUpdateTrigger.run(connect: connect, command: .update(targetBuild: to.build), hostName: name) { st in
+                Task { @MainActor in HostUpdateCenter.shared.status[alias] = st }
+            }
+            await MainActor.run {
+                HostUpdateCenter.shared.status[alias] = end
+                HostUpdateCenter.shared.revision += 1
+            }
+        }
+    }
+
+    /// The row's line while an update runs or just ended (in place of its detail).
+    func line(_ alias: String) -> String? {
+        guard let s = status[alias] else { return nil }
+        switch s.phase {
+        case .done: return "Updated: \(s.message)"
+        case .failed: return "Update failed: \(s.message)"
+        case .rolledBack: return "Update rolled back: \(s.message)"
+        default: return s.message
+        }
+    }
+
+    /// The prompt's text: the Mac, its current and new build and channel.
+    static func promptText(_ h: PairedHost) -> String {
+        guard case .updateAvailable(let from, let to) = h.update else { return "" }
+        let base = "\(h.title): \(from.display) → \(to.display), \(to.channelName)"
+        return h.canTrigger ? base : base + "\n\nThis Mac doesn't take updates from other devices (it is older, or allows updates only on itself). Update it from its menu bar, or over SSH: miraged update --now"
+    }
+}
+
+/// The yellow circle with an up-arrow beside a Mac with an update (DESIGN §3.10); a spinner while one runs.
+struct HostUpdateBadge: View {
+    let host: PairedHost
+    @ObservedObject var center = HostUpdateCenter.shared
+
+    var body: some View {
+        if center.isRunning(host.alias) {
+            ProgressView().controlSize(.small)
+                .accessibilityLabel("Updating \(host.title)")
+        } else if case .updateAvailable = host.update {
+            Button { center.prompt = host } label: {
+                Image(systemName: "arrow.up.circle.fill")
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.black, .yellow)
+                    .font(.system(size: 20))
+            }
+            .buttonStyle(.borderless)
+            .help("Update available")
+            .accessibilityLabel("Update \(host.title)")
+        }
+    }
+}
+
+extension View {
+    /// The update prompt for the rows' arrows (Update / Cancel), on the list.
+    func hostUpdatePrompt(_ center: HostUpdateCenter) -> some View {
+        alert(center.prompt.map { "Update \($0.title)?" } ?? "",
+              isPresented: Binding(get: { center.prompt != nil }, set: { if !$0 { center.prompt = nil } }),
+              presenting: center.prompt) { h in
+            if h.canTrigger {
+                Button("Update") { center.update(h) }
+                Button("Cancel", role: .cancel) {}
+            } else {
+                Button("OK", role: .cancel) {}
+            }
+        } message: { h in
+            Text(HostUpdateCenter.promptText(h))
+        }
+    }
 }

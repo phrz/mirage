@@ -185,6 +185,32 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertEqual(r2.detail(now: now, locale: Locale(identifier: "en_US")), "Connected just now")
     }
 
+    /// U4: the row's Update needs a host that takes triggers from this device; the prompt names both builds and the channel.
+    @MainActor
+    func testUpdatePromptAndTrigger() {
+        var k = known("mac-daddy")
+        k.hostVersion = MirageVersion(version: "0.1", build: 448, commit: "a", channel: .nightly)
+        k.latestAvailable = MirageVersion(version: "0.1", build: 449, commit: "b", channel: .nightly)
+        var row = ConnectList.hosts(known: ["mac-daddy": k], recent: [])[0]
+        XCTAssertFalse(row.canTrigger, "an older host, or one restricted to itself")
+        XCTAssertTrue(HostUpdateCenter.promptText(row).hasPrefix("mac-daddy: 0.1 (448) → 0.1 (449), nightly"))
+        XCTAssertTrue(HostUpdateCenter.promptText(row).contains("miraged update --now"))
+        k.updateTrigger = true
+        row = ConnectList.hosts(known: ["mac-daddy": k], recent: [])[0]
+        XCTAssertTrue(row.canTrigger)
+        XCTAssertEqual(HostUpdateCenter.promptText(row), "mac-daddy: 0.1 (448) → 0.1 (449), nightly")
+    }
+
+    func testLocalStatusUpdateLine() {
+        var s = LocalControl.Status(hostName: "mac-daddy", pairedDevices: 1, pairingOpen: false)
+        XCTAssertNil(s.updateLine, "an older host says nothing")
+        s.hostVersion = MirageVersion(version: "0.1", build: 448, commit: "a", channel: .nightly)
+        s.latestAvailable = MirageVersion(version: "0.1", build: 448, commit: "a", channel: .nightly)
+        XCTAssertNil(s.updateLine)
+        s.latestAvailable = MirageVersion(version: "0.1", build: 449, commit: "b", channel: .nightly)
+        XCTAssertEqual(s.updateLine, "0.1 (448) → 0.1 (449)")
+    }
+
     func testAddSheetNeedsACodeOnlyForANewMac() {
         let paired = [PairedHost(alias: "mac-daddy", name: "mac-daddy")]
         var f = AddHostForm()

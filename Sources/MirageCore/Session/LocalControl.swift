@@ -20,6 +20,9 @@ public enum LocalControl {
         case status
         /// Removes a paired device (its id, as in `Status.devices`).
         case revoke(deviceID: String)
+        /// Install the newest build now (DESIGN §3.10, U4: the menu bar's Update Now and the window bar's Update); the host
+        /// answers with `updateStatus` events. An older host ignores it.
+        case updateNow
     }
 
     /// The host's events.
@@ -32,6 +35,8 @@ public enum LocalControl {
         case confirm(Confirm)
         case paired(deviceName: String)
         case status(Status)
+        /// An update's progress (U4), whoever triggered it.
+        case updateStatus(ControlMessage.UpdateStatus)
     }
 
     public struct Pairing: Codable, Equatable {
@@ -63,6 +68,16 @@ public enum LocalControl {
         public var accessibility: Bool?
         /// The host is restarting itself to apply newly granted permissions.
         public var restarting: Bool?
+        /// DESIGN §3.10 (U4): the build the host runs and the newest its feed check found (newer: the yellow dot and bar),
+        /// and whether it can update itself on `updateNow`. nil from older hosts.
+        public var hostVersion: MirageVersion?
+        public var latestAvailable: MirageVersion?
+        public var canUpdate: Bool?
+        /// An update is available: the version line the menu and the window bar show, else nil.
+        public var updateLine: String? {
+            guard let h = hostVersion, let l = latestAvailable, l.build > h.build else { return nil }
+            return "\(h.display) → \(l.display)"
+        }
         public init(hostName: String, pairedDevices: Int, pairingOpen: Bool, devices: [Device]? = nil, connected: [String]? = nil, screenRecording: Bool? = nil, accessibility: Bool? = nil) {
             self.hostName = hostName; self.pairedDevices = pairedDevices; self.pairingOpen = pairingOpen
             self.devices = devices; self.connected = connected; self.screenRecording = screenRecording; self.accessibility = accessibility

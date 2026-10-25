@@ -108,6 +108,12 @@ public final class LocalControlServer: @unchecked Sendable {
         case .decide(let id, let allow):
             if let k = pendingConfirms.removeValue(forKey: id) { k.resume(returning: allow) }
         case .status: sendStatus(to: c)
+        case .updateNow:
+            guard let handler = ctx.updateHandler else {
+                send(.updateStatus(.init(phase: .failed, message: "this host cannot update itself (a development build or a test instance)")), to: c); return
+            }
+            log("update now, from the Mirage app")
+            Task { await handler(.update(targetBuild: nil), .thisMac, { [weak self] st in self?.queue.async { self?.broadcast(.updateStatus(st)) } }) }
         case .revoke(let id):
             // Future connections and resumes are refused (both authenticate against the store); a stream in progress ends
             // with its connection.
@@ -129,6 +135,9 @@ public final class LocalControlServer: @unchecked Sendable {
             self.queue.async {
                 var s = base
                 s.restarting = self.restarting ? true : nil
+                s.hostVersion = .current
+                s.latestAvailable = self.ctx.updateInfo?().latestAvailable
+                s.canUpdate = self.ctx.updateHandler != nil
                 s.connected = ids.map { id in devices.first { $0.id == id }?.name ?? String(id.prefix(12)) }
                 if self.clients[c.fd] === c { self.send(.status(s), to: c) }
             }

@@ -120,3 +120,18 @@ extension InstallerTests {
         }
     }
 }
+
+extension InstallerTests {
+    /// The Welcome carries the last update's outcome for a few minutes (U4: the triggering viewer learns how it ended).
+    func testTheWelcomeCarriesARecentOutcome() throws {
+        let installer = Installer(paths: paths)
+        XCTAssertNil(Updater.hostUpdateInfo(paths: paths).lastResult)
+        try installer.writeResult(UpdateResult(outcome: .rolledBack, from: ver(412), to: ver(420), at: Date(), message: "started 3 times"))
+        let r = try XCTUnwrap(Updater.hostUpdateInfo(paths: paths).lastResult)
+        XCTAssertEqual(r.phase, .rolledBack); XCTAssertEqual(r.to?.build, 420); XCTAssertEqual(r.message, "started 3 times")
+        try installer.writeResult(UpdateResult(outcome: .committed, from: ver(412), to: ver(420), at: Date(), message: "committed"))
+        XCTAssertEqual(Updater.hostUpdateInfo(paths: paths).lastResult?.phase, .done)
+        XCTAssertNil(Updater.hostUpdateInfo(paths: paths, now: Date().addingTimeInterval(16 * 60)).lastResult, "only a recent one")
+        XCTAssertEqual(Updater.hostUpdateInfo(paths: paths).permission, UpdatePermission(policy: .ask, viewerMayTrigger: true))
+    }
+}

@@ -161,6 +161,8 @@ public final class Store: @unchecked Sendable {
         public var hostVersion: MirageVersion?
         public var latestAvailable: MirageVersion?
         public var incompatibility: String?
+        /// The host takes an update trigger from this viewer (it has U4's trigger, and does not restrict updates to itself).
+        public var updateTrigger: Bool?
         /// Its update state as the device list shows it.
         public var updateState: HostUpdateState {
             .evaluate(hostVersion: hostVersion, latestAvailable: latestAvailable,
