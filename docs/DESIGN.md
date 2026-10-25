@@ -1227,8 +1227,12 @@ the codec. Built 2026-10-17 as M2.5 (§3.3c); loopback measurements in §6.
 - A rate collapse on Fast 4G (2026-10-24 05:58Z, check-5 run c5n, the first stream after a host restart at 05:57:32): the
   connect probe read 9586 kbps (31 of 40 echoes, no burst) and set 5600, srtt was 476 ms at the tier decision, and the
   target then fell 2435 -> 2552 -> 1079 kbps over 15 s with queue 0 ms, refinement held at "inflight-cap" (588 stops in
-  the last 5 s) and both window layers soft at +19 s. The rerun two minutes later reached 9740. One occurrence; if it
-  recurs, find what the controller read as loss or delay with an empty queue.
+  the last 5 s) and both window layers soft at +19 s. The rerun two minutes later reached 9740.
+  It recurred once (c5q, 06:20Z): refinement in flight 601 KB against a 272 KB cap, target 5658 -> 2908, "suspend: 183
+  tiles of unacked tile messages queued for resend" at the end. Both began within ~30 s of an agent restart (deploys at
+  05:57:32 and 06:19:57Z), but two cued restarts mid-run (2026-10-25, 22 s and 32 s into 60 s check-5 runs) and six plain
+  runs did not reproduce it: the viewer applied every message it read (queue waits under 70 ms) and refinement in flight
+  drained within ~10 s. Unexplained; the 5-s logging (viewer "tile flow", host "unacked") stays on to catch the next one.
 
 ## 6. Status
 
