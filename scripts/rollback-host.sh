@@ -19,6 +19,13 @@ ssh "$HOST" 'set -e
     rm -f "$HOME/Library/Application Support/Mirage/pending-update.json"
     echo "rolled back by rename (the previous build predates the updater)"
   fi
-  launchctl kickstart -k gui/$(id -u)/com.paulherz.mirage.host
+  # The restored build may be signed differently from the one the agent was registered for: --ensure-agent restarts it
+  # and registers it again through Mirage.app if launchd refuses it (a launch constraint, EX_CONFIG).
+  if "$APP/Contents/MacOS/miraged" update --help 2>/dev/null | grep -q -- --ensure-agent; then
+    "$APP/Contents/MacOS/miraged" update --ensure-agent || echo "the host agent does not start: launchctl print gui/$(id -u)/com.paulherz.mirage.host" >&2
+  else
+    launchctl kickstart -k gui/$(id -u)/com.paulherz.mirage.host
+    launchctl print gui/$(id -u)/com.paulherz.mirage.host | grep -E "^\s(state|job state|last exit code) ="
+  fi
   sleep 3
   tail -n 6 ~/Library/Logs/mirage-host.log'

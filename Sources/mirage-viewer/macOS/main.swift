@@ -48,6 +48,7 @@ struct Options {
         // The host companion's flags (HostMenu, applicationWillFinishLaunching), and the -NSDocumentRevisionsDebugMode style
         // pairs macOS may pass: not a host name.
         args.removeAll { $0 == "--background" || $0 == "--allow-connections" }
+        _ = value(HostAgent.reregisterFlag)   // the updater's request (HostMenu.reregisterAgent): not a host name
         if let v = value("--window") { let p = v.split(separator: "x").compactMap { Int($0) }; if p.count == 2 { o.window = (p[0], p[1]) } }
         if args.isEmpty { return o }   // launched from Finder/Dock: show the connect window
         if args.contains("-h") || args.contains("--help") {
@@ -107,12 +108,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Started at login (Mirage is a login item while this Mac accepts connections) or by the scripts: menu-bar only.
     private var launchedInBackground = false
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // The updater's re-registration request: no Dock icon, no menu, no window; it quits when done.
+        if HostMenu.reregisterRequest != nil { NSApp.setActivationPolicy(.prohibited); return }
         let e = NSAppleEventManager.shared().currentAppleEvent
         let loginItem = e?.eventID == kAEOpenApplication && e?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
         launchedInBackground = options.host.isEmpty && (loginItem || CommandLine.arguments.contains("--allow-connections") || CommandLine.arguments.contains("--background"))
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let id = HostMenu.reregisterRequest { HostMenu.reregisterAgent(requestID: id); NSApp.terminate(nil); return }
         installMenu()
         MainActor.assumeIsolated {
             controls.onSettings = { [weak self] in self?.showSettings(nil) }

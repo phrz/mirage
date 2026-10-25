@@ -35,6 +35,11 @@ final class HostMenu: NSObject, NSMenuDelegate {
             if Self.agent.status != .enabled { AppLog.write("--allow-connections: registering"); toggleAllow() }
             else { AppLog.write("--allow-connections: already enabled") }
         }
+        // launchd's launch constraint follows the signature registered: register again when it refuses the agent or
+        // miraged is signed differently now (an update or deploy from Apple Development to Developer ID).
+        if Self.agent.status == .enabled, let why = Self.reregistrationReason() {
+            AppLog.write("host agent: \(why): registering it again"); Self.reregisterAgent(requestID: "launch")
+        }
         connect()
         // Test knob MIRAGE_TEST_OPEN_PAIRING: the pairing window opens at launch (screenshots without clicking the menu bar).
         if ProcessInfo.processInfo.environment["MIRAGE_TEST_OPEN_PAIRING"] != nil { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.pairDevice() } }
@@ -132,6 +137,7 @@ final class HostMenu: NSObject, NSMenuDelegate {
             else {
                 AppLog.write("registering: before \(AppLog.services())")
                 try Self.agent.register()
+                Self.recordRegistration(requestID: "allow", error: nil, settle: false)
                 do { try Self.mainApp.register() } catch { AppLog.write("app login item: register failed: \(error)") }   // Mirage at login, as a menu-bar accessory
                 AppLog.write("registered: \(AppLog.services())")
                 if Self.agent.status == .requiresApproval || Self.mainApp.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
@@ -142,6 +148,51 @@ final class HostMenu: NSObject, NSMenuDelegate {
             let a = NSAlert(); a.messageText = "Mirage could not change whether this Mac accepts connections."; a.informativeText = "\(error.localizedDescription)"; a.runModal()
         }
     }
+    /// `Mirage.app --reregister-host ID` (DESIGN §3.10, the updater and the deploy scripts): the request's ID.
+    static var reregisterRequest: String? {
+        let a = CommandLine.arguments
+        guard let i = a.firstIndex(of: HostAgent.reregisterFlag) else { return nil }
+        return i + 1 < a.count ? a[i + 1] : "unnamed"
+    }
+
+    /// Registers the host agent again, so launchd's launch constraint follows the bundle's current signature: after an
+    /// update or deploy whose miraged is signed differently, the old registration makes launchd refuse to spawn it
+    /// ("Launch Constraint Violation", EX_CONFIG). Unregistering stops the running agent; registering starts the new one.
+    /// The outcome goes to the app log and to host-registration.json, which the updater waits for.
+    static func reregisterAgent(requestID: String) {
+        AppLog.write("re-registering the host agent (\(requestID)): before \(AppLog.services()); launchd: \(HostAgent.currentStatus())")
+        var failure: String?
+        if agent.status != .notRegistered {
+            do { try agent.unregister() } catch { AppLog.write("re-register: unregister failed: \(error)") }
+        }
+        do { try agent.register() } catch { failure = "\(error)"; AppLog.write("re-register: register failed: \(error)") }
+        // The app's own login item carries a launch constraint from its signature too: renewed the same way.
+        if mainApp.status == .enabled {
+            do { try mainApp.unregister(); try mainApp.register() } catch { AppLog.write("re-register: app login item: \(error)") }
+        }
+        recordRegistration(requestID: requestID, error: failure, settle: true)
+    }
+
+    /// The bundle's miraged, whose signature launchd's constraint follows.
+    static var hostExecutable: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/miraged") }
+
+    static func reregistrationReason() -> String? {
+        guard let root = try? Store().root else { return nil }
+        return HostAgent.reregistrationReason(status: HostAgent.currentStatus(), recorded: HostAgent.readRegistration(storeRoot: root),
+                                              currentRequirement: HostAgent.designatedRequirement(of: hostExecutable))
+    }
+
+    /// host-registration.json: what was registered (miraged's designated requirement) and how it went, with launchd's job
+    /// state once it has had a moment (`settle`) to start the agent.
+    static func recordRegistration(requestID: String, error: String?, settle: Bool) {
+        if settle { Thread.sleep(forTimeInterval: 1.5) }
+        let job = HostAgent.currentStatus()
+        AppLog.write("registered (\(requestID)): \(AppLog.services()); launchd: \(job)")
+        guard let root = try? Store().root else { return }
+        HostAgent.writeRegistration(.init(requestID: requestID, at: Date(), status: AppLog.describe(agent.status), error: error,
+                                          requirement: HostAgent.designatedRequirement(of: hostExecutable), jobState: "\(job)"), storeRoot: root)
+    }
+
     /// Connections off: the host agent and Mirage-at-login both go.
     static func stopHosting() throws {
         do { try agent.unregister() } catch { AppLog.write("host agent: unregister failed: \(error)"); throw error }

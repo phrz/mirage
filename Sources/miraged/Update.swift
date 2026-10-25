@@ -26,6 +26,8 @@ struct Update: AsyncParsableCommand {
     @Option(help: ArgumentHelp("The installed bundle to update (default: the one this miraged runs from, else /Applications/Mirage.app).", visibility: .hidden)) var app: String?
     @Option(help: ArgumentHelp("Install only if the feed's newest is this build (what a remote trigger names).", visibility: .hidden)) var targetBuild: Int?
     @Flag(help: "Swap only: do not restart the host agent or wait for its commit.") var noRestart = false
+    @Flag(help: "Install even a build signed with another identity (Apple Development ↔ Developer ID): the agent is registered again, and a person must give the Screen Recording and Accessibility grants again.") var allowIdentityChange = false
+    @Flag(help: "Restart the host agent and make sure it runs: if launchd refuses to start it (a launch constraint from another signature), register it again through Mirage.app (deploy and install scripts).") var ensureAgent = false
 
     func run() async throws {
         setvbuf(stdout, nil, _IOLBF, 0)
@@ -47,6 +49,13 @@ struct Update: AsyncParsableCommand {
         let s = updater.settings()
         print("\(DeviceNames.current()): Mirage \(running.display) \(running.commit) (built for \(running.channelName)), following \(channel?.rawValue ?? s.channel.rawValue) at \(paths.app.path)")
 
+        if ensureAgent {
+            let agent = AgentControl(app: paths.app, storeRoot: paths.support)
+            let v = agent.ensureRunning(restart: true, log: { print($0) })
+            print("host agent: \(agent.status())")
+            if case .cannotSpawn = v { throw ExitCode(1) }
+            return
+        }
         if rollback {
             let (from, to) = try updater.rollback()
             print("rolled back \(from?.display ?? "?") → \(to?.display ?? "?"); \(from?.display ?? "the replaced build") is skipped until a newer build appears")
@@ -55,11 +64,13 @@ struct Update: AsyncParsableCommand {
         }
         if now {
             do {
-                switch try await updater.install(channel: channel, targetBuild: targetBuild) {
+                switch try await updater.install(channel: channel, targetBuild: targetBuild, allowIdentityChange: allowIdentityChange) {
                 case .nothing(let d):
                     print(d.message)
-                case .swapped(let p):
-                    try await afterSwap(p, paths: paths)
+                case .swapped(let p, let change):
+                    if let change { print("[installing] \(change): allowed (--allow-identity-change)") }
+                    try await afterSwap(p, paths: paths, identityChanged: change != nil)
+                    if change != nil { print(SigningIdentity.tccSteps) }
                 }
             } catch {
                 print("[failed] \(error)")
@@ -78,9 +89,13 @@ struct Update: AsyncParsableCommand {
     }
 
     /// The host agent restarts onto the new build, which commits once healthy; this waits for that (or its rollback).
-    func afterSwap(_ p: PendingUpdate, paths: InstallPaths) async throws {
+    /// launchd may refuse to spawn the new build at all (a launch constraint from the old signature: "spawn failed",
+    /// EX_CONFIG); it then never counts an attempt, so this process notices, registers the agent again through the app,
+    /// and if it still cannot start, swaps the previous build back itself.
+    func afterSwap(_ p: PendingUpdate, paths: InstallPaths, identityChanged: Bool) async throws {
         let installer = Installer(paths: paths)
-        guard !noRestart, agentProgram(inside: paths.app) else {
+        let agent = AgentControl(app: paths.app, storeRoot: paths.support)
+        guard !noRestart, agent.belongsToApp() else {
             // No agent runs from this bundle: nobody would start the new build to commit it, and its deadline would pass.
             installer.clearPending()
             try? installer.writeResult(UpdateResult(outcome: .installedUnchecked, from: p.from, to: p.to, at: Date(),
@@ -88,8 +103,29 @@ struct Update: AsyncParsableCommand {
             print("[done] installed \(p.from.display) → \(p.to.display); no host agent runs from \(paths.app.path), so no health check (verified and self-tested only)")
             return
         }
+        if identityChanged {
+            // launchd's constraint is the old identity's: register the agent for the new one straight away.
+            print("[restarting] registering the host agent again for the new signing identity")
+            let r = agent.reregister()
+            print("[restarting] registration: \(AgentControl.describe(r))")
+            if case .unreachable = r, var q = Installer(paths: paths).readPending() { q.reregistered = nil; try? Installer(paths: paths).writePending(q) }
+        }
         print("[restarting] the host agent")
-        restartAgent(paths: paths)
+        agent.kickstart()
+        let attempts = { installer.readPending()?.attempts ?? (installer.readResult()?.to.build == p.to.build ? 1 : 0) }
+        if case .cannotSpawn(let why) = agent.watch(attempts: attempts) {
+            print("[restarting] launchd cannot start \(p.to.display) (\(why)); registering the agent again through Mirage.app")
+            // Marked first: the new build may start (and roll back) as soon as it is registered.
+            if var q = installer.readPending() { q.reregistered = true; try? installer.writePending(q) }
+            let r = agent.reregister()
+            print("[restarting] registration: \(AgentControl.describe(r))")
+            let done: Bool
+            if case .done = r { done = true } else { done = false }
+            if !done, var q = installer.readPending() { q.reregistered = nil; try? installer.writePending(q) }
+            if case .cannotSpawn(let why2) = agent.watch(attempts: attempts) {
+                try rollBackUnstartable(p, why: why2, paths: paths, agent: agent, reregistered: done)
+            }
+        }
         let deadline = p.deadline.addingTimeInterval(30)
         while Date() < deadline {
             if let r = installer.readResult(), r.to.build == p.to.build {
@@ -101,6 +137,7 @@ struct Update: AsyncParsableCommand {
                 case .rolledBack:
                     print("[rolledBack] \(p.to.display) rolled back after \(secs) s: \(r.message)")
                     for l in r.logTail ?? [] { print("    \(l)") }
+                    reportAgent(agent.ensureRunning(restart: false, log: { print("[rolledBack] \($0)") }), build: p.from)
                     throw ExitCode(2)
                 }
             }
@@ -110,19 +147,36 @@ struct Update: AsyncParsableCommand {
         throw ExitCode(1)
     }
 
-    /// Whether the login-item agent (com.paulherz.mirage.host) runs its program from inside `app`.
-    func agentProgram(inside app: URL) -> Bool {
-        let out = shell("/bin/launchctl", ["print", "gui/\(getuid())/\(launchdLabel)"])
-        for line in out.split(separator: "\n") {
-            let t = line.trimmingCharacters(in: .whitespaces)
-            if t.hasPrefix("program = ") { return String(t.dropFirst("program = ".count)).hasPrefix(app.path + "/") }
-        }
-        return false
+    /// The new build cannot be started even after registering again: the previous bundle goes back from here (the new
+    /// build never ran, so it cannot roll itself back), is registered again too, and must start.
+    func rollBackUnstartable(_ p: PendingUpdate, why: String, paths: InstallPaths, agent: AgentControl, reregistered: Bool) throws {
+        let installer = Installer(paths: paths)
+        print("[rolledBack] \(p.to.display) cannot be started by launchd (\(why)); putting \(p.from.display) back")
+        do { try installer.rollBack(keepReplaced: false) }
+        catch { print("[failed] rollback: \(error); scripts/rollback-host.sh is the last resort"); throw ExitCode(1) }
+        try? installer.writeResult(UpdateResult(outcome: .rolledBack, from: p.from, to: p.to, at: Date(), message: "launchd cannot start it: \(why)"))
+        var s = UpdateSettings.load(paths.settings)
+        if !s.skippedBuilds.contains(p.to.build) { s.skippedBuilds.append(p.to.build); try? s.save(paths.settings) }
+        installer.clearPending()
+        // Registered for the new build's signature a moment ago: register the old one again before starting it.
+        if reregistered { print("[rolledBack] registration: \(AgentControl.describe(agent.reregister()))") }
+        reportAgent(agent.ensureRunning(restart: false, log: { print("[rolledBack] \($0)") }), build: p.from)
+        throw ExitCode(2)
     }
 
+    func reportAgent(_ v: AgentWatch.Verdict, build: MirageVersion) {
+        switch v {
+        case .started: print("[done] the host agent runs \(build.display)")
+        case .cannotSpawn(let why): print("[failed] the host agent does not start (\(why)): launchctl print gui/$UID/\(HostAgent.label); scripts/rollback-host.sh")
+        case .keepWaiting: break
+        }
+    }
+
+    /// After `--rollback` (or a deploy): the agent running from this bundle, registered again if launchd refuses it.
     func restartAgent(paths: InstallPaths) {
-        guard agentProgram(inside: paths.app) else { print("no host agent runs from \(paths.app.path): start it to use the new build"); return }
-        _ = shell("/bin/launchctl", ["kickstart", "-k", "gui/\(getuid())/\(launchdLabel)"])
+        let agent = AgentControl(app: paths.app, storeRoot: paths.support)
+        guard agent.belongsToApp() else { print("no host agent runs from \(paths.app.path): start it to use the new build"); return }
+        reportAgent(agent.ensureRunning(restart: true, log: { print($0) }), build: Installer.version(of: paths.app) ?? .current)
     }
 }
 

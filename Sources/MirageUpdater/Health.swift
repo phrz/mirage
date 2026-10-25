@@ -12,9 +12,13 @@ public struct PendingUpdate: Codable, Equatable, Sendable {
     /// never rolls back the real app).
     public var appPath: String
     public var started: Date
+    /// The agent was registered again for the new build's signature (launchd refused to spawn it under the old one): a
+    /// rollback must register it again for the old build's, or launchd refuses that one in turn.
+    public var reregistered: Bool?
 
-    public init(from: MirageVersion, to: MirageVersion, attempts: Int = 0, deadline: Date, appPath: String, started: Date) {
+    public init(from: MirageVersion, to: MirageVersion, attempts: Int = 0, deadline: Date, appPath: String, started: Date, reregistered: Bool? = nil) {
         self.from = from; self.to = to; self.attempts = attempts; self.deadline = deadline; self.appPath = appPath; self.started = started
+        self.reregistered = reregistered
     }
 }
 

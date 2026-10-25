@@ -23,10 +23,12 @@ public struct UpdateSettings: Codable, Equatable, Sendable {
     public var lastCheck: Date?
     public var latest: MirageVersion?
     public var lastCheckError: String?
+    /// The running build's signing identity, recorded at its commit (so the next update compares without reading it).
+    public var identity: SigningIdentity?
 
     public init() {}
 
-    enum CodingKeys: String, CodingKey { case channel, policy, trigger, learnedKeys, skippedBuilds, lastCheck, latest, lastCheckError }
+    enum CodingKeys: String, CodingKey { case channel, policy, trigger, learnedKeys, skippedBuilds, lastCheck, latest, lastCheckError, identity }
     /// Every field optional, and a value this build does not know falls back to the default: a settings file from a newer
     /// build never stops an older one from updating.
     public init(from decoder: Decoder) throws {
@@ -40,6 +42,7 @@ public struct UpdateSettings: Codable, Equatable, Sendable {
         lastCheck = opt(Date.self, .lastCheck)
         latest = opt(MirageVersion.self, .latest)
         lastCheckError = opt(String.self, .lastCheckError)
+        identity = opt(SigningIdentity.self, .identity)
     }
 
     public var trust: ManifestTrust { ManifestTrust(learned: learnedKeys) }

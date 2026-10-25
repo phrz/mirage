@@ -72,7 +72,7 @@ final class InstallerTests: XCTestCase {
 
     func testUpdateSwapsAndTheNewHostCommits() async throws {
         let m = try publish(ver(420, "0.4.1"))
-        guard case .swapped(let p) = try await updater().install() else { return XCTFail("expected a swap") }
+        guard case .swapped(let p, _) = try await updater().install() else { return XCTFail("expected a swap") }
         XCTAssertEqual(installed(), 420); XCTAssertEqual(previous(), 412, "exactly one previous bundle, outside /Applications")
         XCTAssertEqual(p.from.build, 412); XCTAssertEqual(p.to, m.mirageVersion); XCTAssertEqual(p.attempts, 0)
         XCTAssertEqual(Installer(paths: paths).readPending()?.to, p.to)
@@ -126,7 +126,7 @@ final class InstallerTests: XCTestCase {
 
     func testTheDeadlineRollsBackARunningButUnhealthyBuild() async throws {
         let m = try publish(ver(420))
-        guard case .swapped(let p) = try await updater().install() else { return XCTFail() }
+        guard case .swapped(let p, _) = try await updater().install() else { return XCTFail() }
         let exits = Exits()
         let h = HostHealth(paths: paths, running: m.mirageVersion, logFile: nil, log: { _ in }, exitProcess: { exits.n += 1 })
         XCTAssertTrue(h.launch())

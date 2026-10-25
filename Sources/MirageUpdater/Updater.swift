@@ -18,9 +18,20 @@ public final class Updater: @unchecked Sendable {
     public let running: MirageVersion
     public var report: @Sendable (UpdatePhase, String) -> Void
 
+    /// A bundle's signing identity (tests: a stand-in).
+    public let identityOf: @Sendable (URL) -> SigningIdentity
+
     public init(paths: InstallPaths, feed: Feed = Feed(), verifier: BundleVerifying = SystemBundleVerifier(),
-                running: MirageVersion = .current, report: @escaping @Sendable (UpdatePhase, String) -> Void = { _, _ in }) {
+                running: MirageVersion = .current, report: @escaping @Sendable (UpdatePhase, String) -> Void = { _, _ in },
+                identityOf: @escaping @Sendable (URL) -> SigningIdentity = { SigningIdentity.of(bundle: $0) }) {
         self.paths = paths; self.feed = feed; self.verifier = verifier; self.running = running; self.report = report
+        self.identityOf = identityOf
+    }
+
+    /// The installed build's signing identity: the one recorded at its commit, else read from the bundle.
+    public func runningIdentity() -> SigningIdentity {
+        if let r = settings().identity, r.build == running.build { return r }
+        return identityOf(paths.app)
     }
 
     public var installer: Installer { Installer(paths: paths) }
@@ -55,14 +66,16 @@ public final class Updater: @unchecked Sendable {
 
     public enum Outcome: Sendable {
         /// Swapped in; pending-update.json is written. The host must restart onto the new build, which commits.
-        case swapped(PendingUpdate)
+        /// `identityChange`: it is signed differently (allowed explicitly): the agent must be registered again, and the
+        /// grants given again by a person.
+        case swapped(PendingUpdate, identityChange: String?)
         /// Nothing to install, and why.
         case nothing(UpdateDecision)
     }
 
     /// Checks, then installs the channel's newest when it is an update. `targetBuild`: the build the trigger named, which
     /// must be the one the feed lists now (a viewer never names code, only a build the signed feed already offers).
-    public func install(channel: UpdateChannel? = nil, targetBuild: Int? = nil, now: Date = Date()) async throws -> Outcome {
+    public func install(channel: UpdateChannel? = nil, targetBuild: Int? = nil, allowIdentityChange: Bool = false, now: Date = Date()) async throws -> Outcome {
         let fd = try installer.lock()
         defer { flock(fd, LOCK_UN); close(fd) }
         report(.checking, "checking \(channel?.rawValue ?? settings().channel.rawValue)")
@@ -75,9 +88,13 @@ public final class Updater: @unchecked Sendable {
         let zip = try await installer.download(m, manifestURL: c.manifestURL)
         report(.verifying, "verifying \(to.display)")
         let staged: URL
+        var change: String?
         do {
             let app = try installer.extract(zip)
             try verifier.verify(app: app, expected: to)
+            // A different signing identity costs the TCC grants and the agent's registration: never by surprise.
+            change = SigningIdentity.change(from: runningIdentity(), to: identityOf(app))
+            if let change, !allowIdentityChange { throw UpdateError.refused(SigningIdentity.refusal(change)) }
             staged = try installer.stageOnAppVolume(app)
         } catch {
             try? FileManager.default.removeItem(at: paths.staging(m.build))
@@ -85,13 +102,14 @@ public final class Updater: @unchecked Sendable {
         }
 
         report(.installing, "installing \(from.display) → \(to.display)")
-        let pending = PendingUpdate(from: from, to: to, deadline: now.addingTimeInterval(UpdateHealth.commitWindow), appPath: paths.app.path, started: now)
+        let pending = PendingUpdate(from: from, to: to, deadline: now.addingTimeInterval(UpdateHealth.commitWindow), appPath: paths.app.path, started: now,
+                                    reregistered: change != nil ? true : nil)
         try installer.writePending(pending)
         try? FileManager.default.removeItem(at: paths.result)
         do { try installer.swapIn(staged) }
         catch { installer.clearPending(); throw error }
         try? FileManager.default.removeItem(at: paths.staging(m.build))
-        return .swapped(pending)
+        return .swapped(pending, identityChange: change)
     }
 
     /// `miraged update --rollback`: the previous bundle back in place; the replaced build becomes the previous one, and is
@@ -125,9 +143,17 @@ public final class HostHealth: @unchecked Sendable {
     private var pending: PendingUpdate?
     private var committed = false
 
+    /// Asks the app to register the agent again (tests: a stand-in).
+    let reregisterAgent: @Sendable () -> HostAgent.Registration?
+
     public init(paths: InstallPaths, running: MirageVersion = .current, logFile: URL?, log: @escaping @Sendable (String) -> Void,
-                exitProcess: @escaping @Sendable () -> Void = { exit(0) }) {
+                exitProcess: @escaping @Sendable () -> Void = { exit(0) },
+                reregisterAgent: (@Sendable () -> HostAgent.Registration?)? = nil) {
         self.paths = paths; self.running = running; self.logFile = logFile; self.log = log; self.exitProcess = exitProcess
+        self.reregisterAgent = reregisterAgent ?? {
+            if case .done(let r) = AgentControl(app: paths.app, storeRoot: paths.support).reregister() { return r }
+            return nil
+        }
     }
 
     var installer: Installer { Installer(paths: paths) }
@@ -178,6 +204,9 @@ public final class HostHealth: @unchecked Sendable {
             let secs = Date().timeIntervalSince(p.started)
             log("update committed \(p.from.build) → \(p.to.build) (\(p.from.display) → \(p.to.display), \(String(format: "%.1f", secs)) s after the swap; capture: \(checks.capture ?? ""))")
             finish(p, outcome: .committed, message: "committed \(String(format: "%.1f", secs)) s after the swap", skip: false)
+            var s = UpdateSettings.load(paths.settings)
+            s.identity = SigningIdentity.of(bundle: paths.app)
+            try? s.save(paths.settings)
         }
     }
 
@@ -203,6 +232,13 @@ public final class HostHealth: @unchecked Sendable {
         do { try installer.rollBack(keepReplaced: false) }
         catch { log("rollback failed: \(error); scripts/rollback-host.sh is the last resort") }
         finish(p, outcome: .rolledBack, message: reason, skip: true)
+        // The agent was registered for this build's signature: register it again for the old build's, or launchd refuses
+        // to spawn that one ("Launch Constraint Violation"). Unregistering ends this process; registering starts the old.
+        if p.reregistered == true {
+            log("registering the host agent again for \(p.from.display)")
+            let r = reregisterAgent()
+            log("registration: \(r.map { "\($0.status)\($0.error.map { ", \($0)" } ?? "")" } ?? "not done: \(AgentControl.openOnce)")")
+        }
     }
 
     func finish(_ p: PendingUpdate, outcome: UpdateResult.Outcome, message: String, skip: Bool) {
