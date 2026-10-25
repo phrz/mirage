@@ -70,11 +70,13 @@ public struct Tunables: Codable, Equatable, Sendable {
         // stay lossless tiles, as before, until the mask path is verified.
         case alphaMask
         // 1 = TRUTH (DESIGN §3.0): the host ends each capture's direct changes with frameEnd and the viewer shows them only
-        // then, all at once (bounded wait: 2 srtt + 50 ms, then TRUTH TIMEOUT); 0 = changes show as they arrive.
+        // then, all at once (bounded wait: 2 srtt + 50 ms, then TRUTH TIMEOUT); 0 = changes show as they arrive. On by default
+        // since 2026-10-25 (it had stayed 0: production showed every tile message as it landed).
         case transactional
         // 1 = TRUTH step 2 (host): one capture's change to a window goes whole, down one path: every visible changed tile now
         // (lossless, or lossy where the budget is spent, refined later), or all of it as video; never part now and the rest
         // deferred, rate-held or in a video frame (ghost carets, a selection painted in one tile: phrz's Duo, 2026-10-25).
+        // Typing + select-all at 5.4 Mbps on the bench: split window captures 30 % (both off), 35 % (TRUTH only), 0.6 % (both).
         case atomicCapture
 
         /// Compiled-in default and the bounds a host value is clamped to.
@@ -116,8 +118,8 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .shadowProbe: return (0, 0, 1)
             case .cutStills: return (0, 0, 1)
             case .alphaMask: return (0, 0, 1)
-            case .transactional: return (0, 0, 1)
-            case .atomicCapture: return (0, 0, 1)
+            case .transactional: return (1, 0, 1)
+            case .atomicCapture: return (1, 0, 1)
             }
         }
     }

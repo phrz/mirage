@@ -180,3 +180,12 @@ final class PrivacyPaneTests: XCTestCase {
         XCTAssertEqual(PrivacyPane.path(PrivacyPane.screenRecording), "System Settings → Privacy & Security → Screen & System Audio Recording")
     }
 }
+
+/// TRUTH steps 1 and 2 are on by default (2026-10-25 measurements: split window captures 30 % -> 0.6 %).
+final class TruthDefaultsTests: XCTestCase {
+    func testTransactionalAndAtomicCaptureOnByDefault() {
+        XCTAssertEqual(Tunables.defaults[.transactional], 1)
+        XCTAssertEqual(Tunables.defaults[.atomicCapture], 1)
+        XCTAssertEqual(Tunables.host(overrides: ["atomicCapture": 0])[.atomicCapture], 0, "a host can still turn it off")
+    }
+}
