@@ -22,9 +22,9 @@ ssh "$HOST" 'open -a /Applications/Mirage.app --args --allow-connections; sleep 
 cat <<'INFO'
 
 == once, on the host Mac (System Settings > Privacy & Security):
-   Screen & System Audio Recording, and Accessibility: enable "miraged"
+   Screen & System Audio Recording, and Device Control and Data Access (Accessibility before macOS 27): enable "miraged"
    (/Applications/Mirage.app/Contents/MacOS/miraged; the host asks for both when it starts, so it is listed).
    If Settings lists it as "Mirage" (or "Mirage Viewer", from older builds) instead, enable that. The Mirage menu-bar item shows
-   "Mirage needs Screen Recording / Accessibility" with buttons to these panes until the host sees both grants;
+   "Mirage needs Screen Recording / Device Control and Data Access" with buttons to these panes until the host sees both grants;
    then restart it: launchctl kickstart -k gui/$(id -u)/com.paulherz.mirage.host
 INFO

@@ -1,6 +1,7 @@
 import Foundation
 import ScreenCaptureKit
 import MirageHost
+import MirageCore
 import MirageUpdater
 
 /// The update health check's capture probe (DESIGN §3.10, commit): one small frame of the main display through
@@ -8,8 +9,8 @@ import MirageUpdater
 /// did); without Screen Recording it reports instead of capturing. A capture that fails with the grant present is
 /// retried every 10 s: no commit until it works, so a build that cannot capture rolls back at its deadline.
 func probeCaptureForHealth(screen: Bool, ax: Bool, health: HostHealth) {
-    let axNote = ax ? "accessibility granted" : "Accessibility missing"
-    guard screen else { health.passed(.capture("Screen Recording missing (no frame), \(axNote)")); return }
+    let axNote = ax ? "accessibility granted" : "accessibility missing (\(PrivacyPane.accessibility()))"
+    guard screen else { health.passed(.capture("Screen Recording missing (\(PrivacyPane.screenRecording), no frame), \(axNote)")); return }
     Task.detached {
         while true {
             do {

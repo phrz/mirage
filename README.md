@@ -214,7 +214,7 @@ both, which also lists it in System Settings. On the host (over ARD or locally):
 
 1. System Settings → Privacy & Security → **Screen & System Audio Recording** → enable `miraged`
    (if it is not listed: `+`, press ⌘⇧G, enter `~/.local/bin/miraged`).
-2. System Settings → Privacy & Security → **Accessibility** → enable `miraged` (same `+` trick).
+2. System Settings → Privacy & Security → **Device Control and Data Access** (called **Accessibility** before macOS 27) → enable `miraged` (same `+` trick).
 3. Restart it: `launchctl kickstart -k gui/$(id -u)/com.paulherz.mirage.host`, and check
    `~/Library/Logs/mirage-host.log` says `permissions: screen recording granted, accessibility granted`.
 

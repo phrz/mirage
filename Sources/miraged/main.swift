@@ -78,8 +78,8 @@ struct Serve: AsyncParsableCommand {
         WarmPool.shared.start(log: { log($0) })   // warm host (M-FIVE): a display snapshot kept while nobody is connected
         let screen = HostPermissions.screenRecordingGranted() || (prompts && HostPermissions.requestScreenRecording())
         let ax = HostPermissions.accessibilityGranted(prompt: prompts)
-        log("permissions: screen recording \(screen ? "granted" : "MISSING (System Settings → Privacy & Security → Screen & System Audio Recording → enable miraged)")"
-            + ", accessibility \(ax ? "granted" : "MISSING (System Settings → Privacy & Security → Accessibility → enable miraged)")")
+        log("permissions: screen recording \(screen ? "granted" : "MISSING (\(PrivacyPane.path(PrivacyPane.screenRecording)) → enable miraged)")"
+            + ", accessibility \(ax ? "granted" : "MISSING (\(PrivacyPane.path(PrivacyPane.accessibility())) → enable miraged)")")
         host.start(onStream: { conn, id, remote in
             Task { await HostSession.handle(connection: conn, connectionID: id, remote: remote, ctx: ctx) }
         }, onState: { state in

@@ -97,7 +97,7 @@ final class HostMenu: NSObject, NSMenuDelegate {
         if isConnected, let s = status, s.restarting == true { label("Restarting to apply permissions…") }
         else if isConnected, let s = status {
             if s.screenRecording == false { _ = item("⚠︎ Mirage needs Screen Recording — Open Settings…", #selector(openScreenRecording)) }
-            if s.accessibility == false { _ = item("⚠︎ Mirage needs Accessibility — Open Settings…", #selector(openAccessibility)) }
+            if s.accessibility == false { _ = item("⚠︎ Mirage needs \(PrivacyPane.accessibility()) — Open Settings…", #selector(openAccessibility)) }
             if let c = s.connected, !c.isEmpty { label("Connected: \(c.joined(separator: ", "))") }
         }
         menu.addItem(.separator())

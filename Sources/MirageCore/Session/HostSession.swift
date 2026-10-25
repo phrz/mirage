@@ -353,7 +353,7 @@ public enum HostPermissionHint {
         let t = "\(error)"
         // SCStream errors: -3801 = user declined / no Screen Recording permission.
         if t.contains("-3801") || t.contains("3801") || t.contains("not authorized") || t.contains("TCC") {
-            return "host is missing Screen Recording permission: on the host open System Settings → Privacy & Security → Screen & System Audio Recording and enable miraged, then restart it"
+            return "host is missing Screen Recording permission: on the host open \(PrivacyPane.path(PrivacyPane.screenRecording)) and enable miraged, then restart it"
         }
         return nil
     }

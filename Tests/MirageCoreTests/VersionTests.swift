@@ -171,3 +171,12 @@ final class VersionTests: XCTestCase {
         }
     }
 }
+
+/// macOS 27 renamed the Accessibility pane; the host's hints name it as that Mac's System Settings does.
+final class PrivacyPaneTests: XCTestCase {
+    func testPaneNamesByOS() {
+        XCTAssertEqual(PrivacyPane.accessibility(osMajor: 27), "Device Control and Data Access")
+        XCTAssertEqual(PrivacyPane.accessibility(osMajor: 26), "Accessibility")
+        XCTAssertEqual(PrivacyPane.path(PrivacyPane.screenRecording), "System Settings → Privacy & Security → Screen & System Audio Recording")
+    }
+}
