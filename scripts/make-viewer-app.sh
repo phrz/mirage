@@ -9,8 +9,11 @@
 #
 # Signing (DESIGN §3.10, phrz 2026-10-25): Developer ID Application, team M8MME6Q9DA, hardened runtime: the designated
 # requirement every release keeps, so the Screen Recording and Accessibility grants survive updates (switching from Apple
-# Development costs one re-grant). MIRAGE_SIGNING: auto (default: Developer ID when this Mac's keychain has it, else Apple
-# Development, with a note), developer-id (required), development (Apple Development, whose grants differ).
+# Development costs one re-grant). MIRAGE_SIGN:
+#   auto (default)  Developer ID when this Mac's keychain has it; else Apple Development, with a loud warning (a missing
+#                   certificate never blocks a build or a host deploy)
+#   developer-id    Developer ID required: an error without it (release.sh)
+#   dev             Apple Development, even when Developer ID is there (its grants differ from Developer ID's)
 set -e
 cd "$(dirname "$0")/.."
 # Xcode's toolchain, not the Command Line Tools (their manifest API can't read Package.swift on macOS 27).
@@ -23,20 +26,30 @@ APP=.build/Mirage.app
 BUILD=${BUILD:-$(git rev-list --count HEAD)}
 COMMIT=${MIRAGE_COMMIT:-$(git rev-parse --short=7 HEAD)}
 TEAM=M8MME6Q9DA
-SIGNING=${MIRAGE_SIGNING:-auto}
+SIGNING=${MIRAGE_SIGN:-auto}
 has_developer_id() { security find-identity -v -p codesigning 2>/dev/null | grep -q "\"Developer ID Application: .*($TEAM)\""; }
-[ "$SIGNING" = auto ] && { if has_developer_id; then SIGNING=developer-id; else SIGNING=development; fi; }
+if [ "$SIGNING" = auto ]; then
+    if has_developer_id; then SIGNING=developer-id
+    else
+        SIGNING=dev
+        cat >&2 <<EOF
+######## WARNING: no "Developer ID Application: … ($TEAM)" identity in this Mac's keychain.
+######## Signing with Apple Development instead. A host's Screen Recording and Accessibility grants follow the
+######## signature: they will need granting again once Developer ID builds arrive (scripts/release.sh --check).
+EOF
+    fi
+fi
 set -- CURRENT_PROJECT_VERSION="$BUILD" MIRAGE_COMMIT="$COMMIT" MIRAGE_CHANNEL="${MIRAGE_CHANNEL:-}" \
     MIRAGE_TEST_EXIT_IN_MAIN="${MIRAGE_TEST_EXIT_IN_MAIN:-}"
 [ -n "${VERSION:-}" ] && set -- "$@" MARKETING_VERSION="$VERSION"
 case "$SIGNING" in
     developer-id)
-        has_developer_id || { echo "error: no \"Developer ID Application: … ($TEAM)\" identity in this Mac's keychain; scripts/release.sh --check says how to add it" >&2; exit 1; }
+        has_developer_id || { echo "error: MIRAGE_SIGN=developer-id, but no \"Developer ID Application: … ($TEAM)\" identity is in this Mac's keychain; scripts/release.sh --check says how to add it" >&2; exit 1; }
         # Manual: a Developer ID app needs no provisioning profile. --timestamp: notarization needs a secure timestamp.
         set -- "$@" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Developer ID Application" DEVELOPMENT_TEAM=$TEAM \
             OTHER_CODE_SIGN_FLAGS=--timestamp ;;
-    development) echo "note: signing with Apple Development (no Developer ID Application identity here, or MIRAGE_SIGNING=development)" >&2 ;;
-    *) echo "error: MIRAGE_SIGNING is auto, developer-id or development" >&2; exit 1 ;;
+    dev|development) ;;
+    *) echo "error: MIRAGE_SIGN is auto, developer-id or dev" >&2; exit 1 ;;
 esac
 # No -allowProvisioningUpdates: a macOS build with automatic signing needs no provisioning profile, and the flag made
 # xcodebuild wait for the Apple account (it hung while this Mac was locked). testflight.sh keeps it for iOS.

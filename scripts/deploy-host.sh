@@ -6,16 +6,20 @@
 #
 # Signed with Developer ID Application (phrz, 2026-10-25), like every release, without notarizing: an rsync-copied bundle
 # carries no quarantine flag. Its designated requirement is the releases', so the grants given once after the switch from
-# Apple Development hold for deploys and updates alike. MIRAGE_SIGNING=development deploys an Apple Development build
-# (its grants differ: each switch between the two needs the grants again). The host must have been migrated once
+# Apple Development hold for deploys and updates alike. Until this Mac has the Developer ID certificate the deploy falls
+# back to Apple Development with a loud warning (a missing certificate never blocks a deploy). MIRAGE_SIGN=dev forces
+# Apple Development; MIRAGE_SIGN=developer-id refuses to deploy without Developer ID (each switch between the two needs
+# the grants again). The host must have been migrated once
 # (scripts/migrate-host-to-app.sh). CLI on the host: /Applications/Mirage.app/Contents/MacOS/miraged (serve, devices, …).
 set -e
 cd "$(dirname "$0")/.."
 HOST=${1:-mac-daddy}
-MIRAGE_SIGNING=${MIRAGE_SIGNING:-developer-id}
-export MIRAGE_SIGNING
+export MIRAGE_SIGN=${MIRAGE_SIGN:-auto}
 APP=$(sh scripts/make-viewer-app.sh | tail -1)
 codesign --verify --strict "$APP"
+if ! codesign -dvv "$APP" 2>&1 | grep -q "Authority=Developer ID Application"; then
+    echo "######## WARNING: deploying an Apple Development build to $HOST (no Developer ID here, or MIRAGE_SIGN=dev)." >&2
+fi
 codesign -dv "$APP/Contents/MacOS/miraged" 2>&1 | grep -q "Identifier=com.paulherz.mirage.host" || { echo "error: miraged is not signed as com.paulherz.mirage.host" >&2; exit 1; }
 rsync -a --delete "$APP/" "$HOST:/Applications/Mirage.app/"
 ssh "$HOST" 'launchctl kickstart -k gui/$(id -u)/com.paulherz.mirage.host && sleep 2 && tail -n 4 ~/Library/Logs/mirage-host.log'

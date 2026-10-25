@@ -184,7 +184,7 @@ fi
 
 echo "== build (Developer ID, hardened runtime)"
 build_tool
-APP=$(BUILD=$BUILD VERSION=$VERSION MIRAGE_CHANNEL=$CHANNEL MIRAGE_SIGNING=developer-id MIRAGE_TEST_EXIT_IN_MAIN=${BROKEN:+YES} \
+APP=$(BUILD=$BUILD VERSION=$VERSION MIRAGE_CHANNEL=$CHANNEL MIRAGE_SIGN=developer-id MIRAGE_TEST_EXIT_IN_MAIN=${BROKEN:+YES} \
     sh scripts/make-viewer-app.sh | tail -1)
 codesign --verify --strict --deep "$APP"
 codesign --verify --strict -R="$DR_APP" "$APP" || die "Mirage.app does not satisfy the pinned requirement: $DR_APP"
