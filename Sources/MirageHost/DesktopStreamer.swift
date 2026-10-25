@@ -2671,7 +2671,23 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // earlier change left stays wrong while the tile counts as sent (a vacated Dock tooltip "…aude" for ~12 s on mac-daddy).
         for i in Array(tightBoxes.keys) where !tracker.isCrisp(i) { tightBoxes[i] = nil }
         let inputQuiet = Clock.elapsed(since: injector?.lastInputNanos ?? 0, now: now) > 1_000_000_000
+        capTally = layer.isDisplay || layer.id == ControlMessage.WindowInfo.overlayID ? nil : (layer.id, [])
+        defer { tallyCapture(layer, dirty: dirty) }
         var plan = tracker.classify(dirty: dirty, now: now, copyGate: Clock.elapsed(since: layer.copyGateNanos, now: now) < 300_000_000 && layer.copyGateNanos > 0, smallRegions: inputQuiet)
+        // TRUTH step 2: a window's changed tiles that classify's per-tile rate limit held back go with the rest of this capture.
+        let atomic = atomicCapture && !layer.isDisplay && layer.id != ControlMessage.WindowInfo.overlayID
+        if atomic {
+            let inPlan = Set(plan.lossless).union(plan.video)
+            let held = dirty.filter { !inPlan.contains($0) && tracker.isDirectPending($0) && !layer.occludedTiles.contains($0) }
+            if !held.isEmpty { tracker.sent(lossless: held, now: now); plan.lossless.append(contentsOf: held) }
+            // One path: a capture that video takes part of goes to video whole (its direct tiles too).
+            if !plan.video.isEmpty, !plan.lossless.isEmpty, (layer.encoder != nil || ensureEncoder(layer)) {
+                plan.video.append(contentsOf: plan.lossless)
+                plan.videoRegion = plan.videoRegion.union(tracker.boundingRect(plan.lossless))
+                tracker.markVideo(plan.lossless, now: now)
+                plan.lossless = []
+            }
+        }
         var withCopy: [Int] = []
         if !copyRegion.isEmpty {
             // The scroll's new content: rate-limited ones (classify held them back) go now too.
@@ -2775,6 +2791,26 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             debit("strip", Double(submitLossless(layer: layer, tiles: withCopy, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: 60)))
             tracker.markVideo(withCopy, now: now)
             statStripLossy += withCopy.count
+        }
+        // TRUTH step 2: when the tile budget cannot carry the whole change lossless, the whole change still goes now: video takes
+        // all of it (a lot of fresh content), or the tiles past the locus go lossy (cheap, refined lossless later), in this
+        // capture's transaction. Nothing is deferred, so no tile keeps a pixel from before this capture.
+        if atomic, !plan.lossless.isEmpty, tileTokens <= 0 {
+            if plan.lossless.count >= 12, rc?.policy.videoEnabled ?? true, !(layer.copyGateNanos > 0 && Clock.elapsed(since: layer.copyGateNanos, now: now) < 300_000_000),
+               layer.encoder != nil || ensureEncoder(layer) {
+                plan.video.append(contentsOf: plan.lossless)
+                plan.videoRegion = plan.videoRegion.union(tracker.boundingRect(plan.lossless))
+                tracker.markVideo(plan.lossless, now: now)
+                plan.lossless = []
+            } else {
+                let (near, far) = splitByLocus(plan.lossless, layer: layer, tracker: tracker)
+                if !far.isEmpty {
+                    debit("atomic-lossy", Double(submitLossless(layer: layer, tiles: far, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: 60)))
+                    tracker.markVideo(far, now: now)   // (pending again: refined lossless once it settles)
+                    statAtomicLossy += far.count
+                }
+                plan.lossless = near
+            }
         }
         if !plan.lossless.isEmpty {
             // Priority 1: changed pixels near the input locus (pointer or caret) always go, now, on the
@@ -3770,9 +3806,29 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         return rc.maxKbps <= 2000 || rc.targetKbps <= 2000
     }
 
+    /// TRUTH step 2's measure: per window capture, its visible changed tiles sent now as tiles, now as video, or left (held
+    /// by classify's rate limit, deferred for budget). A capture is split when part went and part was left, or when one
+    /// capture went down both paths: what shows on the viewer as ghost carets and a selection painted in one tile.
+    private var capTally: (layer: UInt32, tiles: Set<Int>)?
+    private var statAtomicLossy = 0
+    private var atomicCapture: Bool { hostTunables[.atomicCapture] >= 0.5 }
+    private var statCaptureWhole = 0, statCaptureSplit = 0, statCaptureMixed = 0, statCaptureLeftTiles = 0
+    private func tallyCapture(_ layer: Layer, dirty: [Int]) {
+        guard let t = capTally, t.layer == layer.id else { return }
+        capTally = nil
+        let visible = Set(dirty).subtracting(layer.occludedTiles)
+        guard !visible.isEmpty else { return }
+        let video = layer.pendingVideoTiles.intersection(visible)
+        let tiles = t.tiles.intersection(visible)
+        let left = visible.subtracting(tiles).subtracting(video)
+        if !left.isEmpty, !(tiles.isEmpty && video.isEmpty) { statCaptureSplit += 1; statCaptureLeftTiles += left.count }
+        else if !tiles.isEmpty, !video.isEmpty { statCaptureMixed += 1 }
+        else if left.isEmpty { statCaptureWhole += 1 }
+    }
     /// Copies the tiles' pixels out and encodes them on the tile queue. Returns the byte estimate charged to the budget.
     @discardableResult
     private func submitLossless(layer: Layer, tiles: [Int], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, tracker: TileTracker, tight: [Int: PixelRect]? = nil, photoQuality: Float = 90, staged: Bool = false, lossy: Float? = nil, lossyFull: Bool = false, correction: Bool = false) -> Int {
+        if !refinement, var t = capTally, t.layer == layer.id { t.tiles.formUnion(tiles); capTally = t }
         var rects = tracker.mergedRects(tiles)
         if let tight {
             // Shrink each merged rect to the union of its tiles' changed boxes (padded 2 px), when all are known.
@@ -4879,7 +4935,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                        statCaptures, capMs, statDirtyTiles, statDiffPruned, rc?.targetKbps ?? 0, rc?.capacityKbps ?? 0, rc?.queueMs ?? 0, rc?.rung ?? 0, srttNanos / 1e6,
                        unacked.count, statSkippedBudget, statDropped, statLost, enc, statInput)
                 + (statNacks > 0 ? " nacks \(statNacks) resent \(statNackResent)" : "") + " fresh \(d?.fresh.description ?? "-")"
-                + " delivery \(rc?.deliveryKbps ?? 0) kbps\(rc?.inStartup ?? false ? " (startup)" : "") tile-inflight \(tileInflightBytes / 1000)/\((rc?.inflightCapBytes ?? 0) / 1000) KB viewer behind \(viewerBehindBytes / 1000) KB send gate: held \(statGateHeldBytes / 1000) KB, dropped \(statGateDropped) stale"
+                + " delivery \(rc?.deliveryKbps ?? 0) kbps\(rc?.inStartup ?? false ? " (startup)" : "") tile-inflight \(tileInflightBytes / 1000)/\((rc?.inflightCapBytes ?? 0) / 1000) KB viewer behind \(viewerBehindBytes / 1000) KB send gate: held \(statGateHeldBytes / 1000) KB, dropped \(statGateDropped) stale window captures: whole \(statCaptureWhole), split \(statCaptureSplit) (\(statCaptureLeftTiles) tiles left), mixed \(statCaptureMixed), lossy for atomicity \(statAtomicLossy) tiles"
                 + String(format: " control %.0f kbps effort %@ fovea %@%@", Double(statControlBytes) * 8 / 5 / 1000, effortLevel, foveaActive ? "on" : "off", statFoveaTiles > 0 ? " (\(statFoveaTiles) tiles)" : "")
                 + String(format: " delay src %@ age %d ms tile-backlog %.0f ms motion %@ interactive %.0f kbps stale-dropped %d", rc?.lastSampleSource ?? "none", Int((rc?.sampleAgeNanos(now: Clock.nowNanos()) ?? 0) / 1_000_000), rc?.tileDelayMs ?? 0, motionSustained(Clock.nowNanos()) ? "yes" : "no", interactiveKbpsEWMA, statStaleDropped)
                 + " | layers \(windowLayers.count) (\(windowLayers.filter { $0.capturer != nil }.count) capturing, \(windowLayers.filter { $0.encoder != nil }.count) encoders, \(windowLayers.filter { !$0.exposed }.count) pending) stills \(statStills) occluded \(statOccluded) window-cmds \(statWindowCommands) taint-resent \(statTaintResent) exclusion-lag \(statExclusionLag)"
@@ -4890,7 +4946,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             auditVisibleUnsent(now: Clock.nowNanos())
             statStaleDropped = 0; statStills = 0; statOccluded = 0; statWindowCommands = 0; statTaintResent = 0; statExclusionLag = 0
             statControlBytes = 0; statFoveaTiles = 0
-            statFrames = 0; statGateHeldBytes = 0; statGateDropped = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0
+            statFrames = 0; statGateHeldBytes = 0; statGateDropped = 0; statCaptureWhole = 0; statCaptureSplit = 0; statCaptureMixed = 0; statCaptureLeftTiles = 0; statAtomicLossy = 0; statBytes = 0; statDropped = 0; statSkippedBudget = 0; statLost = 0; statEncodeNanos = 0; statInput = 0; statCaptures = 0; statCaptureNanos = 0; statNacks = 0; statNackResent = 0
             visibilityReport(now: Clock.nowNanos())
             if statAlphaMaskTiles > 0 { log("alpha mask: \(statAlphaMaskTiles) tiles (\(statAlphaPlane) planes, \(statAlphaClear) clear, \(statAlphaOpaque) back to opaque), \(statAlphaMaskBytes) bytes in 5 s") }
             statAlphaMaskTiles = 0; statAlphaMaskBytes = 0; statAlphaPlane = 0; statAlphaClear = 0; statAlphaOpaque = 0

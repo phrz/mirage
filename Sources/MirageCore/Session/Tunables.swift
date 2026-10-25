@@ -72,6 +72,10 @@ public struct Tunables: Codable, Equatable, Sendable {
         // 1 = TRUTH (DESIGN §3.0): the host ends each capture's direct changes with frameEnd and the viewer shows them only
         // then, all at once (bounded wait: 2 srtt + 50 ms, then TRUTH TIMEOUT); 0 = changes show as they arrive.
         case transactional
+        // 1 = TRUTH step 2 (host): one capture's change to a window goes whole, down one path: every visible changed tile now
+        // (lossless, or lossy where the budget is spent, refined later), or all of it as video; never part now and the rest
+        // deferred, rate-held or in a video frame (ghost carets, a selection painted in one tile: phrz's Duo, 2026-10-25).
+        case atomicCapture
 
         /// Compiled-in default and the bounds a host value is clamped to.
         public var spec: (default: Double, min: Double, max: Double) {
@@ -113,6 +117,7 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .cutStills: return (0, 0, 1)
             case .alphaMask: return (0, 0, 1)
             case .transactional: return (0, 0, 1)
+            case .atomicCapture: return (0, 0, 1)
             }
         }
     }

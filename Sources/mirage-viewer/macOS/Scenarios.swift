@@ -535,6 +535,37 @@ final class ScenarioRunner {
                 session.send(.key(.init(keyCode: code, down: false, isRepeat: false, modifiers: 0, characters: nil)), scripted: true)
                 try? await Task.sleep(for: .milliseconds(160))
             }
+        case "selecttype":
+            // phrz's Duo case (2026-10-25): typing in a text window, and every 5 s a triple-click selecting the line, held 1.5 s,
+            // then the caret back (right arrow) and typing on. Measures whole vs split window captures (TRUTH step 2).
+            session.resetWatched()
+            let text = Array("the quick brown fox jumps over the lazy dog while mirage streams tiles ")
+            let (x, y) = safePoint(w, ppp: ppp)
+            let (nx, ny) = normalized(x, y)
+            func key(_ code: UInt16, _ ch: String?) {
+                session.send(.key(.init(keyCode: code, down: true, isRepeat: false, modifiers: 0, characters: ch)), scripted: true)
+                session.send(.key(.init(keyCode: code, down: false, isRepeat: false, modifiers: 0, characters: nil)), scripted: true)
+            }
+            var i = 0, lastSelect = Date()
+            while Date() < end {
+                if i % 6 == 0, !guardsStillHold() { break }
+                if Date().timeIntervalSince(lastSelect) >= 5 {
+                    lastSelect = Date()
+                    session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
+                    for n in 1...3 {
+                        session.send(.mouseButton(.init(button: 0, down: true, x: nx, y: ny, clickCount: n, modifiers: 0)), scripted: true)
+                        try? await Task.sleep(for: .milliseconds(40))
+                        session.send(.mouseButton(.init(button: 0, down: false, x: nx, y: ny, clickCount: n, modifiers: 0)), scripted: true)
+                        try? await Task.sleep(for: .milliseconds(60))
+                    }
+                    session.log("scenario selecttype: triple-click")
+                    try? await Task.sleep(for: .milliseconds(1500))
+                    key(124, nil)   // right arrow: the caret back at the line's end
+                }
+                let ch = text[i % text.count]; i += 1
+                key(ch == " " ? 49 : 0, String(ch))
+                try? await Task.sleep(for: .milliseconds(160))
+            }
         case "scroll":
             let (x, y) = safePoint(w, ppp: ppp)
             let (nx, ny) = normalized(x, y)
