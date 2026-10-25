@@ -135,3 +135,50 @@ extension InstallerTests {
         XCTAssertEqual(Updater.hostUpdateInfo(paths: paths).permission, UpdatePermission(policy: .ask, viewerMayTrigger: true))
     }
 }
+
+/// U4 review: a viewer's rollback only right after an update, only to the same signing identity, and never skipping.
+final class RemoteRollbackTests: XCTestCase {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let running = ver(420)
+    var trial: PendingUpdate { PendingUpdate(from: ver(412), to: ver(420), attempts: 1, deadline: now.addingTimeInterval(60), appPath: "/Applications/Mirage.app", started: now.addingTimeInterval(-240)) }
+
+    func testOnlyInTheHealthWindow() {
+        XCTAssertNil(RemoteRollback.refusal(pending: trial, lastResult: nil, running: running, now: now, identityChange: nil), "the new build on trial")
+        let committed = UpdateResult(outcome: .committed, from: ver(412), to: ver(420), at: now.addingTimeInterval(-60), message: "")
+        XCTAssertNil(RemoteRollback.refusal(pending: nil, lastResult: committed, running: running, now: now, identityChange: nil), "just committed")
+        XCTAssertNotNil(RemoteRollback.refusal(pending: nil, lastResult: committed, running: running, now: now.addingTimeInterval(UpdateHealth.commitWindow), identityChange: nil),
+                        "committed long ago: a person's call")
+        XCTAssertNotNil(RemoteRollback.refusal(pending: nil, lastResult: nil, running: running, now: now, identityChange: nil), "no update at all")
+        XCTAssertNotNil(RemoteRollback.refusal(pending: nil, lastResult: committed, running: ver(500), now: now, identityChange: nil), "another build runs now")
+        let future = UpdateResult(outcome: .committed, from: ver(412), to: ver(420), at: now.addingTimeInterval(3600), message: "")
+        XCTAssertNotNil(RemoteRollback.refusal(pending: nil, lastResult: future, running: running, now: now, identityChange: nil), "a clock moved backwards")
+        let rolled = UpdateResult(outcome: .rolledBack, from: ver(412), to: ver(420), at: now, message: "")
+        XCTAssertNotNil(RemoteRollback.refusal(pending: nil, lastResult: rolled, running: running, now: now, identityChange: nil))
+        let why = RemoteRollback.refusal(pending: trial, lastResult: nil, running: running, now: now, identityChange: "signing identity change: x")
+        XCTAssertTrue(why?.hasPrefix("rollback needs a person at the Mac: miraged update --rollback") ?? false, why ?? "nil")
+        XCTAssertTrue(why?.contains("signing identity change") ?? false)
+    }
+}
+
+extension InstallerTests {
+    func testAViewersRollbackDoesNotSkipTheBuild() async throws {
+        try publish(ver(420))
+        guard case .swapped = try await updater().install() else { return XCTFail() }
+        _ = try updater(running: ver(420)).rollback(skipReplaced: false)
+        XCTAssertEqual(installed(), 412)
+        XCTAssertEqual(UpdateSettings.load(paths.settings).skippedBuilds, [], "a viewer's rollback skips nothing")
+    }
+
+    /// The Welcome's outcome while the new build is on trial, and a record from the future (a clock set back) is stale.
+    func testTrialAndClockSkewInTheWelcome() async throws {
+        try publish(ver(420))
+        guard case .swapped = try await updater().install() else { return XCTFail() }
+        XCTAssertEqual(Updater.hostUpdateInfo(paths: paths, running: ver(420)).lastResult?.phase, .trial)
+        XCTAssertNil(Updater.hostUpdateInfo(paths: paths, running: ver(412)).lastResult, "the old build still answers: nothing yet")
+        Installer(paths: paths).clearPending()
+        try Installer(paths: paths).writeResult(UpdateResult(outcome: .committed, from: ver(412), to: ver(420), at: Date().addingTimeInterval(3600), message: ""))
+        XCTAssertNil(Updater.hostUpdateInfo(paths: paths, running: ver(420)).lastResult)
+        try Installer(paths: paths).writeResult(UpdateResult(outcome: .failed, from: ver(412), to: ver(420), at: Date(), message: "bad zip"))
+        XCTAssertEqual(Updater.hostUpdateInfo(paths: paths, running: ver(412)).lastResult?.phase, .failed)
+    }
+}

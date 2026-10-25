@@ -143,6 +143,9 @@ struct Update: AsyncParsableCommand {
                 case .committed, .installedUnchecked:
                     print("[done] update committed \(p.from.build) → \(p.to.build) (\(p.to.display)) in \(secs) s")
                     return
+                case .failed:
+                    print("[failed] \(r.message)")
+                    throw ExitCode(1)
                 case .rolledBack:
                     print("[rolledBack] \(p.to.display) rolled back after \(secs) s: \(r.message)")
                     for l in r.logTail ?? [] { print("    \(l)") }

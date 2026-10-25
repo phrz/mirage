@@ -105,8 +105,10 @@ public struct AgentControl: Sendable {
         let label = "com.paulherz.mirage.supervise.\(UUID().uuidString.prefix(8))"
         let plist = storeRoot.appendingPathComponent("\(label).plist")
         let logPath = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/mirage-host.log").path
-        let script = "\"$0\" \"$@\"; rm -f '\(plist.path)'; exec /bin/launchctl bootout gui/\(getuid())/\(label)"
-        let job: [String: Any] = ["Label": label, "ProgramArguments": ["/bin/sh", "-c", script] + command, "RunAtLoad": true, "LaunchOnlyOnce": true,
+        // The plist path and label travel as arguments ($1, $2), never inside the script; booting out its own job may end
+        // the shell before launchctl returns, which is fine: it is the last step.
+        let script = "plist=$1; label=$2; shift 2; \"$@\"; rm -f \"$plist\"; /bin/launchctl bootout \"gui/$(id -u)/$label\" >/dev/null 2>&1 || true"
+        let job: [String: Any] = ["Label": label, "ProgramArguments": ["/bin/sh", "-c", script, "sh", plist.path, label] + command, "RunAtLoad": true, "LaunchOnlyOnce": true,
                                   "StandardOutPath": logPath, "StandardErrorPath": logPath]
         do { try PropertyListSerialization.data(fromPropertyList: job, format: .xml, options: 0).write(to: plist) }
         catch { return "cannot write \(plist.path): \(error)" }

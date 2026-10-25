@@ -65,6 +65,21 @@ final class UpdateSettingsTests: XCTestCase {
         XCTAssertEqual(s.hostUpdateInfo.permission, UpdatePermission(policy: .automatic, viewerMayTrigger: false))
     }
 
+    /// The trigger gate fails closed: an unreadable trigger value, or a file that does not parse, means this Mac only.
+    func testTheTriggerSettingFailsClosed() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mirage-trigger-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("updates.json")
+        try Data(#"{"trigger":"everyone"}"#.utf8).write(to: url)
+        XCTAssertEqual(UpdateSettings.load(url).trigger, .thisMac)
+        try Data(#"{"channel":"nightly"}"#.utf8).write(to: url)
+        XCTAssertEqual(UpdateSettings.load(url).trigger, .anyDevice, "absent: phrz's default")
+        try Data("{not json".utf8).write(to: url)
+        XCTAssertEqual(UpdateSettings.load(url).trigger, .thisMac)
+        XCTAssertEqual(UpdateSettings.load(dir.appendingPathComponent("none.json")).trigger, .anyDevice, "no file yet: the default")
+    }
+
     func testFileRoundTripToleratesUnknownValuesAndDropsRevokedKeys() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mirage-settings-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }

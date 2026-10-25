@@ -33,11 +33,22 @@ public final class Updater: @unchecked Sendable {
 
     /// What the Welcome says about updates: the newest build found, the trigger permission, and the last update's
     /// outcome when it ended within `recent` (so the viewer that triggered it hears how it ended after the restart).
-    public static func hostUpdateInfo(paths: InstallPaths, now: Date = Date(), recent: TimeInterval = 15 * 60) -> HostUpdateInfo {
+    public static func hostUpdateInfo(paths: InstallPaths, running: MirageVersion = .current, now: Date = Date(), recent: TimeInterval = 15 * 60) -> HostUpdateInfo {
         var info = UpdateSettings.load(paths.settings).hostUpdateInfo
-        if let r = Installer(paths: paths).readResult(), now.timeIntervalSince(r.at) < recent {
-            let phase: UpdatePhase = r.outcome == .rolledBack ? .rolledBack : .done
-            info.lastResult = .init(phase: phase, message: r.message, from: r.from, to: r.to, at: r.at)
+        let installer = Installer(paths: paths)
+        if let p = installer.readPending(), p.to.build == running.build {
+            // On trial: the viewer that triggered it waits for the commit.
+            info.lastResult = .init(phase: .trial, message: "start \(p.attempts), not yet healthy", from: p.from, to: p.to, at: p.started)
+        } else if let r = installer.readResult() {
+            let age = now.timeIntervalSince(r.at)
+            if age >= 0, age < recent {   // a clock moved backwards makes the record stale, not fresh
+                let phase: UpdatePhase = switch r.outcome {
+                case .rolledBack: .rolledBack
+                case .failed: .failed
+                case .committed, .installedUnchecked: .done
+                }
+                info.lastResult = .init(phase: phase, message: r.message, from: r.from, to: r.to, at: r.at)
+            }
         }
         return info
     }
@@ -119,14 +130,15 @@ public final class Updater: @unchecked Sendable {
 
     /// `miraged update --rollback`: the previous bundle back in place; the replaced build becomes the previous one, and is
     /// skipped until a newer build appears.
-    public func rollback() throws -> (from: MirageVersion?, to: MirageVersion?) {
+    /// `skipReplaced`: a person's rollback (the CLI) skips the replaced build until a newer one; a viewer's does not.
+    public func rollback(skipReplaced: Bool = true) throws -> (from: MirageVersion?, to: MirageVersion?) {
         let fd = try installer.lock()
         defer { flock(fd, LOCK_UN); close(fd) }
         let replaced = Installer.version(of: paths.app)
         let restored = Installer.version(of: paths.previous)
         try installer.rollBack(keepReplaced: true)
         installer.clearPending()
-        if let r = replaced {
+        if skipReplaced, let r = replaced {
             var s = settings()
             if !s.skippedBuilds.contains(r.build) { s.skippedBuilds.append(r.build); try? s.save(paths.settings) }
         }

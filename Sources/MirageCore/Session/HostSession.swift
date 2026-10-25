@@ -238,6 +238,12 @@ public enum HostSession {
     /// updater in the background, its progress to this viewer.
     static func trigger(_ cmd: UpdateCommand, device: DeviceRecord, connection: UUID, reply: @escaping @Sendable (ControlMessage.UpdateStatus) -> Void,
                         remote: String, ctx: HostContext) {
+        // Revoked while this connection stayed open: no trigger (authentication was at connect time).
+        guard (try? ctx.store.authorizedDevices())?.contains(where: { $0.id == device.id && $0.publicKey == device.publicKey }) == true else {
+            ctx.log("[\(remote)] \(device.name) asked to update but is no longer paired: refused")
+            reply(.init(phase: .failed, message: "this device is no longer paired with \(ctx.identity.name)", yours: true))
+            return
+        }
         if let why = UpdateGate.refusal(permission: ctx.updateInfo?().permission, canUpdate: ctx.updateHandler != nil, hostName: ctx.identity.name) {
             ctx.log("[\(remote)] \(device.name) asked to update: refused (\(why))")
             reply(.init(phase: .failed, message: why, yours: true))
@@ -308,7 +314,8 @@ public enum HostSession {
                                              hostVersion: .current, latestAvailable: updates?.latestAvailable, updatePolicy: updates?.permission,
                                              protocolVersion: Mirage.protocolVersion,
                                              features: ctx.updateHandler != nil ? [ControlMessage.Feature.updateTrigger] : nil,
-                                             updateResult: updates?.lastResult)))
+                                             // Only to a viewer that decodes update statuses (one from before U4 never sees it).
+                                             updateResult: (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) ? updates?.lastResult : nil)))
         ctx.log("[\(remote)] auth timing: challenge sent at \(tChallenge) ms, authenticate in at \(tAuth) ms, welcome sent at \(ms()) ms (from the hello)")
         ctx.log("[\(remote)] authenticated \(device.name) (\(device.id.prefix(12)))\(resumed ? ", resuming its session" : hello.resumeToken != nil ? " (resume token unknown or expired: new session)" : "")")
         return device

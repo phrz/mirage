@@ -12,14 +12,21 @@ final class UpdateTriggerTests: XCTestCase {
 
     struct Rig { let host: QUICHost; let port: UInt16; let viewerStore: Store; let viewer: DeviceIdentity; let ctx: HostContext; let tmp: URL }
 
-    func rig(permission: UpdatePermission?, lastResult: ControlMessage.UpdateStatus? = nil, handler: HostUpdateHandler?) async throws -> Rig {
+    final class Results: @unchecked Sendable {
+        private let lock = NSLock(); private var queue: [ControlMessage.UpdateStatus?]; private var last: ControlMessage.UpdateStatus?
+        init(_ q: [ControlMessage.UpdateStatus?]) { queue = q; last = q.last ?? nil }
+        /// Each Welcome takes the next; the last one stays.
+        func next() -> ControlMessage.UpdateStatus? { lock.lock(); defer { lock.unlock() }; return queue.isEmpty ? last : queue.removeFirst() }
+    }
+
+    func rig(permission: UpdatePermission?, lastResult: ControlMessage.UpdateStatus? = nil, results: Results? = nil, handler: HostUpdateHandler?) async throws -> Rig {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mirage-trigger-\(UUID().uuidString)")
         let hostStore = try Store(root: tmp.appendingPathComponent("host"))
         let viewerStore = try Store(root: tmp.appendingPathComponent("viewer"))
         let hostID = try hostStore.identity(role: "host", name: "test-host")
         let tls = try TLSIdentity.loadOrCreate(store: hostStore)
         var ctx = HostContext(identity: hostID, store: hostStore, tlsFingerprint: tls.fingerprint, log: { _ in })
-        ctx.updateInfo = { HostUpdateInfo(latestAvailable: nil, permission: permission, lastResult: lastResult) }
+        ctx.updateInfo = { HostUpdateInfo(latestAvailable: nil, permission: permission, lastResult: results?.next() ?? lastResult) }
         ctx.updateHandler = handler
         let viewer = DeviceIdentity(name: "test-phone")
         try hostStore.authorize(viewer.record)
@@ -169,5 +176,89 @@ final class UpdateTriggerTests: XCTestCase {
         XCTAssertEqual(HostUpdateTrigger.outcome(welcome: w(was, result: rb), command: .update(targetBuild: 449), from: was)?.phase, .rolledBack)
         XCTAssertNil(HostUpdateTrigger.outcome(welcome: w(was, result: rb), command: .update(targetBuild: 450), from: was), "an earlier update's rollback")
         XCTAssertEqual(HostUpdateTrigger.outcome(welcome: w(was), command: .rollback, from: now)?.phase, .done)
+    }
+
+    // MARK: Review fixes (U4)
+
+    /// The new build answers but is on trial: "trial", and polling goes on until the Welcome says it committed.
+    func testDoneOnlyOnceCommitted() async throws {
+        let target = MirageVersion.current.build
+        let trial = ControlMessage.UpdateStatus(phase: .trial, message: "start 1", from: MirageVersion(version: "0.1", build: target - 1, commit: "a", channel: nil), to: .current, at: Date())
+        let done = ControlMessage.UpdateStatus(phase: .done, message: "committed", from: trial.from, to: .current, at: Date())
+        // Welcomes: the trigger's own, then two on trial, then committed.
+        let r = try await rig(permission: anyDevice, results: Results([nil, trial, trial, done]), handler: { _, _, reply in
+            reply(.init(phase: .restarting, message: "restarting", yours: true))
+        })
+        defer { r.host.stop(); try? FileManager.default.removeItem(at: r.tmp) }
+        let seen = Log()
+        let end = await HostUpdateTrigger.run(connect: connect(r), command: .update(targetBuild: target), hostName: "test-host", timing: fast) { seen.add($0.phase.rawValue) }
+        XCTAssertEqual(end.phase, .done)
+        XCTAssertEqual(seen.all.filter { $0 == "trial" }.count, 1, "reported once while it lasts: \(seen.all)")
+        XCTAssertEqual(Array(seen.all.suffix(2)), ["trial", "done"])
+    }
+
+    func testATrialThatNeverCommitsIsNotDone() async throws {
+        let target = MirageVersion.current.build
+        let trial = ControlMessage.UpdateStatus(phase: .trial, message: "start 1", from: nil, to: .current, at: Date())
+        let r = try await rig(permission: anyDevice, results: Results([nil, trial]), handler: { _, _, reply in
+            reply(.init(phase: .restarting, message: "restarting", yours: true))
+        })
+        defer { r.host.stop(); try? FileManager.default.removeItem(at: r.tmp) }
+        let end = await HostUpdateTrigger.run(connect: connect(r), command: .update(targetBuild: target), hostName: "test-host",
+                                              timing: .init(reconnectFor: 1.5, pollEvery: 0.2)) { _ in }
+        XCTAssertEqual(end.phase, .failed)
+        XCTAssertTrue(end.message.contains("has not passed its health checks"), end.message)
+    }
+
+    /// The connection is lost before "restarting": the viewer does not claim a restart; the host's record (a failed
+    /// install) read from the next Welcome is the answer.
+    func testALostConnectionReadsTheOutcomeFromTheNextWelcome() async throws {
+        let failed = ControlMessage.UpdateStatus(phase: .failed, message: "verification failed: the zip's SHA-256 differs",
+                                                 from: .current, to: MirageVersion(version: "", build: 9999, commit: "", channel: nil), at: Date())
+        let r = try await rig(permission: anyDevice, lastResult: failed, handler: nil)
+        defer { r.host.stop(); try? FileManager.default.removeItem(at: r.tmp) }
+        let seen = Log()
+        let end = await HostUpdateTrigger.awaitRestart(connect: connect(r), command: .update(targetBuild: 9999), from: .current, hostName: "test-host",
+                                                       timing: fast, lost: true) { seen.add($0.phase.rawValue) }
+        XCTAssertEqual(end.phase, .failed)
+        XCTAssertTrue(end.message.contains("SHA-256"), end.message)
+        XCTAssertFalse(seen.all.contains("restarting"), "no restart is claimed")
+        // Nothing recorded: after the time, "lost the connection", not "did not come back".
+        let r2 = try await rig(permission: anyDevice, handler: nil)
+        defer { r2.host.stop(); try? FileManager.default.removeItem(at: r2.tmp) }
+        let end2 = await HostUpdateTrigger.awaitRestart(connect: connect(r2), command: .update(targetBuild: 9999), from: .current, hostName: "test-host",
+                                                        timing: .init(reconnectFor: 0.8, pollEvery: 0.2), lost: true) { _ in }
+        XCTAssertTrue(end2.message.hasPrefix("lost the connection"), end2.message)
+    }
+
+    /// A phase from a later build decodes (as unknown) instead of failing the Welcome; the outcome goes only to viewers that
+    /// listed updateStatus.
+    func testTolerantPhaseAndUpdateResultOnlyForListeners() async throws {
+        let w = try JSONDecoder().decode(ControlMessage.Welcome.self, from: Data(#"{"hostName":"h","sessionID":"s","updateResult":{"phase":"teleporting","message":"m"}}"#.utf8))
+        XCTAssertEqual(w.updateResult?.phase, .unknown)
+        XCTAssertFalse(w.updateResult?.isFinal ?? true)
+        let rolled = ControlMessage.UpdateStatus(phase: .rolledBack, message: "x", from: .current, to: .current, at: Date())
+        let r = try await rig(permission: anyDevice, lastResult: rolled, handler: nil)
+        defer { r.host.stop(); try? FileManager.default.removeItem(at: r.tmp) }
+        let (a, closeA) = try await connect(r)(); defer { closeA() }
+        let plain = try await a.authenticate()
+        XCTAssertNil(plain.updateResult, "a viewer that did not list updateStatus never gets it")
+        let (b, closeB) = try await connect(r)(); defer { closeB() }
+        let listening = try await b.authenticate(features: [ControlMessage.Feature.updateStatus])
+        XCTAssertEqual(listening.updateResult?.phase, .rolledBack)
+    }
+
+    func testARevokedDeviceCannotTriggerOnItsOpenConnection() async throws {
+        let calls = Log()
+        let r = try await rig(permission: anyDevice, handler: { _, _, _ in calls.add("ran") })
+        defer { r.host.stop(); try? FileManager.default.removeItem(at: r.tmp) }
+        let (s, close) = try await connect(r)(); defer { close() }
+        _ = try await s.authenticate()
+        _ = try r.ctx.store.revoke(idPrefix: r.viewer.id)
+        try await s.stream.send(.updateHost(.init(targetBuild: 1)))
+        guard case .updateStatus(let st) = try await s.stream.receive() else { return XCTFail() }
+        XCTAssertEqual(st.phase, .failed)
+        XCTAssertTrue(st.message.contains("no longer paired"), st.message)
+        XCTAssertEqual(calls.all, [])
     }
 }

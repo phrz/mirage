@@ -52,7 +52,16 @@ public struct MirageVersion: Codable, Equatable, Hashable, Sendable, Comparable 
 /// The phases an update reports (DESIGN §3.10): `miraged update` prints them; the host sends them to the viewer that
 /// triggered it (`ControlMessage.updateStatus`) and to the Mirage app on the host Mac (local control).
 public enum UpdatePhase: String, Codable, Sendable {
-    case checking, downloading, verifying, installing, restarting, done, failed, rolledBack
+    case checking, downloading, verifying, installing, restarting
+    /// The new build runs but has not passed its health checks yet (it may still roll back).
+    case trial
+    case done, failed, rolledBack
+    /// A phase from a later build: it decodes as this instead of failing the whole message (a Welcome included).
+    case unknown
+
+    public init(from decoder: Decoder) throws {
+        self = UpdatePhase(rawValue: (try? decoder.singleValueContainer().decode(String.self)) ?? "") ?? .unknown
+    }
 }
 
 /// What a trigger asks the host for.

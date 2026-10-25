@@ -36,7 +36,8 @@ public struct UpdateSettings: Codable, Equatable, Sendable {
         func opt<T: Decodable>(_ t: T.Type, _ k: CodingKeys) -> T? { (try? c.decodeIfPresent(t, forKey: k)) ?? nil }
         channel = opt(UpdateChannel.self, .channel) ?? .stable
         policy = opt(UpdatePolicy.self, .policy) ?? .ask
-        trigger = opt(UpdateTrigger.self, .trigger) ?? .anyDevice
+        // Absent: the default (any paired device). Present but unreadable: fail closed, to this Mac only.
+        trigger = c.contains(.trigger) ? (opt(UpdateTrigger.self, .trigger) ?? .thisMac) : .anyDevice
         learnedKeys = opt([String].self, .learnedKeys) ?? []
         skippedBuilds = opt([Int].self, .skippedBuilds) ?? []
         lastCheck = opt(Date.self, .lastCheck)
@@ -80,7 +81,9 @@ public struct UpdateSettings: Codable, Equatable, Sendable {
     public static func load(_ url: URL) -> UpdateSettings {
         guard let data = try? Data(contentsOf: url) else { return UpdateSettings() }
         let d = JSONDecoder(); d.dateDecodingStrategy = .iso8601
-        var s = (try? d.decode(UpdateSettings.self, from: data)) ?? UpdateSettings()
+        var s: UpdateSettings
+        if let decoded = try? d.decode(UpdateSettings.self, from: data) { s = decoded }
+        else { s = UpdateSettings(); s.trigger = .thisMac }   // a file that does not parse: the gate fails closed
         // A revoking build drops revoked keys from the learned set at start (the compromise procedure).
         s.learnedKeys = s.trust.prunedLearned()
         return s

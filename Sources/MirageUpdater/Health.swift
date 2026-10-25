@@ -25,7 +25,9 @@ public struct PendingUpdate: Codable, Equatable, Sendable {
 /// How an update ended: `update-result.json`, read by `miraged update --now` (and, in U4, reported to the viewer that
 /// triggered it).
 public struct UpdateResult: Codable, Equatable, Sendable {
-    public enum Outcome: String, Codable, Sendable { case committed, rolledBack, installedUnchecked }
+    /// failed: a triggered update that stopped before the swap (feed, download, verification); `to` is then the build it
+    /// was asked for, as far as known.
+    public enum Outcome: String, Codable, Sendable { case committed, rolledBack, installedUnchecked, failed }
     public var outcome: Outcome
     public var from: MirageVersion
     public var to: MirageVersion
@@ -36,6 +38,25 @@ public struct UpdateResult: Codable, Equatable, Sendable {
 
     public init(outcome: Outcome, from: MirageVersion, to: MirageVersion, at: Date, message: String, logTail: [String]? = nil) {
         self.outcome = outcome; self.from = from; self.to = to; self.at = at; self.message = message; self.logTail = logTail
+    }
+}
+
+/// Whether a paired viewer may roll the host back (U4 review): only while an update it might regret is fresh (the new
+/// build on trial, or committed within the health window), and only to a previous build of the same signing identity.
+/// Anything else (an older build, another identity, losing grants and the launch constraint) needs a person at the Mac.
+public enum RemoteRollback {
+    public static let personNeeded = "rollback needs a person at the Mac: miraged update --rollback"
+
+    public static func refusal(pending: PendingUpdate?, lastResult: UpdateResult?, running: MirageVersion, now: Date,
+                               identityChange: String?) -> String? {
+        let onTrial = pending.map { $0.to.build == running.build && now < $0.deadline } ?? false
+        let justCommitted = lastResult.map { r in
+            let age = now.timeIntervalSince(r.at)
+            return r.outcome == .committed && r.to.build == running.build && age >= 0 && age < UpdateHealth.commitWindow
+        } ?? false
+        guard onTrial || justCommitted else { return "\(personNeeded) (no update in its health window)" }
+        if let identityChange { return "\(personNeeded) (\(identityChange))" }
+        return nil
     }
 }
 
