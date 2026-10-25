@@ -108,6 +108,8 @@ struct ConnectScreen: View {
     let onLink: (PairingLink) -> Void
     @State private var hosts: [PairedHost] = []
     @State private var adding = ProcessInfo.processInfo.environment["MIRAGE_TEST_OPEN_ADD"] != nil
+    /// A pairing link from the + sheet, handed to the root once that sheet is gone.
+    @State private var pendingLink: PairingLink?
 
     var body: some View {
         NavigationStack {
@@ -133,14 +135,16 @@ struct ConnectScreen: View {
                         .accessibilityLabel("Add a Mac")
                 }
             }
-            .sheet(isPresented: $adding) {
+            // The "Pair with …?" alert lives on the root view: it is asked for only once this sheet is gone (onDismiss). An
+            // alert presented while sheets were still animating out was dropped: the scanner closed and nothing happened, the
+            // phone never connected (phrz's new iPhone, 2026-10-25).
+            .sheet(isPresented: $adding, onDismiss: { if let l = pendingLink { pendingLink = nil; onLink(l) } }) {
                 AddHostScreen(paired: hosts, onCancel: { adding = false }, onConnect: { address, code in
                     adding = false
                     onConnect(address, code)
                 }, onLink: { link in
-                    // The "Pair with …?" alert lives on the root view: this sheet goes first.
+                    pendingLink = link
                     adding = false
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { onLink(link) }
                 })
             }
         }
@@ -168,7 +172,11 @@ struct AddHostScreen: View {
     let onConnect: (String, String?) -> Void
     let onLink: (PairingLink) -> Void
     @State private var form = AddHostForm()
-    @State private var scanning = false
+    /// Test knob MIRAGE_TEST_SCAN_LINK=<link> (with MIRAGE_TEST_OPEN_ADD): the scanner opens and takes that link as if
+    /// scanned, so the sheet-to-alert hand-off can be checked in the simulator (no camera there).
+    @State private var scanning = ProcessInfo.processInfo.environment["MIRAGE_TEST_SCAN_LINK"] != nil
+    /// A scanned link, handed on once the scanner sheet is gone.
+    @State private var scanned: PairingLink?
 
     var body: some View {
         NavigationStack {
@@ -194,7 +202,7 @@ struct AddHostScreen: View {
                         .disabled(form.request(paired) == nil)
                 }
             }
-            .sheet(isPresented: $scanning) { PairingScanSheet(onLink: onLink) }
+            .sheet(isPresented: $scanning, onDismiss: { if let l = scanned { scanned = nil; onLink(l) } }) { PairingScanSheet(onLink: { scanned = $0 }) }
         }
         .presentationDetents([.medium, .large])
     }

@@ -16,7 +16,7 @@ struct PairingScanSheet: View {
             VStack(spacing: 16) {
                 if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
                     QRScanner { text in
-                        if let l = PairingLink(string: text) { dismiss(); onLink(l) } else { notALink = true }
+                        if let l = PairingLink(string: text) { onLink(l); dismiss() } else { notALink = true }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 16))
                     Text(notALink ? "That QR code is not a Mirage pairing code." : "Point the camera at the code in Pair a Device… on your Mac.")
@@ -27,7 +27,7 @@ struct PairingScanSheet: View {
                     Text("Scanning needs the camera. You can paste the pairing link instead.").multilineTextAlignment(.center).foregroundStyle(.secondary)
                     TextField("miragerd://pair?…", text: $pasted).textInputAutocapitalization(.never).autocorrectionDisabled()
                         .textFieldStyle(.roundedBorder)
-                    Button("Use Link") { if let l = PairingLink(string: pasted) { dismiss(); onLink(l) } else { notALink = true } }
+                    Button("Use Link") { if let l = PairingLink(string: pasted) { onLink(l); dismiss() } else { notALink = true } }
                         .disabled(pasted.isEmpty)
                     if notALink { Text("That is not a Mirage pairing link.").foregroundStyle(.orange) }
                     Spacer()
@@ -37,6 +37,10 @@ struct PairingScanSheet: View {
             .navigationTitle("Scan Pairing Code")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            .task {
+                guard let t = ProcessInfo.processInfo.environment["MIRAGE_TEST_SCAN_LINK"], let l = PairingLink(string: t) else { return }
+                try? await Task.sleep(for: .seconds(1)); onLink(l); dismiss()
+            }
         }
     }
 }
