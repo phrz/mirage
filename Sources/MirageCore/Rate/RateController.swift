@@ -309,7 +309,12 @@ public struct RateController {
 
     /// The highest target the estimates allow: the cap, 0.7 × the video trains' capacity, and the delivery-rate ceiling.
     private func ceilingKbps() -> Int {
-        let trains = capacityKbps > 0 ? min(maxKbps, max(tuning.minKbps, Int(Double(capacityKbps) * tuning.capacityFraction))) : maxKbps
+        // A video train's spread is read on the viewer's receive clock; an iPhone hands a frame's datagrams over spread out
+        // (receive scheduling, Wi-Fi power save): one unpaced train read 7.7 Mbps right after the session had delivered
+        // 29 Mbps, and 0.7 x it held a LAN at 5.4 Mbps for good (phrz-duo on 448, 2026-10-25 20:07:07Z). A train never
+        // caps below what was measured delivered, and on an unstressed Local link it does not cap at all (as delivery).
+        let trainCap = max(Int(Double(capacityKbps) * tuning.capacityFraction), deliveryKbps)
+        let trains = capacityKbps > 0 && !(tier == .local && !pathStressedNow) ? min(maxKbps, max(tuning.minKbps, trainCap)) : maxKbps
         return max(tuning.minKbps, min(trains, deliveryCeilingKbps))
     }
 

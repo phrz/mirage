@@ -433,6 +433,19 @@ final class LANRecognitionTests: XCTestCase {
         rc.seedLAN()
         XCTAssertEqual(rc.tier, .local)
     }
+    /// An iPhone's spread-out receive clock read a 7.7 Mbps train on a LAN that had delivered 29 Mbps: no 5.4 Mbps ceiling.
+    func testTrainReadingNeverCapsALANBelowDelivery() {
+        var rc = RateController(initialKbps: 2000, maxKbps: 50_000, nativePixels: 3200 * 1800)
+        rc.noteTrainRTT(5_000_000, now: 1_000_000_000)
+        rc.seedLAN()
+        // One unpaced 40-fragment frame of 120 KB whose datagrams arrived over 125 ms: 7.7 Mbps.
+        for i in 0..<3 {
+            let t = UInt64(2_000_000_000 + i * 100_000_000)
+            rc.frameAcked(sentNanos: t, firstReceived: t, lastReceived: t + 125_000_000, fragments: 40, bytes: 120_000, now: t + 130_000_000, rttNanos: 6_000_000)
+        }
+        XCTAssertGreaterThan(rc.capacityKbps, 0)
+        XCTAssertGreaterThanOrEqual(rc.targetKbps, 40_000, "Local, unstressed: the train does not cap")
+    }
     /// Wi-Fi jitter is not a queue: min RTT 4 ms, probes at 30 ms keep the LAN's ceiling at the cap; 60 ms over is a queue.
     func testWiFiJitterIsNotPathStress() {
         var rc = RateController(initialKbps: 2000, maxKbps: 50_000, nativePixels: 3200 * 1800)
