@@ -118,6 +118,8 @@ final class Layer {
     var needsCrop = false
     /// When this layer's last small animation went out (lossy tiles at the capped rate).
     var smallAnimNanos: UInt64 = 0
+    /// One small-animation send's estimated bytes (EWMA), lossless and lossy: what sets its frame rate and quality.
+    var smallAnimLosslessBytes: Double = 0, smallAnimLossyBytes: Double = 0
     var backdropDirty = false
     var backdropHeldNanos: UInt64 = 0
     /// Window picture audit: where its slow sweep continues.

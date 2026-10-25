@@ -2639,11 +2639,25 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if smallVideo || !plan.flicker.isEmpty {
             let small = ((smallVideo ? plan.video : []) + plan.flicker).filter { !layer.occludedTiles.contains($0) }
             if smallVideo { plan.video = []; plan.videoRegion = .zero }
-            let interval = UInt64(1e9 / hostTunables[.smallAnimationFps])
+            // By the link, like everything else (phrz's LAN session, 2026-10-25: Claude's pulsing names "looked terrible and
+            // low fps" at 3 fps half-size q50): where a quarter of the target pays for it, lossless at the request's frame
+            // rate; else q90 at full size at the rate that quarter affords; on a short link (<= 2 Mbps) the tunables' path.
+            var fps = hostTunables[.smallAnimationFps]
+            var quality: Float? = Float(hostTunables[.smallAnimationQuality]), full = false
+            if !photographicFinalIsLossy, let rc, let req = request {
+                let share = Double(rc.targetKbps) * 1000 / 8 * 0.25, maxFPS = Double(max(1, req.maxFPS))
+                let lossless = layer.smallAnimLosslessBytes
+                if lossless == 0 || lossless * maxFPS <= share { fps = maxFPS; quality = nil }
+                else { fps = min(maxFPS, max(fps, share / max(1, layer.smallAnimLossyBytes))); quality = 90; full = true }
+            }
+            let interval = UInt64(1e9 / fps)
             if !small.isEmpty, Clock.elapsed(since: layer.smallAnimNanos, now: now) >= interval {
                 layer.smallAnimNanos = now
                 if layer.isDisplay { displaySent(small) }
-                debit("smallanim", Double(submitLossless(layer: layer, tiles: small, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: Float(hostTunables[.smallAnimationQuality]))))
+                let bytes = submitLossless(layer: layer, tiles: small, from: new, refinement: false, nanos: nanos, tracker: tracker, lossy: quality, lossyFull: full)
+                if quality == nil { layer.smallAnimLosslessBytes = layer.smallAnimLosslessBytes == 0 ? Double(bytes) : layer.smallAnimLosslessBytes * 0.7 + Double(bytes) * 0.3; tracker.sent(lossless: small, now: now) }
+                else { layer.smallAnimLossyBytes = layer.smallAnimLossyBytes == 0 ? Double(bytes) : layer.smallAnimLossyBytes * 0.7 + Double(bytes) * 0.3 }
+                debit("smallanim", Double(bytes))
                 statSmallAnimTiles += small.count
             }
         }
@@ -3536,7 +3550,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
     }
 
-    private func encodeAndSend(_ jobs: [(PixelRect, Data)], estimate: Int, layer: Layer, refinement: Bool, block: Int?, nanos: UInt64, photoQuality: Float = 90, staged: Bool = false, lossy: Float? = nil, correction: Bool = false) {
+    private func encodeAndSend(_ jobs: [(PixelRect, Data)], estimate: Int, layer: Layer, refinement: Bool, block: Int?, nanos: UInt64, photoQuality: Float = 90, staged: Bool = false, lossy: Float? = nil, lossyFull: Bool = false, correction: Bool = false) {
         if !refinement, !staged { markFrameEnd(layer.id) }
         let hdr = header(layer: layer.id, nanos: nanos)
         if staged { layer.stagedEncoding += 1; layer.lastStagedNanos = nanos; if layer.stagedOpenSince == nil { layer.stagedOpenSince = nanos } }
@@ -3558,8 +3572,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     let base = p.baseAddress!
                     if !alpha, let solid = TileCodec.solidColour(base: base, width: r.width, height: r.height, stride: r.width * 4) { return (.solid, solid) }
                     // At half size (the viewer draws a lossy rect scaled onto it): soft for a moment, refined lossless once it settles.
-                    rank = TileKey.lossyStill
-                    if let q = lossy, let data = TileCodec.encodeLossy(base: base, width: r.width, height: r.height, stride: r.width * 4, outWidth: max(16, r.width / 2), outHeight: max(16, r.height / 2), quality: q, alpha: alpha) { return (.lossy, data) }
+                    rank = lossyFull ? TileKey.lossyFinal : TileKey.lossyStill
+                    // (lossyFull: at full size, a small animation on a link with bandwidth to spare.)
+                    if let q = lossy, let data = TileCodec.encodeLossy(base: base, width: r.width, height: r.height, stride: r.width * 4, outWidth: lossyFull ? r.width : max(16, r.width / 2), outHeight: lossyFull ? r.height : max(16, r.height / 2), quality: q, alpha: alpha) { return (.lossy, data) }
                     let photographic = TileCodec.colourCount(base: base, width: r.width, height: r.height, stride: r.width * 4, limit: 4096) > 4096
                     // Review #22: on constrained links a photographic rect (a wallpaper, a photo) ends at visually
                     // lossless (lossy WebP q90 at full size, ~4x under near-lossless on a 2x desktop picture), not at
@@ -3624,7 +3639,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// Copies the tiles' pixels out and encodes them on the tile queue. Returns the byte estimate charged to the budget.
     @discardableResult
-    private func submitLossless(layer: Layer, tiles: [Int], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, tracker: TileTracker, tight: [Int: PixelRect]? = nil, photoQuality: Float = 90, staged: Bool = false, lossy: Float? = nil, correction: Bool = false) -> Int {
+    private func submitLossless(layer: Layer, tiles: [Int], from f: ShiftDetector.Frame, refinement: Bool, nanos: UInt64, tracker: TileTracker, tight: [Int: PixelRect]? = nil, photoQuality: Float = 90, staged: Bool = false, lossy: Float? = nil, lossyFull: Bool = false, correction: Bool = false) -> Int {
         var rects = tracker.mergedRects(tiles)
         if let tight {
             // Shrink each merged rect to the union of its tiles' changed boxes (padded 2 px), when all are known.
@@ -3639,8 +3654,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
         }
         let (jobs, estimate) = copyOut(rects, from: f)
-        encodeAndSend(jobs, estimate: lossy == nil ? estimate : estimate / 12, layer: layer, refinement: refinement, block: nil, nanos: nanos, photoQuality: photoQuality, staged: staged, lossy: lossy, correction: correction)
-        return lossy == nil ? estimate : estimate / 12
+        let est = lossy == nil ? estimate : estimate / (lossyFull ? 4 : 12)
+        encodeAndSend(jobs, estimate: est, layer: layer, refinement: refinement, block: nil, nanos: nanos, photoQuality: photoQuality, staged: staged, lossy: lossy, lossyFull: lossyFull, correction: correction)
+        return est
     }
 
     /// Encodes arbitrary rects (large lossless blocks) on the tile queue, one block in flight. Returns the byte estimate charged.
