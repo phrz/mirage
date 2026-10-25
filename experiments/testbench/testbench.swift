@@ -143,6 +143,30 @@ final class App: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// `--pulse`: an opaque 600x160 window with the same line twice, the upper one's colour pulsing (alpha 0.35-1, a 1.2 s
+    /// cycle, 60 updates a second) like a chat app's "thinking" name, the lower one still: the LAN gate's small-animation
+    /// check (frames per second and sharpness of the pulsing line against the still one, lossless).
+    func startPulse(near f: NSRect) {
+        let w = NSWindow(contentRect: NSRect(x: f.minX + 80, y: f.minY + 80, width: 600, height: 160), styleMask: [.borderless], backing: .buffered, defer: false)
+        w.title = "Mirage Test Bench pulse"; w.isOpaque = true; w.hasShadow = false; w.backgroundColor = .white
+        let text = "Claude is thinking about the tile cache"
+        func label(_ y: CGFloat) -> NSTextField {
+            let l = NSTextField(labelWithString: text); l.font = .systemFont(ofSize: 18, weight: .semibold); l.textColor = .black
+            l.frame = NSRect(x: 24, y: y, width: 552, height: 30); return l
+        }
+        let pulsing = label(100), still = label(30)
+        let v = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 160)); v.addSubview(pulsing); v.addSubview(still)
+        w.contentView = v
+        w.orderFrontRegardless()
+        pulseWindow = w
+        let t0 = Date()
+        Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { _ in
+            let phase = Date().timeIntervalSince(t0).truncatingRemainder(dividingBy: 1.2) / 1.2
+            pulsing.textColor = NSColor(white: 0, alpha: 0.35 + 0.65 * (0.5 + 0.5 * cos(phase * 2 * .pi)))
+        }
+    }
+    var pulseWindow: NSWindow?
+
     func startDockLike(screen: NSScreen, near b: NSRect) {
         let o = NSWindow(contentRect: screen.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         o.isOpaque = false; o.backgroundColor = .clear; o.hasShadow = false; o.ignoresMouseEvents = true
@@ -364,6 +388,7 @@ final class App: NSObject, NSApplicationDelegate {
             if CommandLine.arguments.contains("--noshadow") { startNoShadow(near: w.frame) }
             if CommandLine.arguments.contains("--transmover") { startTransMover(near: w.frame) }
             if CommandLine.arguments.contains("--fade") || CommandLine.arguments.contains("--faded") { startFade(near: w.frame, done: CommandLine.arguments.contains("--faded")) }
+            if CommandLine.arguments.contains("--pulse") { startPulse(near: w.frame) }
             if CommandLine.arguments.contains("--terminal") { startTerminal(tv) }
             updateCaption()
             window = w
