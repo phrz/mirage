@@ -546,6 +546,9 @@ final class ScenarioRunner {
                 session.send(.key(.init(keyCode: code, down: true, isRepeat: false, modifiers: 0, characters: ch)), scripted: true)
                 session.send(.key(.init(keyCode: code, down: false, isRepeat: false, modifiers: 0, characters: nil)), scripted: true)
             }
+            // Key-to-pixel on every third key: the time to the bench window's next shown change (TRUTH: its frameEnd).
+            session.watchWindowID = w.id
+            var latencies: [Double] = []
             var i = 0, lastSelect = Date()
             while Date() < end {
                 if i % 6 == 0, !guardsStillHold() { break }
@@ -563,9 +566,24 @@ final class ScenarioRunner {
                     key(124, nil)   // right arrow: the caret back at the line's end
                 }
                 let ch = text[i % text.count]; i += 1
-                key(ch == " " ? 49 : 0, String(ch))
-                try? await Task.sleep(for: .milliseconds(160))
+                if i % 3 == 0 {
+                    let before = session.lastWatchedShownNanos, t0 = Clock.nowNanos()
+                    key(ch == " " ? 49 : 0, String(ch))
+                    var got: Double? = nil
+                    for _ in 0..<50 {   // up to 500 ms
+                        try? await Task.sleep(for: .milliseconds(5))
+                        if session.lastWatchedShownNanos > before { got = Double(Clock.elapsed(since: t0, now: session.lastWatchedShownNanos)) / 1e6; break }
+                    }
+                    if let got { latencies.append(got) }
+                    try? await Task.sleep(for: .milliseconds(max(0, 160 - Int(got ?? 160))))
+                } else {
+                    key(ch == " " ? 49 : 0, String(ch))
+                    try? await Task.sleep(for: .milliseconds(160))
+                }
             }
+            keyLatencyMs = latencies
+            let sorted = latencies.sorted()
+            if !sorted.isEmpty { session.log(String(format: "scenario selecttype: key-to-pixel p50 %.0f ms, p90 %.0f ms over %d keys", sorted[sorted.count / 2], sorted[min(sorted.count - 1, sorted.count * 9 / 10)], sorted.count)) }
         case "scroll":
             let (x, y) = safePoint(w, ppp: ppp)
             let (nx, ny) = normalized(x, y)

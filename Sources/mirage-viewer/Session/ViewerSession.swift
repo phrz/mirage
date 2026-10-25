@@ -178,6 +178,9 @@ final class ViewerSession: @unchecked Sendable {
     /// Scenario watch rect: last lossless tile / video frame that touched it.
     var watchRect: PixelRect = .zero
     private(set) var lastWatchedTileNanos: UInt64 = 0, lastWatchedVideoNanos: UInt64 = 0, lastWatchedCopyNanos: UInt64 = 0
+    /// When the watched window's direct changes were last shown: at the tile under TRUTH off, at the capture's frameEnd under
+    /// TRUTH (applied tiles wait there), so key-to-pixel times what a person sees.
+    private(set) var lastWatchedShownNanos: UInt64 = 0
     /// Last watched tile of at least 32×32 px: time-to-crisp ignores caret blinks and single glyphs.
     private(set) var lastWatchedLargeTileNanos: UInt64 = 0
     private(set) var watchedVideoFrames = 0, watchedCopyRects = 0
@@ -937,6 +940,7 @@ final class ViewerSession: @unchecked Sendable {
                 let inside = watchWindowID != 0 && isWatchedLayered() ? (v.id == watchWindowID ? t.tiles : []) : t.tiles.filter { displayRect($0.rect, layer: v.id).intersects(watchRect) }
                 if !inside.isEmpty {
                     lastWatchedTileNanos = now; watchedTileBytes += inside.reduce(0) { $0 + $1.data.count }; watchedTileCount += inside.count
+                    if !(transactional && !t.refinement) { lastWatchedShownNanos = now }
                     if inside.contains(where: { $0.rect.area >= 1024 }) { lastWatchedLargeTileNanos = now }
                     if !t.refinement { watchedDirectBytes += inside.reduce(0) { $0 + $1.data.count } }
                     if Self.debugTiles { log("tiles\(t.refinement ? " (refine)" : "") layer \(v.id) seq \(t.header.captureSeq) in watch rect: " + inside.map { "\($0.rect.width)x\($0.rect.height)@\($0.rect.x),\($0.rect.y) \($0.data.count)B \($0.format)" }.joined(separator: "  ")) }
@@ -976,7 +980,9 @@ final class ViewerSession: @unchecked Sendable {
             for id in ids {
                 guard let v = layerView(id) else { continue }
                 let since = v.compositor.pendingSinceNanos
-                shownTiles += v.compositor.commitTransaction()
+                let n = v.compositor.commitTransaction()
+                shownTiles += n
+                if n > 0, id == watchWindowID { lastWatchedShownNanos = now }
                 if since > 0 { waited.append(Clock.elapsed(since: since, now: now) / 1_000_000) }
             }
             if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present: frame \(seq) layers \(ids.map(String.init).joined(separator: " ")): \(shownTiles) tiles, held \(waited.max() ?? 0) ms") }
