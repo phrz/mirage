@@ -9,7 +9,9 @@ import MirageUpdater
 /// (fresh, replace, current, refuse: never a silent signing-identity change), installs at the app path, applies the
 /// settings, turns the host on, and prints the grant steps.
 func MirageUpdate_installBundle(_ bundle: URL, manifest: URL, sigs: URL, channel: UpdateChannel?, appPath: URL, store: Store,
-                   assignments: [String], force: Bool, allowIdentityChange: Bool, dryRun: Bool) async throws {
+                   assignments: [String], force: Bool, allowIdentityChange: Bool, dryRun: Bool,
+                   afterSwap: (PendingUpdate, InstallPaths, Bool) async throws -> Void) async throws {
+    if let why = InstallUser.refusal(uid: getuid(), user: NSUserName(), consoleUser: InstallUser.consoleUser()) { throw UpdateError.refused(why) }
     guard let version = Installer.version(of: bundle) else { throw UpdateError.install("\(bundle.path) is not a Mirage bundle") }
     let m = try FreshInstall.verifyManifest(try Data(contentsOf: manifest), signatures: try Data(contentsOf: sigs), channel: channel, bundle: version)
     print("manifest: \(m.channel.rawValue) \(m.mirageVersion.display), signed by a key this build trusts")
@@ -17,49 +19,15 @@ func MirageUpdate_installBundle(_ bundle: URL, manifest: URL, sigs: URL, channel
     print("bundle: Developer ID team \(PinnedRequirement.team), notarized, self-test ok")
 
     let paths = InstallPaths(app: appPath, support: store.root)
-    let installed = Installer.version(of: appPath)
-    let plan = InstallPlan.decide(installed: installed, installedIdentity: installed != nil ? SigningIdentity.of(bundle: appPath) : nil,
-                                  new: version, newIdentity: SigningIdentity.of(bundle: bundle), force: force, allowIdentityChange: allowIdentityChange)
-    print("plan: \(plan.description) → \(appPath.path)")
-    var settings = UpdateSettings.load(paths.settings)
-    if !assignments.contains(where: { $0.lowercased().hasPrefix("channel") }) { try settings.apply("channel=\(m.channel.rawValue)") }
-    for a in assignments { try settings.apply(a) }
-    print("settings: channel \(settings.channel.rawValue), policy \(settings.policy.rawValue), trigger \(settings.trigger.rawValue)")
-    if case .refuse(let why) = plan { print("error: \(why)"); throw ExitCode(1) }
-    if dryRun { print("dry run: nothing changed"); return }
-    try settings.save(paths.settings)
-    if case .current = plan { print("nothing to install"); return }
-
-    // Staged beside the app path (same volume), then one rename: fresh, or the swap that keeps the old as the previous one.
-    let staged = appPath.deletingLastPathComponent().appendingPathComponent(".Mirage-staged.app", isDirectory: true)
-    try? FileManager.default.removeItem(at: staged)
-    let copy = SystemBundleVerifier.run(URL(fileURLWithPath: "/usr/bin/ditto"), [bundle.path, staged.path], timeout: 300)
-    guard copy.1 == 0 else { throw UpdateError.install("copying to \(staged.path): \(copy.0)") }
-    let agent = AgentControl(app: appPath, storeRoot: store.root)
-    switch plan {
-    case .fresh:
-        guard rename(staged.path, appPath.path) == 0 else { throw UpdateError.install("installing \(appPath.path): \(String(cString: strerror(errno)))") }
-        print("installed \(version.display) at \(appPath.path)")
-        let (v, how) = agent.allowConnections()
-        print("host: \(how)")
-        report(v)
-    case .replace(let from):
-        try Installer(paths: paths).swapIn(staged)
-        print("replaced \(from.display) with \(version.display) (the old build is kept as the previous one)")
-        report(agent.belongsToApp() ? agent.ensureRunning(restart: true, log: { print($0) }) : agent.allowConnections().0)
-    case .current, .refuse: break
-    }
+    let installer = BundleInstaller(paths: paths, agent: SystemInstallAgent(app: appPath, storeRoot: store.root))
+    let plan = try await installer.install(bundle: bundle, version: version, manifestChannel: m.channel, assignments: assignments, force: force,
+                                           allowIdentityChange: allowIdentityChange, dryRun: dryRun,
+                                           afterSwap: { p, changed in try await afterSwap(p, paths, changed) })
+    if dryRun { return }
+    if case .fresh = plan {} else if case .replace = plan {} else { return }
     print("")
     print(SigningIdentity.tccSteps())
     print("Then pair a device: Pair a Device… in Mirage's menu bar, or `\(appPath.path)/Contents/MacOS/miraged pair`.")
-
-    func report(_ v: AgentWatch.Verdict) {
-        switch v {
-        case .started: print("host agent: running")
-        case .cannotSpawn(let why): print("host agent: not running (\(why))")
-        case .keepWaiting: break
-        }
-    }
 }
 
 /// `miraged update --status-line` (U5, scripts/fleet.sh): this Mac in one line.

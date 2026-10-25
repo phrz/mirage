@@ -229,10 +229,12 @@ final class HostMenu: NSObject, NSMenuDelegate {
             do { try agent.unregister() } catch { AppLog.write("re-register: unregister failed: \(error)") }
         }
         do { try agent.register() } catch { failure = "\(error)"; AppLog.write("re-register: register failed: \(error)") }
-        // The app's own login item carries a launch constraint from its signature too: renewed the same way.
-        if mainApp.status == .enabled {
-            do { try mainApp.unregister(); try mainApp.register() } catch { AppLog.write("re-register: app login item: \(error)") }
-        }
+        // The app's own login item carries a launch constraint from its signature too: renewed the same way; and a host
+        // turned on by install-host.sh gets it as the Allow toggle gives it (Mirage at login, as a menu-bar accessory).
+        do {
+            if mainApp.status == .enabled { try mainApp.unregister() }
+            try mainApp.register()
+        } catch { AppLog.write("re-register: app login item: \(error)") }
         recordRegistration(requestID: requestID, error: failure, settle: true)
     }
 

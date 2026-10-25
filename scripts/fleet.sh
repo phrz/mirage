@@ -8,6 +8,7 @@
 #
 #   HOSTS_FILE: one SSH destination per line (a name from ~/.ssh/config, user@host, …); # starts a comment.
 #   status    `miraged update --status-line` on each: version, channel, latest, agent, streaming, grants, policy
+#             (exits non-zero when any host is unreachable, has no Mirage, or fails)
 #   install   scripts/install-host.sh on each (through `sh -s`); on a Mac that has Mirage it replaces an older build
 #   update    `miraged update --now` on each (the same updater as the remote trigger)
 #   --dry-run print what would run, run nothing
@@ -17,6 +18,7 @@
 # and agent registration need a person at that Mac. A fresh install over SSH also ends with steps for a person there
 # (the grants, which TCC never allows remotely, and Login Items approval if macOS asks).
 set -e
+set -f   # host names are never glob patterns
 DIR=$(cd "$(dirname "$0")" && pwd)
 DRY=
 [ "${1:-}" = --dry-run ] && { DRY=1; shift; }
@@ -39,26 +41,32 @@ case "$CHANNEL" in ""|stable|beta|nightly) ;; *) echo "error: --channel is stabl
 case "$POLICY" in ""|ask|automatic) ;; *) echo "error: --policy is ask or automatic" >&2; exit 2 ;; esac
 
 MIRAGED=/Applications/Mirage.app/Contents/MacOS/miraged
-SSH="ssh -o BatchMode=yes -o ConnectTimeout=8"
+SSH="ssh -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=15 -o ServerAliveCountMax=2"
+# One stuck host cannot hang the run: each host's command has an overall limit (perl's alarm; macOS has no timeout(1)).
+limit() { secs=$1; shift; /usr/bin/perl -e 'alarm shift; exec @ARGV or exit 127' "$secs" "$@"; }
+case "$ACTION" in status) LIMIT=60 ;; install) LIMIT=1200 ;; update) LIMIT=900 ;; esac
 INSTALL_ARGS=
 [ -n "$CHANNEL" ] && INSTALL_ARGS="$INSTALL_ARGS --channel $CHANNEL"
 [ -n "$POLICY" ] && INSTALL_ARGS="$INSTALL_ARGS --policy $POLICY"
 HOSTLIST=$(sed -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d' "$HOSTS" | awk '{print $1}')
 [ -n "$HOSTLIST" ] || { echo "error: $HOSTS lists no hosts" >&2; exit 2; }
+for h in $HOSTLIST; do
+    case "$h" in -*) echo "error: $HOSTS: \"$h\" starts with \"-\": a host, not an ssh option" >&2; exit 2 ;; esac
+done
 
 # One host, one action. $1 = host, $2 = action.
 remote() {
     case "$2" in
-        status) $SSH "$1" "$MIRAGED update --status-line" ;;
-        install) $SSH "$1" "sh -s --$INSTALL_ARGS" < "$DIR/install-host.sh" ;;
-        update) $SSH "$1" "$MIRAGED update --now" ;;
+        status) limit "$LIMIT_NOW" $SSH -- "$1" "$MIRAGED update --status-line" ;;
+        install) limit "$LIMIT_NOW" $SSH -- "$1" "sh -s --$INSTALL_ARGS" < "$DIR/install-host.sh" ;;
+        update) limit "$LIMIT_NOW" $SSH -- "$1" "$MIRAGED update --now" ;;
     esac
 }
 describe() {
     case "$2" in
-        status) echo "$SSH $1 '$MIRAGED update --status-line'" ;;
-        install) echo "$SSH $1 'sh -s --$INSTALL_ARGS' < $DIR/install-host.sh" ;;
-        update) echo "$SSH $1 '$MIRAGED update --now'" ;;
+        status) echo "(≤60 s) $SSH -- $1 '$MIRAGED update --status-line'" ;;
+        install) echo "(≤$LIMIT s) $SSH -- $1 'sh -s --$INSTALL_ARGS' < $DIR/install-host.sh" ;;
+        update) echo "(≤$LIMIT s) $SSH -- $1 '$MIRAGED update --now'" ;;
     esac
 }
 
@@ -75,7 +83,8 @@ run_all() {
     i=0
     for h in $HOSTLIST; do
         i=$((i + 1))
-        ( set +e; remote "$h" "$1" > "$OUT/$i.$1.log" 2>&1; echo $? > "$OUT/$i.$1.rc" ) &
+        ( set +e; case "$1" in status) LIMIT_NOW=60 ;; *) LIMIT_NOW=$LIMIT ;; esac
+          remote "$h" "$1" > "$OUT/$i.$1.log" 2>&1; echo $? > "$OUT/$i.$1.rc" ) &
     done
     wait
 }
@@ -88,7 +97,7 @@ if [ "$ACTION" != status ]; then
     for h in $HOSTLIST; do
         i=$((i + 1))
         rc=$(cat "$OUT/$i.$ACTION.rc")
-        [ "$rc" = 0 ] && mark=ok || { mark="FAILED ($rc)"; failed=1; }
+        case "$rc" in 0) mark=ok ;; 142) mark="TIMED OUT after $LIMIT s"; failed=1 ;; *) mark="FAILED ($rc)"; failed=1 ;; esac
         echo "-- $h: $mark"
         tail -n 4 "$OUT/$i.$ACTION.log" | sed 's/^/   /'
     done
@@ -102,9 +111,10 @@ for h in $HOSTLIST; do
     rc=$(cat "$OUT/$i.status.rc")
     case "$rc" in
         0) line=$(tail -n 1 "$OUT/$i.status.log") ;;
-        255) line="unreachable over SSH" ;;
-        127) line="Mirage not installed" ;;
-        *) line="status failed ($rc): $(tail -n 1 "$OUT/$i.status.log")" ;;
+        255) line="unreachable over SSH"; failed=1 ;;
+        127) line="Mirage not installed"; failed=1 ;;
+        142) line="no answer within 60 s"; failed=1 ;;
+        *) line="status failed ($rc): $(tail -n 1 "$OUT/$i.status.log")"; failed=1 ;;
     esac
     printf '%-18s %s\n' "$h" "$line"
 done

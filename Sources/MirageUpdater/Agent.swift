@@ -127,21 +127,18 @@ public struct AgentControl: Sendable {
         return "launchctl bootstrap failed: \(out.trimmingCharacters(in: .whitespacesAndNewlines))"
     }
 
-    /// A fresh install (U5): the app turns the host on as its menu does (`--allow-connections`: the agent and Mirage at
-    /// login), launched in the GUI session (`open`, else a one-shot gui job when this runs over SSH); then the agent must
-    /// start. Returns the verdict and what was done.
+    /// A fresh install (U5): the app registers the host (the agent and Mirage at login) through the same path as a
+    /// re-registration (`open -n … --reregister-host ID`, or a one-shot gui job from SSH): a separate instance that acts
+    /// and quits, so it works whether or not Mirage.app is already running. Then the app is opened for its menu-bar item,
+    /// and the agent must start. Returns the verdict and what was done.
     public func allowConnections() -> (AgentWatch.Verdict, String) {
-        let args = ["-g", "-a", app.path, "--args", "--allow-connections"]
-        let (out, code, _) = SystemBundleVerifier.run(URL(fileURLWithPath: "/usr/bin/open"), args, timeout: 20)
-        var how = "opened Mirage.app with --allow-connections"
-        if code != 0 {
-            let (why, cleanup) = runInGUISession(["/usr/bin/open"] + args, id: UUID().uuidString)
-            defer { cleanup() }
-            if let why { return (.cannotSpawn("\(why); \(Self.openOnce), and choose Allow Connections to This Mac in its menu"), "open failed: \(out)") }
-            how = "opened Mirage.app through a one-shot gui job (open from here: \(out.trimmingCharacters(in: .whitespacesAndNewlines)))"
-            return (watch(window: 30), how)
+        let r = reregister()
+        guard case .done(let reg) = r else { return (.cannotSpawn(Self.describe(r)), "registration \(Self.describe(r))") }
+        _ = SystemBundleVerifier.run(URL(fileURLWithPath: "/usr/bin/open"), ["-g", "-a", app.path], timeout: 20)   // its menu-bar item; harmless if running
+        if reg.status == "requiresApproval" {
+            return (.cannotSpawn("Login Items must approve Mirage (System Settings > General > Login Items)"), "registered: \(Self.describe(r))")
         }
-        return (watch(window: 30), how)
+        return (watch(window: 30), "registered: \(Self.describe(r))")
     }
 
     /// Polls until the verdict is reached. `attempts` reads the pending update's count (a deploy: always 0).

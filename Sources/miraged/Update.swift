@@ -51,7 +51,8 @@ struct Update: AsyncParsableCommand {
             do {
                 try await MirageUpdate_installBundle(url(b), manifest: url(manifest), sigs: url(sigs), channel: channel,
                                                      appPath: app.map { url($0) } ?? URL(fileURLWithPath: "/Applications/Mirage.app", isDirectory: true),
-                                                     store: store, assignments: assignments, force: force, allowIdentityChange: allowIdentityChange, dryRun: dryRun)
+                                                     store: store, assignments: assignments, force: force, allowIdentityChange: allowIdentityChange, dryRun: dryRun,
+                                                     afterSwap: { p, installPaths, changed in try await afterSwap(p, paths: installPaths, identityChanged: changed) })
             } catch let e as ExitCode { throw e } catch { print("error: \(error)"); throw ExitCode(1) }
             return
         }

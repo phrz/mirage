@@ -1474,26 +1474,36 @@ A bad build rolls itself back.
 - Not yet: a notice inside a viewer window that is streaming from the host. That window reconnects by itself after the
   restart, but showing the notice needs a hook in ViewerSession's control path, which this work does not touch.
 
-**As built: U5 (2026-10-26).**
-- `scripts/install-host.sh` works from the release feed. A person at the new Mac runs it, or `fleet.sh install` runs it
-  over SSH with `sh -s`. No repository checkout is needed. The chain of trust:
-  1. it checks the zip's size and SHA-256 against the channel head;
-  2. it checks the bundle with the Mac's own tools before running anything from it: `codesign -R` with the pinned
-     requirements, and `spctl` reporting "Notarized Developer ID";
-  3. only then does the bundle's own miraged run (`update --install-bundle`, hidden). It verifies the manifest's
-     signature with its compiled keys and that the manifest describes this very bundle, runs the updater's checks
-     again, self-test included, and decides fresh / replace / current / refuse;
-  4. it installs, applies the channel and policy, turns the host on (`--allow-connections`: the agent and Mirage at
-     login; over SSH through a one-shot gui job), and prints the grant steps through PrivacyPane.
-- It never changes a signing identity without `--allow-identity-change`, never downgrades without `--force`, and
-  `--dry-run` changes nothing. Checked here (dry runs) against the real nightly-449: the signature verified with the
-  compiled keys, the bundle passed Gatekeeper and its self-test, and an install over an Apple Development bundle was
-  refused.
-- Builds before U5 have no installer half. install-host.sh says so instead of installing without the manifest's
-  signature checked, so it works from the first nightly that carries U5.
-- `scripts/fleet.sh HOSTS status|install|update [--dry-run]` runs over SSH in parallel, then prints one line per host
-  (`miraged update --status-line`: version, channel, latest, agent, streaming, grants, policy, trigger). It refuses
-  `--allow-identity-change` outright.
+**As built: U5 (2026-10-26, hardened after review).**
+- `scripts/install-host.sh` works from the release feed (HTTPS only). A person at the new Mac runs it, or `fleet.sh
+  install` runs it over SSH with `sh -s`. It must run as the user logged in at the console, never root. The chain of
+  trust:
+  1. Before downloading anything, it verifies the channel head itself: an Ed25519 signature by a key embedded in the
+     script, the channel, the expiry, and a per-channel build floor (`MIN_BUILD_*`), so a replayed old manifest cannot
+     install an old build.
+     - The keys are kept equal to `TrustedKeys.swift`: `release.sh keys-init` writes both, and `release.sh --check` and
+       a test compare them. `release.sh` raises the channel's floor as it publishes.
+     - Verification runs on macOS's own perl (core Math::BigInt, Digest::SHA). The system `openssl` is LibreSSL 3.3.6
+       and has no Ed25519, and a fresh Mac has no other tool.
+     - Checked against the RFC 8032 vectors and the real channel head.
+  2. It checks the zip's size and SHA-256, now authenticated, and lists the zip before unpacking: everything must be
+     inside Mirage.app/, with no absolute paths, no "..", and no symlinks pointing out. It unpacks into a fresh directory.
+  3. It checks the bundle with the system's tools before running anything from it: `codesign -R` with the pinned
+     requirements, `spctl` exiting 0 with "accepted, source=Notarized Developer ID", and the sealed `CFBundleVersion`
+     equal to the manifest's build.
+  4. The bundle's own miraged (`update --install-bundle`) verifies the manifest again with its compiled keys, re-checks
+     the bundle (self-test included), and installs through `BundleInstaller`:
+     - it takes the updater's lock, and refuses while a trial is pending;
+     - fresh: one rename;
+     - over an older build: `pending-update.json` first, then the swap, then the same restart, trial and commit (or
+       rollback) as `miraged update --now`;
+     - settings are saved only once the bundle is in place, and nothing is left staged on a failure;
+     - "already current" still makes sure the host is on.
+- Turning the host on uses the re-registration path: `open -n … --reregister-host`, which now also registers Mirage at
+  login, so it works while Mirage.app is already running.
+- `scripts/fleet.sh` passes `ssh -o ServerAliveInterval=15 -o ServerAliveCountMax=2 --` and a per-host overall limit
+  (perl's alarm: 60 s for status, 20 min for install, 15 min for update). It rejects host tokens that start with "-",
+  never glob-expands the list, and exits non-zero when any host is unreachable, lacks Mirage, times out or fails.
 
 **Milestones.**
 

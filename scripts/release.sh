@@ -77,6 +77,15 @@ check_compiled_keys() {
     echo "missing: trusted manifest public keys in Sources/MirageUpdater/TrustedKeys.swift (scripts/release.sh keys-init writes them)" >&2
     return 1
 }
+# install-host.sh verifies the channel head before it downloads anything, with keys embedded in it: they must be the app's.
+swift_keys() { sed -n '/BEGIN MIRAGE MANIFEST KEYS/,/END MIRAGE MANIFEST KEYS/p' Sources/MirageUpdater/TrustedKeys.swift | sed -n 's/^ *"\([A-Za-z0-9+/=]*\)".*/\1/p' | sort | tr '\n' ' '; }
+swift_revoked() { sed -n '/static let revoked/,/]/p' Sources/MirageUpdater/TrustedKeys.swift | sed -n 's/^ *"\([0-9a-f]*\)".*/\1/p' | sort | tr '\n' ' '; }
+script_var() { sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" scripts/install-host.sh | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' '; }
+check_script_keys() {
+    [ "$(swift_keys)" = "$(script_var TRUSTED_KEYS)" ] && [ "$(swift_revoked)" = "$(script_var REVOKED_KEYS)" ] && return 0
+    echo "mismatch: scripts/install-host.sh's TRUSTED_KEYS/REVOKED_KEYS differ from Sources/MirageUpdater/TrustedKeys.swift (update the script's block)" >&2
+    return 1
+}
 check_gh() {
     gh auth status >/dev/null 2>&1 && return 0
     echo "missing: GitHub CLI authentication for $REPO (gh auth login)" >&2
@@ -89,6 +98,7 @@ if [ "${1:-}" = --check ]; then
     check_notary || ok=1
     check_manifest_key || ok=1
     check_compiled_keys || ok=1
+    check_script_keys || ok=1
     check_gh || ok=1
     [ $ok = 0 ] && echo "ready to release"
     exit $ok
@@ -118,6 +128,10 @@ block = (f'        // BEGIN MIRAGE MANIFEST KEYS\n        "{cur}", // current {c
          '        // END MIRAGE MANIFEST KEYS')
 s = re.sub(r'        // BEGIN MIRAGE MANIFEST KEYS\n.*?        // END MIRAGE MANIFEST KEYS', block, s, flags=re.S)
 open(p, "w").write(s)
+q = "scripts/install-host.sh"
+t = open(q).read()
+t = re.sub(r'^TRUSTED_KEYS=".*"$', f'TRUSTED_KEYS="{cur} {nxt}"', t, flags=re.M)
+open(q, "w").write(t)
 PY
     cat <<EOF
 current key $CUR_ID: private half saved in the login keychain ($KEY_SERVICE / current).
@@ -154,6 +168,7 @@ check_identity || ok=1
 check_notary || ok=1
 check_manifest_key || ok=1
 check_compiled_keys || ok=1
+check_script_keys || ok=1
 [ -n "$PUBLISH" ] && { check_gh || ok=1; }
 [ $ok = 0 ] || die "this Mac is not set up to release (above)"
 
@@ -249,6 +264,10 @@ if ! gh release view "channel-$CHANNEL" --repo "$REPO" >/dev/null 2>&1; then
         --title "channel-$CHANNEL (rolling head)" --notes "The current $CHANNEL manifest for Mirage's updater (DESIGN §3.10). Not a release: see $TAG."
 fi
 gh release upload "channel-$CHANNEL" "$OUT/manifest.json" "$OUT/manifest.sigs.json" --repo "$REPO" --clobber
+# install-host.sh's floor for this channel follows the head: a replayed older manifest cannot install an older build.
+FLOORVAR=MIN_BUILD_$(echo "$CHANNEL" | tr 'a-z' 'A-Z')
+sed -i '' "s/^$FLOORVAR=[0-9]*$/$FLOORVAR=$BUILD/" scripts/install-host.sh
+echo "== scripts/install-host.sh: $FLOORVAR=$BUILD (commit it)"
 
 if [ "$CHANNEL" = nightly ]; then
     echo "== prune nightlies beyond the newest 10"

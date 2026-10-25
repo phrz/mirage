@@ -83,3 +83,131 @@ public enum FleetStatus {
                 "policy \(settings.policy.rawValue)", "trigger \(settings.trigger.rawValue)"].joined(separator: "  ")
     }
 }
+
+/// Who may run an install (U5 review): the person logged in at the Mac, not root. The settings, the kept previous build
+/// and the host agent (gui/<uid>) are that person's.
+public enum InstallUser {
+    public static func refusal(uid: uid_t, user: String, consoleUser: String?) -> String? {
+        if uid == 0 { return "do not run this as root (sudo): run it as the person logged in at this Mac" }
+        guard let c = consoleUser else { return "cannot tell who is logged in at this Mac" }
+        if c == "root" || c.isEmpty { return "nobody is logged in at this Mac: a person must log in first (the host runs in their session)" }
+        if c != user { return "this runs as \(user), but \(c) is logged in at this Mac: run it as \(c) (the settings and the host agent are theirs)" }
+        return nil
+    }
+
+    /// The owner of /dev/console: who is logged in at the screen.
+    public static func consoleUser() -> String? {
+        var st = stat()
+        guard stat("/dev/console", &st) == 0, let pw = getpwuid(st.st_uid) else { return nil }
+        return String(cString: pw.pointee.pw_name)
+    }
+}
+
+/// What the install needs from the host agent (tests: a stand-in).
+public protocol InstallAgent: Sendable {
+    /// The agent job is registered (for this app).
+    var registered: Bool { get }
+    /// Turn the host on (`--allow-connections`), or make sure the registered agent runs.
+    func turnOn() -> String
+    func ensureRunning() -> String
+}
+
+public struct SystemInstallAgent: InstallAgent {
+    let control: AgentControl
+    public init(app: URL, storeRoot: URL) { control = AgentControl(app: app, storeRoot: storeRoot) }
+    public var registered: Bool { control.belongsToApp() }
+    public func turnOn() -> String {
+        let (v, how) = control.allowConnections()
+        return "\(how); \(Self.describe(v))"
+    }
+    public func ensureRunning() -> String { Self.describe(control.ensureRunning(restart: false, log: { print($0) })) }
+    static func describe(_ v: AgentWatch.Verdict) -> String {
+        switch v {
+        case .started: return "host agent running"
+        case .cannotSpawn(let why): return "host agent not running (\(why))"
+        case .keepWaiting: return "host agent starting"
+        }
+    }
+}
+
+/// install-host.sh's Swift half, after the manifest and the bundle are verified: decide, then install (fresh: one
+/// rename; over an older build: the updater's own lock, pending update, swap, trial and commit), with the settings saved
+/// only once the bundle is in place and nothing left staged on a failure.
+public struct BundleInstaller {
+    public var paths: InstallPaths
+    public var agent: InstallAgent
+    public var identityOf: (URL) -> SigningIdentity
+    public var say: (String) -> Void
+
+    public init(paths: InstallPaths, agent: InstallAgent, identityOf: @escaping (URL) -> SigningIdentity = { SigningIdentity.of(bundle: $0) },
+                say: @escaping (String) -> Void = { print($0) }) {
+        self.paths = paths; self.agent = agent; self.identityOf = identityOf; self.say = say
+    }
+
+    public var staged: URL { paths.app.deletingLastPathComponent().appendingPathComponent(".Mirage-staged.app", isDirectory: true) }
+
+    /// `afterSwap`: the updater's restart, trial and commit (or rollback), with the pending update and whether the signing
+    /// identity changed.
+    @discardableResult
+    public func install(bundle: URL, version: MirageVersion, manifestChannel: UpdateChannel, assignments: [String], force: Bool, allowIdentityChange: Bool,
+                        dryRun: Bool, now: Date = Date(), afterSwap: (PendingUpdate, Bool) async throws -> Void) async throws -> InstallPlan {
+        let installer = Installer(paths: paths)
+        let fd = try installer.lock()   // one update at a time, the updater's own lock
+        defer { flock(fd, LOCK_UN); close(fd) }
+        let installed = Installer.version(of: paths.app)
+        if let p = installer.readPending(), let i = installed, p.to.build == i.build {
+            throw UpdateError.refused("an update to \(p.to.display) is on trial on this Mac: wait a few minutes for it to commit, or roll it back (miraged update --rollback)")
+        }
+        let installedIdentity = installed != nil ? identityOf(paths.app) : nil
+        let newIdentity = identityOf(bundle)
+        let plan = InstallPlan.decide(installed: installed, installedIdentity: installedIdentity, new: version, newIdentity: newIdentity,
+                                      force: force, allowIdentityChange: allowIdentityChange)
+        say("plan: \(plan.description) → \(paths.app.path)")
+        var settings = UpdateSettings.load(paths.settings)
+        if !assignments.contains(where: { $0.lowercased().hasPrefix("channel") }) { try settings.apply("channel=\(manifestChannel.rawValue)") }
+        for a in assignments { try settings.apply(a) }
+        say("settings: channel \(settings.channel.rawValue), policy \(settings.policy.rawValue), trigger \(settings.trigger.rawValue)")
+        if case .refuse(let why) = plan { throw UpdateError.refused(why) }
+        if dryRun { say("dry run: nothing changed"); return plan }
+
+        switch plan {
+        case .current:
+            try settings.save(paths.settings)
+            say("nothing to install; \(agent.registered ? agent.ensureRunning() : agent.turnOn())")
+            return plan
+        case .refuse:
+            return plan
+        case .fresh, .replace:
+            break
+        }
+        // Staged beside the app path (same volume), then one rename; nothing stays staged on a failure.
+        try? FileManager.default.removeItem(at: staged)
+        do {
+            let copy = SystemBundleVerifier.run(URL(fileURLWithPath: "/usr/bin/ditto"), [bundle.path, staged.path], timeout: 300)
+            guard copy.1 == 0 else { throw UpdateError.install("copying to \(staged.path): \(copy.0.trimmingCharacters(in: .whitespacesAndNewlines))") }
+            switch plan {
+            case .fresh:
+                guard rename(staged.path, paths.app.path) == 0 else { throw UpdateError.install("installing \(paths.app.path): \(String(cString: strerror(errno)))") }
+                try settings.save(paths.settings)
+                say("installed \(version.display) at \(paths.app.path)")
+                say("host: \(agent.turnOn())")
+            case .replace(let from):
+                // The updater's path: pending first, then the swap; the new build's start counts, commits or rolls back.
+                let changed = installedIdentity.map { SigningIdentity.change(from: $0, to: newIdentity) != nil } ?? false
+                let pending = PendingUpdate(from: from, to: version, deadline: now.addingTimeInterval(UpdateHealth.commitWindow), appPath: paths.app.path,
+                                            started: now, reregistered: changed ? true : nil)
+                try installer.writePending(pending)
+                do { try installer.swapIn(staged) } catch { installer.clearPending(); throw error }
+                try settings.save(paths.settings)
+                say("replaced \(from.display) with \(version.display) (the old build is kept as the previous one)")
+                try await afterSwap(pending, changed)
+            case .current, .refuse:
+                break
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: staged)
+            throw error
+        }
+        return plan
+    }
+}
