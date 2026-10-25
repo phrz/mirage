@@ -254,6 +254,7 @@ public enum HostSession {
     // MARK: Pairing
 
     static func pair(_ req: ControlMessage.PairRequest, _ stream: MessageStream, remote: String, ctx: HostContext) async throws {
+        ctx.log("[\(remote)] pair request from \(req.deviceName) (\(req.secret ?? false ? "link" : "code"), protocol \(req.protocolVersion), this host \(Mirage.protocolVersion))")
         // The password: from the open "Pair a Device…" window (code or link secret, single use: taking it rotates both), else
         // a code `miraged pair` left (code only).
         let usesSecret = req.secret ?? false

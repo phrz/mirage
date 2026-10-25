@@ -105,6 +105,10 @@ public final class QUICHost: @unchecked Sendable {
     public let queue = DispatchQueue(label: "mirage.quic.host")
     private let listener: NWListener
     public let tls: TLSIdentity
+    /// Every inbound QUIC connection and how its handshake ended (peer, ready or the failure: a TLS or ALPN mismatch, a
+    /// version the stack refused), at info level: a device that never reached "wants to pair" left no trace before
+    /// (phrz's new iPhone, 2026-10-25 10:31Z).
+    public var log: (@Sendable (String) -> Void)?
 
     public init(port: UInt16, tls: TLSIdentity) throws {
         self.tls = tls
@@ -127,7 +131,16 @@ public final class QUICHost: @unchecked Sendable {
         listener.newConnectionGroupHandler = { [queue] group in
             let remote = "\(group.descriptor)"
             let id = UUID()   // one per QUIC connection; its streams and datagram flow share it
-            group.stateUpdateHandler = { _ in }
+            let log = self.log
+            log?("inbound QUIC connection from \(remote)")
+            group.stateUpdateHandler = { state in
+                switch state {
+                case .ready: log?("QUIC handshake complete with \(remote)")
+                case .failed(let e): log?("QUIC connection from \(remote) failed: \(e)")
+                case .waiting(let e): log?("QUIC connection from \(remote) waiting: \(e)")
+                default: break
+                }
+            }
             group.newConnectionHandler = { conn in
                 conn.start(queue: queue)
                 onStream(conn, id, remote)
