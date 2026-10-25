@@ -335,6 +335,7 @@
 				MIRAGE_CHANNEL = "";
 				MIRAGE_COMMIT = "";
 				MIRAGE_DISPLAY_NAME = Mirage;
+				MIRAGE_TEST_EXIT_IN_MAIN = "";
 				PRODUCT_BUNDLE_IDENTIFIER = com.paulherz.mirage;
 				PRODUCT_MODULE_NAME = MirageViewer;
 				PRODUCT_NAME = "$(MIRAGE_DISPLAY_NAME)";
@@ -501,6 +502,7 @@
 				MIRAGE_CHANNEL = "";
 				MIRAGE_COMMIT = "";
 				MIRAGE_DISPLAY_NAME = Mirage;
+				MIRAGE_TEST_EXIT_IN_MAIN = "";
 				PRODUCT_BUNDLE_IDENTIFIER = com.paulherz.mirage;
 				PRODUCT_MODULE_NAME = MirageViewer;
 				PRODUCT_NAME = "$(MIRAGE_DISPLAY_NAME)";

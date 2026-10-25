@@ -193,6 +193,11 @@ for b in "$APP" "$APP/Contents/MacOS/miraged"; do
     codesign -dv "$b" 2>&1 | grep -q 'flags=.*runtime' || die "$b lacks the hardened runtime"
 done
 
+echo "== self-test of the built host"
+SELF=$("$APP/Contents/MacOS/miraged" --self-test) || die "the built miraged fails its self-test: $SELF"
+echo "$SELF" | grep -q "\"build\":$BUILD," || die "the self-test reports another build: $SELF"
+echo "$SELF" | head -1
+
 echo "== notarize (notarytool, profile $PROFILE) and staple"
 rm -rf "$OUT"; mkdir -p "$OUT"
 ditto -c -k --keepParent "$APP" "$OUT/notarize.zip"

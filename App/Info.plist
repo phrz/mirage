@@ -28,6 +28,10 @@
 	<string>$(MIRAGE_COMMIT)</string>
 	<key>MirageChannel</key>
 	<string>$(MIRAGE_CHANNEL)</string>
+	<!-- YES only in a deliberately broken build (scripts/release.sh --broken): its host exits in main, to prove the
+	     updater's rollback (DESIGN §3.10, U3). Empty in every other build. -->
+	<key>MirageTestExitInMain</key>
+	<string>$(MIRAGE_TEST_EXIT_IN_MAIN)</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Mirage uses the camera to scan the pairing code your Mac shows.</string>
 </dict>

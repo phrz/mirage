@@ -60,6 +60,7 @@ targets:
         # commit count), MIRAGE_COMMIT the short hash, MIRAGE_CHANNEL the channel a release goes to (empty: a local build).
         MIRAGE_COMMIT: ""
         MIRAGE_CHANNEL: ""
+        MIRAGE_TEST_EXIT_IN_MAIN: ""   # YES: release.sh --broken, the rollback test build
         INFOPLIST_KEY_CFBundleDisplayName: $(MIRAGE_DISPLAY_NAME)
         INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.utilities
         INFOPLIST_KEY_NSHumanReadableCopyright: "© 2026 Paul Herz. MIT License."

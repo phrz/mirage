@@ -59,7 +59,7 @@ let package = Package(
         .executableTarget(
             name: "miraged",
             dependencies: [
-                "MirageCore", "MirageHost",
+                "MirageCore", "MirageHost", "MirageUpdater",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]

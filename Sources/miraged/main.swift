@@ -3,6 +3,7 @@ import Foundation
 import ArgumentParser
 import MirageCore
 import MirageHost
+import MirageUpdater
 import Network
 
 @main
@@ -10,7 +11,7 @@ struct Miraged: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "miraged",
         abstract: "Mirage host daemon: serves this Mac to paired devices over QUIC.",
-        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Install.self, Uninstall.self, ProbeLayers.self],
+        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Install.self, Uninstall.self, ProbeLayers.self, Update.self],
         defaultSubcommand: Serve.self)
 }
 
@@ -34,8 +35,11 @@ struct Serve: AsyncParsableCommand {
     @Option(help: "Host name shown to clients (default: this Mac's computer name).") var name: String?
     @Option(help: "Append stdout and stderr to this file (~ expands): the app's login-item agent cannot name ~ in its plist.") var logFile: String?
     @Flag(help: "No local control socket and no permission watcher: a second, test instance beside the login-item agent (whose control.sock it would otherwise take over).") var noLocalControl = false
+    @Flag(name: .customLong("self-test"), help: "Load, read the stores, print this build's version and exit (the updater runs it on a staged bundle).") var selfTest = false
 
     func run() async throws {
+        // Before anything else, and with no window-server contact: the updater runs this on a bundle it has not installed.
+        if selfTest { try runSelfTest(); return }
         stayInvisible()
         if let logFile {
             let path = (logFile as NSString).expandingTildeInPath
@@ -44,12 +48,23 @@ struct Serve: AsyncParsableCommand {
         }
         setvbuf(stdout, nil, _IOLBF, 0)
         let store = try Store()
+        // Updates (DESIGN §3.10): a build on trial counts this start first, and rolls back (exits, so launchd starts the
+        // previous build) after too many starts or past its deadline. A test instance leaves the real app's update alone.
+        let paths = InstallPaths(app: InstallPaths.installedApp(support: store.root), support: store.root)
+        let health = noLocalControl ? nil : HostHealth(paths: paths, logFile: logFile.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }, log: { log($0) })
+        if let health, !health.launch() { Foundation.exit(0) }
+        if Bundle.main.object(forInfoDictionaryKey: "MirageTestExitInMain") as? String == "YES" {
+            log("deliberately broken build (MirageTestExitInMain, scripts/release.sh --broken): exiting in main")
+            Foundation.exit(1)
+        }
         let identity = try store.identity(role: "host", name: name ?? DeviceNames.current())
         let tls = try TLSIdentity.loadOrCreate(store: store)
-        let ctx = HostContext(identity: identity, store: store, tlsFingerprint: tls.fingerprint, log: { log($0) },
+        var ctx = HostContext(identity: identity, store: store, tlsFingerprint: tls.fingerprint, log: { log($0) },
                               makeStreamer: { MacDesktopStreamer(log: { log($0) }) })
+        ctx.updateInfo = { UpdateSettings.load(paths.settings).hostUpdateInfo }
         let host = try QUICHost(port: port, tls: tls)
         host.log = { log($0) }
+        log("mirage host build \(MirageVersion.current.display) \(MirageVersion.current.commit) (\(MirageVersion.current.channelName))")
         log("mirage host \(identity.name) id=\(identity.id.prefix(12)) tls=\(tls.fingerprint.prefix(6).map { String(format: "%02x", $0) }.joined()) devices=\(try store.authorizedDevices().count)")
         // TCC: prompting registers this binary in System Settings → Privacy & Security so it can be ticked once.
         // MIRAGE_NO_PERMISSION_PROMPTS: check only (test runs on a Mac whose grants belong to another binary).
@@ -69,7 +84,7 @@ struct Serve: AsyncParsableCommand {
             Task { await HostSession.handle(connection: conn, connectionID: id, remote: remote, ctx: ctx) }
         }, onState: { state in
             switch state {
-            case .ready: log("listening on udp/\(port)")
+            case .ready: log("listening on udp/\(port)"); health?.passed(.listener)
             case .failed(let e): log("listener failed: \(e)"); Foundation.exit(1)
             default: break
             }
@@ -78,8 +93,10 @@ struct Serve: AsyncParsableCommand {
         let control = LocalControlServer(ctx: ctx, port: port, log: { log($0) })
         if noLocalControl { log("test instance: no local control, no permission watcher") }
         else {
-            do { try control.start() } catch { log("local control unavailable: \(error)") }
+            do { try control.start(); health?.passed(.control) } catch { log("local control unavailable: \(error)") }
             if !(screen && ax) { watchPermissions(screen: screen, ax: ax, control: control) }
+            if let health, health.onTrial { probeCaptureForHealth(screen: screen, ax: ax, health: health) }
+            scheduleUpdateChecks(paths: paths, log: { log($0) })
         }
         try await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
         _ = control
