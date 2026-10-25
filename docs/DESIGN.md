@@ -1292,8 +1292,13 @@ A bad build rolls itself back.
    against a requirement pinned in the running binary:
    `anchor apple generic and identifier "com.paulherz.mirage" and certificate leaf[subject.OU] = "M8MME6Q9DA"`.
    The embedded `miraged` is checked the same way with `identifier "com.paulherz.mirage.host"`.
-4. Check notarization: `SecAssessmentCreate` (the Gatekeeper assessment `spctl` uses) on the staged bundle must accept
-   it, with the ticket stapled.
+4. Check notarization, all three on the staged bundle (as built in U3):
+   - the stapled ticket is there (`Contents/CodeResources`);
+   - it satisfies the code requirement `notarized` (`SecStaticCodeCheckValidity`, which checks the ticket);
+   - Gatekeeper's own assessment for execution, `spctl --assess --type execute`, accepts it with "source=Notarized
+     Developer ID".
+   - Not `SecAssessmentCreate`: the macOS 27 SDK (Xcode 27.1) no longer ships its header, and declaring the symbol
+     ourselves would be using an unpublished API. `spctl` is on every Mac and runs the same assessment.
 5. Run a self-test: the staged `Contents/MacOS/miraged --self-test` must exit 0 within 10 s. It loads (catching
    dyld/architecture breakage), opens its stores read-only, binds no port and prints its `MirageVersion`. That version
    must match the manifest.
@@ -1387,6 +1392,37 @@ A bad build rolls itself back.
   - the `miraged update` and `--self-test` commands.
 - **It must not touch:** `DesktopStreamer`, `ScreenCapturer`, `Rate/`, `Render/`, `Tiles/`, the tile and video message
   formats, `ViewerSession`'s streaming paths, or the test bench.
+
+**As built: U1–U3 (2026-10-25).** Where the build differs from, or adds to, the design above:
+- Notarization (verification step 4): the `notarized` requirement, `spctl` and the stapled ticket, in place of
+  `SecAssessmentCreate` (above).
+- Attempts: read literally. Each start of an uncommitted build counts one; the start at which `attempts` reaches 3
+  swaps back instead of serving. That leaves two trial starts, about 20 s apart under launchd's KeepAlive throttle.
+- `miraged update --now` runs the updater in its own process (the SSH session), then restarts the agent with
+  `launchctl kickstart -k`, and waits for the new host's commit or rollback (`update-result.json`). The viewer's trigger
+  (U4) runs the same `Updater` inside the agent and exits instead. If no agent runs from the bundle, nobody would start
+  the new build to commit it, so it is installed without a health check and says so.
+- `mirage-release`, a helper tool for `release.sh`: generating manifest keys (`release.sh keys-init`), writing and
+  signing manifests (private keys on stdin only), and verifying them with the host's own code.
+- A local feed: `miraged update --feed DIR|URL` (or `MIRAGE_UPDATE_FEED`) reads `channel-<name>/manifest.json` there,
+  with zip URLs relative to the manifest. It is as safe as the real feed, because it must still be signed by a
+  trusted key. `release.sh … --no-publish` writes one.
+- `MirageTestExitInMain` (Info.plist, `YES` only in `release.sh --broken` builds): the host exits in main right after
+  counting its start, for U3's rollback test. The bundle is signed, so nobody can set it on a release.
+- The host agent checks the feed at start (after 30–120 s of jitter) and then every 6 h ± 10 min, skipping metered or
+  constrained uplinks. Check only: the result goes into `updates.json` and the Welcome's `latestAvailable`; installing
+  stays a trigger's (Ask) or Automatic's (U6).
+- `scripts/rollback-host.sh HOST`: the last resort over SSH. It runs the previous build's own
+  `miraged update --rollback` (the same swap), else two renames for a previous build from before the updater.
+- Health check: the capture probe is one 64×36 ScreenCaptureKit screenshot, taken only while a build is on trial; without
+  Screen Recording it reports the missing grant instead of capturing.
+- Signing: `make-viewer-app.sh` and `deploy-host.sh` use Developer ID when this Mac has it, and otherwise Apple
+  Development with a loud warning, so a missing certificate never blocks a deploy. `MIRAGE_SIGN=developer-id` requires
+  Developer ID (release.sh sets it); `MIRAGE_SIGN=dev` forces Apple Development.
+- `Mirage.minProtocolVersion` = `protocolVersion` = 5 for now: every build in the fleet still connects. A newer viewer
+  that can speak down is accepted; `Hello.minProtocolVersion` lets a viewer that can't be refused as `.hostTooOld`.
+- `TrustedKeys.compiled` is empty until phrz runs `release.sh keys-init` and commits it. Until then no build verifies a
+  manifest, so none updates itself.
 
 **Milestones.**
 
