@@ -3753,7 +3753,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 }
                 if !again.isEmpty { l.tracker.markDirect(Array(again), now: Clock.nowNanos()); self.statRefineOvertaken += again.count }
             }
-            self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes, block, layer, rects); self.refinementInFlight += refinementBytes; self.tileInflightBytes += d.count
+            // Only tiles and copy-rects are acked (the viewer's apply); the rest (resets, commits, frameEnds, alpha masks) sat
+            // "unacked" until the 20 s purge, padding the in-flight bytes the refinement cap reads.
+            let acked: Bool
+            switch m { case .tiles, .copyRect: acked = true; default: acked = false }
+            if acked { self.tileSent[seq] = (Clock.nowNanos(), d.count, refinementBytes, block, layer, rects); self.refinementInFlight += refinementBytes; self.tileInflightBytes += d.count }
             if let block { self.pacer.sent(id: block, msgSeq: seq, bytes: d.count, now: Clock.nowNanos()) }
             if refinementBytes == 0 { self.secInteractiveBytes += d.count }
         }
