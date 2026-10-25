@@ -400,3 +400,21 @@ final class TileSchedulerTests: XCTestCase {
         XCTAssertTrue(Set(t.due(now: s + 11 * s, limit: 10, centre: nil)).isSuperset(of: [5, 6]), "forced: due now")
     }
 }
+
+/// A LAN is recognised at once: Local from the first measured sample whatever the startup target, the cap following
+/// measured delivery (never the probe), and the video rung the target pays for (phrz's LAN session, 2026-10-25 11:49Z).
+final class LANRecognitionTests: XCTestCase {
+    func testLANIsLocalAtOnceAndStartsAtTheCap() {
+        XCTAssertEqual(LinkTier.classify(rateKbps: 2000, limitedByLink: true, rttMs: 13, lossPercent: 0), .local, "the 13 ms link that read Constrained")
+        XCTAssertEqual(LinkTier.classify(rateKbps: 8100, limitedByLink: false, rttMs: 165, lossPercent: 0), .constrained, "Fast 4G stays what it was")
+        var sel = TierSelector(initial: .constrained)
+        sel.adoptFirst(rateKbps: 2000, limitedByLink: true, rttMs: 5, lossPercent: 0, now: 1)
+        XCTAssertEqual(sel.tier, .local, "the first measurement, no 10 s dwell")
+        var rc = RateController(initialKbps: 2000, maxKbps: 50_000, nativePixels: 3200 * 1800)
+        rc.automaticCap = true
+        rc.seedLAN()
+        XCTAssertEqual(rc.targetKbps, 50_000)
+        XCTAssertEqual(rc.deliveryCeilingKbps, 50_000, "the pre-estimate ceiling is the cap on a LAN")
+        XCTAssertEqual(rc.bestRung(), 0, "50 Mbps pays for the native rung of a 3200x1800 display")
+    }
+}

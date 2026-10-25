@@ -136,7 +136,8 @@ public struct RateController {
 
     /// Lossy-first for a recovery or a newly visible picture: back to the tiny rung now, then climb again.
     public mutating func dropToTinyRung(now: UInt64) {
-        rung = Self.tinyRung; belowSince = 0; aboveSince = 0; lastRungChange = now
+        // (A LAN keeps the rung its target pays for: the tiny rung's first picture is for links where a keyframe costs.)
+        rung = tier == .local ? bestRung() : Self.tinyRung; belowSince = 0; aboveSince = 0; lastRungChange = now
     }
 
     /// Video bytes acked in the last second (delay-driven back-off applies only while video actually
@@ -343,7 +344,9 @@ public struct RateController {
         // The link, not the cap, is holding the target down when the target sits well under the cap
         // after a delay- or loss-driven decrease in the last few seconds.
         let limitedByLink = targetKbps < maxKbps * 8 / 10 && lastLinkDecreaseNanos > 0 && Clock.elapsed(since: lastLinkDecreaseNanos, now: now) < 5_000_000_000
+        if srttSeeded || minRTTNanos.isFinite { tiers.adoptFirst(rateKbps: targetKbps, limitedByLink: limitedByLink, rttMs: minRttMs, lossPercent: frameLossPercent, now: now) }
         tiers.update(rateKbps: targetKbps, limitedByLink: limitedByLink, rttMs: minRttMs, lossPercent: frameLossPercent, now: now)
+        liftCapOnLAN()
         updateRung(now: now)
     }
 
@@ -363,10 +366,37 @@ public struct RateController {
         } else { fpsShortfallSince = 0 }
     }
 
+    /// On a LAN (tier Local) an automatic stream's cap follows what the link is measured to deliver: twice the measured
+    /// peak (acks, never the probe), at least the host's automatic maximum, at most 400 Mbps (50 Mbps capped a LAN).
+    public var automaticCap = false
+    private var baseMaxKbps: Int? = nil
+    private mutating func liftCapOnLAN() {
+        guard automaticCap else { return }
+        if baseMaxKbps == nil { baseMaxKbps = maxKbps }
+        let base = baseMaxKbps!
+        maxKbps = tier == .local ? min(400_000, max(base, measuredPeakKbps * 2)) : base
+    }
+    /// A LAN's connect probe (round trip under 20 ms) that could not read a burst: faster than the train can measure. The
+    /// target starts at the cap and the pre-estimate ceiling is the cap; the path-stress rules still bring it down at the
+    /// first loss or delay (2026-10-25: "no burst" read as unknown kept a LAN at 2-15 Mbps for seconds).
+    public private(set) var lanStart = false
+    public mutating func seedLAN() {
+        lanStart = true
+        targetKbps = maxKbps
+    }
+    /// The highest rung (largest scale) the target pays for now (what a LAN starts on instead of the tiny rung).
+    public func bestRung() -> Int {
+        let kpix = Double(nativePixels) / 1000
+        for r in 0..<Self.scales.count where Double(targetKbps) > kpix * Self.scales[r] * Self.scales[r] * tuning.kbpsPerKpixelUp { return max(r, policy.minRung) }
+        return Self.tinyRung
+    }
+
     private mutating func updateRung(now: UInt64) {
         let kpix = Double(nativePixels) / 1000
         let need = kpix * scale * scale * tuning.kbpsPerKpixelDown
         let p = policy
+        // Local: the rung follows the target at once (the hysteresis is for links whose rate moves under us).
+        if tier == .local, rung > bestRung() { rung = bestRung(); belowSince = 0; aboveSince = 0; lastRungChange = now }
         if rung < p.minRung { rung = p.minRung; lastRungChange = now }
         if rung > p.maxRung { rung = p.maxRung; lastRungChange = now }
         if Double(targetKbps) < need, rung < p.maxRung {
@@ -443,6 +473,7 @@ public struct RateController {
     public private(set) var probeKbps = 0
     public var deliveryCeilingKbps: Int {
         if deliveryKbps > 0 { return min(maxKbps, max(tuning.minKbps, Int(Double(deliveryKbps) * deliveryGain))) }
+        if lanStart { return maxKbps }
         // Before any delivery sample: 4 x the start. (Not lowered by the probe: sent behind stage 1's traffic, its train read
         // 878 kbps on a 20 Mbps link on mac-daddy, pinned the start at 2 Mbps and took crisp to 11.4 s. The in-flight cap
         // before delivery, 64 KB unless the probe allows more, keeps a slow link's queue short instead.)

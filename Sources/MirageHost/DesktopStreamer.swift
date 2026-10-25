@@ -620,6 +620,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 controller.resume(fromKbps: k)
                 log("careful resume: this pairing's last estimate on this network \(k) kbps; starting at \(controller.targetKbps) kbps")
             }
+            controller.automaticCap = automaticBitrate
             rc = controller
         }
         let controller = rc!
@@ -2992,6 +2993,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // The whole train instead: raises the target only, at most to the pre-estimate ceiling (4 x the start rate, under
             // the cap), never the delivery estimate or delivery.json: delivery samples must confirm it (the 231 Mbps misread).
             if let whole = RateController.trainRateWhole(r, packetBytes: Self.trainSize + 40) {
+                // A LAN (srtt from the train's first echo under 20 ms, no throttle): faster than the train can read.
+                if let c = rc, c.srttMs < 20, whole >= 5_000, request?.throttle == nil {
+                    rc?.seedLAN()
+                    log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read at srtt \(String(format: "%.1f", c.srttMs)) ms: a LAN, faster than the train reads (whole train \(whole) kbps); starting at \(rc?.targetKbps ?? 0) kbps")
+                    applyBudget(now: Clock.nowNanos())
+                    return
+                }
                 rc?.seedTargetFromProbe(kbps: min(whole, 4 * Int(hostTunables[.startKbps]), Int(hostTunables[.autoMaxKbps])))
                 log("connect probe: \(r.count) of \(Self.trainCount) echoes; no burst to read; whole train \(whole) kbps; target \(rc?.targetKbps ?? 0) kbps (unconfirmed)")
                 applyBudget(now: Clock.nowNanos())
@@ -3000,6 +3008,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         // A cross-check that can only raise the start (careful resume and the doubling startup lead), and by at most 4 x the
         // start rate: receive-side batching can still flatter a burst.
+        if let c = rc, c.srttMs < 20, request?.throttle == nil {
+            rc?.seedLAN()   // (a LAN: start at the cap; delivery samples and the stress rules take it from there)
+            log("connect probe: \(r.count) of \(Self.trainCount) echoes: \(kbps) kbps from the densest burst at srtt \(String(format: "%.1f", c.srttMs)) ms: a LAN; starting at \(rc?.targetKbps ?? 0) kbps")
+            applyBudget(now: Clock.nowNanos())
+            return
+        }
         rc?.seedFromProbe(kbps: min(kbps, 4 * Int(hostTunables[.startKbps])))
         log("connect probe: \(r.count) of \(Self.trainCount) echoes: \(kbps) kbps from the densest burst; target \(rc?.targetKbps ?? 0) kbps")
         applyBudget(now: Clock.nowNanos())
@@ -3010,8 +3024,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// The network a session's estimate is saved under: none for a throttled session, nor for one under a viewer's bitrate cap
     /// (its peak is the cap's, not the link's: a test run at --bitrate 800 saved 1267 kbps into the store the login-item host
     /// shares, and phrz's next connect on his several-Mbps link started at 950, 2026-10-23 12:41Z).
+    /// The stream's rate is the host's to choose: the request reaches the streamer resolved (BitratePolicy.resolved: the cap
+    /// filled in, explicitBitrate set), so `isAutomatic` on it is always false; an automatic request resolves to the host's
+    /// automatic maximum. (8243b14 read it the first way: no session saved an estimate.)
+    private var automaticBitrate: Bool { (request?.bitrateKbps ?? 0) >= Int(hostTunables[.autoMaxKbps]) }
     private var priorDeliveryNetwork: String? {
-        guard let req = request, req.throttle == nil, BitratePolicy.isAutomatic(req) else { return nil }
+        guard let req = request, req.throttle == nil, automaticBitrate else { return nil }
         return req.networkFingerprint
     }
     static func priorDelivery(for peer: String?, network: String?) -> Int? {

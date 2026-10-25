@@ -46,6 +46,10 @@ public enum LinkTier: Int, Codable, Sendable, CaseIterable {
     /// Extreme is a link-limited rate under 500 kbps, nothing else.
     public static func classify(rateKbps: Int, limitedByLink: Bool, rttMs: Double, lossPercent: Double) -> LinkTier {
         if limitedByLink && rateKbps < 500 { return .extreme }
+        // A LAN (round trip under 20 ms, no loss) is Local from its first sample, whatever the startup target: a 13 ms link
+        // read Constrained (the 2 Mbps start counted as "limited by the link") and became Local only at +14 s, with video
+        // on the lowest rungs meanwhile (phrz's LAN session, 2026-10-25 11:49Z: "worse than prior art").
+        if rttMs < 20 && lossPercent < 1 { return .local }
         if (limitedByLink && rateKbps < 2000) || rttMs >= 100 { return .constrained }
         if rttMs < 10 && (!limitedByLink || rateKbps > 50_000) { return .local }
         return .normal
@@ -64,6 +68,13 @@ public struct TierSelector: Equatable {
     public var dwellNanosExtreme: UInt64 = 10_000_000_000  // into Extreme
 
     public init(initial: LinkTier = .normal) { tier = initial; candidate = initial }
+    /// The first measured classification is taken at once (no dwell): the initial tier is a guess, not a measurement.
+    private var measured = false
+    public mutating func adoptFirst(rateKbps: Int, limitedByLink: Bool, rttMs: Double, lossPercent: Double, now: UInt64) {
+        guard !measured else { return }
+        measured = true
+        tier = LinkTier.classify(rateKbps: rateKbps, limitedByLink: limitedByLink, rttMs: rttMs, lossPercent: lossPercent); candidate = tier; candidateSince = now
+    }
 
     @discardableResult
     public mutating func update(rateKbps: Int, limitedByLink: Bool, rttMs: Double, lossPercent: Double, now: UInt64) -> LinkTier {
