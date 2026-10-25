@@ -12,6 +12,8 @@ import Foundation
 public enum TrustedKeys {
     public static let compiled: [String] = [
         // BEGIN MIRAGE MANIFEST KEYS
+        "RkdiYPOI6pgPA7XtzSH8qSYzO01fsuWk2nXTGl4sA6c=", // current c924500cb37a35e0
+        "xt0I5ZG+3e8M5gXc1odsxj+dC7xjmtH2+nqCSLGn3/I=", // next fc4317d9258b2d04 (private half offline)
         // END MIRAGE MANIFEST KEYS
     ]
     public static let revoked: [String] = [
