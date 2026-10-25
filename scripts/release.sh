@@ -191,6 +191,7 @@ codesign --verify --strict -R="$DR_APP" "$APP" || die "Mirage.app does not satis
 codesign --verify --strict -R="$DR_HOST" "$APP/Contents/MacOS/miraged" || die "miraged does not satisfy: $DR_HOST"
 for b in "$APP" "$APP/Contents/MacOS/miraged"; do
     codesign -dv "$b" 2>&1 | grep -q 'flags=.*runtime' || die "$b lacks the hardened runtime"
+    codesign -d --entitlements :- "$b" 2>/dev/null | grep -q get-task-allow && die "$b carries get-task-allow (notarization rejects it)"
 done
 
 echo "== self-test of the built host"
