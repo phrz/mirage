@@ -657,6 +657,42 @@ public final class Compositor {
 
     // MARK: Tiles and copy-rects
 
+    /// A tile decoded ahead of `applyTiles`: a lossless, near-lossless or solid rect's pixels, or a still's texture.
+    public enum Decoded { case pixels(MTLBuffer), still(MTLTexture) }
+    /// Decodes a message's tiles (WebP) in parallel, on the caller's thread and any worker: the video queue is left the
+    /// uploads and blits. Serially on the video queue, decode was what a LAN's tile acks waited for (crisp-first,
+    /// 2026-10-25). Keyed by rect (the caller filters a message's tiles before applying them); a tile that does not decode is
+    /// absent and `applyTiles` skips it, as before. `alpha`: a window layer's stills are clamped to premultiplied, as
+    /// `applyTiles` does.
+    public static func predecode(_ tiles: [TileMessage.Tile], device: MTLDevice, alpha: Bool) -> [PixelRect: Decoded] {
+        var out = [Decoded?](repeating: nil, count: tiles.count)
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: tiles.count) { i in
+            let t = tiles[i], w = t.rect.width, h = t.rect.height, stride = w * 4
+            var d: Decoded? = nil
+            if t.format == .lossy {
+                if let (dw, dh) = TileCodec.size(of: t.data) {
+                    let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: dw, height: dh, mipmapped: false)
+                    desc.usage = [.shaderRead]; desc.storageMode = .shared
+                    var pixels = [UInt8](repeating: 0, count: dw * dh * 4)
+                    if let tex = device.makeTexture(descriptor: desc), pixels.withUnsafeMutableBytes({ TileCodec.decode(t.data, into: $0.baseAddress!, width: dw, height: dh, stride: dw * 4) }) {
+                        if alpha { clampPremultiplied(&pixels) }
+                        tex.replace(region: MTLRegionMake2D(0, 0, dw, dh), mipmapLevel: 0, withBytes: pixels, bytesPerRow: dw * 4)
+                        d = .still(tex)
+                    }
+                }
+            } else if w > 0, h > 0, let buf = device.makeBuffer(length: stride * h, options: .storageModeShared) {
+                let ok = t.format == .solid ? TileCodec.fillSolid(t.data, into: buf.contents(), width: w, height: h, stride: stride)
+                    : (TileCodec.size(of: t.data).map { $0.width == w && $0.height == h } ?? false) && TileCodec.decode(t.data, into: buf.contents(), width: w, height: h, stride: stride)
+                if ok { d = .pixels(buf) }
+            }
+            lock.lock(); out[i] = d; lock.unlock()
+        }
+        var byRect: [PixelRect: Decoded] = [:]
+        for (i, d) in out.enumerated() { if let d { byRect[tiles[i].rect] = d } }
+        return byRect
+    }
+
     /// Decodes and uploads lossless tiles (and lossy stills, scaled onto their rect). Returns the number applied.
     /// `crossfade`: the tiles fade in together (a whole-layer level). `staged`: they go to the off-screen next
     /// level only, shown on `commitStaged`; the parts of them inside `alsoShow` are written to the canvas too
@@ -665,7 +701,7 @@ public final class Compositor {
     /// `transaction`: a capture's direct change under TRUTH, collected in `pending` until `commitTransaction`.
     /// `captureSeq`: the capture the tiles came from (staged quality bookkeeping, and lossy writes never replace staged lossless
     /// pixels of the same or a later capture).
-    public func applyTiles(_ tiles: [TileMessage.Tile], crossfade: Bool = false, staged: Bool = false, alsoShow: [PixelRect] = [], transaction: Bool = false, captureSeq: UInt32? = nil) -> Int {
+    public func applyTiles(_ tiles: [TileMessage.Tile], crossfade: Bool = false, staged: Bool = false, alsoShow: [PixelRect] = [], transaction: Bool = false, captureSeq: UInt32? = nil, decoded: [PixelRect: Decoded]? = nil) -> Int {
         guard canvas != nil, let cb = commandQueue.makeCommandBuffer() else { return 0 }
         let bounds = PixelRect(x: 0, y: 0, width: width, height: height)
         if crossfade && !staged { for t in tiles { finishFades(intersecting: t.rect, cb) } }
@@ -676,19 +712,25 @@ public final class Compositor {
         var faded: [PixelRect] = []
         var shownNow = false
         for t in tiles {
+            let pre = decoded?[t.rect]
+            if decoded != nil, pre == nil { continue }   // decoded ahead and failed: skipped, like a failed decode below
             let r = t.rect.intersection(bounds)
             guard !r.isEmpty else { continue }
             let w = t.rect.width, h = t.rect.height, stride = w * 4
             if t.format == .lossy {
                 // A still at its own size: decode into a shared texture and draw it scaled onto the rect.
-                guard let (dw, dh) = TileCodec.size(of: t.data) else { continue }
-                let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: dw, height: dh, mipmapped: false)
-                d.usage = [.shaderRead]; d.storageMode = .shared
-                guard let tex = device.makeTexture(descriptor: d) else { continue }
-                var pixels = [UInt8](repeating: 0, count: dw * dh * 4)
-                guard pixels.withUnsafeMutableBytes({ TileCodec.decode(t.data, into: $0.baseAddress!, width: dw, height: dh, stride: dw * 4) }) else { continue }
-                if hasAlpha { Self.clampPremultiplied(&pixels) }
-                tex.replace(region: MTLRegionMake2D(0, 0, dw, dh), mipmapLevel: 0, withBytes: pixels, bytesPerRow: dw * 4)
+                let tex: MTLTexture
+                if case .still(let pt) = pre { tex = pt } else {
+                    guard let (dw, dh) = TileCodec.size(of: t.data) else { continue }
+                    let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: dw, height: dh, mipmapped: false)
+                    d.usage = [.shaderRead]; d.storageMode = .shared
+                    guard let made = device.makeTexture(descriptor: d) else { continue }
+                    var pixels = [UInt8](repeating: 0, count: dw * dh * 4)
+                    guard pixels.withUnsafeMutableBytes({ TileCodec.decode(t.data, into: $0.baseAddress!, width: dw, height: dh, stride: dw * 4) }) else { continue }
+                    if hasAlpha { Self.clampPremultiplied(&pixels) }
+                    made.replace(region: MTLRegionMake2D(0, 0, dw, dh), mipmapLevel: 0, withBytes: pixels, bytesPerRow: dw * 4)
+                    tex = made
+                }
                 blit?.endEncoding(); blit = nil
                 if let keys = t.keys {
                     // Keyed: per tile, where its key lands (a still drawn scaled, clipped to each landing tile).
@@ -707,11 +749,15 @@ public final class Compositor {
                 n += 1
                 continue
             }
-            guard let buf = device.makeBuffer(length: stride * h, options: .storageModeShared) else { continue }
-            if t.format == .solid {
-                guard TileCodec.fillSolid(t.data, into: buf.contents(), width: w, height: h, stride: stride) else { continue }
-            } else {
-                guard let (dw, dh) = TileCodec.size(of: t.data), dw == w, dh == h, TileCodec.decode(t.data, into: buf.contents(), width: w, height: h, stride: stride) else { continue }
+            let buf: MTLBuffer
+            if case .pixels(let pb) = pre { buf = pb } else {
+                guard let made = device.makeBuffer(length: stride * h, options: .storageModeShared) else { continue }
+                if t.format == .solid {
+                    guard TileCodec.fillSolid(t.data, into: made.contents(), width: w, height: h, stride: stride) else { continue }
+                } else {
+                    guard let (dw, dh) = TileCodec.size(of: t.data), dw == w, dh == h, TileCodec.decode(t.data, into: made.contents(), width: w, height: h, stride: stride) else { continue }
+                }
+                buf = made
             }
             if let keys = t.keys {
                 // Keyed: each tile of the rect lands where its key wins.

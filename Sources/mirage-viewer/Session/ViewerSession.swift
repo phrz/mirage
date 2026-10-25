@@ -378,6 +378,7 @@ final class ViewerSession: @unchecked Sendable {
             let welcome = try await session.authenticate(resumeToken: resumeToken)
             log("connect timing: authenticated at \(since())")
             let resumed = welcome.resumed == true
+            hostProtocol = welcome.protocolVersion ?? 5
             if resumeToken != nil { if resumed { resumes += 1 } else { reconnects += 1 } }
             if let t = welcome.resumeToken { resumeToken = t; saveResume() }
             if resumeToken != nil, !resumed {
@@ -746,6 +747,8 @@ final class ViewerSession: @unchecked Sendable {
         }
     }
 
+    /// The host's protocol (its Welcome; 5 when it did not say): 6 takes `tileReceived`.
+    private var hostProtocol = 5
     private func receiveTiles(_ stream: MessageStream, gen myGen: Int) async {
         var parser = TileStreamParser()
         while !Task.isCancelled {
@@ -755,10 +758,26 @@ final class ViewerSession: @unchecked Sendable {
                     let now = Clock.nowNanos()
                     noteHostPacket(now)
                     tileFlowNote(received: bytes, now: now)
+                    // Protocol 6: "read" now, "applied" (tileAck) after the video queue has it: the host's rate and in-flight
+                    // cap measure the network, not this queue's backlog (a 45 Mbps LAN held at ~8 Mbps, 2026-10-25).
+                    if hostProtocol >= 6 {
+                        switch msg {
+                        case .tiles(let t): sender?.send(.tileReceived(.init(msgSeq: seq, captureNanos: t.header.captureNanos, receivedNanos: now, bytes: bytes)))
+                        case .copyRect(let c): sender?.send(.tileReceived(.init(msgSeq: seq, captureNanos: c.header.captureNanos, receivedNanos: now, bytes: bytes)))
+                        default: break
+                        }
+                    }
                     if Self.testDelayNanos > 0 {
                         videoQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(Self.testDelayNanos))) { guard myGen == self.gen else { return }; self.apply(msg, seq: seq, bytes: bytes, now: Clock.nowNanos()) }
+                    } else if case .tiles(let t) = msg, let device = context?.device {
+                        // WebP decode in parallel here (in message order: one serial queue), the video queue left the blits.
+                        decodeQueue.async {
+                            let decoded = Compositor.predecode(t.tiles, device: device, alpha: t.header.windowID != 0)
+                            self.videoQueue.async { guard myGen == self.gen else { return }; self.apply(msg, seq: seq, bytes: bytes, now: now, decoded: decoded) }
+                        }
                     } else {
-                        videoQueue.async { guard myGen == self.gen else { return }; self.apply(msg, seq: seq, bytes: bytes, now: now) }
+                        // Behind any tiles still decoding: messages land in the order they were read.
+                        decodeQueue.async { self.videoQueue.async { guard myGen == self.gen else { return }; self.apply(msg, seq: seq, bytes: bytes, now: now) } }
                     }
                 }
             } catch { log("tile stream: \(error)"); return }
@@ -840,7 +859,9 @@ final class ViewerSession: @unchecked Sendable {
         flowLock.unlock()
         if let line { log(line) }
     }
-    private func apply(_ msg: TileMessage, seq: UInt32, bytes: Int, now: UInt64) {
+    /// Tile messages decode here, in read order, each one's tiles in parallel (Compositor.predecode).
+    private let decodeQueue = DispatchQueue(label: "mirage.viewer.tile-decode", qos: .userInteractive)
+    private func apply(_ msg: TileMessage, seq: UInt32, bytes: Int, now: UInt64, decoded: [PixelRect: Compositor.Decoded]? = nil) {
         // Crisp-first: the video queue's time in tile messages (WebP decode and blits), against the queue wait above.
         let applyStart = Clock.nowNanos()
         defer { let d = Clock.nowNanos() &- applyStart; flowLock.lock(); flowApplyNanos += d; flowMaxApplyNanos = max(flowMaxApplyNanos, d); flowLock.unlock() }
@@ -881,8 +902,8 @@ final class ViewerSession: @unchecked Sendable {
             var n = 0
             if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) seq \(seq) capture \(t.header.captureSeq): shown \(shown.map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)\($0.format == .lossy ? "L" : "")" }.joined(separator: " ")) staged \(staged.map { "\($0.rect.x),\($0.rect.y) \($0.rect.width)x\($0.rect.height)" }.joined(separator: " "))\(t.refinement ? " (refinement)" : "")") }
             // TRUTH: a capture's direct change waits for its frameEnd (refinement keeps its own crossfades and levels).
-            if !shown.isEmpty { n += v.compositor.applyTiles(shown, crossfade: t.refinement && !t.staged, transaction: transactional && !t.refinement, captureSeq: t.header.captureSeq) }
-            if !staged.isEmpty { n += v.compositor.applyTiles(staged, staged: true, alsoShow: fillParts, captureSeq: t.header.captureSeq); v.stagedLossless += staged.filter { $0.format != .lossy || finalLossy }.map(\.rect) }
+            if !shown.isEmpty { n += v.compositor.applyTiles(shown, crossfade: t.refinement && !t.staged, transaction: transactional && !t.refinement, captureSeq: t.header.captureSeq, decoded: decoded) }
+            if !staged.isEmpty { n += v.compositor.applyTiles(staged, staged: true, alsoShow: fillParts, captureSeq: t.header.captureSeq, decoded: decoded); v.stagedLossless += staged.filter { $0.format != .lossy || finalLossy }.map(\.rect) }
             if !t.staged, !shown.isEmpty {
                 let area = shown.reduce(0) { $0 + $1.rect.area }, whole = area * 10 >= max(1, v.compositor.width * v.compositor.height) * 9
                 if shown.contains(where: { $0.format == .lossy }) && whole { v.step(t.refinement ? "fade" : "still", now: now) }

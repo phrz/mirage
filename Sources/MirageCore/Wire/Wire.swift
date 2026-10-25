@@ -2,7 +2,9 @@ import Foundation
 
 /// Protocol constants shared by host and clients.
 public enum Mirage {
-    public static let protocolVersion = 5
+    /// 6: the viewer sends `tileReceived` as it reads each tile message (rate and in-flight accounting), before `tileAck`
+    /// (applied). A 5 host gets only `tileAck`.
+    public static let protocolVersion = 6
     /// The oldest protocol this build still speaks (DESIGN §3.10): the host accepts viewers in
     /// `minProtocolVersion ... protocolVersion` (and newer ones, which speak down), and gates newer features on the peer's
     /// version, so a fleet can run mixed builds. Raise it only when dropping support for an old peer.
@@ -130,6 +132,9 @@ public enum ControlMessage: Codable, Equatable {
 
     // M2: tile-stream acks (feedback), host window list, rate-controller state for the overlay.
     case tileAck(TileAck)
+    /// Protocol 6: a tile message read off its stream (not yet applied). Drives the host's rate estimate and in-flight cap,
+    /// so they measure the network; `tileAck` (applied) still decides what the viewer holds.
+    case tileReceived(TileAck)
     case windowList(WindowList)
     case rateState(RateState)
     /// What the host is looking at: console lock state, frontmost app and window (once a second).

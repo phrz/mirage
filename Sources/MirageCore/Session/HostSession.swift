@@ -193,6 +193,8 @@ public enum HostSession {
                 conn.streamer?.handle(ack: ack)
             case .tileAck(let ack):
                 conn.streamer?.handle(tileAck: ack)
+            case .tileReceived(let ack):
+                conn.streamer?.handle(tileReceived: ack)
             case .nack(let n):
                 conn.streamer?.handle(nack: n)
             case .viewInterest(let v):

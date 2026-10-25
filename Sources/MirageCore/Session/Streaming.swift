@@ -16,6 +16,7 @@ public protocol StreamOutput: AnyObject, Sendable {
     var peerID: String? { get }
 }
 public extension StreamOutput { var peerID: String? { nil } }
+public extension DesktopStreamer { func handle(tileReceived: ControlMessage.TileAck) {} }
 
 /// A platform implementation of "stream this display, inject this input" (macOS: MirageHost).
 /// MirageCore itself stays free of ScreenCaptureKit/AppKit so it compiles for iOS.
@@ -24,6 +25,8 @@ public protocol DesktopStreamer: AnyObject, Sendable {
     func update(_ request: ControlMessage.StreamRequest) async throws -> ControlMessage.StreamInfo
     func handle(ack: ControlMessage.FrameAck)
     func handle(tileAck: ControlMessage.TileAck)
+    /// Protocol 6: a tile message read by the viewer, not yet applied (`tileAck` follows once it is).
+    func handle(tileReceived: ControlMessage.TileAck)
     func handle(nack: ControlMessage.Nack)
     func handle(input: ControlMessage)
     /// Input datagram with redundancy; returns what to acknowledge (nil = not ready, the viewer will repeat).
