@@ -3,8 +3,10 @@
 # Contents/MacOS/miraged and its LaunchAgent plist to Contents/Library/LaunchAgents, and signs miraged with the app's
 # signing identity under the stable identifier com.paulherz.mirage.host (the TCC grants for Screen Recording and
 # Accessibility follow the signature's designated requirement: identifier + team, so they survive rebuilds).
-# Hardened runtime when the app has it (DESIGN §3.10: notarization requires it on every executable), and a secure
-# timestamp for a Developer ID identity (notarization requires that too; none for development builds, which stay offline).
+# A Developer ID identity adds the hardened runtime and a secure timestamp (DESIGN §3.10: notarization requires both on
+# every executable). Any other identity signs exactly as before, with no extra flags: the login-item agent's launch
+# constraint (its LWCR, from the signature SMAppService registered) broke on mac-daddy when an Apple Development miraged
+# gained the hardened runtime (2026-10-26, "Launch Constraint Violation", EX_CONFIG).
 set -e
 [ "$PLATFORM_NAME" = "macosx" ] || exit 0
 ROOT="$PROJECT_DIR/.."
@@ -18,10 +20,7 @@ install -m 0755 "$BIN" "$CONTENTS/MacOS/miraged"
 mkdir -p "$CONTENTS/Library/LaunchAgents"
 install -m 0644 "$PROJECT_DIR/LaunchAgents/com.paulherz.mirage.host.plist" "$CONTENTS/Library/LaunchAgents/"
 IDENTITY="${EXPANDED_CODE_SIGN_IDENTITY:--}"
-set -- --identifier com.paulherz.mirage.host
-[ "${ENABLE_HARDENED_RUNTIME:-NO}" = YES ] && set -- "$@" --options runtime
 case "${EXPANDED_CODE_SIGN_IDENTITY_NAME:-}" in
-    "Developer ID Application"*) set -- "$@" --timestamp ;;
-    *) set -- "$@" --timestamp=none ;;
+    "Developer ID Application"*) codesign -f -s "$IDENTITY" --identifier com.paulherz.mirage.host --options runtime --timestamp "$CONTENTS/MacOS/miraged" ;;
+    *) codesign -f -s "$IDENTITY" --identifier com.paulherz.mirage.host "$CONTENTS/MacOS/miraged" ;;
 esac
-codesign -f -s "$IDENTITY" "$@" "$CONTENTS/MacOS/miraged"

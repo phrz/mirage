@@ -71,9 +71,9 @@ targets:
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         ENABLE_USER_SCRIPT_SANDBOXING: NO   # the Embed host phase runs swift build in the package
-        # Signing (DESIGN §3.10): the hardened runtime on every Mac build (notarization needs it; capture, input injection and
-        # QUIC need no exceptions). The identity stays automatic here (Apple Development, and the iOS slice's own);
-        # scripts/make-viewer-app.sh and release.sh sign the Mac app with Developer ID Application (team M8MME6Q9DA) on the
-        # xcodebuild command line, and embed-host.sh signs miraged with the same identity and options.
-        "ENABLE_HARDENED_RUNTIME[sdk=macosx*]": YES
+        # Signing (DESIGN §3.10): the identity stays automatic here (Apple Development, and the iOS slice's own), signed as
+        # before: no hardened runtime. scripts/make-viewer-app.sh signs a Developer ID build on the xcodebuild command line,
+        # with ENABLE_HARDENED_RUNTIME=YES (notarization needs it), and embed-host.sh signs miraged the same way. Not here:
+        # changing an Apple Development miraged's signing flags broke the login-item agent's launch constraint on mac-daddy
+        # (2026-10-26, "Launch Constraint Violation", EX_CONFIG).
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Mirage connects to the Macs you pair with on your network or tailnet."

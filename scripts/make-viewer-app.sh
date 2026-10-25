@@ -46,8 +46,9 @@ case "$SIGNING" in
     developer-id)
         has_developer_id || { echo "error: MIRAGE_SIGN=developer-id, but no \"Developer ID Application: … ($TEAM)\" identity is in this Mac's keychain; scripts/release.sh --check says how to add it" >&2; exit 1; }
         # Manual: a Developer ID app needs no provisioning profile. --timestamp: notarization needs a secure timestamp.
+        # Hardened runtime with Developer ID only (notarization needs it); Apple Development builds are signed as before.
         set -- "$@" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Developer ID Application" DEVELOPMENT_TEAM=$TEAM \
-            OTHER_CODE_SIGN_FLAGS=--timestamp ;;
+            ENABLE_HARDENED_RUNTIME=YES OTHER_CODE_SIGN_FLAGS=--timestamp ;;
     dev|development) ;;
     *) echo "error: MIRAGE_SIGN is auto, developer-id or dev" >&2; exit 1 ;;
 esac
