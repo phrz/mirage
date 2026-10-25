@@ -40,10 +40,19 @@ public struct AgentControl: Sendable {
 
     public func status() -> AgentStatus { HostAgent.currentStatus() }
 
-    /// Whether launchd's job runs its program from inside `app` (the agent belongs to this bundle).
+    /// Whether launchd's agent job is this bundle's: its running process's executable is inside the app, or inside the
+    /// kept previous bundle (where the swap just moved the code it runs).
+    public func ownership() -> HostAgent.Ownership {
+        let (out, code) = HostAgent.launchctlPrint()
+        let previous = InstallPaths(app: app, support: storeRoot).previous
+        return HostAgent.ownership(launchctlOutput: out, exitCode: code, bundles: [app, previous], pidPath: HostAgent.executablePath(pid:))
+    }
+    /// The agent job is this bundle's, or can only be (SMAppService, not running): either way restarting it is right.
     public func belongsToApp() -> Bool {
-        guard let p = AgentStatus.fields(HostAgent.launchctlPrint().0)["program"] else { return false }
-        return p.hasPrefix(app.path + "/")
+        switch ownership() {
+        case .ours, .probablyOurs: return true
+        case .notLoaded, .elsewhere: return false
+        }
     }
 
     public func kickstart() { _ = SystemBundleVerifier.run(Self.launchctl, ["kickstart", "-k", target], timeout: 15) }

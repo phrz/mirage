@@ -182,3 +182,62 @@ extension InstallerTests {
         XCTAssertEqual(Updater.hostUpdateInfo(paths: paths, running: ver(412)).lastResult?.phase, .failed)
     }
 }
+
+/// Whose the agent job is, from `launchctl print` (mac-daddy, 2026-10-26: the first self-update reported "no host agent
+/// runs from /Applications/Mirage.app" while the agent ran, because an SMAppService agent prints no `program`).
+final class AgentOwnershipTests: XCTestCase {
+    let app = URL(fileURLWithPath: "/Applications/Mirage.app")
+    let previous = URL(fileURLWithPath: "/Users/phrz/Library/Application Support/Mirage/Previous/Mirage.app")
+    /// As mac-daddy printed it (SMAppService registration).
+    let smAppService = """
+        gui/501/com.paulherz.mirage.host = {
+        \tactive count = 1
+        \tpath = (submitted by smd.601)
+        \ttype = LaunchAgent
+        \tstate = running
+        \tprogram identifier = Contents/MacOS/miraged (mode: 2)
+        \tinherited environment = {
+        \t\tSSH_AUTH_SOCK => /private/tmp/com.apple.launchd.x/Listeners
+        \t}
+        \tpid = 73163
+        \tjob state = running
+        \tproperties = needs LWCR update | has LWCR
+        }
+        """
+    /// A plist agent (miraged install, the old LaunchAgent): an absolute program.
+    let plist = """
+        gui/501/com.paulherz.mirage.host = {
+        \tpath = /Users/phrz/Library/LaunchAgents/com.paulherz.mirage.host.plist
+        \tstate = not running
+        \tprogram = /Applications/Mirage.app/Contents/MacOS/miraged
+        \tlast exit code = 0
+        }
+        """
+
+    func own(_ out: String, pid: String?) -> HostAgent.Ownership {
+        HostAgent.ownership(launchctlOutput: out, bundles: [app, previous], pidPath: { _ in pid })
+    }
+
+    func testSMAppServiceAgentIsFoundByItsProcess() {
+        XCTAssertEqual(HostAgent.Status.parse(smAppService), .running(pid: 73163, program: nil))
+        XCTAssertEqual(own(smAppService, pid: "/Applications/Mirage.app/Contents/MacOS/miraged"), .ours(pid: 73163))
+        XCTAssertEqual(own(smAppService, pid: previous.path + "/Contents/MacOS/miraged"), .ours(pid: 73163),
+                       "after the swap the running code sits in the kept previous bundle: still ours, and it must be restarted")
+        XCTAssertEqual(own(smAppService, pid: "/Users/phrz/Repos/mirage/.build/Mirage.app/Contents/MacOS/miraged"),
+                       .elsewhere("/Users/phrz/Repos/mirage/.build/Mirage.app/Contents/MacOS/miraged"))
+        let stopped = smAppService.replacingOccurrences(of: "\tstate = running", with: "\tstate = not running").replacingOccurrences(of: "\tpid = 73163\n", with: "")
+        XCTAssertEqual(own(stopped, pid: nil), .probablyOurs, "registered from a bundle launchctl does not name: restart it")
+    }
+
+    func testPlistAgentByItsProgram() {
+        XCTAssertEqual(own(plist, pid: nil), .ours(pid: nil))
+        XCTAssertEqual(own(plist.replacingOccurrences(of: "/Applications/Mirage.app", with: "/Users/x/old/Mirage.app"), pid: nil),
+                       .elsewhere("/Users/x/old/Mirage.app/Contents/MacOS/miraged"))
+        XCTAssertEqual(own("Bad request.\nCould not find service \"com.paulherz.mirage.host\" in domain for user gui: 501\n", pid: nil), .notLoaded)
+    }
+
+    func testThisProcessExecutablePath() {
+        XCTAssertNotNil(HostAgent.executablePath(pid: Int(getpid())))
+        XCTAssertNil(HostAgent.executablePath(pid: 999_999_999))
+    }
+}

@@ -104,12 +104,24 @@ struct Update: AsyncParsableCommand {
     func afterSwap(_ p: PendingUpdate, paths: InstallPaths, identityChanged: Bool) async throws {
         let installer = Installer(paths: paths)
         let agent = AgentControl(app: paths.app, storeRoot: paths.support)
-        guard !noRestart, agent.belongsToApp() else {
-            // No agent runs from this bundle: nobody would start the new build to commit it, and its deadline would pass.
+        let kick = "launchctl kickstart -k gui/\(getuid())/\(HostAgent.label)"
+        switch noRestart ? nil : agent.ownership() {
+        case .ours?, .probablyOurs?:
+            break
+        case .notLoaded?:
+            // The host is not turned on here (a viewer-only Mac): nothing to restart, nobody to commit it.
             installer.clearPending()
             try? installer.writeResult(UpdateResult(outcome: .installedUnchecked, from: p.from, to: p.to, at: Date(),
-                                                    message: "installed without a health check: no host agent runs from \(paths.app.path)"))
-            print("[done] installed \(p.from.display) → \(p.to.display); no host agent runs from \(paths.app.path), so no health check (verified and self-tested only)")
+                                                    message: "installed without a health check: the host is not turned on on this Mac"))
+            print("[installed] \(p.from.display) → \(p.to.display) at \(paths.app.path); the host is not turned on on this Mac (no agent registered), so there was no restart and no health check")
+            return
+        case .elsewhere(let program)?:
+            // Never "done": the swap happened, and the agent that should restart into it is not this bundle's.
+            print("[failed] swapped in \(p.to.display) at \(paths.app.path), but the host agent runs \(program), not this bundle: it was not restarted")
+            print("         restart it onto the new build yourself: \(kick) (within \(Int(UpdateHealth.commitWindow / 60)) min, or the new build rolls back at its next start)")
+            throw ExitCode(1)
+        case nil:
+            print("[installed] \(p.from.display) → \(p.to.display) swapped in (--no-restart). Restart the host onto it: \(kick)")
             return
         }
         if identityChanged {
@@ -187,7 +199,10 @@ struct Update: AsyncParsableCommand {
     /// After `--rollback` (or a deploy): the agent running from this bundle, registered again if launchd refuses it.
     func restartAgent(paths: InstallPaths) {
         let agent = AgentControl(app: paths.app, storeRoot: paths.support)
-        guard agent.belongsToApp() else { print("no host agent runs from \(paths.app.path): start it to use the new build"); return }
+        guard agent.belongsToApp() else {
+            print("the host agent is not this bundle's (or not registered): restart it yourself: launchctl kickstart -k gui/\(getuid())/\(HostAgent.label)")
+            return
+        }
         reportAgent(agent.ensureRunning(restart: true, log: { print($0) }), build: Installer.version(of: paths.app) ?? .current)
     }
 }

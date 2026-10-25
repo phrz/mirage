@@ -94,7 +94,44 @@ public enum HostAgent {
         }
     }
 
+    /// Whose the loaded agent job is (mac-daddy, 2026-10-26): an SMAppService agent prints no `program`, only
+    /// `program identifier = Contents/MacOS/miraged (mode: 2)` (bundle-relative) and `path = (submitted by smd…)`; a plist
+    /// agent prints `program = /abs/path`. So: the running pid's executable decides (it may already sit in the kept
+    /// previous bundle, moved there by the swap), else the absolute program, else a bundle-relative identifier naming
+    /// miraged, which is ours but cannot say from where.
+    public enum Ownership: Equatable, Sendable {
+        case notLoaded
+        /// Running from one of the given bundles, or launchd's absolute program is inside one.
+        case ours(pid: Int?)
+        /// Registered from some bundle, which `launchctl print` does not name, and not running now.
+        case probablyOurs
+        /// Runs (or is configured to run) from elsewhere: another copy of Mirage.
+        case elsewhere(String)
+    }
+
+    public static func ownership(launchctlOutput out: String, exitCode: Int32 = 0, bundles: [URL], pidPath: (Int) -> String?) -> Ownership {
+        if case .notLoaded = Status.parse(out, exitCode: exitCode) { return .notLoaded }
+        let f = Status.fields(out)
+        func inside(_ path: String) -> Bool {
+            let p = URL(fileURLWithPath: path).standardizedFileURL.path
+            return bundles.contains { p.hasPrefix($0.standardizedFileURL.path + "/") }
+        }
+        if f["state"] == "running", let pid = f["pid"].flatMap({ Int($0) }), let exe = pidPath(pid) {
+            return inside(exe) ? .ours(pid: pid) : .elsewhere(exe)
+        }
+        if let program = f["program"], program.hasPrefix("/") { return inside(program) ? .ours(pid: nil) : .elsewhere(program) }
+        if let ident = f["program identifier"], ident.hasPrefix("Contents/MacOS/miraged") { return .probablyOurs }
+        return .elsewhere(f["program"] ?? f["program identifier"] ?? "unknown program")
+    }
+
     #if os(macOS)
+    /// A process's executable path (proc_pidpath), else nil.
+    public static func executablePath(pid: Int) -> String? {
+        var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        let n = proc_pidpath(Int32(pid), &buf, UInt32(buf.count))
+        return n > 0 ? String(cString: buf) : nil
+    }
+
     /// `launchctl print` of the agent: its output and exit status.
     public static func launchctlPrint() -> (String, Int32) {
         let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
