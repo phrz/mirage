@@ -245,9 +245,42 @@ final class ViewerSettingsTests: XCTestCase {
         h.lastSeen = now.addingTimeInterval(-120)
         XCTAssertEqual(h.detail(now: now, locale: en), "Seen 2 minutes ago")
         h.streamingElsewhere = true
-        XCTAssertEqual(h.detail(now: now, locale: en), "Seen 2 minutes ago · In use by another device")
+        XCTAssertEqual(h.detail(now: now, locale: en), "In use by another device")
         h.unreachable = true
-        XCTAssertEqual(h.detail(now: now, locale: en), "Unreachable · last seen 2 minutes ago")
+        XCTAssertEqual(h.detail(now: now, locale: en), "Unreachable")
+        XCTAssertFalse(h.detail(now: now, locale: en)!.contains("·"))
+    }
+
+    /// phrz, 2026-10-26: the row keeps one short status; build, channel, policy, model and when it was seen show only on
+    /// Get Info, one plain line each.
+    func testGetInfoLines() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let en = Locale(identifier: "en_US")
+        var h = PairedHost(alias: "green.local", name: "green-machine", model: "Mac15,4", lastSeen: now.addingTimeInterval(-120))
+        h.hostVersion = MirageVersion(version: "0.1", build: 475, commit: "abc", channel: .nightly)
+        h.policy = .automatic
+        XCTAssertEqual(h.detail(now: now, locale: en), "Seen 2 minutes ago", "no build or policy in the row")
+        XCTAssertEqual(h.info(now: now, locale: en), ["Mirage 0.1 (475)", "Nightly channel", "Updates automatically", "Model Mac15,4",
+                                                      "Last seen 2 minutes ago", "Address green.local"])
+        for line in h.info(now: now, locale: en) { XCTAssertFalse(line.contains("·"), line) }
+        h.policy = .ask; h.unreachable = true
+        XCTAssertTrue(h.info(now: now, locale: en).contains("Updates when asked"))
+        XCTAssertTrue(h.info(now: now, locale: en).contains("Not answering now"))
+        XCTAssertEqual(PairedHost(alias: "m", name: "m").info(), [], "nothing known: nothing shown")
+    }
+
+    /// The list uses the Mac's own icon when it sent one (the store keeps it per host), else the generic one.
+    func testListUsesTheHostsOwnIcon() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mirage-icons-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = try Store(root: tmp)
+        try store.remember(host: .init(hostID: "abc1", hostName: "green", publicKey: Data(), endpoint: "green", pairedAt: Date()), as: "green")
+        try store.remember(host: .init(hostID: "abc2", hostName: "old", publicKey: Data(), endpoint: "old", pairedAt: Date()), as: "old")
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 1, 2, 3])
+        try store.saveHostIcon(HostIcon.make(png128: png, png256: nil)!, hostID: "abc1")
+        let rows = ConnectList.load(store: store, defaults: defaults)
+        XCTAssertEqual(rows.first { $0.alias == "green" }?.icon, png)
+        XCTAssertNil(rows.first { $0.alias == "old" }?.icon, "an older host: the generic icon")
     }
 
     /// U7: no probe while a session to that host is open (its own Welcome keeps the record); otherwise one is made.

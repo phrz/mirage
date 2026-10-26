@@ -62,6 +62,7 @@ struct Serve: AsyncParsableCommand {
         var ctx = HostContext(identity: identity, store: store, tlsFingerprint: tls.fingerprint, log: { log($0) },
                               makeStreamer: { MacDesktopStreamer(log: { log($0) }) })
         ctx.updateInfo = { hostUpdateInfo(paths: paths) }
+        ctx.hostIcon = HostIconRenderer.make()   // its own icon (model and colour) for the device lists, once per start
         // A viewer's Welcome (a session's or a status probe's) refreshes a feed record older than 10 min (rate-limited),
         // so the next one shows a release minutes after it is out; a test instance does not check.
         if !noLocalControl { ctx.welcomed = { Task.detached { await checkFeed(paths: paths, reason: "a viewer asked", welcome: true, log: { log($0) }) } } }

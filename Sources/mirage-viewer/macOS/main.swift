@@ -513,6 +513,9 @@ struct ConnectView: View {
     @ObservedObject private var pairing = HostPairingCenter.shared
     /// The Mac whose removal waits for confirmation (right-click Remove…, or Delete on the selected row).
     @State private var removing: PairedHost?
+    /// The row showing Get Info's lines (right-click Get Info, or ⌘I on the selected row; the same again, or another
+    /// selection, hides them).
+    @State private var infoShown: String?
     let onConnect: (String, String?) -> Void
 
     init(hosts: [PairedHost], lastHost: String?, openAdd: Bool = false, onConnect: @escaping (String, String?) -> Void) {
@@ -536,6 +539,13 @@ struct ConnectView: View {
         }
         .onChange(of: removal.revision) { reload() }
         .onChange(of: pairing.revision) { reload() }
+        .onChange(of: selection) { if infoShown != selection { infoShown = nil } }
+        // ⌘I: Get Info on the selected row.
+        .background {
+            Button("Get Info") { if let s = selection { toggleInfo(s) } }
+                .keyboardShortcut("i", modifiers: .command)
+                .opacity(0).frame(width: 0, height: 0).accessibilityHidden(true)
+        }
         .alert(removing.map { HostRemovalCenter.confirmation($0.title).title } ?? "",
                isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing) { h in
             Button("Remove", role: .destructive) { Task { await removal.remove(h) } }
@@ -556,6 +566,10 @@ struct ConnectView: View {
         hosts = pairing.rows(ConnectList.load())
         if let s = pairing.takeSelection() { selection = s }
         if let s = selection, !hosts.contains(where: { $0.alias == s }) { selection = hosts.first?.alias }
+    }
+
+    private func toggleInfo(_ alias: String) {
+        if infoShown == alias { infoShown = nil } else { selection = alias; infoShown = alias }
     }
 
     /// Connects to a row that takes it (not while its Mac has yet to allow this one).
@@ -583,6 +597,7 @@ struct ConnectView: View {
                 .contextMenu(forSelectionType: String.self) { items in
                     if let a = items.first, hosts.first(where: { $0.alias == a })?.canConnect ?? true { Button("Connect") { connect(a) } }
                     if let a = items.first, let h = hosts.first(where: { $0.alias == a }), h.canConnect {
+                        Button(infoShown == a ? "Hide Info" : "Get Info") { toggleInfo(a) }
                         Divider()
                         Button("Remove \(h.title)…") { removing = h }
                     }
@@ -613,10 +628,18 @@ struct ConnectView: View {
 
     private func row(_ h: PairedHost) -> some View {
         HStack(spacing: 10) {
-            DeviceIconView(model: h.model, family: h.family, size: 36)
+            DeviceIconView(model: h.model, family: h.family, size: 36, png: h.icon)
             VStack(alignment: .leading, spacing: 1) {
                 Text(h.title).fontWeight(.medium)
                 if let d = updates.line(h.alias) ?? h.detail() { Text(d).font(.caption).foregroundStyle(.secondary) }
+                if infoShown == h.alias {
+                    // Get Info: one short line each, small and grey.
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(h.info(), id: \.self) { Text($0) }
+                    }
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .padding(.top, 2)
+                }
             }
             Spacer(minLength: 0)
             if h.pairing?.inProgress == true { ProgressView().controlSize(.small) } else { HostUpdateBadge(host: h) }

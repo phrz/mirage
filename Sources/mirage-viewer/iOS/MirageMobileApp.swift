@@ -124,6 +124,8 @@ struct ConnectScreen: View {
     @ObservedObject private var pairing = HostPairingCenter.shared
     /// The new Mac's row, highlighted after pairing (a phone's list has no selection).
     @State private var highlighted: String?
+    /// The Mac whose Get Info sheet shows (long-press → Get Info).
+    @State private var infoHost: PairedHost?
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -152,6 +154,7 @@ struct ConnectScreen: View {
                                 .contextMenu {
                                     if h.canConnect {
                                         Button { onConnect(h.alias, nil) } label: { Label("Connect", systemImage: "play.display") }
+                                        Button { infoHost = h } label: { Label("Get Info", systemImage: "info.circle") }
                                     }
                                     if case .updateAvailable = h.update, UpdatePrompt.state(h) == .canUpdate, !updates.isRunning(h.alias) {
                                         Button { updates.update(h) } label: { Label("Update", systemImage: "arrow.up.circle") }
@@ -201,6 +204,7 @@ struct ConnectScreen: View {
         .onDisappear { probes.listDisappeared() }
         .onChange(of: scenePhase) { if scenePhase == .active { probes.appBecameActive() } }
         .hostUpdatePrompt(updates)
+        .sheet(item: $infoHost) { h in HostInfoSheet(host: h) }
     }
 
     /// Known-hosts with the pairings under way; a new Mac's row is highlighted.
@@ -211,7 +215,7 @@ struct ConnectScreen: View {
 
     private func row(_ h: PairedHost) -> some View {
         HStack(spacing: 12) {
-            DeviceIconView(model: h.model, family: h.family, size: 34)
+            DeviceIconView(model: h.model, family: h.family, size: 34, png: h.icon)
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(h.title).foregroundStyle(.primary)
@@ -221,6 +225,24 @@ struct ConnectScreen: View {
             if h.pairing?.inProgress == true { ProgressView() } else { HostUpdateBadge(host: h) }
         }
         .contentShape(Rectangle())
+    }
+}
+
+/// Get Info for a paired Mac (long-press → Get Info): its icon and name, then short grey lines.
+struct HostInfoSheet: View {
+    let host: PairedHost
+    var body: some View {
+        VStack(spacing: 10) {
+            DeviceIconView(model: host.model, family: host.family, size: 72, png: host.icon)
+                .foregroundStyle(.secondary)
+            Text(host.title).font(.headline)
+            VStack(spacing: 2) {
+                ForEach(host.info(), id: \.self) { Text($0) }
+            }
+            .font(.footnote).foregroundStyle(.secondary)
+        }
+        .padding(24)
+        .presentationDetents([.medium])
     }
 }
 

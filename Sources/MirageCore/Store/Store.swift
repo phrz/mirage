@@ -204,8 +204,9 @@ public final class Store: @unchecked Sendable {
     @discardableResult
     public func forget(host alias: String) throws -> Bool {
         var hosts = try knownHosts()
-        guard hosts.removeValue(forKey: alias) != nil else { return false }
+        guard let gone = hosts.removeValue(forKey: alias) else { return false }
         try write(hosts, "known-hosts.json")
+        if !hosts.values.contains(where: { $0.hostID == gone.hostID }) { removeHostIcon(hostID: gone.hostID) }
         return true
     }
     /// Changes a known host's record (what its latest Welcome said); nothing if the alias is not known.

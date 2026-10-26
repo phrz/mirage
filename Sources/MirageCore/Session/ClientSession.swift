@@ -61,8 +61,11 @@ public struct ClientSession {
             throw MirageError.authenticationFailed("not paired with \(alias); run `mirage connect \(alias) --pair CODE`")
         }
         let clientNonce = DeviceIdentity.nonce()
+        // The host's own icon: asked for always, sent only when the one kept here differs.
+        let features = (features ?? []).contains(ControlMessage.Feature.hostIcon) ? features : (features ?? []) + [ControlMessage.Feature.hostIcon]
         try await stream.send(.hello(.init(protocolVersion: Mirage.protocolVersion, deviceID: identity.id, deviceName: identity.name, clientNonce: clientNonce, resumeToken: resumeToken, deviceModel: DeviceModel.current,
-                                           viewerVersion: .current, minProtocolVersion: Mirage.minProtocolVersion, features: features)))
+                                           viewerVersion: .current, minProtocolVersion: Mirage.minProtocolVersion, features: features,
+                                           hostIconHash: store.hostIcon(hostID: known.hostID)?.hash)))
         // A version refusal comes in place of the challenge: remember which side to update (the device list says so).
         let first = try await stream.receive()
         if case .reject(let r) = first {
@@ -86,6 +89,7 @@ public struct ClientSession {
         try await stream.send(.authenticate(.init(clientPublicKey: identity.publicKey, clientSignature: try identity.sign(clientTranscript))))
         let welcome = try await stream.expect("welcome") { if case .welcome(let w) = $0 { return w } else { return nil } }
         let tooOld = ProtocolCompat.viewerCheck(hostProtocol: welcome.protocolVersion)
+        if let icon = welcome.hostIcon { try? store.saveHostIcon(icon, hostID: known.hostID) }
         // What the host is (its icon in the connect list), its build and its feed's newest (the update indicator), and when
         // it was last reached.
         try? store.updateKnownHost(alias) { h in

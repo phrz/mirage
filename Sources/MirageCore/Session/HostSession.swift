@@ -26,6 +26,8 @@ public struct HostContext: Sendable {
     public var welcomed: (@Sendable () -> Void)?
     /// Tests: a host from before `unpairDevice` (its Welcome does not list the feature).
     public var advertisesUnpair = true
+    /// This Mac's own icon (rendered once per start by miraged), for viewers that ask for it.
+    public var hostIcon: HostIcon?
 
     public init(identity: DeviceIdentity, store: Store, tlsFingerprint: Data, log: @escaping @Sendable (String) -> Void,
                 makeStreamer: (@Sendable () -> DesktopStreamer)? = nil) {
@@ -343,7 +345,8 @@ public enum HostSession {
                                              features: (ctx.advertisesUnpair ? [ControlMessage.Feature.unpair] : []) + (ctx.updateHandler != nil ? [ControlMessage.Feature.updateTrigger] : []),
                                              // Only to a viewer that decodes update statuses (one from before U4 never sees it).
                                              updateResult: (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) ? updates?.lastResult : nil,
-                                             hostStreaming: streamingElsewhere, minProtocolVersion: Mirage.minProtocolVersion)))
+                                             hostStreaming: streamingElsewhere, minProtocolVersion: Mirage.minProtocolVersion,
+                                             hostIcon: HostIcon.forViewer(features: hello.features, cachedHash: hello.hostIconHash, icon: ctx.hostIcon))))
         ctx.welcomed?()
         if quiet {
             // A status probe: one line per device every 10 min at most, no timings.

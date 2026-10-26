@@ -203,6 +203,8 @@ public enum ControlMessage: Codable, Equatable {
         public static let probe = "probe"
         /// A host that takes `unpairDevice` (Welcome).
         public static let unpair = "unpair"
+        /// A viewer that keeps the host's own icon (Hello): the Welcome carries `hostIcon` when its copy differs.
+        public static let hostIcon = "hostIcon"
     }
 
     public struct UpdateHost: Codable, Equatable {
@@ -251,11 +253,14 @@ public enum ControlMessage: Codable, Equatable {
         public var minProtocolVersion: Int?
         /// `Feature` names this viewer supports. nil from older viewers.
         public var features: [String]?
+        /// The `HostIcon.hash` of the icon this viewer holds for the host (with `Feature.hostIcon`). nil: none.
+        public var hostIconHash: String?
         public init(protocolVersion: Int, deviceID: String, deviceName: String, clientNonce: Data, resumeToken: Data? = nil, deviceModel: String? = nil,
-                    viewerVersion: MirageVersion? = nil, minProtocolVersion: Int? = nil, features: [String]? = nil) {
+                    viewerVersion: MirageVersion? = nil, minProtocolVersion: Int? = nil, features: [String]? = nil, hostIconHash: String? = nil) {
             self.protocolVersion = protocolVersion; self.deviceID = deviceID
             self.deviceName = deviceName; self.clientNonce = clientNonce; self.resumeToken = resumeToken; self.deviceModel = deviceModel
             self.viewerVersion = viewerVersion; self.minProtocolVersion = minProtocolVersion; self.features = features
+            self.hostIconHash = hostIconHash
         }
     }
     public struct Challenge: Codable, Equatable {
@@ -309,16 +314,20 @@ public enum ControlMessage: Codable, Equatable {
         public var updateResult: UpdateStatus?
         public init(hostName: String, sessionID: String, resumeToken: Data? = nil, resumed: Bool? = nil, hostBuild: String? = nil, hostModel: String? = nil, hostFamily: String? = nil,
                     hostVersion: MirageVersion? = nil, latestAvailable: MirageVersion? = nil, updatePolicy: UpdatePermission? = nil, protocolVersion: Int? = nil,
-                    features: [String]? = nil, updateResult: UpdateStatus? = nil, hostStreaming: Bool? = nil, minProtocolVersion: Int? = nil) {
+                    features: [String]? = nil, updateResult: UpdateStatus? = nil, hostStreaming: Bool? = nil, minProtocolVersion: Int? = nil,
+                    hostIcon: HostIcon? = nil) {
             self.hostName = hostName; self.sessionID = sessionID; self.resumeToken = resumeToken; self.resumed = resumed; self.hostBuild = hostBuild
             self.hostModel = hostModel; self.hostFamily = hostFamily
             self.hostVersion = hostVersion; self.latestAvailable = latestAvailable; self.updatePolicy = updatePolicy; self.protocolVersion = protocolVersion
             self.features = features; self.updateResult = updateResult
             self.hostStreaming = hostStreaming; self.minProtocolVersion = minProtocolVersion
+            self.hostIcon = hostIcon
         }
         /// U7: the host streams to another device right now; the oldest protocol it speaks. nil from older hosts.
         public var hostStreaming: Bool?
         public var minProtocolVersion: Int?
+        /// The host's own icon, to a viewer that asked for it and holds another (or none). nil otherwise, and from older hosts.
+        public var hostIcon: HostIcon?
         /// The host accepts update triggers from this viewer.
         public var acceptsUpdateTrigger: Bool { (features ?? []).contains(Feature.updateTrigger) && (updatePolicy?.viewerMayTrigger ?? false) }
     }

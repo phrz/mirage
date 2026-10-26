@@ -3,6 +3,8 @@ import MirageCore
 #if os(macOS)
 import AppKit
 import UniformTypeIdentifiers
+#else
+import UIKit
 #endif
 
 /// One paired Mac in the connect list (the Mac's connect window, iOS's connect screen): what known-hosts holds for it.
@@ -28,13 +30,30 @@ struct PairedHost: Identifiable, Equatable {
     var streamingElsewhere = false
     /// A pairing under way from this device (phrz, 2026-10-26): no Connect until the Mac allows it.
     var pairing: PairingPhase?
+    /// For Get Info (phrz, 2026-10-26: shown on request, never in the row): its build and channel, and its update policy.
+    var hostVersion: MirageVersion?
+    var policy: UpdatePolicy?
+    /// The Mac's own icon (PNG, its model and colour), when it sent one.
+    var icon: Data?
     var id: String { alias }
     /// Connect is offered (double-click, Return, a tap): not while the Mac has yet to allow this device.
     var canConnect: Bool { !(pairing?.inProgress ?? false) }
 
     var title: String { name.isEmpty ? alias : name }
 
-    /// The second line: the address when it is not just the name, and when this viewer last connected.
+    /// Whether the address says more than the name.
+    private var addressDiffers: Bool {
+        let bare = alias.lowercased().replacingOccurrences(of: ".local", with: "")
+        return !name.isEmpty && bare != name.lowercased()
+    }
+
+    private static func ago(_ t: Date, now: Date, locale: Locale) -> String {
+        let f = RelativeDateTimeFormatter(); f.locale = locale; f.unitsStyle = .full; f.dateTimeStyle = .named
+        return now.timeIntervalSince(t) < 60 ? "just now" : f.localizedString(for: t, relativeTo: now)
+    }
+
+    /// The second line: one short status (phrz, 2026-10-26: no build or policy here, no separators). A pairing or a
+    /// version refusal first, then unreachable, in use elsewhere, seen, connected; else the address when it says more.
     func detail(now: Date = Date(), locale: Locale = .current) -> String? {
         if let p = pairing, let line = p.line { return line }
         // A version refusal says which side to update, in place of the rest: connecting cannot work until then.
@@ -42,21 +61,32 @@ struct PairedHost: Identifiable, Equatable {
         case .hostTooOld, .viewerTooOld, .updating: return update.note(hostName: title)
         case .current, .updateAvailable: break
         }
-        var parts: [String] = []
-        let bare = alias.lowercased().replacingOccurrences(of: ".local", with: "")
-        if !name.isEmpty, bare != name.lowercased() { parts.append(alias) }
-        let f = RelativeDateTimeFormatter(); f.locale = locale; f.unitsStyle = .full; f.dateTimeStyle = .named
-        func ago(_ t: Date) -> String { now.timeIntervalSince(t) < 60 ? "just now" : f.localizedString(for: t, relativeTo: now) }
-        // What it is now, as far as known: unreachable, seen (by a probe or a session), else when this device connected.
-        if unreachable {
-            parts.append(lastSeen.map { "Unreachable · last seen \(ago($0))" } ?? "Unreachable")
-        } else if let t = lastSeen {
-            parts.append("Seen \(ago(t))")
-            if streamingElsewhere { parts.append("In use by another device") }
-        } else if let t = lastConnected {
-            parts.append("Connected \(ago(t))")
+        if unreachable { return "Unreachable" }
+        if lastSeen != nil, streamingElsewhere { return "In use by another device" }
+        if let t = lastSeen { return "Seen \(Self.ago(t, now: now, locale: locale))" }
+        if let t = lastConnected { return "Connected \(Self.ago(t, now: now, locale: locale))" }
+        return addressDiffers ? alias : nil
+    }
+
+    /// Get Info: short lines in small grey text (the Mac's row on request, iOS's info sheet), each a plain phrase.
+    func info(now: Date = Date(), locale: Locale = .current) -> [String] {
+        var lines: [String] = []
+        if let v = hostVersion {
+            lines.append("Mirage \(v.display)")
+            lines.append(v.channel.map { "\($0.rawValue.capitalized) channel" } ?? "Local build")
         }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+        switch policy {
+        case .automatic?: lines.append("Updates automatically")
+        case .ask?: lines.append("Updates when asked")
+        case nil: break
+        }
+        if let m = model, !m.isEmpty { lines.append("Model \(m)") }
+        if let t = lastSeen { lines.append("Last seen \(Self.ago(t, now: now, locale: locale))") }
+        else if let t = lastConnected { lines.append("Last connected \(Self.ago(t, now: now, locale: locale))") }
+        if unreachable { lines.append("Not answering now") }
+        if streamingElsewhere, !unreachable { lines.append("In use by another device") }
+        if addressDiffers || name.isEmpty { lines.append("Address \(alias)") }
+        return lines
     }
 }
 
@@ -76,13 +106,19 @@ enum ConnectList {
             let h = known[alias]!
             return PairedHost(alias: alias, name: h.hostName, model: h.model, family: h.deviceFamily, lastConnected: h.lastConnected, update: h.updateState,
                               canTrigger: h.updateTrigger ?? false, lastSeen: h.lastSeen, unreachable: h.unreachableSince != nil,
-                              triggerFeature: h.triggerFeature, viewerMayTrigger: h.hostPolicy?.viewerMayTrigger, streamingElsewhere: h.hostStreaming ?? false)
+                              triggerFeature: h.triggerFeature, viewerMayTrigger: h.hostPolicy?.viewerMayTrigger, streamingElsewhere: h.hostStreaming ?? false,
+                              hostVersion: h.hostVersion, policy: h.hostPolicy?.policy)
         }
     }
 
-    /// From the store (MIRAGE_TEST_STORE for a throwaway one) and the recent list in `defaults`.
+    /// From the store (MIRAGE_TEST_STORE for a throwaway one) and the recent list in `defaults`, with each Mac's own icon.
     static func load(store: Store? = try? Store(), defaults: UserDefaults = .standard) -> [PairedHost] {
-        hosts(known: (try? store?.knownHosts()) ?? [:], recent: ViewerSettings.recentHosts(defaults))
+        let known = (try? store?.knownHosts()) ?? [:]
+        return hosts(known: known, recent: ViewerSettings.recentHosts(defaults)).map { h in
+            var h = h
+            if let id = known[h.alias]?.hostID, let icon = store?.hostIcon(hostID: id) { h.icon = icon.png256 ?? icon.png128 }
+            return h
+        }
     }
 
     /// The row chosen when the list opens: the Mac connected to last if it is listed, else the first one.
@@ -131,24 +167,50 @@ struct DeviceIconView: View {
     let model: String?
     let family: DeviceFamily?
     var size: CGFloat = 32
+    /// The Mac's own icon (PNG), when it sent one: drawn in place of the system's generic one.
+    var png: Data? = nil
 
     var body: some View {
         #if os(macOS)
-        Image(nsImage: DeviceIcon.image(model: model, family: family))
+        Image(nsImage: png.flatMap(DeviceIcon.decoded) ?? DeviceIcon.image(model: model, family: family))
             .resizable().interpolation(.high).aspectRatio(contentMode: .fit)
             .frame(width: size, height: size)
             .accessibilityHidden(true)
         #else
-        Image(systemName: DeviceIcon.symbolName(model: model, family: family))
-            .font(.system(size: size * 0.62))
-            .frame(width: size, height: size)
-            .accessibilityHidden(true)
+        if let img = png.flatMap(DeviceIcon.decoded) {
+            Image(uiImage: img)
+                .resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+                .frame(width: size, height: size)
+                .accessibilityHidden(true)
+        } else {
+            Image(systemName: DeviceIcon.symbolName(model: model, family: family))
+                .font(.system(size: size * 0.62))
+                .frame(width: size, height: size)
+                .accessibilityHidden(true)
+        }
         #endif
     }
 }
 
 enum DeviceIcon {
     static func family(model: String?, family: DeviceFamily?) -> DeviceFamily { family ?? DeviceModel.family(of: model) ?? .mac }
+
+    #if os(macOS)
+    typealias PlatformImage = NSImage
+    #else
+    typealias PlatformImage = UIImage
+    #endif
+    nonisolated(unsafe) private static var decodedCache: [Data: PlatformImage] = [:]
+    private static let decodedLock = NSLock()
+    /// A host's PNG icon, decoded once.
+    static func decoded(_ png: Data) -> PlatformImage? {
+        decodedLock.lock(); defer { decodedLock.unlock() }
+        if let i = decodedCache[png] { return i }
+        guard let i = PlatformImage(data: png) else { return nil }
+        if decodedCache.count > 32 { decodedCache.removeAll() }
+        decodedCache[png] = i
+        return i
+    }
     static func symbolName(model: String?, family: DeviceFamily?) -> String { Self.family(model: model, family: family).symbolName }
 
     #if os(macOS)
@@ -520,7 +582,7 @@ enum PairingPhase: Equatable {
     var line: String? {
         switch self {
         case .pending(let n): return "Waiting for \(n) to accept…"
-        case .accepted(let n): return "\(n) accepted · checking…"
+        case .accepted(let n): return "Checking \(n)…"
         case .connectable, .refused: return nil
         }
     }
