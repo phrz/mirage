@@ -235,7 +235,12 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 ditto -c -k --keepParent "$APP" "$OUT/notarize.zip"
 xcrun notarytool submit "$OUT/notarize.zip" --keychain-profile "$PROFILE" --wait 2>&1 | tee "$OUT/notarize.log" | grep -E "status:|id:" || true
 grep -q "status: Accepted" "$OUT/notarize.log" || die "notarization was not accepted (see $OUT/notarize.log; xcrun notarytool log <id> --keychain-profile $PROFILE)"
-xcrun stapler staple "$APP"
+# The ticket can take a minute or two to reach Apple's CDN after "Accepted" ("Record not found", stapler error 65).
+n=0
+until xcrun stapler staple "$APP"; do
+    n=$((n+1)); [ "$n" -lt 10 ] || die "stapling failed after $n tries: the notarization ticket never reached Apple's CDN"
+    echo "   ticket not yet available (try $n); waiting 20 s"; sleep 20
+done
 xcrun stapler validate "$APP"
 spctl --assess --type execute -vv "$APP" 2>&1 | grep -q "source=Notarized Developer ID" || die "Gatekeeper does not accept $APP as a notarized Developer ID app"
 rm "$OUT/notarize.zip"
