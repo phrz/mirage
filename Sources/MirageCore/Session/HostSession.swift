@@ -24,6 +24,8 @@ public struct HostContext: Sendable {
     public let probes = ProbeRegistry()
     /// After each Welcome (a session's or a probe's): the host refreshes a stale feed record (miraged, rate-limited).
     public var welcomed: (@Sendable () -> Void)?
+    /// Tests: a host from before `unpairDevice` (its Welcome does not list the feature).
+    public var advertisesUnpair = true
 
     public init(identity: DeviceIdentity, store: Store, tlsFingerprint: Data, log: @escaping @Sendable (String) -> Void,
                 makeStreamer: (@Sendable () -> DesktopStreamer)? = nil) {
@@ -161,6 +163,14 @@ public enum HostSession {
             case .updateHost(let u):
                 guard let device = authenticated else { throw MirageError.protocolViolation("updateHost before auth") }
                 trigger(.update(targetBuild: u.targetBuild), device: device, connection: conn.id, reply: { sendUpdate(.updateStatus($0)) }, remote: remote, ctx: ctx)
+            case .unpairDevice:
+                // Only the authenticated device itself: the message names nobody, so no device can remove another.
+                guard let device = authenticated else { throw MirageError.protocolViolation("unpairDevice before auth") }
+                let removed = (try? ctx.store.authorizedDevices().filter { $0.id == device.id && $0.publicKey == device.publicKey }) ?? []
+                if !removed.isEmpty { _ = try? ctx.store.revoke(idPrefix: device.id) }
+                ctx.log("[\(remote)] \(device.name) (\(device.id.prefix(12))) removed this Mac from its list: unpaired")
+                try await stream.send(.unpaired)
+                authenticated = nil
             case .rollbackHost:
                 guard let device = authenticated else { throw MirageError.protocolViolation("rollbackHost before auth") }
                 trigger(.rollback, device: device, connection: conn.id, reply: { sendUpdate(.updateStatus($0)) }, remote: remote, ctx: ctx)
@@ -330,7 +340,7 @@ public enum HostSession {
                                              hostModel: DeviceModel.current, hostFamily: DeviceModel.currentFamily?.rawValue,
                                              hostVersion: .current, latestAvailable: updates?.latestAvailable, updatePolicy: updates?.permission,
                                              protocolVersion: Mirage.protocolVersion,
-                                             features: ctx.updateHandler != nil ? [ControlMessage.Feature.updateTrigger] : nil,
+                                             features: (ctx.advertisesUnpair ? [ControlMessage.Feature.unpair] : []) + (ctx.updateHandler != nil ? [ControlMessage.Feature.updateTrigger] : []),
                                              // Only to a viewer that decodes update statuses (one from before U4 never sees it).
                                              updateResult: (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) ? updates?.lastResult : nil,
                                              hostStreaming: streamingElsewhere, minProtocolVersion: Mirage.minProtocolVersion)))

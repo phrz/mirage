@@ -106,3 +106,37 @@ public enum ResumeNotice {
         return n
     }
 }
+
+/// Removing a paired host from a device's list (phrz, 2026-10-26): best effort, the host is asked to forget this device
+/// too, on a control-only connection like a status probe.
+public enum HostUnpair {
+    public enum Outcome: Equatable, Sendable {
+        /// The host no longer lists this device.
+        case unpaired
+        /// The host has no `unpairDevice` (an older build): it still lists this device.
+        case notSupported
+        /// Not reached in time; it still lists this device.
+        case unreachable(String)
+    }
+
+    public static func unpair(connect: HostUpdateTrigger.Connect, timeout: TimeInterval = 5) async -> Outcome {
+        do {
+            let (s, close) = try await connect()
+            defer { close() }
+            let w = try await s.authenticate(features: [ControlMessage.Feature.probe], probe: true)
+            guard (w.features ?? []).contains(ControlMessage.Feature.unpair) else { return .notSupported }
+            try await s.stream.send(.unpairDevice)
+            return try await withThrowingTaskGroup(of: Outcome.self) { g in
+                g.addTask {
+                    while true { if case .unpaired = try await s.stream.receive() { return .unpaired } }
+                }
+                g.addTask { try await Task.sleep(for: .seconds(timeout)); close(); return .unreachable("no answer within \(Int(timeout)) s") }   // closing ends the receive
+                let first = try await g.next() ?? .unreachable("no answer")
+                g.cancelAll()
+                return first
+            }
+        } catch {
+            return .unreachable("\(error)")
+        }
+    }
+}

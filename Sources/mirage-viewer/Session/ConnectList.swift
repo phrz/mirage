@@ -411,3 +411,55 @@ extension View {
         }
     }
 }
+
+// MARK: - Removing a paired Mac (phrz, 2026-10-26)
+
+/// The device lists' Remove (iOS: swipe to delete; Mac: right-click or Delete, with a confirmation): an open session to
+/// that Mac ends first; the Mac is asked to forget this device (best effort, a control-only connection); then this
+/// device forgets it: its record and pinned key, its resume token, and its place in the recent list.
+@MainActor
+final class HostRemovalCenter: ObservableObject {
+    static let shared = HostRemovalCenter()
+    /// Bumped after a removal: the lists reload.
+    @Published private(set) var revision = 0
+    /// The last removal's outcome, under the list (no alert).
+    @Published var note: String?
+    /// Ends this app's session to an alias, if one is open (set by the app shells).
+    var endSession: (String) -> Void = { _ in }
+    var store: () -> Store? = { try? Store() }
+    var connector: (String) -> HostUpdateTrigger.Connect = { HostConnector.connect(alias: $0, timeout: 3) }
+    var defaults: UserDefaults = .standard
+
+    func remove(_ h: PairedHost) async {
+        let alias = h.alias, name = h.title
+        endSession(alias)   // never forget a Mac with a session still open to it
+        note = "Removing \(name)…"
+        let connect = connector(alias)
+        let outcome = await Task.detached { await HostUnpair.unpair(connect: connect) }.value
+        Self.forgetLocally(alias: alias, store: store(), defaults: defaults)
+        note = Self.message(outcome, name: name)
+        revision += 1
+    }
+
+    /// This device's side, whatever the host said.
+    nonisolated static func forgetLocally(alias: String, store: Store?, defaults: UserDefaults) {
+        _ = try? store?.forget(host: alias)
+        let (host, port) = ConnectList.parseAddress(alias)
+        Keychain.delete("resume-\(host):\(port)")
+        defaults.set(ViewerSettings.recentHosts(defaults).filter { $0 != alias }, forKey: ViewerSettings.recentHostsKey)
+        if defaults.string(forKey: "lastHost") == alias { defaults.removeObject(forKey: "lastHost") }
+    }
+
+    nonisolated static func message(_ o: HostUnpair.Outcome, name: String) -> String {
+        switch o {
+        case .unpaired: return "Removed \(name). It no longer lists this device."
+        case .notSupported: return "Removed \(name) here. Its Mirage is too old to forget this device: revoke it in \(name)'s menu bar."
+        case .unreachable: return "Removed \(name) here. \(name) couldn't be reached, so it still lists this device until you revoke it in its menu bar."
+        }
+    }
+
+    /// The Mac's confirmation text.
+    nonisolated static func confirmation(_ name: String) -> (title: String, message: String) {
+        ("Remove \(name)?", "This device will need to pair again to connect.")
+    }
+}

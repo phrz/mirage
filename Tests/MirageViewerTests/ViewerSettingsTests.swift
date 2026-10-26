@@ -298,6 +298,35 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertNil(fresh.step, "once")
     }
 
+    /// Remove (phrz, 2026-10-26): an open session ends first; this device forgets the Mac (record, recents, last host)
+    /// whatever the Mac said, and the note says which.
+    @MainActor
+    func testRemovingAHost() async throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mirage-remove-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = try Store(root: tmp)
+        try store.remember(host: .init(hostID: "h", hostName: "mac-daddy", publicKey: Data(), endpoint: "mac-daddy", pairedAt: Date()), as: "mac-daddy")
+        ViewerSettings.noteConnected("mac-daddy", defaults)
+        let center = HostRemovalCenter.shared
+        let saved = (center.endSession, center.store, center.connector, center.defaults)
+        defer { (center.endSession, center.store, center.connector, center.defaults) = saved }
+        final class Ended: @unchecked Sendable { var aliases: [String] = [] }
+        let ended = Ended()
+        center.endSession = { ended.aliases.append($0) }
+        center.store = { store }
+        center.defaults = defaults
+        center.connector = { _ in { throw MirageError.transport("unreachable in the test") } }
+        await center.remove(PairedHost(alias: "mac-daddy", name: "mac-daddy"))
+        XCTAssertEqual(ended.aliases, ["mac-daddy"], "the session to it ended first")
+        XCTAssertNil(try store.knownHosts()["mac-daddy"])
+        XCTAssertEqual(ViewerSettings.recentHosts(defaults), [])
+        XCTAssertNil(defaults.string(forKey: "lastHost"))
+        XCTAssertTrue(center.note?.contains("couldn't be reached") ?? false, center.note ?? "nil")
+        XCTAssertEqual(HostRemovalCenter.message(.unpaired, name: "mac-daddy"), "Removed mac-daddy. It no longer lists this device.")
+        XCTAssertEqual(HostRemovalCenter.confirmation("mac-daddy").title, "Remove mac-daddy?")
+        XCTAssertEqual(HostRemovalCenter.confirmation("mac-daddy").message, "This device will need to pair again to connect.")
+    }
+
     func testAddSheetNeedsACodeOnlyForANewMac() {
         let paired = [PairedHost(alias: "mac-daddy", name: "mac-daddy")]
         var f = AddHostForm()

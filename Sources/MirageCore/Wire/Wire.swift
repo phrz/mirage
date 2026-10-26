@@ -185,6 +185,11 @@ public enum ControlMessage: Codable, Equatable {
     /// Host → viewer: an update's progress (to the viewer that triggered it), or a notice that the host is about to
     /// restart into an update (to the others).
     case updateStatus(UpdateStatus)
+    /// Viewer → host: forget me (this authenticated device, never another): the device list's Remove. Sent only to a
+    /// host whose Welcome lists `Feature.unpair`.
+    case unpairDevice
+    /// Host → viewer: done, this device is no longer authorized.
+    case unpaired
 
     /// Optional abilities a peer announces in its Hello or Welcome, so newer messages go only to peers that decode them
     /// (within one protocol version).
@@ -196,6 +201,8 @@ public enum ControlMessage: Codable, Equatable {
         /// A status probe (U7, Hello): a short control-only connection that learns the host's state for the device list.
         /// It never streams; the host does not list it, log it more than now and then, or keep it for notices.
         public static let probe = "probe"
+        /// A host that takes `unpairDevice` (Welcome).
+        public static let unpair = "unpair"
     }
 
     public struct UpdateHost: Codable, Equatable {

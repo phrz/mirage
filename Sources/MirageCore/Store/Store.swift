@@ -200,6 +200,14 @@ public final class Store: @unchecked Sendable {
         hosts[alias] = host
         try write(hosts, "known-hosts.json")
     }
+    /// Forgets a paired host (the device list's Remove): its record, with the host key it pinned. True if it was known.
+    @discardableResult
+    public func forget(host alias: String) throws -> Bool {
+        var hosts = try knownHosts()
+        guard hosts.removeValue(forKey: alias) != nil else { return false }
+        try write(hosts, "known-hosts.json")
+        return true
+    }
     /// Changes a known host's record (what its latest Welcome said); nothing if the alias is not known.
     public func updateKnownHost(_ alias: String, _ change: (inout KnownHost) -> Void) throws {
         guard var hosts = try read([String: KnownHost].self, "known-hosts.json"), var h = hosts[alias] else { return }

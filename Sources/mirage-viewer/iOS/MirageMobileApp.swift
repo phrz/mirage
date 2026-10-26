@@ -18,7 +18,12 @@ struct MirageMobileApp: App {
                 }
             }
             .preferredColorScheme(.dark)
-            .onAppear { state.autoConnectFromLaunchArguments() }
+            .onAppear {
+                state.autoConnectFromLaunchArguments()
+                // Removing a paired Mac ends the session to it first.
+                let st = state
+                HostRemovalCenter.shared.endSession = { [weak st] alias in if st?.session?.host == alias { st?.disconnect() } }
+            }
             // A pairing link (Camera's "Open in Mirage", or a tap): never connects silently.
             .onOpenURL { state.open($0) }
             .alert(state.offered.map { "Pair with \($0.hostName)?" } ?? "", isPresented: Binding(get: { state.offered != nil }, set: { if !$0 { state.offered = nil } }), presenting: state.offered) { link in
@@ -112,6 +117,7 @@ struct ConnectScreen: View {
     @State private var pendingLink: PairingLink?
     @ObservedObject private var updates = HostUpdateCenter.shared
     @ObservedObject private var probes = HostProbeCenter.shared
+    @ObservedObject private var removal = HostRemovalCenter.shared
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -128,6 +134,10 @@ struct ConnectScreen: View {
                     List(hosts) { h in
                         Button { onConnect(h.alias, nil) } label: { row(h) }
                             .tint(.primary)
+                            // Swipe to delete: forget this Mac (it is asked to forget this device too).
+                            .swipeActions(edge: .trailing) {
+                                Button(role: .destructive) { Task { await removal.remove(h) } } label: { Label("Delete", systemImage: "trash") }
+                            }
                             // Long-press → Update, straight away (the arrow asks first).
                             .contextMenu {
                                 Button { onConnect(h.alias, nil) } label: { Label("Connect", systemImage: "play.display") }
@@ -161,6 +171,10 @@ struct ConnectScreen: View {
         .onAppear { hosts = ConnectList.load() }
         .onChange(of: updates.revision) { hosts = ConnectList.load() }
         .onChange(of: probes.revision) { hosts = ConnectList.load() }
+        .onChange(of: removal.revision) { hosts = ConnectList.load() }
+        .safeAreaInset(edge: .bottom) {
+            if let n = removal.note { Text(n).font(.footnote).foregroundStyle(.secondary).padding(.horizontal).padding(.bottom, 8) }
+        }
         // Status probes (U7): while this list shows, and when the app comes back to the foreground with it showing.
         .onAppear { probes.listAppeared() }
         .onDisappear { probes.listDisappeared() }

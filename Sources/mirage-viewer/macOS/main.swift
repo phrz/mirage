@@ -131,6 +131,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             m.onConnectWindow = { [weak self] in MainActor.assumeIsolated { self?.openViewer() } }
             m.onQuit = { [weak self] in self?.requestQuit() }
             hostMenu = m
+            // Removing a paired Mac ends the session to it first.
+            MainActor.assumeIsolated {
+                HostRemovalCenter.shared.endSession = { [weak self] alias in
+                    MainActor.assumeIsolated { if self?.session?.host == alias { self?.disconnect() } }
+                }
+            }
             // Status probes of the paired Macs (U7): now, then every 10 min in the background (every 60 s with the list).
             MainActor.assumeIsolated { HostProbeCenter.shared.appBecameActive() }
         }
@@ -502,6 +508,9 @@ struct ConnectView: View {
     @ObservedObject private var updates = HostUpdateCenter.shared
     @ObservedObject private var localUpdate = LocalHostUpdate.shared
     @ObservedObject private var probes = HostProbeCenter.shared
+    @ObservedObject private var removal = HostRemovalCenter.shared
+    /// The Mac whose removal waits for confirmation (right-click Remove…, or Delete on the selected row).
+    @State private var removing: PairedHost?
     let onConnect: (String, String?) -> Void
 
     init(hosts: [PairedHost], lastHost: String?, openAdd: Bool = false, onConnect: @escaping (String, String?) -> Void) {
@@ -516,6 +525,19 @@ struct ConnectView: View {
             // This Mac's own host, out of date (DESIGN §3.10, U4): the bar across the top of the window.
             LocalUpdateBar(model: localUpdate)
             list
+            if let n = removal.note {
+                Text(n).font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+            }
+        }
+        .onChange(of: removal.revision) { hosts = ConnectList.load(); if let s = selection, !hosts.contains(where: { $0.alias == s }) { selection = hosts.first?.alias } }
+        .alert(removing.map { HostRemovalCenter.confirmation($0.title).title } ?? "",
+               isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing) { h in
+            Button("Remove", role: .destructive) { Task { await removal.remove(h) } }
+                .keyboardShortcut(.defaultAction)
+            Button("Cancel", role: .cancel) {}
+        } message: { h in
+            Text(HostRemovalCenter.confirmation(h.title).message)
         }
         .onChange(of: updates.revision) { hosts = ConnectList.load() }
         .onChange(of: probes.revision) { hosts = ConnectList.load() }
@@ -537,9 +559,15 @@ struct ConnectView: View {
                     row(h).tag(h.alias)
                 }
                 .listStyle(.inset)
+                // Delete on the selected row: the same confirmation.
+                .onDeleteCommand { if let s = selection, let h = hosts.first(where: { $0.alias == s }) { removing = h } }
                 .alternatingRowBackgrounds(.disabled)
                 .contextMenu(forSelectionType: String.self) { items in
                     if let a = items.first { Button("Connect") { onConnect(a, nil) } }
+                    if let a = items.first, let h = hosts.first(where: { $0.alias == a }) {
+                        Divider()
+                        Button("Remove \(h.title)…") { removing = h }
+                    }
                     // Right-click → Update, straight away (the arrow asks first).
                     if let a = items.first, let h = hosts.first(where: { $0.alias == a }), case .updateAvailable = h.update, UpdatePrompt.state(h) == .canUpdate, !updates.isRunning(a) {
                         Button("Update \(h.title)") { updates.update(h) }
