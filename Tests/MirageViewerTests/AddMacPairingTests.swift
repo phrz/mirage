@@ -17,6 +17,7 @@ final class AddMacPairingTests: XCTestCase {
         saved = (c.check, c.checkEvery, c.checkWindow, c.defaults)
         c.defaults = defaults
         c.checkEvery = .milliseconds(10)
+        ListNotices.shared.reset()
     }
     override func tearDown() {
         let c = HostPairingCenter.shared
@@ -40,7 +41,6 @@ final class AddMacPairingTests: XCTestCase {
         XCTAssertEqual(r, .refused(hostName: "mac-daddy", reason: "denied on the host"))
         XCTAssertFalse(r.inProgress)
         XCTAssertEqual(r.next(.allowed("mac-daddy")), r, "refused is final")
-        XCTAssertEqual(r.note(connectHint: ""), "Not paired with mac-daddy: denied on the host")
         XCTAssertEqual(HostPairing.reason(MirageError.authenticationFailed("host rejected: denied on the host")), "denied on the host")
         XCTAssertEqual(HostPairing.reason(MirageError.pairingFailed("wrong code")), "wrong code")
     }
@@ -71,7 +71,7 @@ final class AddMacPairingTests: XCTestCase {
         XCTAssertFalse(rows[0].canConnect, "no Connect while the Mac has to allow it")
         XCTAssertEqual(rows[0].detail(), "Waiting for studio to accept…")
         XCTAssertTrue(rows[1].canConnect)
-        XCTAssertNil(c.note)
+        XCTAssertNil(ListNotices.shared.note)
 
         gate.allow.continuation.yield()
         await task.value
@@ -80,7 +80,8 @@ final class AddMacPairingTests: XCTestCase {
         rows = c.rows(existing)
         XCTAssertEqual(rows.map(\.alias), ["mac-daddy"], "a normal row now: the list shows it from known-hosts")
         XCTAssertEqual(c.takeSelection(), "studio.local", "selected again once ready")
-        XCTAssertEqual(c.note, "studio is ready. \(HostPairingCenter.connectHint)")
+        XCTAssertEqual(ListNotices.shared.note, "studio is ready. \(HostPairingCenter.connectHint)", "a passing note")
+        XCTAssertTrue(ListNotices.shared.alerts.isEmpty, "nothing to acknowledge")
         XCTAssertEqual(ViewerSettings.recentHosts(defaults).first, "studio.local", "first in the list")
     }
 
@@ -97,7 +98,8 @@ final class AddMacPairingTests: XCTestCase {
         await task.value
         XCTAssertEqual(c.phases["studio.local"], .refused(hostName: "studio", reason: "denied on the host"))
         XCTAssertEqual(c.rows([]).count, 0, "no row for a Mac that refused")
-        XCTAssertEqual(c.note, "Not paired with studio: denied on the host")
+        XCTAssertEqual(ListNotices.shared.current, ListAlert(title: "Not paired with studio", message: "Denied on the host."), "an alert, not a footer")
+        XCTAssertNil(ListNotices.shared.note)
         XCTAssertEqual(checks.n, 0)
         XCTAssertEqual(ViewerSettings.recentHosts(defaults), [])
     }
@@ -109,7 +111,7 @@ final class AddMacPairingTests: XCTestCase {
         c.check = { _ in { false } }
         await c.pair(alias: "studio.local", hostName: nil) { _ in DeviceRecord(id: "s", name: "studio", publicKey: Data(), pairedAt: Date()) }.value
         XCTAssertEqual(c.phases["studio.local"], .connectable(hostName: "studio", answered: false))
-        XCTAssertTrue(c.note?.hasPrefix("Paired with studio.") ?? false, c.note ?? "nil")
+        XCTAssertTrue(ListNotices.shared.note?.hasPrefix("Paired with studio.") ?? false, ListNotices.shared.note ?? "nil")
     }
 
     /// A Mac that is recorded already (pairing again from a link) keeps its row and carries the phase.

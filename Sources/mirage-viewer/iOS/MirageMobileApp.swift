@@ -122,6 +122,7 @@ struct ConnectScreen: View {
     @ObservedObject private var probes = HostProbeCenter.shared
     @ObservedObject private var removal = HostRemovalCenter.shared
     @ObservedObject private var pairing = HostPairingCenter.shared
+    @ObservedObject private var notices = ListNotices.shared
     /// The new Mac's row, highlighted after pairing (a phone's list has no selection).
     @State private var highlighted: String?
     /// The Mac whose Get Info sheet shows (long-press → Get Info).
@@ -191,13 +192,16 @@ struct ConnectScreen: View {
         .onChange(of: probes.revision) { reload() }
         .onChange(of: removal.revision) { reload() }
         .onChange(of: pairing.revision) { reload() }
+        // A passing note (a Mac ready after pairing, an update done): gone after a few seconds.
         .safeAreaInset(edge: .bottom) {
-            VStack(spacing: 4) {
-                ForEach([pairing.note, removal.note].compactMap { $0 }, id: \.self) { n in
-                    Text(n).font(.footnote).foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal).padding(.bottom, 8)
+            if let n = notices.note { Text(n).font(.footnote).foregroundStyle(.secondary).padding(.horizontal).padding(.bottom, 8) }
+        }
+        // What needs acknowledging: an alert with OK, one at a time.
+        .alert(notices.current?.title ?? "", isPresented: Binding(get: { notices.current != nil }, set: { if !$0 { notices.dismiss() } }),
+               presenting: notices.current) { _ in
+            Button("OK", role: .cancel) {}
+        } message: { a in
+            Text(a.message)
         }
         // Status probes (U7): while this list shows, and when the app comes back to the foreground with it showing.
         .onAppear { probes.listAppeared() }
@@ -236,10 +240,15 @@ struct HostInfoSheet: View {
             DeviceIconView(model: host.model, family: host.family, size: 72, png: host.icon)
                 .foregroundStyle(.secondary)
             Text(host.title).font(.headline)
-            VStack(spacing: 2) {
-                ForEach(host.info(), id: \.self) { Text($0) }
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                ForEach(host.info(), id: \.self) { r in
+                    GridRow {
+                        Text(r.label).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                        Text(r.value)
+                    }
+                }
             }
-            .font(.footnote).foregroundStyle(.secondary)
+            .font(.footnote)
         }
         .padding(24)
         .presentationDetents([.medium])

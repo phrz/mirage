@@ -513,9 +513,7 @@ struct ConnectView: View {
     @ObservedObject private var pairing = HostPairingCenter.shared
     /// The Mac whose removal waits for confirmation (right-click Remove…, or Delete on the selected row).
     @State private var removing: PairedHost?
-    /// The row showing Get Info's lines (right-click Get Info, or ⌘I on the selected row; the same again, or another
-    /// selection, hides them).
-    @State private var infoShown: String?
+    @ObservedObject private var notices = ListNotices.shared
     let onConnect: (String, String?) -> Void
 
     init(hosts: [PairedHost], lastHost: String?, openAdd: Bool = false, onConnect: @escaping (String, String?) -> Void) {
@@ -532,17 +530,20 @@ struct ConnectView: View {
             // This Mac's own host, out of date (DESIGN §3.10, U4): the bar across the top of the window.
             LocalUpdateBar(model: localUpdate)
             list
-            ForEach([pairing.note, removal.note].compactMap { $0 }, id: \.self) { n in
+            // A passing note (a Mac ready after pairing, an update done): gone after a few seconds.
+            if let n = notices.note {
                 Text(n).font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 12).padding(.vertical, 6)
             }
         }
         .onChange(of: removal.revision) { reload() }
         .onChange(of: pairing.revision) { reload() }
-        .onChange(of: selection) { if infoShown != selection { infoShown = nil } }
+        // What needs acknowledging: an NSAlert with OK, one at a time.
+        .onChange(of: notices.current) { showAlert() }
+        .onAppear { showAlert() }
         // ⌘I: Get Info on the selected row.
         .background {
-            Button("Get Info") { if let s = selection { toggleInfo(s) } }
+            Button("Get Info") { if let s = selection, let h = hosts.first(where: { $0.alias == s }) { HostInfoWindows.show(h) } }
                 .keyboardShortcut("i", modifiers: .command)
                 .opacity(0).frame(width: 0, height: 0).accessibilityHidden(true)
         }
@@ -568,8 +569,23 @@ struct ConnectView: View {
         if let s = selection, !hosts.contains(where: { $0.alias == s }) { selection = hosts.first?.alias }
     }
 
-    private func toggleInfo(_ alias: String) {
-        if infoShown == alias { infoShown = nil } else { selection = alias; infoShown = alias }
+    @State private var alerting = false
+    private func showAlert() {
+        guard !alerting, let a = notices.current else { return }
+        alerting = true
+        let alert = NSAlert()
+        alert.messageText = a.title
+        alert.informativeText = a.message
+        alert.addButton(withTitle: "OK")
+        let done: (NSApplication.ModalResponse) -> Void = { _ in
+            alerting = false
+            notices.dismiss()
+        }
+        if let w = NSApp.windows.first(where: { $0.isVisible && $0.title == "Mirage" && $0.contentViewController is NSHostingController<ConnectView> }) {
+            alert.beginSheetModal(for: w, completionHandler: done)
+        } else {
+            done(alert.runModal())
+        }
     }
 
     /// Connects to a row that takes it (not while its Mac has yet to allow this one).
@@ -597,7 +613,7 @@ struct ConnectView: View {
                 .contextMenu(forSelectionType: String.self) { items in
                     if let a = items.first, hosts.first(where: { $0.alias == a })?.canConnect ?? true { Button("Connect") { connect(a) } }
                     if let a = items.first, let h = hosts.first(where: { $0.alias == a }), h.canConnect {
-                        Button(infoShown == a ? "Hide Info" : "Get Info") { toggleInfo(a) }
+                        Button("Get Info") { HostInfoWindows.show(h) }
                         Divider()
                         Button("Remove \(h.title)…") { removing = h }
                     }
@@ -632,20 +648,75 @@ struct ConnectView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(h.title).fontWeight(.medium)
                 if let d = updates.line(h.alias) ?? h.detail() { Text(d).font(.caption).foregroundStyle(.secondary) }
-                if infoShown == h.alias {
-                    // Get Info: one short line each, small and grey.
-                    VStack(alignment: .leading, spacing: 0) {
-                        ForEach(h.info(), id: \.self) { Text($0) }
-                    }
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .padding(.top, 2)
-                }
             }
             Spacer(minLength: 0)
             if h.pairing?.inProgress == true { ProgressView().controlSize(.small) } else { HostUpdateBadge(host: h) }
         }
         .padding(.vertical, 3)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// Get Info for a paired Mac (right-click Get Info, or ⌘I): a small window of its own per Mac, "<host> Info", with its
+/// details as label and value (phrz, 2026-10-26: not lines in the row). Asking again brings it forward with fresh values.
+@MainActor
+enum HostInfoWindows {
+    private(set) static var open: [String: NSPanel] = [:]
+
+    /// `present`: false in tests (the window is made, never put on screen).
+    @discardableResult
+    static func show(_ h: PairedHost, present: Bool = true) -> NSPanel {
+        let view = HostInfoView(host: h)
+        if let p = open[h.alias] {
+            (p.contentViewController as? NSHostingController<HostInfoView>)?.rootView = view
+            p.title = "\(h.title) Info"
+            p.setContentSize(p.contentViewController?.view.fittingSize ?? p.frame.size)
+            if present { p.makeKeyAndOrderFront(nil) }
+            return p
+        }
+        let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 300, height: 200), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        p.title = "\(h.title) Info"
+        p.hidesOnDeactivate = false
+        p.isReleasedWhenClosed = false
+        p.contentViewController = NSHostingController(rootView: view)
+        p.setContentSize(p.contentViewController?.view.fittingSize ?? NSSize(width: 300, height: 200))
+        p.center()
+        let alias = h.alias
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: p, queue: .main) { _ in
+            MainActor.assumeIsolated { _ = open.removeValue(forKey: alias) }
+        }
+        open[alias] = p
+        if present { p.makeKeyAndOrderFront(nil) }
+        return p
+    }
+}
+
+struct HostInfoView: View {
+    let host: PairedHost
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                DeviceIconView(model: host.model, family: host.family, size: 40, png: host.icon)
+                Text(host.title).font(.headline)
+            }
+            let rows = host.info()
+            if rows.isEmpty {
+                Text("Nothing known yet: it has not answered since it was paired.").font(.callout).foregroundStyle(.secondary)
+            } else {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 4) {
+                    ForEach(rows, id: \.self) { r in
+                        GridRow {
+                            Text(r.label).foregroundStyle(.secondary).gridColumnAlignment(.trailing)
+                            Text(r.value).textSelection(.enabled)
+                        }
+                    }
+                }
+                .font(.callout)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 260, alignment: .leading)
+        .fixedSize()
     }
 }
 

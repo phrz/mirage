@@ -491,6 +491,12 @@ struct LocalUpdateBar: View {
                 Spacer()
                 if step.isFinal { Button("Dismiss") { model.dismissStep() } }
             }
+            // Done needs no acknowledging: it passes after a few seconds (a failure or rollback waits for Dismiss).
+            .task(id: step) {
+                guard step.phase == .done else { return }
+                try? await Task.sleep(for: ListNotices.shared.lifetime)
+                if !Task.isCancelled, model.step == step { model.dismissStep() }
+            }
         } else if let line = model.line, model.dismissed != line {
             bar {
                 Image(systemName: "arrow.up.circle.fill").symbolRenderingMode(.palette).foregroundStyle(.black, .yellow)

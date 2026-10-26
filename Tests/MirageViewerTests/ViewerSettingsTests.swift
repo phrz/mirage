@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import SwiftUI
 @testable import mirage_viewer
 @testable import MirageCore
 
@@ -260,12 +261,13 @@ final class ViewerSettingsTests: XCTestCase {
         h.hostVersion = MirageVersion(version: "0.1", build: 475, commit: "abc", channel: .nightly)
         h.policy = .automatic
         XCTAssertEqual(h.detail(now: now, locale: en), "Seen 2 minutes ago", "no build or policy in the row")
-        XCTAssertEqual(h.info(now: now, locale: en), ["Mirage 0.1 (475)", "Nightly channel", "Updates automatically", "Model Mac15,4",
-                                                      "Last seen 2 minutes ago", "Address green.local"])
-        for line in h.info(now: now, locale: en) { XCTAssertFalse(line.contains("·"), line) }
+        typealias R = PairedHost.InfoRow
+        XCTAssertEqual(h.info(now: now, locale: en), [R(label: "Version", value: "Mirage 0.1 (475)"), R(label: "Channel", value: "Nightly"),
+                                                      R(label: "Updates", value: "Automatically"), R(label: "Model", value: "Mac15,4"),
+                                                      R(label: "Last seen", value: "2 minutes ago"), R(label: "Address", value: "green.local")])
         h.policy = .ask; h.unreachable = true
-        XCTAssertTrue(h.info(now: now, locale: en).contains("Updates when asked"))
-        XCTAssertTrue(h.info(now: now, locale: en).contains("Not answering now"))
+        XCTAssertTrue(h.info(now: now, locale: en).contains(R(label: "Updates", value: "When asked")))
+        XCTAssertTrue(h.info(now: now, locale: en).contains(R(label: "Status", value: "Not answering")))
         XCTAssertEqual(PairedHost(alias: "m", name: "m").info(), [], "nothing known: nothing shown")
     }
 
@@ -354,10 +356,65 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertNil(try store.knownHosts()["mac-daddy"])
         XCTAssertEqual(ViewerSettings.recentHosts(defaults), [])
         XCTAssertNil(defaults.string(forKey: "lastHost"))
-        XCTAssertTrue(center.note?.contains("couldn't be reached") ?? false, center.note ?? "nil")
-        XCTAssertEqual(HostRemovalCenter.message(.unpaired, name: "mac-daddy"), "Removed mac-daddy. It no longer lists this device.")
+        // phrz, 2026-10-26: no footer that stays; an alert to acknowledge, with the Mac's state.
+        XCTAssertNil(ListNotices.shared.note, "nothing under the list")
+        XCTAssertEqual(ListNotices.shared.current, ListAlert(title: "Removed mac-daddy from this device.",
+                                                             message: "It couldn't be reached, so it still lists this device until you revoke it in its menu bar."))
+        ListNotices.shared.dismiss()
+        XCTAssertNil(ListNotices.shared.current, "OK dismisses it: nothing kept")
+        XCTAssertNil(HostRemovalCenter.alert(.unpaired, name: "mac-daddy"), "a clean removal: the row going is enough")
+        XCTAssertNotNil(HostRemovalCenter.alert(.notSupported, name: "mac-daddy"))
         XCTAssertEqual(HostRemovalCenter.confirmation("mac-daddy").title, "Remove mac-daddy?")
         XCTAssertEqual(HostRemovalCenter.confirmation("mac-daddy").message, "This device will need to pair again to connect.")
+    }
+
+    /// A passing note clears itself; alerts wait for OK, one at a time.
+    func testNotesPassAndAlertsWait() async throws {
+        let n = ListNotices.shared
+        n.reset()
+        let saved = n.lifetime
+        defer { n.lifetime = saved; n.reset() }
+        n.lifetime = .milliseconds(50)
+        n.flash("studio is ready.")
+        XCTAssertEqual(n.note, "studio is ready.")
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertNil(n.note, "gone by itself")
+        n.alert(ListAlert(title: "a", message: "1")); n.alert(ListAlert(title: "a", message: "1")); n.alert(ListAlert(title: "b", message: "2"))
+        XCTAssertEqual(n.alerts.count, 2, "the same alert once")
+        XCTAssertEqual(n.current?.title, "a")
+        n.dismiss()
+        XCTAssertEqual(n.current?.title, "b")
+        n.dismiss()
+        XCTAssertNil(n.current)
+    }
+
+    /// An update from here: the row line shows only while it runs; done is a passing note, a failure an alert.
+    func testUpdateOutcomesDoNotStayInTheList() {
+        let n = ListNotices.shared, c = HostUpdateCenter.shared
+        n.reset()
+        defer { n.reset() }
+        c.finish("mac-daddy", name: "mac-daddy", .init(phase: .done, message: "now 0.1 (480)"))
+        XCTAssertNil(c.line("mac-daddy"), "the row has its own status again")
+        XCTAssertEqual(n.note, "Updated mac-daddy: now 0.1 (480)")
+        c.finish("mac-daddy", name: "mac-daddy", .init(phase: .rolledBack, message: "started 3 times"))
+        XCTAssertEqual(n.current?.title, "mac-daddy rolled back its update")
+    }
+
+    /// Get Info on the Mac: one small window per Mac, "<host> Info", not resizable, brought forward when asked again.
+    func testGetInfoWindow() {
+        var h = PairedHost(alias: "green.local", name: "green-machine", model: "Mac15,4")
+        h.hostVersion = MirageVersion(version: "0.1", build: 475, commit: "abc", channel: .nightly)
+        let p = HostInfoWindows.show(h, present: false)
+        defer { p.close() }
+        XCTAssertEqual(p.title, "green-machine Info")
+        XCTAssertFalse(p.styleMask.contains(.resizable))
+        XCTAssertTrue(p.styleMask.contains(.closable))
+        XCTAssertTrue(HostInfoWindows.show(h, present: false) === p, "one per Mac")
+        XCTAssertEqual((p.contentViewController as? NSHostingController<HostInfoView>)?.rootView.host.info().first,
+                       PairedHost.InfoRow(label: "Version", value: "Mirage 0.1 (475)"))
+        let other = HostInfoWindows.show(PairedHost(alias: "mini", name: "mini"), present: false)
+        defer { other.close() }
+        XCTAssertFalse(other === p)
     }
 
     func testAddSheetNeedsACodeOnlyForANewMac() {

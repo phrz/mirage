@@ -68,25 +68,28 @@ struct PairedHost: Identifiable, Equatable {
         return addressDiffers ? alias : nil
     }
 
-    /// Get Info: short lines in small grey text (the Mac's row on request, iOS's info sheet), each a plain phrase.
-    func info(now: Date = Date(), locale: Locale = .current) -> [String] {
-        var lines: [String] = []
+    /// One Get Info row: a label and its value.
+    struct InfoRow: Equatable, Hashable { var label: String; var value: String }
+
+    /// Get Info (the Mac's info window, iOS's info sheet): what is known about it, as label and value; nothing unknown.
+    func info(now: Date = Date(), locale: Locale = .current) -> [InfoRow] {
+        var rows: [InfoRow] = []
         if let v = hostVersion {
-            lines.append("Mirage \(v.display)")
-            lines.append(v.channel.map { "\($0.rawValue.capitalized) channel" } ?? "Local build")
+            rows.append(.init(label: "Version", value: "Mirage \(v.display)"))
+            rows.append(.init(label: "Channel", value: v.channel.map { $0.rawValue.capitalized } ?? "Local build"))
         }
         switch policy {
-        case .automatic?: lines.append("Updates automatically")
-        case .ask?: lines.append("Updates when asked")
+        case .automatic?: rows.append(.init(label: "Updates", value: "Automatically"))
+        case .ask?: rows.append(.init(label: "Updates", value: "When asked"))
         case nil: break
         }
-        if let m = model, !m.isEmpty { lines.append("Model \(m)") }
-        if let t = lastSeen { lines.append("Last seen \(Self.ago(t, now: now, locale: locale))") }
-        else if let t = lastConnected { lines.append("Last connected \(Self.ago(t, now: now, locale: locale))") }
-        if unreachable { lines.append("Not answering now") }
-        if streamingElsewhere, !unreachable { lines.append("In use by another device") }
-        if addressDiffers || name.isEmpty { lines.append("Address \(alias)") }
-        return lines
+        if let m = model, !m.isEmpty { rows.append(.init(label: "Model", value: m)) }
+        if let t = lastSeen { rows.append(.init(label: "Last seen", value: Self.ago(t, now: now, locale: locale))) }
+        else if let t = lastConnected { rows.append(.init(label: "Last connected", value: Self.ago(t, now: now, locale: locale))) }
+        if unreachable { rows.append(.init(label: "Status", value: "Not answering")) }
+        else if streamingElsewhere { rows.append(.init(label: "Status", value: "In use by another device")) }
+        if addressDiffers || name.isEmpty { rows.append(.init(label: "Address", value: alias)) }
+        return rows
     }
 }
 
@@ -272,21 +275,28 @@ final class HostUpdateCenter: ObservableObject {
                 Task { @MainActor in HostUpdateCenter.shared.status[alias] = st }
             }
             await MainActor.run {
-                HostUpdateCenter.shared.status[alias] = end
-                HostUpdateCenter.shared.revision += 1
+                HostUpdateCenter.shared.finish(alias, name: name, end)
             }
         }
     }
 
-    /// The row's line while an update runs or just ended (in place of its detail).
-    func line(_ alias: String) -> String? {
-        guard let s = status[alias] else { return nil }
-        switch s.phase {
-        case .done: return "Updated: \(s.message)"
-        case .failed: return "Update failed: \(s.message)"
-        case .rolledBack: return "Update rolled back: \(s.message)"
-        default: return s.message
+    /// How an update from here ended: the row goes back to its own status; a passing note when it worked, an alert when
+    /// it failed or rolled back (phrz, 2026-10-26: no result line stays in the list).
+    func finish(_ alias: String, name: String, _ end: ControlMessage.UpdateStatus) {
+        status[alias] = nil
+        revision += 1
+        switch end.phase {
+        case .done: ListNotices.shared.flash("Updated \(name): \(end.message)")
+        case .failed: ListNotices.shared.alert(ListAlert(title: "\(name) did not update", message: end.message))
+        case .rolledBack: ListNotices.shared.alert(ListAlert(title: "\(name) rolled back its update", message: end.message))
+        default: break
         }
+    }
+
+    /// The row's line while an update runs (in place of its detail).
+    func line(_ alias: String) -> String? {
+        guard let s = status[alias], !s.isFinal else { return nil }
+        return s.message
     }
 
     /// Opens the prompt for a row; a Mac whose trigger was never learned is probed first (the prompt says "Checking…").
@@ -489,8 +499,6 @@ final class HostRemovalCenter: ObservableObject {
     static let shared = HostRemovalCenter()
     /// Bumped after a removal: the lists reload.
     @Published private(set) var revision = 0
-    /// The last removal's outcome, under the list (no alert).
-    @Published var note: String?
     /// Ends this app's session to an alias, if one is open (set by the app shells).
     var endSession: (String) -> Void = { _ in }
     var store: () -> Store? = { try? Store() }
@@ -500,11 +508,11 @@ final class HostRemovalCenter: ObservableObject {
     func remove(_ h: PairedHost) async {
         let alias = h.alias, name = h.title
         endSession(alias)   // never forget a Mac with a session still open to it
-        note = "Removing \(name)…"
         let connect = connector(alias)
         let outcome = await Task.detached { await HostUnpair.unpair(connect: connect) }.value
         Self.forgetLocally(alias: alias, store: store(), defaults: defaults)
-        note = Self.message(outcome, name: name)
+        // phrz, 2026-10-26: no footer text. The row going is the success; a Mac that still lists this device is an alert.
+        if let a = Self.alert(outcome, name: name) { ListNotices.shared.alert(a) }
         revision += 1
     }
 
@@ -517,11 +525,16 @@ final class HostRemovalCenter: ObservableObject {
         if defaults.string(forKey: "lastHost") == alias { defaults.removeObject(forKey: "lastHost") }
     }
 
-    nonisolated static func message(_ o: HostUnpair.Outcome, name: String) -> String {
+    /// What needs acknowledging: nothing when the Mac forgot this device too.
+    nonisolated static func alert(_ o: HostUnpair.Outcome, name: String) -> ListAlert? {
         switch o {
-        case .unpaired: return "Removed \(name). It no longer lists this device."
-        case .notSupported: return "Removed \(name) here. Its Mirage is too old to forget this device: revoke it in \(name)'s menu bar."
-        case .unreachable: return "Removed \(name) here. \(name) couldn't be reached, so it still lists this device until you revoke it in its menu bar."
+        case .unpaired: return nil
+        case .notSupported:
+            return ListAlert(title: "Removed \(name) from this device.",
+                             message: "Its Mirage is too old to forget this device, so it still lists this device until you revoke it in its menu bar.")
+        case .unreachable:
+            return ListAlert(title: "Removed \(name) from this device.",
+                             message: "It couldn't be reached, so it still lists this device until you revoke it in its menu bar.")
         }
     }
 
@@ -662,8 +675,6 @@ final class HostPairingCenter: ObservableObject {
     @Published private(set) var phases: [String: PairingPhase] = [:]
     /// Bumped on every change: the lists reload.
     @Published private(set) var revision = 0
-    /// The last pairing's outcome, under the list.
-    @Published var note: String?
     /// The row to select (the new one): the lists take it and clear it.
     @Published var selectRequest: String?
 
@@ -697,7 +708,6 @@ final class HostPairingCenter: ObservableObject {
     func pair(alias: String, hostName: String?, run: @escaping HostPairing.Run) -> Task<Void, Never> {
         tasks[alias]?.cancel()
         phases[alias] = .pending(hostName: hostName ?? alias)
-        note = nil
         selectRequest = alias
         revision += 1
         let check = self.check(alias), every = checkEvery, window = checkWindow
@@ -729,10 +739,17 @@ final class HostPairingCenter: ObservableObject {
         guard next != now else { return }
         phases[alias] = next
         if case .accepted = next { ViewerSettings.noteConnected(alias, defaults) }   // the new Mac first in the list
-        if let n = next.note(connectHint: Self.connectHint) {
-            note = n
-            if case .connectable = next { selectRequest = alias }
+        // How it ended: a passing note when it worked, an alert when it did not (phrz, 2026-10-26: nothing stays).
+        switch next {
+        case .connectable:
+            if let n = next.note(connectHint: Self.connectHint) { ListNotices.shared.flash(n) }
+            selectRequest = alias
             tasks[alias] = nil
+        case .refused(let n, let why):
+            ListNotices.shared.alert(ListAlert(title: "Not paired with \(n)", message: why.prefix(1).uppercased() + why.dropFirst() + "."))
+            tasks[alias] = nil
+        case .pending, .accepted:
+            break
         }
         revision += 1
     }
@@ -763,4 +780,44 @@ final class HostPairingCenter: ObservableObject {
             return true
         } catch { return false }
     }
+}
+
+// MARK: - Notes and alerts under the device lists (phrz, 2026-10-26)
+
+/// Something to acknowledge: an alert with OK (NSAlert on the Mac, .alert on iOS).
+struct ListAlert: Identifiable, Equatable {
+    let id = UUID()
+    var title: String
+    var message: String
+    static func == (a: ListAlert, b: ListAlert) -> Bool { a.title == b.title && a.message == b.message }
+}
+
+/// The device lists' outcomes: nothing stays under a list. A passing note clears itself after a few seconds; what needs
+/// acknowledging is an alert, one at a time. The rows' own status (Seen, Unreachable, Updating) is not here.
+@MainActor
+final class ListNotices: ObservableObject {
+    static let shared = ListNotices()
+    @Published private(set) var note: String?
+    @Published private(set) var alerts: [ListAlert] = []
+    var lifetime: Duration = .seconds(8)
+    private var clearing: Task<Void, Never>?
+
+    /// A note under the list for `lifetime`, then gone.
+    func flash(_ text: String) {
+        note = text
+        clearing?.cancel()
+        let lifetime = self.lifetime
+        clearing = Task { [weak self] in
+            try? await Task.sleep(for: lifetime)
+            guard !Task.isCancelled, self?.note == text else { return }
+            self?.note = nil
+        }
+    }
+
+    func alert(_ a: ListAlert) { if !alerts.contains(a) { alerts.append(a) } }
+    /// The alert showing now.
+    var current: ListAlert? { alerts.first }
+    func dismiss() { if !alerts.isEmpty { alerts.removeFirst() } }
+    /// Tests: nothing showing.
+    func reset() { clearing?.cancel(); note = nil; alerts = [] }
 }
