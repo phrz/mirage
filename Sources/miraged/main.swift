@@ -62,6 +62,9 @@ struct Serve: AsyncParsableCommand {
         var ctx = HostContext(identity: identity, store: store, tlsFingerprint: tls.fingerprint, log: { log($0) },
                               makeStreamer: { MacDesktopStreamer(log: { log($0) }) })
         ctx.updateInfo = { hostUpdateInfo(paths: paths) }
+        // A viewer's Welcome (a session's or a status probe's) refreshes a feed record older than 10 min (rate-limited),
+        // so the next one shows a release minutes after it is out; a test instance does not check.
+        if !noLocalControl { ctx.welcomed = { Task.detached { await checkFeed(paths: paths, reason: "a viewer asked", welcome: true, log: { log($0) }) } } }
         // The agent takes update triggers (U4) from paired viewers and this Mac's app, and runs the Automatic policy (U6);
         // a test instance does neither.
         if !noLocalControl {
@@ -103,7 +106,7 @@ struct Serve: AsyncParsableCommand {
             do { try control.start(); health?.passed(.control) } catch { log("local control unavailable: \(error)") }
             if !(screen && ax) { watchPermissions(screen: screen, ax: ax, control: control) }
             if let health, health.onTrial { probeCaptureForHealth(screen: screen, ax: ax, health: health) }
-            scheduleUpdateChecks(paths: paths, log: { log($0) })
+            scheduleUpdateChecks(paths: paths, ctx: ctx, log: { log($0) })
         }
         try await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
         _ = control

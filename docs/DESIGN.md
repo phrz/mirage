@@ -1265,8 +1265,13 @@ A bad build rolls itself back.
   `releases/download/channel-<name>/manifest.json`, which needs no GitHub API rate limit.
 - `expires` (published + 30 days for nightly, + 1 year for stable) stops a stale or replayed manifest from freezing a
   host on an old build.
-- **When the host checks:** at start, every 6 h, and on a viewer's request. The check uses jitter and is skipped on
-  metered or Extreme links: the host's own uplink, not the viewer's.
+- **When the host checks** (as built, after mac-daddy's first live run, where a release waited up to 6 h to be noticed):
+  - at start, then every hour with jitter, and at the first quiet moment of a new day;
+  - when a viewer's Welcome (a session's or a status probe's) finds the record older than 10 min. Those re-checks are
+    rate-limited to one per 10 min, and only one check of any kind is ever in flight (`FeedChecker`);
+  - `fleet.sh status` runs `miraged update --check` on each host before reporting.
+
+  The check is skipped on metered or constrained links: the host's own uplink, not the viewer's.
 - **Host settings** (`updates.json` in Application Support; the menu bar and `miraged update --set` edit them):
   - `channel`: stable by default; mac-daddy is on nightly.
   - `policy` (phrz, 2026-10-25: only two):

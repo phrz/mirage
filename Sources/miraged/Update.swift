@@ -1,5 +1,7 @@
 import Foundation
 import ArgumentParser
+import CoreGraphics
+import MirageHost
 import MirageCore
 import MirageUpdater
 import Network
@@ -250,21 +252,44 @@ func runSelfTest() throws {
     print(SelfTest.line(v))
 }
 
-/// The host agent's feed checks (DESIGN §3.10): at start, then every 6 h, with jitter; skipped on a metered or constrained
-/// uplink (the host's own). Checking only: installing is a trigger's (Ask) or the Automatic policy's (U6).
-func scheduleUpdateChecks(paths: InstallPaths, log: @escaping @Sendable (String) -> Void) {
+/// The host agent's feed checks (DESIGN §3.10; cadence after mac-daddy's first live run): every hour with jitter, at the
+/// first quiet moment of a new day, and when a viewer's Welcome finds the record older than 10 min (FeedChecker: one in
+/// flight, Welcome-driven ones at most every 10 min). Skipped on a metered or constrained uplink (the host's own). Checking
+/// only: installing is a trigger's (Ask) or the Automatic policy's.
+let feedChecker = FeedChecker()
+
+func checkFeed(paths: InstallPaths, reason: String, welcome: Bool, log: @escaping @Sendable (String) -> Void) async {
+    let last = UpdateSettings.load(paths.settings).lastCheck
+    guard feedChecker.begin(welcome: welcome, lastCheck: last, now: Date()) else { return }
+    defer { feedChecker.end() }
+    if await uplinkIsMetered() { log("update check (\(reason)) skipped: metered or constrained network"); return }
+    let updater = Updater(paths: paths, feed: Feed(override: ProcessInfo.processInfo.environment["MIRAGE_UPDATE_FEED"]),
+                          running: Installer.version(of: paths.app) ?? .current)
+    do { log("update check (\(reason)): \(try await updater.check().decision.message)") }
+    catch { log("update check (\(reason)) failed: \(error)") }
+}
+
+func scheduleUpdateChecks(paths: InstallPaths, ctx: HostContext, log: @escaping @Sendable (String) -> Void) {
     Task.detached {
         try? await Task.sleep(for: .seconds(Double.random(in: 30...120)))
+        await checkFeed(paths: paths, reason: "start", welcome: false, log: log)
+        var jitter = Double.random(in: -360...360)
         while true {
-            if await uplinkIsMetered() {
-                log("update check skipped: metered or constrained network")
-            } else {
-                let updater = Updater(paths: paths, feed: Feed(override: ProcessInfo.processInfo.environment["MIRAGE_UPDATE_FEED"]),
-                                      running: Installer.version(of: paths.app) ?? .current)
-                do { log("update check: \(try await updater.check().decision.message)") }
-                catch { log("update check failed: \(error)") }
+            try? await Task.sleep(for: .seconds(60))
+            let last = UpdateSettings.load(paths.settings).lastCheck
+            let now = Date()
+            if FeedChecker.isDue(lastCheck: last, now: now, jitter: jitter) {
+                await checkFeed(paths: paths, reason: "hourly", welcome: false, log: log)
+                jitter = Double.random(in: -360...360)
+            } else if FeedChecker.isNewDay(lastCheck: last, now: now) {
+                // The first quiet moment of a new day (no viewer streaming or just gone, no prompt, nobody at the Mac).
+                let streaming = await ctx.connections.streamingDeviceIDs().count
+                let suspended = AutomaticUpdate.Moment.recent(await ctx.connections.suspendedSince(), now: now)
+                let idle = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: CGEventType(rawValue: ~0)!)
+                let m = AutomaticUpdate.Moment(streaming: streaming, lastStreamEnded: nil, systemPrompt: !WarmPool.systemPromptWindows().isEmpty,
+                                               idleSeconds: idle, now: now, suspendedRecently: suspended)
+                if AutomaticUpdate.gateReason(m) == nil { await checkFeed(paths: paths, reason: "new day", welcome: false, log: log) }
             }
-            try? await Task.sleep(for: .seconds(6 * 3600 + Double.random(in: -600...600)))
         }
     }
 }

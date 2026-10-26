@@ -7,7 +7,8 @@
 #   scripts/fleet.sh [--dry-run] HOSTS_FILE update
 #
 #   HOSTS_FILE: one SSH destination per line (a name from ~/.ssh/config, user@host, …); # starts a comment.
-#   status    `miraged update --status-line` on each: version, channel, latest, agent, streaming, grants, policy
+#   status    `miraged update --check`, then `--status-line`, on each (so "latest" is current): version, channel,
+#             latest, agent, streaming, grants, policy
 #             (exits non-zero when any host is unreachable, has no Mirage, or fails)
 #   install   scripts/install-host.sh on each (through `sh -s`); on a Mac that has Mirage it replaces an older build
 #   update    `miraged update --now` on each (the same updater as the remote trigger)
@@ -57,14 +58,14 @@ done
 # One host, one action. $1 = host, $2 = action.
 remote() {
     case "$2" in
-        status) limit "$LIMIT_NOW" $SSH -- "$1" "$MIRAGED update --status-line" ;;
+        status) limit "$LIMIT_NOW" $SSH -- "$1" "$MIRAGED update --check >/dev/null 2>&1; $MIRAGED update --status-line" ;;
         install) limit "$LIMIT_NOW" $SSH -- "$1" "sh -s --$INSTALL_ARGS" < "$DIR/install-host.sh" ;;
         update) limit "$LIMIT_NOW" $SSH -- "$1" "$MIRAGED update --now" ;;
     esac
 }
 describe() {
     case "$2" in
-        status) echo "(≤60 s) $SSH -- $1 '$MIRAGED update --status-line'" ;;
+        status) echo "(≤60 s) $SSH -- $1 '$MIRAGED update --check >/dev/null 2>&1; $MIRAGED update --status-line'" ;;
         install) echo "(≤$LIMIT s) $SSH -- $1 'sh -s --$INSTALL_ARGS' < $DIR/install-host.sh" ;;
         update) echo "(≤$LIMIT s) $SSH -- $1 '$MIRAGED update --now'" ;;
     esac

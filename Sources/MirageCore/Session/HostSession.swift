@@ -22,6 +22,8 @@ public struct HostContext: Sendable {
     public let updateListeners = UpdateListeners()
     /// Status probes from viewers' device lists (U7): quiet, never streams, never listeners.
     public let probes = ProbeRegistry()
+    /// After each Welcome (a session's or a probe's): the host refreshes a stale feed record (miraged, rate-limited).
+    public var welcomed: (@Sendable () -> Void)?
 
     public init(identity: DeviceIdentity, store: Store, tlsFingerprint: Data, log: @escaping @Sendable (String) -> Void,
                 makeStreamer: (@Sendable () -> DesktopStreamer)? = nil) {
@@ -332,6 +334,7 @@ public enum HostSession {
                                              // Only to a viewer that decodes update statuses (one from before U4 never sees it).
                                              updateResult: (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) ? updates?.lastResult : nil,
                                              hostStreaming: streamingElsewhere, minProtocolVersion: Mirage.minProtocolVersion)))
+        ctx.welcomed?()
         if quiet {
             // A status probe: one line per device every 10 min at most, no timings.
             if ctx.probes.shouldLog(device.id) { ctx.log("[\(remote)] status probe from \(device.name) (\(device.id.prefix(12))); further probes from it unlogged for \(Int(ctx.probes.logEvery / 60)) min") }
