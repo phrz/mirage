@@ -113,6 +113,28 @@ final class PairingFlowTests: XCTestCase {
         XCTAssertEqual(try r.viewerStore.knownHosts()["test-host"]?.hostID, r.hostID.id)
     }
 
+    /// The device list's "Waiting for <host> to accept…" (phrz, 2026-10-26): the viewer learns the host's name and that it is
+    /// asking before the host's user answers; nothing is recorded until the Allow.
+    func testTheViewerKnowsTheHostIsAskingBeforeItAnswers() async throws {
+        let r = try await rig(); defer { r.host.stop(); try? FileManager.default.removeItem(at: r.tmp) }
+        let w = PairingWindow(); r.ctx.pairing.window = w
+        final class Seen: @unchecked Sendable { let lock = NSLock(); var name: String?; var recordedWhileAsking: Bool? }
+        let seen = Seen()
+        let viewerStore = r.viewerStore
+        r.ctx.pairing.confirm = { _ in
+            // The host asks its user; by now the viewer has been told, and has recorded nothing.
+            for _ in 0..<200 where seen.lock.withLock({ seen.name == nil }) { try? await Task.sleep(for: .milliseconds(5)) }
+            let recorded = ((try? viewerStore.knownHosts()["test-host"]) ?? nil) != nil
+            seen.lock.withLock { seen.recordedWhileAsking = recorded }
+            return true
+        }
+        let code = w.current().code
+        _ = try await pair(r, viewer: DeviceIdentity(name: "test-phone")) { try await $0.pair(code: code, onAwaitingHost: { n in seen.lock.withLock { seen.name = n } }) }
+        XCTAssertEqual(seen.lock.withLock { seen.name }, "test-host")
+        XCTAssertEqual(seen.lock.withLock { seen.recordedWhileAsking }, false, "nothing recorded before the Allow")
+        XCTAssertNotNil(try r.viewerStore.knownHosts()["test-host"])
+    }
+
     func testDenyOnTheHostAuthorizesNothing() async throws {
         let r = try await rig(); defer { r.host.stop(); try? FileManager.default.removeItem(at: r.tmp) }
         let w = PairingWindow(); r.ctx.pairing.window = w

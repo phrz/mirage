@@ -14,9 +14,9 @@ func MirageUpdate_installBundle(_ bundle: URL, manifest: URL, sigs: URL, channel
     if let why = InstallUser.refusal(uid: getuid(), user: NSUserName(), consoleUser: InstallUser.consoleUser()) { throw UpdateError.refused(why) }
     guard let version = Installer.version(of: bundle) else { throw UpdateError.install("\(bundle.path) is not a Mirage bundle") }
     let m = try FreshInstall.verifyManifest(try Data(contentsOf: manifest), signatures: try Data(contentsOf: sigs), channel: channel, bundle: version)
-    print("manifest: \(m.channel.rawValue) \(m.mirageVersion.display), signed by a key this build trusts")
+    InstallOutput.say("manifest: \(m.channel.rawValue) \(m.mirageVersion.display), signed by a key this build trusts")
     try SystemBundleVerifier().verify(app: bundle, expected: version)
-    print("bundle: Developer ID team \(PinnedRequirement.team), notarized, self-test ok")
+    InstallOutput.say("bundle: Developer ID team \(PinnedRequirement.team), notarized, self-test ok")
 
     let paths = InstallPaths(app: appPath, support: store.root)
     let installer = BundleInstaller(paths: paths, agent: SystemInstallAgent(app: appPath, storeRoot: store.root))
@@ -25,9 +25,9 @@ func MirageUpdate_installBundle(_ bundle: URL, manifest: URL, sigs: URL, channel
                                            afterSwap: { p, changed in try await afterSwap(p, paths, changed) })
     if dryRun { return }
     if case .fresh = plan {} else if case .replace = plan {} else { return }
-    print("")
-    print(SigningIdentity.tccSteps())
-    print("Then pair a device: Pair a Device… in Mirage's menu bar, or `\(appPath.path)/Contents/MacOS/miraged pair`.")
+    InstallOutput.say("")
+    InstallOutput.say(SigningIdentity.tccSteps())
+    InstallOutput.say("Then pair a device: Pair a Device… in Mirage's menu bar, or `\(appPath.path)/Contents/MacOS/miraged pair`.")
 }
 
 /// `miraged update --status-line` (U5, scripts/fleet.sh): this Mac in one line.

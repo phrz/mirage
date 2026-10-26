@@ -245,8 +245,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             alert.addButton(withTitle: "Cancel")
             guard alert.runModal() == .alertFirstButtonReturn else { return }
             guard !link.isExpired() else { return info("That pairing code has expired.", "Show a fresh one on the Mac and scan it again.") }
-            connectWindow?.close(); connectWindow = nil
-            startViewer(host: link.address, pairCode: nil, pairLink: link)
+            // Pairing returns to the list (phrz, 2026-10-26): the new row waits for the Mac's Allow; no session opens.
+            HostPairingCenter.shared.pair(link: link)
+            if let w = connectWindow { w.makeKeyAndOrderFront(nil) } else { showConnectWindow() }
         }
     }
     @MainActor private func info(_ title: String, _ text: String) {
@@ -509,13 +510,16 @@ struct ConnectView: View {
     @ObservedObject private var localUpdate = LocalHostUpdate.shared
     @ObservedObject private var probes = HostProbeCenter.shared
     @ObservedObject private var removal = HostRemovalCenter.shared
+    @ObservedObject private var pairing = HostPairingCenter.shared
     /// The Mac whose removal waits for confirmation (right-click Remove…, or Delete on the selected row).
     @State private var removing: PairedHost?
     let onConnect: (String, String?) -> Void
 
     init(hosts: [PairedHost], lastHost: String?, openAdd: Bool = false, onConnect: @escaping (String, String?) -> Void) {
-        self._hosts = State(initialValue: hosts)
-        self._selection = State(initialValue: ConnectList.initialSelection(hosts, lastHost: lastHost))
+        let center = HostPairingCenter.shared
+        let rows = center.rows(hosts)
+        self._hosts = State(initialValue: rows)
+        self._selection = State(initialValue: center.takeSelection() ?? ConnectList.initialSelection(rows, lastHost: lastHost))
         self._adding = State(initialValue: openAdd)
         self.onConnect = onConnect
     }
@@ -525,12 +529,13 @@ struct ConnectView: View {
             // This Mac's own host, out of date (DESIGN §3.10, U4): the bar across the top of the window.
             LocalUpdateBar(model: localUpdate)
             list
-            if let n = removal.note {
+            ForEach([pairing.note, removal.note].compactMap { $0 }, id: \.self) { n in
                 Text(n).font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 12).padding(.vertical, 6)
             }
         }
-        .onChange(of: removal.revision) { hosts = ConnectList.load(); if let s = selection, !hosts.contains(where: { $0.alias == s }) { selection = hosts.first?.alias } }
+        .onChange(of: removal.revision) { reload() }
+        .onChange(of: pairing.revision) { reload() }
         .alert(removing.map { HostRemovalCenter.confirmation($0.title).title } ?? "",
                isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing) { h in
             Button("Remove", role: .destructive) { Task { await removal.remove(h) } }
@@ -539,11 +544,24 @@ struct ConnectView: View {
         } message: { h in
             Text(HostRemovalCenter.confirmation(h.title).message)
         }
-        .onChange(of: updates.revision) { hosts = ConnectList.load() }
-        .onChange(of: probes.revision) { hosts = ConnectList.load() }
+        .onChange(of: updates.revision) { reload() }
+        .onChange(of: probes.revision) { reload() }
         .onAppear { probes.listAppeared() }
         .onDisappear { probes.listDisappeared() }
         .hostUpdatePrompt(updates)
+    }
+
+    /// Known-hosts with the pairings under way; the selection follows a new Mac, and a removed one's moves to the first.
+    private func reload() {
+        hosts = pairing.rows(ConnectList.load())
+        if let s = pairing.takeSelection() { selection = s }
+        if let s = selection, !hosts.contains(where: { $0.alias == s }) { selection = hosts.first?.alias }
+    }
+
+    /// Connects to a row that takes it (not while its Mac has yet to allow this one).
+    private func connect(_ alias: String) {
+        guard hosts.first(where: { $0.alias == alias })?.canConnect ?? true else { return }
+        onConnect(alias, nil)
     }
 
     private var list: some View {
@@ -560,11 +578,11 @@ struct ConnectView: View {
                 }
                 .listStyle(.inset)
                 // Delete on the selected row: the same confirmation.
-                .onDeleteCommand { if let s = selection, let h = hosts.first(where: { $0.alias == s }) { removing = h } }
+                .onDeleteCommand { if let s = selection, let h = hosts.first(where: { $0.alias == s }), h.canConnect { removing = h } }
                 .alternatingRowBackgrounds(.disabled)
                 .contextMenu(forSelectionType: String.self) { items in
-                    if let a = items.first { Button("Connect") { onConnect(a, nil) } }
-                    if let a = items.first, let h = hosts.first(where: { $0.alias == a }) {
+                    if let a = items.first, hosts.first(where: { $0.alias == a })?.canConnect ?? true { Button("Connect") { connect(a) } }
+                    if let a = items.first, let h = hosts.first(where: { $0.alias == a }), h.canConnect {
                         Divider()
                         Button("Remove \(h.title)…") { removing = h }
                     }
@@ -573,7 +591,7 @@ struct ConnectView: View {
                         Button("Update \(h.title)") { updates.update(h) }
                     }
                 } primaryAction: { items in
-                    if let a = items.first { onConnect(a, nil) }   // double-click, Return
+                    if let a = items.first { connect(a) }   // double-click, Return
                 }
             }
         }
@@ -585,9 +603,10 @@ struct ConnectView: View {
             }
         }
         .sheet(isPresented: $adding) {
-            AddHostSheet(paired: hosts, onCancel: { adding = false }) { address, code in
+            AddHostSheet(paired: hosts.filter(\.canConnect), onCancel: { adding = false }) { address, code in
                 adding = false
-                onConnect(address, code)
+                // A new Mac pairs and stays in the list until it allows this one (phrz, 2026-10-26); a paired one connects.
+                if let code { pairing.pair(address: address, code: code) } else { onConnect(address, nil) }
             }
         }
     }
@@ -600,7 +619,7 @@ struct ConnectView: View {
                 if let d = updates.line(h.alias) ?? h.detail() { Text(d).font(.caption).foregroundStyle(.secondary) }
             }
             Spacer(minLength: 0)
-            HostUpdateBadge(host: h)
+            if h.pairing?.inProgress == true { ProgressView().controlSize(.small) } else { HostUpdateBadge(host: h) }
         }
         .padding(.vertical, 3)
         .accessibilityElement(children: .combine)
@@ -630,7 +649,7 @@ struct AddHostSheet: View {
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel, action: onCancel).keyboardShortcut(.cancelAction)
-                Button("Connect", action: connect).keyboardShortcut(.defaultAction).disabled(form.request(paired) == nil)
+                Button(form.needsCode(paired) ? "Pair" : "Connect", action: connect).keyboardShortcut(.defaultAction).disabled(form.request(paired) == nil)
             }
             .padding(.horizontal, 20).padding(.bottom, 16)
         }

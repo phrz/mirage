@@ -130,6 +130,31 @@ public struct SystemInstallAgent: InstallAgent {
     }
 }
 
+/// install-host.sh's summary lines (phrz, 2026-10-26: "dry run: nothing changed" landed on the settings line in his
+/// terminal): each one ends with exactly one newline of its own and goes out in a single write, after whatever stdout
+/// still buffers, so nothing else can land inside it or after it on the same line.
+public enum InstallOutput {
+    /// The bytes for one line: trailing newlines and carriage returns become one "\n".
+    public static func line(_ s: String) -> Data {
+        var t = Substring(s)
+        while let last = t.last, last == "\n" || last == "\r" || last == "\r\n" { t = t.dropLast() }
+        return Data((t + "\n").utf8)
+    }
+
+    public static func say(_ s: String, fd: Int32 = STDOUT_FILENO) {
+        fflush(stdout)
+        let data = line(s)
+        data.withUnsafeBytes { (buf: UnsafeRawBufferPointer) in
+            var off = 0
+            while off < buf.count {
+                let n = write(fd, buf.baseAddress! + off, buf.count - off)
+                if n < 0 { if errno == EINTR { continue }; return }
+                off += n
+            }
+        }
+    }
+}
+
 /// install-host.sh's Swift half, after the manifest and the bundle are verified: decide, then install (fresh: one
 /// rename; over an older build: the updater's own lock, pending update, swap, trial and commit), with the settings saved
 /// only once the bundle is in place and nothing left staged on a failure.
@@ -140,7 +165,7 @@ public struct BundleInstaller {
     public var say: (String) -> Void
 
     public init(paths: InstallPaths, agent: InstallAgent, identityOf: @escaping (URL) -> SigningIdentity = { SigningIdentity.of(bundle: $0) },
-                say: @escaping (String) -> Void = { print($0) }) {
+                say: @escaping (String) -> Void = { InstallOutput.say($0) }) {
         self.paths = paths; self.agent = agent; self.identityOf = identityOf; self.say = say
     }
 

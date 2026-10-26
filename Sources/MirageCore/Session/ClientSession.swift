@@ -15,13 +15,18 @@ public struct ClientSession {
     }
 
     /// Runs CPace pairing with a 6-digit code and records the host.
-    public func pair(code: String) async throws -> DeviceRecord { try await pair(password: code, secret: false, pinnedKeyHash: nil) }
+    public func pair(code: String, onAwaitingHost: (@Sendable (String) -> Void)? = nil) async throws -> DeviceRecord {
+        try await pair(password: code, secret: false, pinnedKeyHash: nil, onAwaitingHost: onAwaitingHost)
+    }
     /// Pairing from a scanned or opened link: its secret is the password, and the host must hold the key the link pins.
-    public func pair(link: PairingLink) async throws -> DeviceRecord { try await pair(password: link.password, secret: true, pinnedKeyHash: link.keyHash) }
+    public func pair(link: PairingLink, onAwaitingHost: (@Sendable (String) -> Void)? = nil) async throws -> DeviceRecord {
+        try await pair(password: link.password, secret: true, pinnedKeyHash: link.keyHash, onAwaitingHost: onAwaitingHost)
+    }
 
     /// CPace pairing with a password (a code, or a link secret), recording the host. `pinnedKeyHash`: the host's Ed25519 key
-    /// must hash to it, or nothing is recorded (a link names the host it was shown on).
-    public func pair(password: String, secret: Bool, pinnedKeyHash: Data?) async throws -> DeviceRecord {
+    /// must hash to it, or nothing is recorded (a link names the host it was shown on). `onAwaitingHost`: the code was right
+    /// and this device's identity is sent; the host (its name) now asks its user to Allow or Deny.
+    public func pair(password: String, secret: Bool, pinnedKeyHash: Data?, onAwaitingHost: (@Sendable (String) -> Void)? = nil) async throws -> DeviceRecord {
         try await stream.send(.pairRequest(.init(protocolVersion: Mirage.protocolVersion, deviceName: identity.name, secret: secret ? true : nil)))
         let ch = try await stream.expect("pairChallenge") { if case .pairChallenge(let c) = $0 { return c } else { return nil } }
         let channel = lv(tlsFingerprint) + lv(Data(ch.hostName.utf8))
@@ -36,6 +41,7 @@ public struct ClientSession {
         }
         let key = CPace.pairingKey(isk: isk)
         try await stream.send(.pairIdentity(.init(sealed: try SealedBox.seal(identity.record, key: key))))
+        onAwaitingHost?(ch.hostName)
         let done = try await stream.expect("pairComplete") { if case .pairComplete(let c) = $0 { return c } else { return nil } }
         let host = try SealedBox.open(DeviceRecord.self, done.sealed, key: key)
         guard host.id == DeviceIdentity.id(forPublicKey: host.publicKey) else { throw MirageError.pairingFailed("malformed host identity") }

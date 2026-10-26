@@ -58,20 +58,23 @@ final class AppState: ObservableObject {
         guard session == nil else { linkProblem = "Disconnect first, then scan the pairing code again."; return }
         offered = link
     }
+    /// Pairs and stays on the list (phrz, 2026-10-26): the new row waits for the Mac's Allow, then a tap connects.
     func pair(_ link: PairingLink) {
         offered = nil
         guard !link.isExpired() else { linkProblem = "That pairing code has expired. Scan the one the Mac shows now."; return }
-        ViewerSettings.noteConnected(link.address)
-        let m = Self.makeModel()
-        let s = ViewerSession(host: link.address, port: link.port, pairCode: nil, pairLink: link, model: m)
-        model = m; session = s; ViewerPreferences.shared.session = s
-        s.start()
+        HostPairingCenter.shared.pair(link: link)
     }
 
     /// `HOST`, `HOST:PORT` or `[V6]:PORT`.
     static func parse(_ s: String) -> (host: String, port: UInt16) { ConnectList.parseAddress(s) }
 
+    /// A paired Mac connects; a new one with its code pairs and stays on the list (no session until a tap).
     func connect(_ address: String, pairCode: String?) {
+        if let pairCode { HostPairingCenter.shared.pair(address: address, code: pairCode); return }
+        startSession(address, pairCode: nil)
+    }
+
+    private func startSession(_ address: String, pairCode: String?) {
         let (host, port) = Self.parse(address)
         UserDefaults.standard.set(address, forKey: "lastHost")
         ViewerSettings.noteConnected(host)   // the connect list's order: most recent first
@@ -95,14 +98,14 @@ final class AppState: ObservableObject {
         session = nil; model = nil; ViewerPreferences.shared.session = nil
     }
 
-    /// Test and power-user hook: `-connect HOST[:PORT] [-pair CODE]` as launch arguments (simctl launch) connects at once;
+    /// Test and power-user hook: `-connect HOST[:PORT] [-pair CODE]` as launch arguments (simctl launch) pairs and connects at once;
     /// `-pairLink URL` opens a pairing link as Camera would (the confirmation shows; nothing connects until Pair).
     private var autoConnected = false
     func autoConnectFromLaunchArguments() {
         if !autoConnected, let link = UserDefaults.standard.string(forKey: "pairLink"), let url = URL(string: link) { autoConnected = true; open(url); return }
         guard !autoConnected, session == nil, let host = UserDefaults.standard.string(forKey: "connect"), !host.isEmpty else { return }
         autoConnected = true
-        connect(host, pairCode: UserDefaults.standard.string(forKey: "pair").flatMap { PairingCode.normalize($0) })
+        startSession(host, pairCode: UserDefaults.standard.string(forKey: "pair").flatMap { PairingCode.normalize($0) })
     }
 }
 
@@ -118,6 +121,9 @@ struct ConnectScreen: View {
     @ObservedObject private var updates = HostUpdateCenter.shared
     @ObservedObject private var probes = HostProbeCenter.shared
     @ObservedObject private var removal = HostRemovalCenter.shared
+    @ObservedObject private var pairing = HostPairingCenter.shared
+    /// The new Mac's row, highlighted after pairing (a phone's list has no selection).
+    @State private var highlighted: String?
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -131,20 +137,29 @@ struct ConnectScreen: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    List(hosts) { h in
-                        Button { onConnect(h.alias, nil) } label: { row(h) }
-                            .tint(.primary)
-                            // Swipe to delete: forget this Mac (it is asked to forget this device too).
-                            .swipeActions(edge: .trailing) {
-                                Button(role: .destructive) { Task { await removal.remove(h) } } label: { Label("Delete", systemImage: "trash") }
-                            }
-                            // Long-press → Update, straight away (the arrow asks first).
-                            .contextMenu {
-                                Button { onConnect(h.alias, nil) } label: { Label("Connect", systemImage: "play.display") }
-                                if case .updateAvailable = h.update, UpdatePrompt.state(h) == .canUpdate, !updates.isRunning(h.alias) {
-                                    Button { updates.update(h) } label: { Label("Update", systemImage: "arrow.up.circle") }
+                    ScrollViewReader { scroller in
+                        List(hosts) { h in
+                            Button { if h.canConnect { onConnect(h.alias, nil) } } label: { row(h) }
+                                .tint(.primary)
+                                .listRowBackground(highlighted == h.alias ? Color.accentColor.opacity(0.22) : nil)
+                                // Swipe to delete: forget this Mac (it is asked to forget this device too).
+                                .swipeActions(edge: .trailing) {
+                                    if h.canConnect {
+                                        Button(role: .destructive) { Task { await removal.remove(h) } } label: { Label("Delete", systemImage: "trash") }
+                                    }
                                 }
-                            }
+                                // Long-press → Update, straight away (the arrow asks first).
+                                .contextMenu {
+                                    if h.canConnect {
+                                        Button { onConnect(h.alias, nil) } label: { Label("Connect", systemImage: "play.display") }
+                                    }
+                                    if case .updateAvailable = h.update, UpdatePrompt.state(h) == .canUpdate, !updates.isRunning(h.alias) {
+                                        Button { updates.update(h) } label: { Label("Update", systemImage: "arrow.up.circle") }
+                                    }
+                                }
+                                .id(h.alias)
+                        }
+                        .onChange(of: highlighted) { if let a = highlighted { withAnimation { scroller.scrollTo(a) } } }
                     }
                 }
             }
@@ -159,7 +174,7 @@ struct ConnectScreen: View {
             // alert presented while sheets were still animating out was dropped: the scanner closed and nothing happened, the
             // phone never connected (phrz's new iPhone, 2026-10-25).
             .sheet(isPresented: $adding, onDismiss: { if let l = pendingLink { pendingLink = nil; onLink(l) } }) {
-                AddHostScreen(paired: hosts, onCancel: { adding = false }, onConnect: { address, code in
+                AddHostScreen(paired: hosts.filter(\.canConnect), onCancel: { adding = false }, onConnect: { address, code in
                     adding = false
                     onConnect(address, code)
                 }, onLink: { link in
@@ -168,18 +183,30 @@ struct ConnectScreen: View {
                 })
             }
         }
-        .onAppear { hosts = ConnectList.load() }
-        .onChange(of: updates.revision) { hosts = ConnectList.load() }
-        .onChange(of: probes.revision) { hosts = ConnectList.load() }
-        .onChange(of: removal.revision) { hosts = ConnectList.load() }
+        .onAppear { reload() }
+        .onChange(of: updates.revision) { reload() }
+        .onChange(of: probes.revision) { reload() }
+        .onChange(of: removal.revision) { reload() }
+        .onChange(of: pairing.revision) { reload() }
         .safeAreaInset(edge: .bottom) {
-            if let n = removal.note { Text(n).font(.footnote).foregroundStyle(.secondary).padding(.horizontal).padding(.bottom, 8) }
+            VStack(spacing: 4) {
+                ForEach([pairing.note, removal.note].compactMap { $0 }, id: \.self) { n in
+                    Text(n).font(.footnote).foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal).padding(.bottom, 8)
         }
         // Status probes (U7): while this list shows, and when the app comes back to the foreground with it showing.
         .onAppear { probes.listAppeared() }
         .onDisappear { probes.listDisappeared() }
         .onChange(of: scenePhase) { if scenePhase == .active { probes.appBecameActive() } }
         .hostUpdatePrompt(updates)
+    }
+
+    /// Known-hosts with the pairings under way; a new Mac's row is highlighted.
+    private func reload() {
+        hosts = pairing.rows(ConnectList.load())
+        if let s = pairing.takeSelection() { highlighted = s }
     }
 
     private func row(_ h: PairedHost) -> some View {
@@ -191,7 +218,7 @@ struct ConnectScreen: View {
                 if let d = updates.line(h.alias) ?? h.detail() { Text(d).font(.caption).foregroundStyle(.secondary) }
             }
             Spacer(minLength: 0)
-            HostUpdateBadge(host: h)
+            if h.pairing?.inProgress == true { ProgressView() } else { HostUpdateBadge(host: h) }
         }
         .contentShape(Rectangle())
     }
@@ -230,7 +257,7 @@ struct AddHostScreen: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel", action: onCancel) }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Connect") { if let r = form.request(paired) { onConnect(r.address, r.code) } }
+                    Button(form.needsCode(paired) ? "Pair" : "Connect") { if let r = form.request(paired) { onConnect(r.address, r.code) } }
                         .disabled(form.request(paired) == nil)
                 }
             }

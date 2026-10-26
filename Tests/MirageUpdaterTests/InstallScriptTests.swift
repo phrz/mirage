@@ -171,6 +171,31 @@ extension InstallerTests {
         XCTAssertEqual(installed(), 412)
     }
 
+    /// phrz, 2026-10-26: "dry run: nothing changed" landed on the settings line. Every summary line ends with its own
+    /// newline, written whole, after what stdout buffered before it.
+    func testEverySummaryLineEndsWithItsOwnNewline() async throws {
+        XCTAssertEqual(InstallOutput.line("settings: channel nightly"), Data("settings: channel nightly\n".utf8))
+        XCTAssertEqual(InstallOutput.line("dry run: nothing changed\n"), Data("dry run: nothing changed\n".utf8))
+        XCTAssertEqual(InstallOutput.line("a\r\n\n"), Data("a\n".utf8))
+        XCTAssertEqual(InstallOutput.line(""), Data("\n".utf8))
+        // Through a pipe, as install-host.sh's terminal gets it: the installer's own lines from a dry run.
+        let pipe = Pipe()
+        let fd = pipe.fileHandleForWriting.fileDescriptor
+        let b = try newBundle(ver(450))
+        let i = BundleInstaller(paths: paths, agent: FakeAgent(registered: true), identityOf: { _ in SigningIdentity(app: "a", host: "h") },
+                                say: { InstallOutput.say($0, fd: fd) })
+        _ = try await i.install(bundle: b, version: ver(450), manifestChannel: .nightly, assignments: ["policy=ask"],
+                                force: false, allowIdentityChange: false, dryRun: true) { _, _ in }
+        try pipe.fileHandleForWriting.close()
+        let out = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        let lines = out.components(separatedBy: "\n")
+        XCTAssertEqual(lines.count, 4, out)
+        XCTAssertTrue(lines[0].hasPrefix("plan: replace "), out)
+        XCTAssertEqual(lines[1], "settings: channel nightly, policy ask, trigger \(UpdateSettings.load(paths.settings).trigger.rawValue)")
+        XCTAssertEqual(lines[2], "dry run: nothing changed")
+        XCTAssertEqual(lines[3], "", "the output ends with a newline")
+    }
+
     func testSettingsOnlyAfterTheBundleIsInPlaceAndNothingLeftStaged() async throws {
         let b = try newBundle(ver(450))
         let before = UpdateSettings.load(paths.settings)

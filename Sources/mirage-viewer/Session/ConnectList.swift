@@ -26,12 +26,17 @@ struct PairedHost: Identifiable, Equatable {
     var triggerFeature: Bool?
     var viewerMayTrigger: Bool?
     var streamingElsewhere = false
+    /// A pairing under way from this device (phrz, 2026-10-26): no Connect until the Mac allows it.
+    var pairing: PairingPhase?
     var id: String { alias }
+    /// Connect is offered (double-click, Return, a tap): not while the Mac has yet to allow this device.
+    var canConnect: Bool { !(pairing?.inProgress ?? false) }
 
     var title: String { name.isEmpty ? alias : name }
 
     /// The second line: the address when it is not just the name, and when this viewer last connected.
     func detail(now: Date = Date(), locale: Locale = .current) -> String? {
+        if let p = pairing, let line = p.line { return line }
         // A version refusal says which side to update, in place of the rest: connecting cannot work until then.
         switch update {
         case .hostTooOld, .viewerTooOld, .updating: return update.note(hostName: title)
@@ -461,5 +466,239 @@ final class HostRemovalCenter: ObservableObject {
     /// The Mac's confirmation text.
     nonisolated static func confirmation(_ name: String) -> (title: String, message: String) {
         ("Remove \(name)?", "This device will need to pair again to connect.")
+    }
+}
+
+// MARK: - Pairing without connecting (phrz, 2026-10-26)
+
+/// One pairing from this device, as its row shows it. Adding a Mac pairs and returns to the list; it never opens a
+/// session (the window stayed black until the Mac's Allow). The Mac's Allow comes as the end of the pairing exchange;
+/// a status probe then checks that it takes this device, every few seconds for the first minute.
+enum PairingPhase: Equatable {
+    /// The code (or link) is out; the Mac asks its user to Allow or Deny. No Connect.
+    case pending(hostName: String)
+    /// The Mac allowed it and is recorded; checking that it takes this device. No Connect yet.
+    case accepted(hostName: String)
+    /// A normal row. `answered`: the check got through (else the minute ran out, and connecting will tell).
+    case connectable(hostName: String, answered: Bool)
+    /// Denied, a wrong code, an expired link, no answer: nothing was recorded.
+    case refused(hostName: String, reason: String)
+
+    enum Event: Equatable {
+        /// The host's name, from its challenge (the code was right).
+        case awaiting(String)
+        /// The Mac allowed this device (its name, from its identity).
+        case allowed(String)
+        /// A status probe authenticated.
+        case answered
+        /// The minute of checks ran out.
+        case gaveUp
+        case failed(String)
+    }
+
+    var hostName: String {
+        switch self {
+        case .pending(let n), .accepted(let n), .connectable(let n, _), .refused(let n, _): return n
+        }
+    }
+    var inProgress: Bool {
+        switch self { case .pending, .accepted: return true; case .connectable, .refused: return false }
+    }
+
+    func next(_ e: Event) -> PairingPhase {
+        switch (self, e) {
+        case (.pending, .awaiting(let n)): return .pending(hostName: n)
+        case (.pending, .allowed(let n)): return .accepted(hostName: n)
+        case (.pending(let n), .failed(let why)): return .refused(hostName: n, reason: why)
+        case (.accepted(let n), .answered): return .connectable(hostName: n, answered: true)
+        case (.accepted(let n), .gaveUp): return .connectable(hostName: n, answered: false)
+        default: return self   // a late or out-of-order event changes nothing
+        }
+    }
+
+    /// The row's second line while in progress.
+    var line: String? {
+        switch self {
+        case .pending(let n): return "Waiting for \(n) to accept…"
+        case .accepted(let n): return "\(n) accepted · checking…"
+        case .connectable, .refused: return nil
+        }
+    }
+
+    /// The note under the list once it ends.
+    func note(connectHint: String) -> String? {
+        switch self {
+        case .pending, .accepted: return nil
+        case .connectable(let n, true): return "\(n) is ready. \(connectHint)"
+        case .connectable(let n, false): return "Paired with \(n). It hasn't answered since; connect when it's online."
+        case .refused(let n, let why): return "Not paired with \(n): \(why)"
+        }
+    }
+}
+
+/// How a pairing runs: given the callback for "the Mac is asking", the host's record once it allowed this device.
+enum HostPairing {
+    typealias Run = @Sendable (_ awaiting: @escaping @Sendable (String) -> Void) async throws -> DeviceRecord
+
+    /// The Mac's question waits for its user: it says no after 120 s itself; this side gives up a little later.
+    static let answerWithin: TimeInterval = 150
+
+    /// Pairing on a connection of its own (never a viewer's), closed when it ends; recorded under `alias`.
+    static func run(host: String, port: UInt16, alias: String, code: String?, link: PairingLink?, within: TimeInterval = answerWithin) -> Run {
+        return { awaiting in
+            let store = try Store()
+            let identity = try ViewerCredentials.clientIdentity(store: store)
+            let client = QUICClient(host: host, port: port)
+            defer { client.close() }
+            try await client.connect(timeout: 15)
+            guard let fp = client.tlsFingerprint else { throw MirageError.transport("no TLS fingerprint") }
+            let stream = try await client.openStream()
+            let session = ClientSession(identity: identity, store: store, alias: alias, tlsFingerprint: fp, stream: stream)
+            final class Deadline: @unchecked Sendable { let lock = NSLock(); var fired = false }
+            let timer = Deadline()
+            return try await withThrowingTaskGroup(of: DeviceRecord?.self) { g in
+                g.addTask {
+                    if let link { return try await session.pair(link: link, onAwaitingHost: awaiting) }
+                    guard let c = PairingCode.normalize(code ?? "") else { throw MirageError.pairingFailed("the code needs 6 digits") }
+                    return try await session.pair(code: c, onAwaitingHost: awaiting)
+                }
+                g.addTask {
+                    try await Task.sleep(for: .seconds(within))
+                    timer.lock.withLock { timer.fired = true }
+                    client.close()   // the pairing's receive returns
+                    return nil
+                }
+                defer { g.cancelAll() }
+                do {
+                    if let r = try await g.next() ?? nil { return r }
+                } catch {
+                    let fired = timer.lock.withLock { timer.fired }
+                    if !fired { throw error }
+                }
+                throw MirageError.pairingFailed("no answer from the Mac")
+            }
+        }
+    }
+
+    /// The reason a pairing ended, for the note: the host's own words when it sent some.
+    static func reason(_ error: Error) -> String {
+        switch error as? MirageError {
+        case .pairingFailed(let s)?: return s
+        case .authenticationFailed(let s)?: return s.hasPrefix("host rejected: ") ? String(s.dropFirst("host rejected: ".count)) : s
+        case .transport?: return "it couldn't be reached"
+        default: return "\(error)"
+        }
+    }
+}
+
+/// The device lists' pairings (Mac and iOS): the new row shows at once, selected, "Waiting for <Mac> to accept…" with no
+/// Connect; once the Mac allows it a status probe checks that it takes this device (every few seconds, for a minute);
+/// then it is a normal row and a note says it is ready. A refusal says why; nothing is recorded then.
+@MainActor
+final class HostPairingCenter: ObservableObject {
+    static let shared = HostPairingCenter()
+    @Published private(set) var phases: [String: PairingPhase] = [:]
+    /// Bumped on every change: the lists reload.
+    @Published private(set) var revision = 0
+    /// The last pairing's outcome, under the list.
+    @Published var note: String?
+    /// The row to select (the new one): the lists take it and clear it.
+    @Published var selectRequest: String?
+
+    #if os(macOS)
+    static let connectHint = "Double-click it to connect."
+    #else
+    static let connectHint = "Tap it to connect."
+    #endif
+    /// Whether a recorded host takes this device now (tests replace it).
+    var check: (String) -> @Sendable () async -> Bool = { alias in
+        let connect = HostConnector.connect(alias: alias, timeout: 3)
+        return { await HostPairingCenter.authenticates(connect) }
+    }
+    var checkEvery: Duration = .seconds(3)
+    var checkWindow: TimeInterval = 60
+    var defaults: UserDefaults = .standard
+    private var tasks: [String: Task<Void, Never>] = [:]
+
+    /// A 6-digit code typed for a Mac by name or address.
+    func pair(address: String, code: String) {
+        let (host, port) = ConnectList.parseAddress(address)
+        pair(alias: host, hostName: nil, run: HostPairing.run(host: host, port: port, alias: host, code: code, link: nil))
+    }
+    /// A scanned or opened link, after "Pair with <Mac>?".
+    func pair(link: PairingLink) {
+        pair(alias: link.address, hostName: link.hostName, run: HostPairing.run(host: link.address, port: link.port, alias: link.address, code: nil, link: link))
+    }
+
+    /// Starts one; the returned task ends with it (tests wait for it).
+    @discardableResult
+    func pair(alias: String, hostName: String?, run: @escaping HostPairing.Run) -> Task<Void, Never> {
+        tasks[alias]?.cancel()
+        phases[alias] = .pending(hostName: hostName ?? alias)
+        note = nil
+        selectRequest = alias
+        revision += 1
+        let check = self.check(alias), every = checkEvery, window = checkWindow
+        let t = Task { [weak self] in
+            // `run` and `check` are nonisolated: they run off the main actor, and a cancel (pairing the same Mac again) reaches them.
+            let record: DeviceRecord
+            do {
+                record = try await run { name in Task { @MainActor in self?.apply(alias, .awaiting(name)) } }
+            } catch {
+                if !Task.isCancelled { self?.apply(alias, .failed(HostPairing.reason(error))) }
+                return
+            }
+            guard !Task.isCancelled else { return }
+            self?.apply(alias, .allowed(record.name))
+            let deadline = Date().addingTimeInterval(window)
+            while !Task.isCancelled {
+                if await check() { self?.apply(alias, .answered); return }
+                if Date() >= deadline { self?.apply(alias, .gaveUp); return }
+                try? await Task.sleep(for: every)
+            }
+        }
+        tasks[alias] = t
+        return t
+    }
+
+    func apply(_ alias: String, _ e: PairingPhase.Event) {
+        guard let now = phases[alias] else { return }
+        let next = now.next(e)
+        guard next != now else { return }
+        phases[alias] = next
+        if case .accepted = next { ViewerSettings.noteConnected(alias, defaults) }   // the new Mac first in the list
+        if let n = next.note(connectHint: Self.connectHint) {
+            note = n
+            if case .connectable = next { selectRequest = alias }
+            tasks[alias] = nil
+        }
+        revision += 1
+    }
+
+    /// The list with the pairings in progress: a Mac not recorded yet shows first; a recorded one carries its phase.
+    func rows(_ hosts: [PairedHost]) -> [PairedHost] {
+        var out = hosts
+        var new: [PairedHost] = []
+        for (alias, phase) in phases.sorted(by: { $0.key < $1.key }) where phase.inProgress {
+            if let i = out.firstIndex(where: { $0.alias == alias }) { out[i].pairing = phase }
+            else { new.append(PairedHost(alias: alias, name: phase.hostName, pairing: phase)) }
+        }
+        return new + out
+    }
+
+    /// Takes the row to select, once.
+    func takeSelection() -> String? {
+        defer { selectRequest = nil }
+        return selectRequest
+    }
+
+    /// A status probe that authenticated (a refusal or no answer is "not yet").
+    nonisolated static func authenticates(_ connect: HostUpdateTrigger.Connect) async -> Bool {
+        do {
+            let (s, close) = try await connect()
+            defer { close() }
+            _ = try await s.authenticate(features: [ControlMessage.Feature.updateStatus, ControlMessage.Feature.probe], probe: true)
+            return true
+        } catch { return false }
     }
 }
