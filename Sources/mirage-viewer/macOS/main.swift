@@ -359,6 +359,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func disconnectMenu(_ sender: Any?) { MainActor.assumeIsolated { disconnect() } }
     @objc func newConnection(_ sender: Any?) { MainActor.assumeIsolated { openViewer() } }
 
+    /// Check for Updates… (the app menu): a fresh check, then an alert; Update Now runs this Mac's updater, its progress in
+    /// the update card (the connect window comes up for it). Shared or not, the same.
+    private var checkingUpdates = false
+    @objc func checkForUpdates(_ sender: Any?) {
+        guard !checkingUpdates else { return }
+        checkingUpdates = true
+        Task { @MainActor in
+            let outcome = await hostMenu?.checkForUpdates() ?? .noHost
+            checkingUpdates = false
+            let a = outcome.alert
+            let alert = NSAlert()
+            alert.messageText = a.title
+            alert.informativeText = a.message
+            for b in a.buttons { alert.addButton(withTitle: b) }
+            NSApp.activate(ignoringOtherApps: true)
+            let first = alert.runModal() == .alertFirstButtonReturn
+            if first, case .available(_, _, true) = outcome {
+                hostMenu?.updateNowFromCheck()
+                openViewer()
+            }
+        }
+    }
+
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         MainActor.assumeIsolated {
             switch item.action {
@@ -367,6 +390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             case #selector(toggleUnified(_:)): item.state = model?.unified == true ? .on : .off; return session != nil
             case #selector(toggleDock(_:)): return model?.unified == true
             case #selector(disconnectMenu(_:)): return session != nil
+            case #selector(checkForUpdates(_:)): return !checkingUpdates && !(hostMenu?.updating ?? false)
             default: return true
             }
         }
@@ -427,6 +451,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appMenu.addItem(.separator())
         // ⌘, while the picture has focus goes to the host when shortcuts are sent to the Mac; ⌃⌥⌘, opens Settings there.
         _ = item(appMenu, "Settings…", #selector(showSettings(_:)), ",")
+        _ = item(appMenu, "Check for Updates…", #selector(checkForUpdates(_:)))
         appMenu.addItem(.separator())
         _ = item(appMenu, "Hide Mirage", #selector(NSApplication.hide(_:)), "h")
         _ = item(appMenu, "Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option])

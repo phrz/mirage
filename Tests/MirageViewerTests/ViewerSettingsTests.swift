@@ -544,6 +544,41 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertTrue(model.cardVisible(now: Date().addingTimeInterval(25 * 3600)))
     }
 
+    /// Check for Updates… (phrz, 2026-10-27): up to date, available (and whether this copy can install it), no host, a
+    /// failed check; the alerts' words.
+    func testCheckForUpdatesOutcomes() {
+        func v(_ b: Int) -> MirageVersion { MirageVersion(version: "0.1", build: b, commit: "c", channel: .nightly) }
+        func m(_ b: Int) -> Manifest {
+            Manifest(channel: .nightly, version: "0.1", build: b, commit: "c", minProtocol: 5, protocolVersion: 6, minOS: "15.0", zipURL: "z",
+                     zipSHA256: "", zipSize: 1, notes: "", published: Date(), expires: Date().addingTimeInterval(3600))
+        }
+        let os = OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0)
+        typealias O = UpdateCheckOutcome
+        XCTAssertEqual(O.decide(running: v(510), reported: nil, canUpdate: true, feed: m(510), feedError: nil, os: os), .upToDate(v(510)))
+        XCTAssertEqual(O.decide(running: v(510), reported: v(510), canUpdate: true, feed: m(512), feedError: nil, os: os),
+                       .available(offered: m(512).mirageVersion, running: v(510), canUpdate: true), "the fresh feed is newer than the host's record")
+        XCTAssertEqual(O.decide(running: v(510), reported: v(511), canUpdate: true, feed: nil, feedError: "offline", os: os),
+                       .available(offered: v(511), running: v(510), canUpdate: true), "the host knows one, though the check failed")
+        XCTAssertEqual(O.decide(running: v(510), reported: nil, canUpdate: true, feed: nil, feedError: "GitHub API rate limit", os: os), .failed("GitHub API rate limit"))
+        XCTAssertEqual(O.decide(running: nil, reported: nil, canUpdate: false, feed: m(512), feedError: nil, os: os), .noHost)
+
+        XCTAssertEqual(O.upToDate(v(510)).alert, .init(title: "You're up to date", message: "Mirage 0.1 (510) is the newest version available.", buttons: ["OK"]))
+        let avail = O.available(offered: v(512), running: v(510), canUpdate: true).alert
+        XCTAssertEqual(avail.title, "Mirage 0.1 (512) is available")
+        XCTAssertEqual(avail.message, "You have Mirage 0.1 (510).")
+        XCTAssertEqual(avail.buttons, ["Update Now", "Later"])
+        let dev = O.available(offered: v(512), running: v(510), canUpdate: false).alert
+        XCTAssertEqual(dev.buttons, ["OK"]); XCTAssertTrue(dev.message.contains("can't update itself"))
+        XCTAssertTrue(O.noHost.alert.message.contains("isn't running"))
+        XCTAssertEqual(O.failed("feed: GitHub API rate limit").alert.title, "Couldn't check for updates")
+        XCTAssertEqual(O.failed("feed: GitHub API rate limit").alert.message, "The update server is busy right now. Try again later.")
+        XCTAssertEqual(O.failed("The Internet connection appears to be offline.").alert.message, "This Mac seems to be offline.")
+        XCTAssertEqual(O.failed("feed: manifest.json: HTTP 502\nmore").alert.message, "feed: manifest.json: HTTP 502", "one line")
+        for o in [O.upToDate(v(1)), .available(offered: v(2), running: v(1), canUpdate: true), .available(offered: v(2), running: v(1), canUpdate: false), .noHost, .failed("x")] {
+            XCTAssertFalse((o.alert.title + o.alert.message).contains("·"))
+        }
+    }
+
     /// Get Info on the Mac: one small window per Mac, "<host> Info", not resizable, brought forward when asked again.
     func testGetInfoWindow() {
         var h = PairedHost(alias: "green.local", name: "green-machine", model: "Mac15,4")

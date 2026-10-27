@@ -83,7 +83,10 @@ final class HostMenu: NSObject, NSMenuDelegate {
     private func handle(_ e: LocalControl.Event) {
         switch e {
         case .hello(_, let name, _): hostName = name
-        case .status(let s): status = s; updateIndicators(); permissionsStatus(s)
+        case .status(let s):
+            status = s; updateIndicators(); permissionsStatus(s)
+            let waiting = statusWaiters; statusWaiters = []
+            for w in waiting { w(s) }
         case .pairing(let p):
             panel?.show(p)
             MainActor.assumeIsolated { permissions.model.pairingCode = "\(p.code.prefix(3)) \(p.code.suffix(3))" }
@@ -191,6 +194,37 @@ final class HostMenu: NSObject, NSMenuDelegate {
             }
         }
     }
+
+    /// Waiting for the next status (Check for Updates…).
+    private var statusWaiters: [(LocalControl.Status?) -> Void] = []
+
+    /// The host's status as it is now: asked for, waited for up to 3 s; nil with no host.
+    func freshStatus() async -> LocalControl.Status? {
+        guard isConnected else { return nil }
+        return await withCheckedContinuation { (k: CheckedContinuation<LocalControl.Status?, Never>) in
+            var done = false
+            let finish: (LocalControl.Status?) -> Void = { s in if !done { done = true; k.resume(returning: s) } }
+            statusWaiters.append(finish)
+            try? client?.send(.status)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { finish(nil) }
+        }
+    }
+
+    /// Check for Updates…: the host's status and the viewer's feed for this Mac's channel, both fresh. No install.
+    func checkForUpdates() async -> UpdateCheckOutcome {
+        guard let s = await freshStatus(), let running = s.hostVersion else { return .noHost }
+        var head: Manifest?, failure: String?
+        if let ch = s.updateChannel ?? running.channel {
+            do { head = try await MainActor.run { ViewerFeedCenter.shared }.checkNow(ch) } catch { failure = "\(error)" }
+        }
+        return UpdateCheckOutcome.decide(running: running, reported: s.latestAvailable, canUpdate: s.canUpdate ?? false, feed: head, feedError: failure)
+    }
+
+    /// An update is under way (the menu item waits).
+    var updating: Bool { MainActor.assumeIsolated { LocalHostUpdate.shared.step.map { !$0.isFinal } ?? false } }
+
+    /// Update Now from the alert: the card shows its progress (whatever was closed for this build).
+    func updateNowFromCheck() { updateNow() }
 
     @objc private func updateNow() {
         do { try client?.send(.updateNow) } catch { AppLog.write("update now: \(error)") }

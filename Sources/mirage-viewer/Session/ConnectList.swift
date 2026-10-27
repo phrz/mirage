@@ -931,6 +931,15 @@ final class ViewerFeedCenter: ObservableObject {
         return now.timeIntervalSince(c) >= freshFor || now < c
     }
 
+    /// Check for Updates…: this channel now, past the throttle; the error is the caller's to say.
+    func checkNow(_ ch: UpdateChannel, now: Date = Date()) async throws -> Manifest {
+        guard let store = store() else { throw MirageError.storage("no store") }
+        let (v, _, m, s) = try await feed.checkWithBytes(ch, trust: ManifestTrust(), now: now)
+        try store.saveViewerFeed(.init(manifest: m, signatures: s, checked: now), channel: ch)
+        revision += 1
+        return v.manifest
+    }
+
     func checkAll(now: Date = Date()) async {
         lastRun = now
         guard let store = store() else { return }
@@ -1034,5 +1043,64 @@ struct UpdateCardView: View {
         .padding(.horizontal, 14).padding(.vertical, 10)
         .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.yellow.opacity(0.14)))
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.yellow.opacity(0.45)))
+    }
+}
+
+/// Check for Updates… (the Mac app menu; phrz, 2026-10-27): what a fresh check found, and what the alert says.
+enum UpdateCheckOutcome: Equatable {
+    case upToDate(MirageVersion)
+    /// `canUpdate`: this Mac's host can install it (not a development build or a test instance).
+    case available(offered: MirageVersion, running: MirageVersion, canUpdate: Bool)
+    /// No host on this Mac to install updates (none running, or none in this copy).
+    case noHost
+    case failed(String)
+
+    /// From the host's fresh status (nil: no host answered) and the viewer's fresh feed read (or why it failed).
+    static func decide(running: MirageVersion?, reported: MirageVersion?, canUpdate: Bool, feed: Manifest?, feedError: String?,
+                       os: OperatingSystemVersion? = ProcessInfo.processInfo.operatingSystemVersion) -> UpdateCheckOutcome {
+        guard let running else { return .noHost }
+        if let o = OwnUpdateCard.offered(running: running, reported: reported, feed: feed, os: os) {
+            return .available(offered: o, running: running, canUpdate: canUpdate)
+        }
+        if let e = feedError { return .failed(e) }
+        return .upToDate(running)
+    }
+
+    struct Alert: Equatable {
+        var title: String
+        var message: String
+        /// The buttons, the default first.
+        var buttons: [String]
+    }
+
+    var alert: Alert {
+        switch self {
+        case .upToDate(let r):
+            return Alert(title: "You're up to date", message: "Mirage \(r.display) is the newest version available.", buttons: ["OK"])
+        case .available(let o, let r, true):
+            return Alert(title: "Mirage \(o.display) is available", message: "You have Mirage \(r.display).", buttons: ["Update Now", "Later"])
+        case .available(let o, let r, false):
+            return Alert(title: "Mirage \(o.display) is available",
+                         message: "You have Mirage \(r.display). This copy can't update itself: it is a development build or a test instance.",
+                         buttons: ["OK"])
+        case .noHost:
+            return Alert(title: "Mirage can't update itself here",
+                         message: "Mirage installs updates through its host on this Mac, which isn't running. Install Mirage with install-host.sh to get updates.",
+                         buttons: ["OK"])
+        case .failed(let why):
+            return Alert(title: "Couldn't check for updates", message: Self.oneLine(why), buttons: ["OK"])
+        }
+    }
+
+    /// The reason in one line, in words.
+    static func oneLine(_ error: String) -> String {
+        let e = error.lowercased()
+        if e.contains("rate limit") { return "The update server is busy right now. Try again later." }
+        if e.contains("offline") || e.contains("not connected") || e.contains("network connection") || e.contains("-1009") {
+            return "This Mac seems to be offline."
+        }
+        if e.contains("timed out") || e.contains("-1001") { return "The update server didn't answer in time." }
+        let first = error.split(whereSeparator: \.isNewline).first.map(String.init) ?? error
+        return first.count > 160 ? String(first.prefix(157)) + "…" : first
     }
 }
