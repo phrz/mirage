@@ -66,10 +66,10 @@ final class WindowDragTests: XCTestCase {
         let s = LayerScene.Shadow.key(pxPerPoint: 2)
         let g = s.geometry(window: SIMD4(100, 100, 500, 400), scale: 0.5)
         XCTAssertEqual(g.mask, SIMD4(100, 100, 500, 400), "the window itself, unshifted")
-        XCTAssertEqual(g.box, SIMD4(100, 110, 500, 410), "10 pt down: 20 px × 0.5")
-        XCTAssertEqual(g.blur, 36)
+        XCTAssertEqual(g.box, SIMD4(100, 118, 500, 418), "18 pt down: 36 px × 0.5")
+        XCTAssertEqual(g.sigma, 20)
         XCTAssertEqual(g.radius, 12)
-        XCTAssertLessThanOrEqual(g.quad.y, g.box.y - g.blur); XCTAssertGreaterThanOrEqual(g.quad.w, g.box.w + g.blur)
+        XCTAssertLessThanOrEqual(g.quad.y, g.box.y - 3 * g.sigma); XCTAssertGreaterThanOrEqual(g.quad.w, g.box.w + 3 * g.sigma)
     }
 
     /// The field bug: a strip as tall as the shadow's offset under the window's bottom edge was left bare (the shader

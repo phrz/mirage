@@ -1684,7 +1684,7 @@ final class ViewerSession: @unchecked Sendable {
         guard let bg = compositor, bg.width > 0 else { return nil }
         scenePxPerPoint = pxPerPoint
         let arranged = arrangedWindows()
-        let plan = LayerScenePlan.plan(arranged, hasCanvas: { id in (self.layerViews[id]?.compositor.width ?? 0) > 0 }, display: PixelRect(x: 0, y: 0, width: bg.width, height: bg.height), shadowMargin: Int(48 * pxPerPoint))
+        let plan = LayerScenePlan.plan(arranged, hasCanvas: { id in (self.layerViews[id]?.compositor.width ?? 0) > 0 }, display: PixelRect(x: 0, y: 0, width: bg.width, height: bg.height), shadowMargin: Int(CGFloat(LayerScene.Shadow.reachPoints) * 0.75 * pxPerPoint))   // (the plan adds a third below)
         let items = plan.sceneItems(pxPerPoint: Float(pxPerPoint), canvas: { self.layerViews[$0]?.compositor })
         let (disp, colors) = displacements()
         let layered = Set(plan.entries.filter { $0.kind == .layer }.map(\.id))

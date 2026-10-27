@@ -1028,10 +1028,16 @@ public final class Compositor {
     fragment float4 blendFragment(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]], constant float4& alpha [[buffer(0)]]) {
         return areaSample(tex, s, in.uv) * alpha.x;
     }
-    // Soft shadow of a rounded rect: `box` = rect in drawable pixels (x0,y0,x1,y1), `p` = (corner radius, blur px, opacity, 0),
-    // `mask` = the window itself (unshifted), which the shadow never darkens.
+    // Soft shadow of a rounded rect: `box` = rect in drawable pixels (x0,y0,x1,y1), `p` = (corner radius, Gaussian sigma px,
+    // opacity, 0), `mask` = the window itself (unshifted), which the shadow never darkens.
     struct ShadowOut { float4 pos [[position]]; float2 px; };
     struct Shadow { float4 ndc; float4 box; float4 p; float4 mask; };
+    // erfc (Abramowitz and Stegun 7.1.26, error under 1.5e-7): Metal has none.
+    float erfcApprox(float x) {
+        float z = abs(x), t = 1.0 / (1.0 + 0.3275911 * z);
+        float e = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429)))) * exp(-z * z);
+        return x >= 0.0 ? e : 2.0 - e;
+    }
     float roundedBoxDistance(float2 px, float4 box, float r) {
         float2 ext = (box.zw - box.xy) * 0.5;
         float2 centre = (box.xy + box.zw) * 0.5;
@@ -1043,7 +1049,7 @@ public final class Compositor {
         float2 c = corners[vid];
         ShadowOut o;
         o.pos = float4(mix(sh.ndc.x, sh.ndc.z, c.x), mix(sh.ndc.y, sh.ndc.w, c.y), 0, 1);
-        float b = sh.p.y;
+        float b = 3.0 * sh.p.y;   // the quad: the box ± 3 sigma (geometry's `quad`)
         o.px = float2(mix(sh.box.x - b, sh.box.z + b, c.x), mix(sh.box.y - b, sh.box.w + b, c.y));
         return o;
     }
@@ -1053,10 +1059,11 @@ public final class Compositor {
         // window, not the shadow's box, which sits lower by the offset: masking that box left the strip between the
         // window's bottom edge and the box's bottom bare, a gap under the window between it and its shadow.
         if (roundedBoxDistance(in.px, sh.mask, r) < 0.0) discard_fragment();
-        // Full strength inside the offset box (under the window's bottom edge), fading outside it.
-        float d = max(roundedBoxDistance(in.px, sh.box, r), 0.0);
-        float sigma = max(sh.p.y, 1.0) * 0.45;
-        float a = sh.p.z * exp(-d * d / (2.0 * sigma * sigma));
+        // The box blurred by a Gaussian, as macOS draws it: half strength at the box's edge, rising inside it and falling
+        // outside it as erfc (measured on macOS 27: within a level of its window shadows). A Gaussian falloff from full
+        // strength at the edge drew them 3× too dark beside the window and 7× above it (phrz, 2026-10-27: "way too dark").
+        float d = roundedBoxDistance(in.px, sh.box, r);
+        float a = sh.p.z * 0.5 * erfcApprox(d / (max(sh.p.y, 0.5) * 1.41421356));
         return float4(0, 0, 0, a);
     }
     kernel void nv12ToBGRA(texture2d<float, access::read> yTex [[texture(0)]], texture2d<float, access::read> cTex [[texture(1)]],
@@ -1093,23 +1100,28 @@ public struct LayerScene {
         case cutout(PixelRect, shadow: Shadow?, clips: [PixelRect])
     }
     public struct Shadow: Equatable {
-        public var cornerRadius: Float, blur: Float, offsetY: Float, opacity: Float
-        public init(cornerRadius: Float, blur: Float, offsetY: Float, opacity: Float) { self.cornerRadius = cornerRadius; self.blur = blur; self.offsetY = offsetY; self.opacity = opacity }
-        /// macOS-style shadows in display points; scale by pixels per point.
-        public static func key(pxPerPoint: Float) -> Shadow { Shadow(cornerRadius: 12 * pxPerPoint, blur: 36 * pxPerPoint, offsetY: 10 * pxPerPoint, opacity: 0.55) }
-        public static func inactive(pxPerPoint: Float) -> Shadow { Shadow(cornerRadius: 12 * pxPerPoint, blur: 14 * pxPerPoint, offsetY: 3 * pxPerPoint, opacity: 0.35) }
-        public static func menu(pxPerPoint: Float) -> Shadow { Shadow(cornerRadius: 8 * pxPerPoint, blur: 18 * pxPerPoint, offsetY: 5 * pxPerPoint, opacity: 0.4) }
+        /// `sigma`: the Gaussian blur's standard deviation; the shadow is the window's shape lowered by `offsetY`, blurred.
+        public var cornerRadius: Float, sigma: Float, offsetY: Float, opacity: Float
+        public init(cornerRadius: Float, sigma: Float, offsetY: Float, opacity: Float) { self.cornerRadius = cornerRadius; self.sigma = sigma; self.offsetY = offsetY; self.opacity = opacity }
+        /// macOS's shadows in display points (scale by pixels per point), fitted to window shots of macOS 27 (a plain window,
+        /// key and not, its shadow's alpha out to 70 pt: within a level everywhere).
+        public static func key(pxPerPoint: Float) -> Shadow { Shadow(cornerRadius: 12 * pxPerPoint, sigma: 20 * pxPerPoint, offsetY: 18 * pxPerPoint, opacity: 0.40) }
+        public static func inactive(pxPerPoint: Float) -> Shadow { Shadow(cornerRadius: 12 * pxPerPoint, sigma: 8 * pxPerPoint, offsetY: 7 * pxPerPoint, opacity: 0.22) }
+        /// Not measured: close to an inactive window's.
+        public static func menu(pxPerPoint: Float) -> Shadow { Shadow(cornerRadius: 8 * pxPerPoint, sigma: 7 * pxPerPoint, offsetY: 5 * pxPerPoint, opacity: 0.25) }
+        /// How far a shadow can reach beyond its window, in points (the key window's, below it: 3 sigma plus the offset).
+        public static let reachPoints: Float = 78
 
         /// Where the shadow of a window drawn at `window` (drawable pixels: x0, y0, x1, y1) goes, at `scale` drawable pixels
-        /// per display pixel: `box`, the window's shape lowered by the offset, is the shadow at full strength, fading over
-        /// `blur` outside it within `quad`; `mask`, the window itself, is never darkened. The mask is the window, not `box`:
+        /// per display pixel: `box`, the window's shape lowered by the offset, blurred by `sigma` within `quad` (3 sigma around
+        /// it); `mask`, the window itself, is never darkened. The mask is the window, not `box`:
         /// the strip between the window's bottom edge and the lowered box's bottom edge is shadow (a mask from the lowered
         /// box left it bare, a gap between a window's bottom and its shadow, plain to see when the window moved).
-        public func geometry(window: SIMD4<Float>, scale: Float) -> (box: SIMD4<Float>, quad: SIMD4<Float>, mask: SIMD4<Float>, radius: Float, blur: Float) {
-            let off = offsetY * scale, b = blur * scale
+        public func geometry(window: SIMD4<Float>, scale: Float) -> (box: SIMD4<Float>, quad: SIMD4<Float>, mask: SIMD4<Float>, radius: Float, sigma: Float) {
+            let off = offsetY * scale, sg = sigma * scale, b = 3 * sg
             let box = SIMD4<Float>(window.x, window.y + off, window.z, window.w + off)
-            let quad = SIMD4<Float>(box.x - b, box.y - b, box.z + b, box.w + b)   // the vertex shader assumes box ± blur
-            return (box, quad, window, cornerRadius * scale, b)
+            let quad = SIMD4<Float>(box.x - b, box.y - b, box.z + b, box.w + b)   // the vertex shader assumes box ± 3 sigma
+            return (box, quad, window, cornerRadius * scale, sg)
         }
     }
     public struct Displacement { public var layerID: UInt32; public var displacement: Predictor.Displacement
@@ -1224,7 +1236,7 @@ public enum SceneRenderer {
         func drawShadow(_ s: LayerScene.Shadow, box: SIMD4<Float>) {
             let g = s.geometry(window: box, scale: (sx + sy) / 2)
             struct ShadowUniform { var ndc: SIMD4<Float>; var box: SIMD4<Float>; var p: SIMD4<Float>; var mask: SIMD4<Float> }
-            var u = ShadowUniform(ndc: ndc(g.quad), box: g.box, p: SIMD4(g.radius, g.blur, s.opacity, 0), mask: g.mask)
+            var u = ShadowUniform(ndc: ndc(g.quad), box: g.box, p: SIMD4(g.radius, g.sigma, s.opacity, 0), mask: g.mask)
             re.setRenderPipelineState(context.shadowPipeline)
             re.setVertexBytes(&u, length: MemoryLayout<ShadowUniform>.stride, index: 0)
             re.setFragmentBytes(&u, length: MemoryLayout<ShadowUniform>.stride, index: 0)
