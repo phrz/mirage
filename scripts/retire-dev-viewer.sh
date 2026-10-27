@@ -2,7 +2,8 @@
 # Retires a development copy of Mirage (scripts/install-viewer-app.sh: Apple Development signed, no release host) and
 # installs the signed release with Share This Mac off, as every viewer-only Mac runs it:
 #   1. checks the copy (default ~/Applications/Mirage.app; another path only with --app) is Mirage (com.paulherz.mirage),
-#      not a Developer ID release, and not /Applications/Mirage.app;
+#      not a release (a release carries a stapled notarization ticket; the signer alone says nothing), and not
+#      /Applications/Mirage.app;
 #   2. asks before doing anything (--yes skips the question), the install included;
 #   3. quits Mirage, makes sure no login item or host agent runs from that copy, and moves it to the Trash (not deleted:
 #      it can be put back);
@@ -17,7 +18,7 @@ while [ $# -gt 0 ]; do
         --yes) YES=1; shift ;;
         --channel) CHANNEL=$2; shift 2 ;;
         --app) DEV=$2; shift 2 ;;
-        -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
         *) echo "error: unknown option $1 (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -42,10 +43,21 @@ fi
 ID=$(plutil -extract CFBundleIdentifier raw "$DEV/Contents/Info.plist" 2>/dev/null || true)
 [ "$ID" = com.paulherz.mirage ] || { echo "error: $DEV is not Mirage (bundle id ${ID:-unknown})" >&2; exit 1; }
 AUTH=$(codesign -dvv "$DEV" 2>&1 | sed -n 's/^Authority=//p' | head -1)
-case "$AUTH" in
-    "Developer ID Application:"*) echo "error: $DEV is signed by $AUTH: a release, not a development copy; leaving it" >&2; exit 1 ;;
-esac
-echo "$DEV is a development copy (${AUTH:-unsigned})."
+# A release is notarized with its ticket stapled (release.sh staples it). The signer says nothing: install-viewer-app.sh
+# can sign a development copy with the Developer ID too (phrz's ~/Applications copy, build 481), unnotarized.
+if command -v xcrun >/dev/null 2>&1 && xcrun --find stapler >/dev/null 2>&1; then
+    if xcrun stapler validate -q "$DEV" >/dev/null 2>&1; then
+        echo "error: $DEV carries a stapled notarization ticket: a release, not a development copy; leaving it" >&2; exit 1
+    fi
+    WHY="no stapled notarization ticket"
+else
+    # No stapler (no developer tools): Gatekeeper's verdict instead.
+    case "$(spctl --assess --type execute -vv "$DEV" 2>&1)" in
+        *"source=Notarized Developer ID"*) echo "error: $DEV is notarized: a release, not a development copy; leaving it" >&2; exit 1 ;;
+    esac
+    WHY="not notarized"
+fi
+echo "$DEV is a development copy ($WHY; signed by ${AUTH:-nobody})."
 echo "This quits Mirage, moves that copy to the Trash, and installs the signed release (/Applications/Mirage.app, viewer only)."
 ask "Go ahead?"
 
