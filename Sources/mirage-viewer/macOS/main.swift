@@ -102,6 +102,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var toolbar: ViewerToolbar?
     /// Disconnect (toolbar, menu): the viewer window closes and the connect window comes back, the app stays.
     private var disconnecting = false
+    /// The session's `streamStop` is on its way (window closed, or quitting): sent once; quitting waits for it.
+    private var endingSession: ViewerSession?
     /// This Mac as a host: the menu-bar item that drives the local `miraged` (Pair a Device…, Allow / Deny).
     var hostMenu: HostMenu?
 
@@ -368,17 +370,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func windowWillClose(_ notification: Notification) {
         if (notification.object as? NSWindow) === connectWindow { connectWindow = nil; becomeAccessoryIfIdle(); return }
         guard (notification.object as? NSWindow) === window else { return }
-        session?.stop()
-        MainActor.assumeIsolated { ViewerPreferences.shared.session = nil; controls.model = nil }
-        chrome?.stop(); unified?.stop()
         let back = disconnecting
         disconnecting = false
+        // Closing the viewer ends the session (phrz, 2026-10-28): the host gets `streamStop` before the connection closes,
+        // so it stops (curtain down, Lock When Finished) instead of suspending as for a dropped connection.
+        let quitAfter = !(back || hostingCompanion)
+        endSession { [weak self] in if quitAfter { self?.session = nil; NSApp.terminate(nil) } }
+        MainActor.assumeIsolated { ViewerPreferences.shared.session = nil; controls.model = nil }
+        chrome?.stop(); unified?.stop()
         // Disconnect: back to the connect window. Closing the viewer while hosting: the app stays in the menu bar.
-        // Otherwise closing the viewer quits, as before.
-        if back || hostingCompanion {
+        // Otherwise closing the viewer quits, as before (once the host has heard the session end).
+        if !quitAfter {
             session = nil; window = nil; model = nil; toolbar = nil; unified = nil; chrome = nil
             if back { MainActor.assumeIsolated { showConnectWindow() } } else { becomeAccessoryIfIdle() }
-        } else { NSApp.terminate(nil) }
+        }
+    }
+    /// Sends the session's `streamStop` once and runs `then` on the main queue when the host has it (about a second at
+    /// most); at once when there is no session.
+    private func endSession(then: @escaping @MainActor () -> Void) {
+        guard let s = session, endingSession == nil else { if endingSession == nil { MainActor.assumeIsolated { then() } }; return }
+        endingSession = s
+        s.stop { DispatchQueue.main.async { MainActor.assumeIsolated { self.endingSession = nil; then() } } }
+    }
+    /// Quitting (⌘Q, the menu, logout) with a session open: it ends first, so the host does not keep it suspended for a
+    /// day with the curtain up.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard session != nil, endingSession == nil else { return .terminateNow }
+        endSession { [weak self] in self?.session = nil; NSApp.reply(toApplicationShouldTerminate: true) }
+        return .terminateLater
     }
     /// Not in Unified mode: the Desktop window is hidden there, and remote windows come and go with the host's. Never while
     /// hosting (the menu-bar item stays).

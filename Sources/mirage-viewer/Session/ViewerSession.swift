@@ -1918,10 +1918,20 @@ final class ViewerSession: @unchecked Sendable {
         probeLog = false
     }
 
-    func stop() {
+    /// The person closed the session (the window's X, ⌘W, Disconnect, quitting; iOS's close button): the host ends it
+    /// (curtain down, then Lock When Finished) instead of suspending it, so `streamStop` must reach it before the
+    /// connection closes. `done` runs once it has (or after about a second). Leaving the iOS app or a dropped connection
+    /// never comes here: those suspend, the curtain kept up.
+    func stop(then done: (@Sendable () -> Void)? = nil) {
         stopped = true
-        sender?.send(.streamStop)
-        dropConnection()
+        guard let s = sender else { dropConnection(); done?(); return }
+        Task {
+            let sent = await s.finish(with: .streamStop)
+            if !sent { log("disconnect: streamStop not confirmed sent within 1 s; closing anyway") }
+            try? await Task.sleep(for: .milliseconds(100))   // the stream's last bytes on their way before the close
+            dropConnection()
+            done?()
+        }
     }
 }
 

@@ -1809,6 +1809,11 @@ desk. The curtain blocks nothing.
 **Lifecycle** (`CurtainLogic.Machine`, pure and unit-tested):
 - The curtain is wanted while a session streams or is suspended (phrz, 2026-10-27), the Mac is unlocked, and no person at
   the Mac has signed in since.
+- **Closing a session ends it** (phrz, 2026-10-28): the window's X, ⌘W, Disconnect, quitting the Mac viewer, and the iOS
+  close button send `streamStop` and close the connection only once it is on its way (`ControlSender.finish`, at most
+  about a second; quitting waits through `applicationShouldTerminate`), so the host stops the session (curtain down,
+  Lock When Finished after ~5 s). Only leaving the iOS app or a dropped connection suspends. Before, the close raced the
+  send: big-mac kept a closed session suspended for a day, the curtain over phrz's other remote tool.
 - **Suspended sessions** (a backgrounded phone, a roam, a dropped or crashed viewer, within the resume window): the curtain
   stays up exactly as while streaming, so a local click, key or scroll locks the Mac at once and the trigger is swallowed;
   pointer motion alone does nothing (it reveals nothing under the curtain). A suspend is not an end: no lock on time

@@ -309,6 +309,21 @@ public final class ControlSender: @unchecked Sendable {
         guard !pending.isEmpty else { task = nil; return nil }
         return pending.removeFirst()
     }
+
+    /// The last message of a session (`streamStop`: the person closed it), after everything queued, past any simulated
+    /// link, and returns once it has been handed to the stream (or `timeout` passed). Closing the connection only after
+    /// this is what makes the host end the session instead of suspending it as a dropped connection.
+    @discardableResult
+    public func finish(with message: ControlMessage, timeout: Duration = .seconds(1)) async -> Bool {
+        enqueue(message)
+        let deadline = ContinuousClock.now + timeout
+        while ContinuousClock.now < deadline {
+            lock.lock(); let idle = pending.isEmpty && task == nil; lock.unlock()
+            if idle { return true }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return false
+    }
 }
 
 /// StreamOutput bound to one connection's datagram flow, tile stream and control stream.
