@@ -157,6 +157,22 @@ In the compositor model nothing is ever baked:
   covered where a window is in front, never baked into the desktop. `MIRAGE_TEST_FALLBACK=<app name>` forces it for that
   app's windows.
 
+**Fresh pictures are whole from their first frame** (TRUTH, phrz 2026-10-27 after an unlock on 522: "the windows still fade
+in one by one, no placeholders even, and patchy all over"; tunable `wholeFreshPicture`, 1 by default). A connect, an unlock
+or a viewer holding nothing goes through the lock's path: every capture is the whole display, the display's still goes
+first ahead of every gate (full resolution at quality 80 unless the link has measured below 5 Mbps: 522 sent a 596x335 still
+for 3200x1800, "very lossy start"), then video, and no window is listed. The window layers assemble invisibly; once every
+visible one has a frame captured since (and a new one its still) and the screen has stood still for 300 ms (never
+mid-animation: the unlock's fade streams whole, as video), the windows are listed and the display goes back to the desktop
+alone beneath them, in one step (at the latest after 8 s: window captures took up to 4 s to start on a busy mac-daddy).
+The rule is `WholeHandover.waiting` (unit-tested). The lock picture is presented at once (no stage-1 barrier), the windows
+listed until it is in, and the viewer clears its unknown-desktop marks when the host locks (they painted the desktop colour
+over ~400 cells where windows had been). Checks: tunables `testTruthReference` (the composited display's cell means every
+second, logged as "truth reference") and `testLockReference` work on the production agent; the viewer's frames.jsonl carries
+wall times for the comparison. Measured on a test copy (2026-10-27): connecting to the locked mac-daddy, a 3200x1800 still
+of 89 KB 240 ms after the stream start, video at 27 fps, 1 partial frame of 99 compared. A steady 35-cell difference (the
+Dock's glass, captured over transparency, and window shadows) is the compositor model's, apart from fresh pictures.
+
 **While the host is locked** (phrz, 2026-10-28): the viewer shows the lock screen as macOS draws it, whole and current,
 never anything beneath it. Every capture, whatever its source (the compositor's desktop, the overlay, the display minus
 layers), switches to the whole display, minus only the curtain (down while locked anyway), as soon as the streamer sees

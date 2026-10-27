@@ -704,6 +704,9 @@ final class ViewerSession: @unchecked Sendable {
                 statsLock.lock(); let wasLocked = hostStatus?.consoleLocked; hostStatus = h; statsLock.unlock()
                 if wasLocked != h.consoleLocked, h.consoleLocked || wasLocked == true { log(h.consoleLocked ? "host: \(host)'s screen is locked (window layers paused on the host)" : "host: \(host)'s screen is unlocked") }
                 Task { @MainActor in model.hostStatus = h }
+                // Locked: the display layer carries the whole lock screen; no desktop under a window is unknown any more (the
+                // marks painted the desktop colour over where windows had been, ~400 of 576 cells on mac-daddy).
+                if h.consoleLocked, wasLocked != true { videoQueue.async { self.unknownDesktop = [:] } }
                 unlock.hostStatus(locked: h.consoleLocked)
             case .caret(let c):
                 predictorLock.lock(); typeahead.host(c, now: Clock.nowNanos()); predictorLock.unlock()

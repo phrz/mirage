@@ -81,6 +81,12 @@ public struct Tunables: Codable, Equatable, Sendable {
         // 1 = the curtain (DESIGN §3.12): while a session streams, the host's screens show a lock-screen-like curtain, left
         // out of every capture; the first local click, key or scroll locks the Mac. 0 = the host's screens show the session.
         case curtain
+        // 1 = a fresh picture (connect, unlock, a viewer holding nothing) is the whole display first, the window layers taking
+        // over invisibly once ready (DESIGN §3.0a); 0 = the layer-by-layer fresh picture (the A/B).
+        case wholeFreshPicture
+        // Test knobs settable on the production agent (tunables.json), 1 = on: the composited display's cell means every second
+        // ("truth reference"), and the lock frame's every 200 ms ("lock frame: TEST reference"), for viewer-side checks.
+        case testTruthReference, testLockReference
 
         /// Compiled-in default and the bounds a host value is clamped to.
         public var spec: (default: Double, min: Double, max: Double) {
@@ -124,6 +130,8 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .transactional: return (1, 0, 1)
             case .atomicCapture: return (1, 0, 1)
             case .curtain: return (1, 0, 1)
+            case .wholeFreshPicture: return (1, 0, 1)
+            case .testTruthReference, .testLockReference: return (0, 0, 1)
             }
         }
     }

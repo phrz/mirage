@@ -32,7 +32,7 @@ final class FrameRecorder {
         log = FileHandle(forWritingAtPath: path)
     }
 
-    struct Line: Codable { var i: Int; var ms: Int; var clock: Int = 0; var width: Int; var height: Int; var layers: [L] }
+    struct Line: Codable { var i: Int; var ms: Int; var clock: Int = 0; var wall: Double = 0; var width: Int; var height: Int; var layers: [L] }
     struct L: Codable { var id: UInt32; var x: Int; var y: Int; var w: Int; var h: Int }
 
     /// On the viewer's video queue (where every canvas write happens).
@@ -54,7 +54,7 @@ final class FrameRecorder {
         let i = index; index += 1
         let ms = Int(Clock.elapsed(since: start, now: Clock.nowNanos()) / 1_000_000)
         let data = Data(bytes: buf.contents(), count: stride * h)
-        let line = Line(i: i, ms: ms, clock: Int(Clock.nowNanos() / 1_000_000), width: w, height: h, layers: layers.map { id, r in L(id: id, x: Int(Double(r.x) * scale), y: Int(Double(r.y) * scale), w: Int(Double(r.width) * scale), h: Int(Double(r.height) * scale)) })
+        let line = Line(i: i, ms: ms, clock: Int(Clock.nowNanos() / 1_000_000), wall: Date().timeIntervalSince1970, width: w, height: h, layers: layers.map { id, r in L(id: id, x: Int(Double(r.x) * scale), y: Int(Double(r.y) * scale), w: Int(Double(r.width) * scale), h: Int(Double(r.height) * scale)) })
         if let j = try? JSONEncoder().encode(line) { log?.write(j + Data("\n".utf8)) }
         // MIRAGE_TEST_FRAMES_LAYERS=1: the desktop layer alone (`l0-`), the desktop with the viewer's fill for desktop tiles
         // it holds no clean pixels for (`l0f-`), and the overlay alone on clear (`ov-`, premultiplied), at the frame's

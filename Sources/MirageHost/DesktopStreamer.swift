@@ -513,7 +513,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             PixelRect(x: Int(Double($0.frame.x) * k), y: Int(Double($0.frame.y) * k), width: Int((Double($0.frame.width) * k).rounded(.up)), height: Int((Double($0.frame.height) * k).rounded(.up)))
         }
         let f0 = Clock.nowNanos()
-        HoleFill.fill(&px, width: snap.width, height: snap.height, holes: holes)
+        if !wholeFreshEnabled { HoleFill.fill(&px, width: snap.width, height: snap.height, holes: holes) }   // (whole-display fresh picture: the shot as composited)
         log("provisional desktop: from \(source); \(holes.count) windows cut out and filled in \(Clock.elapsed(since: f0, now: Clock.nowNanos()) / 1_000_000) ms")
         guard let provisional = Self.scaledFrame(px, width: snap.width, height: snap.height, toWidth: t.pixelWidth, toHeight: t.pixelHeight) else { return nil }
         let info: ControlMessage.StreamInfo = try await withCheckedThrowingContinuation { c in
@@ -772,7 +772,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let onFrame: (CVPixelBuffer, UInt64, [PixelRect]) -> Void = { [weak self] pb, nanos, dirty in self?.queue.async { self?.captured(pb, nanos, dirtyRects: dirty, layerID: 0) } }
         // A stream starting while the host is locked: the whole display from its first frame (no warm desktop frame, which
         // would be the desktop beneath the lock screen).
-        let lockedNow = InputInjector.consoleLocked()
+        let lockedNow = InputInjector.consoleLocked() || comp && wholeFreshEnabled   // (or a whole-display fresh picture at the start)
         if comp, !lockedNow, let (warm, last) = queue.sync(execute: { WarmPool.shared.takeDisplay(.desktop, displayID: t.display.displayID) }) {
             do {
                 _ = try await warm.adopt(req, target: t, onFrame: onFrame)
@@ -1523,14 +1523,102 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         } }
         return String(format: "%dx%d, flat dark %.1f%% of 576 cells; cell means ", w, h, 100 * Double(flat) / 576) + means
     }
+    // MARK: Whole-display fresh pictures (TRUTH, phrz 2026-10-27)
+
+    /// A fresh picture (connect, unlock, a viewer holding nothing) shows the screen whole from its first frame: the display
+    /// stream carries the composited display (the lock's path: every capture the whole display, its still first, ahead of
+    /// every gate, then video), no window is listed, and the window layers assemble invisibly; once every visible one has a
+    /// frame captured since (and a new one its still), plus a margin for delivery, the windows are listed and the display
+    /// goes back to the desktop alone, beneath them, in one step. phrz after an unlock on 522: "the windows still fade in one
+    /// by one, no placeholders even, and patchy all over". `base`: the layers that existed when it began.
+    private var whole: (since: UInt64, deadline: UInt64, base: Set<UInt32>, readyAt: UInt64?, reason: String)?
+    /// Every capture is the whole display: while locked, and during a whole-display fresh picture.
+    private var wholeDisplay: Bool { screenLocked || whole != nil }
+    /// The knobs, from the environment (a test host) or the host's tunables.json (the production agent: no separate binary).
+    private var wholeFreshEnabled: Bool { !Self.testNoCover && hostTunables[.wholeFreshPicture] >= 0.5 }
+    private var truthReferenceOn: Bool { Self.testTruthReference || hostTunables[.testTruthReference] >= 0.5 }
+    private var lockReferenceOn: Bool { Self.testLockReference || hostTunables[.testLockReference] >= 0.5 }
+    static let wholeMarginNanos: UInt64 = 300_000_000
+    /// At the latest: window captures took up to 4 s to (re)start on a busy mac-daddy; the screen stays whole and live until then.
+    static let wholeMaxNanos: UInt64 = 8_000_000_000
+    /// Test knob MIRAGE_TEST_NO_COVER=1: no whole-display fresh picture (the A/B against the layer-by-layer one).
+    static let testNoCover = ProcessInfo.processInfo.environment["MIRAGE_TEST_NO_COVER"] == "1"
+    /// Test knob MIRAGE_TEST_TRUTH_REFERENCE=1: while streaming, every second, the composited display's cell means (32×18, a
+    /// screenshot at 640 wide), the host's truth for a viewer-side comparison of whole frames (numbers only).
+    static let testTruthReference = ProcessInfo.processInfo.environment["MIRAGE_TEST_TRUTH_REFERENCE"] == "1"
+    private var truthTimer: DispatchSourceTimer?
+    private func startTruthReference() {
+        guard truthReferenceOn, truthTimer == nil else { return }
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now(), repeating: 1)   // (ScreenCaptureKit serialises shots: 5 a second held the captures back)
+        t.setEventHandler { [weak self] in
+            guard let self, let tg = self.target, self.output != nil else { return }
+            Task { [weak self] in
+                let h = max(1, 640 * tg.pixelHeight / max(1, tg.pixelWidth))
+                guard let px = await Self.displayShot(tg.display, width: 640, height: h) else { return }
+                self?.log("truth reference: " + Self.cellMeans(px, width: 640, height: h))
+            }
+        }
+        t.resume(); truthTimer = t
+    }
+    /// 32×18 cell mean luminances of premultiplied BGRA pixels, as hex.
+    static func cellMeans(_ px: [UInt8], width w: Int, height h: Int) -> String {
+        let cw = w / 32, ch = h / 18
+        var out = ""
+        for cy in 0..<18 { for cx in 0..<32 {
+            var s = 0.0, n = 0.0
+            for y in Swift.stride(from: cy * ch, to: (cy + 1) * ch, by: 2) { for x in Swift.stride(from: cx * cw, to: (cx + 1) * cw, by: 2) {
+                let o = (y * w + x) * 4; s += 0.114 * Double(px[o]) + 0.587 * Double(px[o + 1]) + 0.299 * Double(px[o + 2]); n += 1
+            } }
+            out += String(format: "%02x", min(255, Int((s / max(1, n)).rounded())))
+        } }
+        return out
+    }
+    private func beginWhole(_ trigger: FreshPictureTrigger) {
+        guard compositor, !unifiedView, wholeFreshEnabled else { return }
+        let now = Clock.nowNanos()
+        whole = (now, now + Self.wholeMaxNanos, Set(layers.keys), nil, trigger.rawValue)
+        for cap in [capturer, fallbackCapture].compactMap({ $0 }) { cap.setLocked(true, log: log) }
+        if let d = display, !d.provisional { d.lastFrame = nil; d.forceFullDiff = true; d.wantKeyframe = true }
+        lockStillDue = true
+        stage1Active = false   // (the display is the only layer shown: its still is presented the moment it is in)
+        log("fresh picture (\(trigger.rawValue)): the whole display first; windows listed once their layers are ready")
+    }
+    /// Once every visible window layer has a frame captured since (a new one also its still) and the margin has passed, or at
+    /// the latest after `wholeMaxNanos`: the windows are listed and the display goes back to the desktop alone.
+    private func wholeCheck(now: UInt64) {
+        guard let w = whole, !screenLocked else { return }
+        let states = layers.values.filter { !$0.isDisplay && $0.id != ControlMessage.WindowInfo.overlayID && plannedFrames[$0.id] != nil }.map {
+            WholeHandover.LayerState(id: $0.id, visible: $0.visibleFraction, lastCaptured: $0.lastCapturedNanos, existedAtStart: w.base.contains($0.id), hasStill: $0.stillSent || $0.cutStill)
+        }
+        let waiting = WholeHandover.waiting(states, since: w.since, displayChangedAt: display?.contentChangedNanos ?? 0, now: now, settle: Self.wholeMarginNanos)
+        if waiting.isEmpty, w.readyAt == nil { whole?.readyAt = now }
+        if !waiting.isEmpty { whole?.readyAt = nil }
+        let ready = waiting.isEmpty && Clock.elapsed(since: whole?.readyAt ?? now, now: now) >= Self.wholeMarginNanos
+        guard ready || now >= w.deadline else { return }
+        whole = nil
+        for cap in [capturer, fallbackCapture].compactMap({ $0 }) { cap.setLocked(false, log: log) }
+        log("fresh picture (\(w.reason)): windows listed after \(Clock.elapsed(since: w.since, now: now) / 1_000_000) ms (\(ready ? "every visible layer ready" : "time up; still waiting for layers \(waiting)"))")
+        publishWindows(now: now, full: true)
+    }
+
     /// The display's still is owed for a lock switch: sent at the next refine with a frame, before any gate (refine).
     private var lockStillDue = false
+    /// The next still is the whole-display one of a lock switch or a fresh picture (full size unless the link measured slow).
+    private var fullStillNext = false
+    static let fullStillMinKbps = 5_000
+    /// Locked: the lock still is presented (its commit sent); until then the window list stays as it was.
+    private var lockPicturePresented = true
     private var lastLockRefNanos: UInt64 = 0
     private func lockSwitch(_ locked: Bool) {
         for cap in [capturer, fallbackCapture].compactMap({ $0 }) { cap.setLocked(locked, log: log) }
         if let d = display { d.lastFrame = nil; d.forceFullDiff = true; d.wantKeyframe = true }
         beginFreshPicture(locked ? .screenLock : .screenUnlock)
         lockStillDue = compositor   // (the seam design's fresh picture is the keyframe ladder)
+        // Locked: the lock still is presented the moment it is in (no stage-1 barrier: the display is the only layer), and the
+        // windows stay listed until then, so the viewer goes from the desktop with its windows to the lock screen in one step
+        // (between them it showed the desktop layer alone for ~1.5 s: the wallpaper and icons a lock must never show).
+        if locked, compositor { stage1Active = false; lockPicturePresented = false }
     }
 
     /// Creates, resizes, stops and reprioritises window layers after a window-list sample; computes
@@ -2478,10 +2566,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// (window layers: the whole frame is a candidate; the diff decides).
     private func captured(_ pbIn: CVPixelBuffer, _ nanos: UInt64, dirtyRects: [PixelRect], layerID: UInt32, provisionalFrame: Bool = false, fromBand: Bool = false) {
         guard request != nil, output != nil, let windows, let layer = layers[layerID] else { return }
+        layer.lastCapturedNanos = Clock.nowNanos()
         // Locked: the overlay is not part of the picture (lockSwitch).
-        if screenLocked, layerID == ControlMessage.WindowInfo.overlayID { return }
+        if wholeDisplay, layerID == ControlMessage.WindowInfo.overlayID { return }
         // (Test knob: while locked, the host's own frame's cell means every 200 ms, the reference for a viewer that types.)
-        if Self.testLockReference, screenLocked, layer.isDisplay, Clock.elapsed(since: lastLockRefNanos, now: nanos) > 200_000_000 {
+        if lockReferenceOn, screenLocked, layer.isDisplay, Clock.elapsed(since: lastLockRefNanos, now: nanos) > 200_000_000 {
             lastLockRefNanos = nanos; log("lock frame: TEST reference: \(Self.flatDarkShare(pbIn))")
         }
         // The desktop's real first frame after a provisional one (the warm snapshot): it replaces it without a diff; the
@@ -3355,6 +3444,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // (Not while locked: placeholders are for windows, and the picture is the lock screen alone.)
             if hostTunables[.placeholders] >= 1, !InputInjector.consoleLocked() { sendPlaceholders() }   // M-FIVE stage 0, both models
         }
+        if trigger == .streamStart { startTruthReference() }
         if compositor {
             // M-FIVE: the desktop's first picture is a still like every window's (no tiny keyframe and ladder climb: the
             // "very noisy start"), presented with the others behind the stage-1 barrier.
@@ -3363,6 +3453,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             stage1Active = true; stage1Staged = []; stage1Deadline = Clock.nowNanos() + 700_000_000
             if trigger == .streamStart { traceUntil = Clock.nowNanos() + 8_000_000_000; traceNext = 0; traceBytes = statTileBytes; traceCapped = 0; streamStartNanos = Clock.nowNanos(); for l in layers.values { l.crispAt = 0; l.crispOnce = false } }
             log("fresh picture (\(trigger.rawValue)\(detail)): stage 1, one coherent still per visible layer, presented together")
+            if trigger == .streamStart || trigger == .viewerEmpty || trigger == .screenUnlock { beginWhole(trigger) }
             return
         }
         display?.fresh = .base(seq: 0)
@@ -3658,7 +3749,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// the viewer holds (announced and with its still sent).
     private func currentList() -> [ControlMessage.WindowInfo] {
         // Locked: no windows (their titles and frames are the desktop's, beneath the lock screen), only the display.
-        if screenLocked { return [] }
+        if screenLocked { return lockPicturePresented ? [] : publishedWindows }
+        if whole != nil { return [] }   // (a whole-display fresh picture: the display stream shows the windows until their layers are ready)
         guard let s = windows?.current else { return publishedWindows }
         let displayArea = display?.bounds.area ?? 1
         if compositor {
@@ -4005,13 +4097,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if staged, stage1Active { stage1Encoding.insert(layer.id) }
         // ~0.1 B/px for UI at quality 60 after rescale.
         let area = Double(rect.area)
-        let scale = min(1.0, (targetBytes / 0.1 / area).squareRoot())
+        // The whole-display still of a lock switch or a fresh picture: full resolution at good quality unless the link has
+        // measured slow (phrz, 522: "very lossy start, worse than workbench": a 596x335 still for 3200x1800, sized from the
+        // connect's start estimate, not the link; latency is not bandwidth). A few hundred KB on a LAN.
+        let measured = rc.map { max($0.deliveryKbps, $0.probeKbps) } ?? 0
+        let full = fullStillNext && layer.isDisplay && (measured == 0 || measured >= Self.fullStillMinKbps)
+        let scale = full ? 1.0 : min(1.0, (targetBytes / 0.1 / area).squareRoot())
+        let quality: Float = full ? 80 : 60
         let ow = max(32, Int(Double(rect.width) * scale)), oh = max(32, Int(Double(rect.height) * scale))
         var d = Data(count: rect.width * rect.height * 4)
         d.withUnsafeMutableBytes { dst in for y in 0..<rect.height { memcpy(dst.baseAddress!.advanced(by: y * rect.width * 4), f.base.advanced(by: y * f.stride), rect.width * 4) } }
         let hdr = header(layer: layer.id, nanos: nanos)
         let stillKeys = seqKeys(layer, rect)
-        let estimate = Int(targetBytes)
+        let estimate = full ? Int(area * 0.25) : Int(targetBytes)
         let layerID = layer.id
         let block = pacer.start(layer: layer.id, estimate: estimate, now: nanos)
         layer.blankedOffDisplay = []; layer.needsCrop = true   // the still covers the whole layer: cropped again next tick
@@ -4019,7 +4117,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // mac-daddy); the tile queue only waits for this one's result, so its place in the stream is kept.
         let box = StillBox()
         Self.stillEncoders.async {
-            box.data = d.withUnsafeBytes { TileCodec.encodeLossy(base: $0.baseAddress!, width: rect.width, height: rect.height, stride: rect.width * 4, outWidth: ow, outHeight: oh, quality: 60) }
+            box.data = d.withUnsafeBytes { TileCodec.encodeLossy(base: $0.baseAddress!, width: rect.width, height: rect.height, stride: rect.width * 4, outWidth: ow, outHeight: oh, quality: quality) }
             box.done.signal()
         }
         tileQueue.async { [weak self] in
@@ -4042,6 +4140,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     if !staged { l.exposed = true }
                     else if self.stage1Active { self.stage1Staged.insert(layerID); self.checkStage1(now: Clock.nowNanos()) }
                     else { self.sendTileMessage(.commit(layer: layerID), captureNanos: nanos); l.exposed = true }
+                    if l.isDisplay, self.screenLocked { self.lockPicturePresented = true }
                 }
                 self.log("layer \(layerID): still \(ow)x\(oh) \(data.count) bytes for a \(rect.width)x\(rect.height) window")
                 if let s = self.windows?.current { self.reconcileLayers(s, now: Clock.nowNanos()); self.publishWindows(now: Clock.nowNanos(), full: false) }
@@ -4157,19 +4256,22 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var refineGates: [String: Int] = [:]
     private func gate(_ g: String) { refineGates[g, default: 0] += 1 }
     private func refine(now: UInt64) {
+        wholeCheck(now: now)
         // A lock or unlock: the display's whole still first, from the first frame after the switch, ahead of every budget and
         // pacing gate. Changed tiles of a lock screen that keeps changing (the clock, the blur) used the tile budget and the
         // still never went: 60 % of mac-daddy's lock screen stayed unfilled on 510 (phrz, 2026-10-27).
         if let d = display, lockStillDue, d.lastFrame != nil, case .still = d.fresh {
             lockStillDue = false
+            fullStillNext = true
             freshStep(d, now: now, stage1: true, force: true)
+            fullStillNext = false
             // Locked: no lossless blocks after the still. The lock screen changes everywhere (an animated wallpaper: ~12,000
             // changed tiles a second on mac-daddy at 3200x1800), so blocks never finished, the display stayed in its fresh
             // picture, video never started, and the password dots and caret waited behind 1,450 queued tiles (phrz, 518: "no
             // feedback when typing"). Done at once: the changing picture goes as video, like any motion.
             if screenLocked { d.fresh = .done }
             log("lock switch: the display's whole still sent")
-            if Self.testLockReference, let f = d.lastFrame { log("lock switch: TEST reference: \(Self.flatDarkShare(f))") }
+            if lockReferenceOn, let f = d.lastFrame { log("lock switch: TEST reference: \(Self.flatDarkShare(f))") }
         }
         crispCheck(now: now)
         sharpReference(now: now)
@@ -5099,3 +5201,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 }
 
+/// When a whole-display fresh picture hands over to the layers (DesktopStreamer.wholeCheck). Pure, for tests.
+enum WholeHandover {
+    struct LayerState { var id: UInt32; var visible: Double; var lastCaptured: UInt64; var existedAtStart: Bool; var hasStill: Bool }
+    /// The layers (0: the display) the hand-over still waits for: every visible window layer needs a frame captured since the
+    /// fresh picture began (a static window delivers one when its capture starts) and, if it is new, its still; and the screen
+    /// must have stood still for `settle` (never mid-animation: the unlock's fade streams whole, as video).
+    static func waiting(_ layers: [LayerState], since: UInt64, displayChangedAt: UInt64, now: UInt64, settle: UInt64) -> [UInt32] {
+        var out = layers.filter { $0.visible > 0.002 && ($0.lastCaptured <= since || !$0.existedAtStart && !$0.hasStill) }.map(\.id)
+        if now &- displayChangedAt < settle { out.append(0) }
+        return out
+    }
+}
