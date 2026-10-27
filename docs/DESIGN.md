@@ -171,7 +171,13 @@ budget and pacing gate (on 510 the still waited behind the changed tiles of a lo
 and the blur, and never went: 60 % of the picture unfilled), no placeholders. No window list while locked (the windows' titles and frames
 are the desktop's); the viewer's "screen is locked" chip shows only where no desktop is (Unified mode) or with Unlock.
 Verified on mac-daddy (test copy, 2026-10-27): at full size, 1.2 % of 576 cells differ from the host's own frame at 0.5 s
-(the lossy first still), none from 1.0 s (MIRAGE_TEST_LOCK_REFERENCE logs the host's cell means for the comparison). Before this, the compositor model's desktop capture went on
+(the lossy first still), none from 1.0 s (MIRAGE_TEST_LOCK_REFERENCE logs the host's cell means for the comparison).
+After the still, a locked display has no lossless blocks (its fresh picture ends with the still): the lock screen changes
+everywhere (an animated wallpaper, ~12,000 changed tiles a second at 3200x1800), blocks never finished, video never
+started, and typed password dots and the caret waited behind the queue (phrz, 518). Verified on mac-daddy (test copy,
+2026-10-27, MIRAGE_TEST_LOCK_TYPE: three keys and three Deletes, never Return): video at 28 fps at 3200x1800, the first
+picture change 1-21 ms after five of the six keys (97 ms for one), the viewer matching the host's own frames (sampled every
+200 ms) in every cell throughout. Before this, the compositor model's desktop capture went on
 showing the wallpaper and Finder's desktop icons behind mac-daddy's lock screen, and gray where nothing was captured.
 
 ### 3.0 M-FIVE: The first five seconds (milestone, phrz 2026-10-21; supersedes the connect sequence elsewhere)
