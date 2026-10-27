@@ -157,6 +157,15 @@ In the compositor model nothing is ever baked:
   covered where a window is in front, never baked into the desktop. `MIRAGE_TEST_FALLBACK=<app name>` forces it for that
   app's windows.
 
+**While the host is locked** (phrz, 2026-10-28): the viewer shows the lock screen as macOS draws it, whole and current,
+never anything beneath it. Every capture, whatever its source (the compositor's desktop, the overlay, the display minus
+layers), switches to the whole display, minus only the curtain (down while locked anyway), as soon as the streamer sees
+the lock (`ScreenCapturer.setLocked`, `FilterPlan.wholeDisplay`); frames captured during the switch are dropped; window
+layers pause and the overlay is not shown; the display layer goes out after a full diff as one keyframe, so the viewer
+presents one full frame of the lock screen, never a mix. A stream that starts while the host is locked starts on the whole
+display (no warm desktop frame). On unlock the same in reverse. Before this, the compositor model's desktop capture went on
+showing the wallpaper and Finder's desktop icons behind mac-daddy's lock screen, and gray where nothing was captured.
+
 ### 3.0 M-FIVE: The first five seconds (milestone, phrz 2026-10-21; supersedes the connect sequence elsewhere)
 
 phrz, connecting over a ~20 Mbps café link (seam design): "I stared at a lossy page for far too long, then all the windows

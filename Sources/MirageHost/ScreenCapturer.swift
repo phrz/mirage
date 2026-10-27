@@ -117,7 +117,8 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         lastRequested = excluding
         let gen = CurtainExclusion.generation
         let filter: SCContentFilter
-        if source == .desktop { let (f, ex) = try await Self.desktopFilterAndExcluded(t.display); filter = f; setDesktopExcluded(ex) }
+        if Self.filterPlan(source: source, locked: locked) == .wholeDisplay { filter = try await Self.displayFilter(t.display, excluding: []); clearDesktopExcluded() }
+        else if source == .desktop { let (f, ex) = try await Self.desktopFilterAndExcluded(t.display); filter = f; setDesktopExcluded(ex) }
         else { filter = try await Self.displayFilter(t.display, excluding: excluding) }
         let config = configuration(for: t, maxFPS: maxFPS)
         let s = SCStream(filter: filter, configuration: config, delegate: self)
@@ -202,7 +203,8 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 let gen = CurtainExclusion.generation
                 do {
                     // Bounded: an update that never returns must not hold every later exclusion back (applying stays true).
-                    let f = try await Self.displayFilter(t.display, excluding: want)
+                    // Locked: the whole display whatever the wish (kept for the unlock).
+                    let f = try await Self.displayFilter(t.display, excluding: self.locked ? [] : want)
                     try await Self.bounded(seconds: 3, { try await stream.updateContentFilter(f) }, late: { _ in })
                     self.failures = 0
                     self.excluded = want
@@ -277,6 +279,50 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private var _desktopExcluded: Set<UInt32>? = nil
     var desktopExcluded: Set<UInt32>? { excludedLock.lock(); defer { excludedLock.unlock() }; return _desktopExcluded }
     private func setDesktopExcluded(_ s: Set<UInt32>) { excludedLock.lock(); _desktopExcluded = Self.testDesktopInclude ? nil : s; excludedLock.unlock() }
+    private func clearDesktopExcluded() { excludedLock.lock(); _desktopExcluded = nil; excludedLock.unlock() }
+
+    // MARK: The locked screen (phrz, 2026-10-28)
+
+    /// What a capture's filter is: the whole display (minus the curtain), the desktop alone, or the display minus its window
+    /// layers. While the host's screen is locked it is always the whole display, whatever the source: the lock screen is
+    /// what the viewer must see, never the desktop beneath it (a desktop source showed the wallpaper and Finder's icons
+    /// behind mac-daddy's lock screen). Pure, for tests.
+    enum FilterPlan: Equatable { case wholeDisplay, desktop, displayExcludingLayers }
+    static func filterPlan(source: Source, locked: Bool) -> FilterPlan {
+        if locked { return .wholeDisplay }
+        return source == .desktop ? .desktop : .displayExcludingLayers
+    }
+    private(set) var locked = false
+    /// Between a lock switch's start and its filter being in force: frames are dropped (one from the old filter would show
+    /// the desktop beneath the lock screen, or the lock screen after the unlock).
+    private var switchingLock = false
+    private(set) var lockDropped = 0
+    /// Before `start`: the host is locked already, so the first filter is the whole display.
+    func presetLocked(_ on: Bool) { filterLock.lock(); locked = on; filterLock.unlock() }
+    /// Switches to the whole display while locked, back to this source's own filter on unlock; the first frame after it is
+    /// delivered whole (`forceNextFrame`). `done` once the filter is in force (or the switch failed).
+    func setLocked(_ on: Bool, log: @escaping (String) -> Void, done: (@Sendable () -> Void)? = nil) {
+        filterLock.lock(); let changed = locked != on; locked = on; if changed { switchingLock = true }; filterLock.unlock()
+        guard changed, let stream, let t = target else { filterLock.lock(); switchingLock = false; filterLock.unlock(); done?(); return }
+        let src = source
+        Task {
+            do {
+                let f: SCContentFilter
+                switch Self.filterPlan(source: src, locked: on) {
+                case .wholeDisplay: f = try await Self.displayFilter(t.display, excluding: []); self.clearDesktopExcluded()
+                case .desktop: let (df, ex) = try await Self.desktopFilterAndExcluded(t.display); f = df; self.setDesktopExcluded(ex)
+                case .displayExcludingLayers:
+                    self.filterLock.lock(); let want = self.lastRequested ?? self.excluded; self.filterLock.unlock()
+                    f = try await Self.displayFilter(t.display, excluding: want)
+                }
+                try await Self.bounded(seconds: 3, { try await stream.updateContentFilter(f) }, late: { _ in })
+                log("\(src) capture: \(on ? "screen locked: the whole display (the lock screen)" : "screen unlocked: its own filter again")")
+            } catch { log("\(src) capture: the lock switch failed: \(error)") }
+            self.queue.async { self.forceNextFrame = true }
+            self.filterLock.lock(); self.switchingLock = false; self.filterLock.unlock()
+            done?()
+        }
+    }
 
     /// The desktop alone: the display minus every window at the normal level or above, from one catalog sample (the window
     /// ids it leaves out are kept in `desktopExcluded`; the streamer drops desktop frames while a window it shows is not among
@@ -298,9 +344,14 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         Task {
             let gen = CurtainExclusion.generation
             do {
-                let (f, ex) = try await Self.desktopFilterAndExcluded(t.display)
-                try await Self.bounded(seconds: 3, { try await stream.updateContentFilter(f) }, late: { _ in })
-                self.setDesktopExcluded(ex)
+                if self.locked {
+                    let f = try await Self.displayFilter(t.display, excluding: [])
+                    try await Self.bounded(seconds: 3, { try await stream.updateContentFilter(f) }, late: { _ in })
+                } else {
+                    let (f, ex) = try await Self.desktopFilterAndExcluded(t.display)
+                    try await Self.bounded(seconds: 3, { try await stream.updateContentFilter(f) }, late: { _ in })
+                    self.setDesktopExcluded(ex)
+                }
                 self.filterLock.lock(); self.curtainGen = max(self.curtainGen, gen); self.filterLock.unlock(); done?(true)
             } catch { log("desktop filter update failed: \(error)"); done?(false) }
         }
@@ -348,6 +399,8 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
         // The curtain (DESIGN §3.12): while it is up, nothing from a filter built before its windows were left out goes on.
         if CurtainExclusion.active { filterLock.lock(); let stale = curtainGen < CurtainExclusion.generation; filterLock.unlock(); if stale { curtainDropped += 1; return } }
+        filterLock.lock(); let switching = switchingLock; filterLock.unlock()
+        if switching { lockDropped += 1; return }
         guard type == .screen, sb.isValid,
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let statusRaw = attachments.first?[.status] as? Int, let status = SCFrameStatus(rawValue: statusRaw), status == .complete,

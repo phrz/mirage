@@ -769,7 +769,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// pool's running desktop capture is adopted when there is one (no ScreenCaptureKit start), with its latest frame.
     private func startDesktop(_ req: ControlMessage.StreamRequest, _ t: ScreenCapturer.Target, compositor comp: Bool, excluding: [SCWindow], forceFirst: Bool = false) async throws -> (ScreenCapturer, CVPixelBuffer?) {
         let onFrame: (CVPixelBuffer, UInt64, [PixelRect]) -> Void = { [weak self] pb, nanos, dirty in self?.queue.async { self?.captured(pb, nanos, dirtyRects: dirty, layerID: 0) } }
-        if comp, let (warm, last) = queue.sync(execute: { WarmPool.shared.takeDisplay(.desktop, displayID: t.display.displayID) }) {
+        // A stream starting while the host is locked: the whole display from its first frame (no warm desktop frame, which
+        // would be the desktop beneath the lock screen).
+        let lockedNow = InputInjector.consoleLocked()
+        if comp, !lockedNow, let (warm, last) = queue.sync(execute: { WarmPool.shared.takeDisplay(.desktop, displayID: t.display.displayID) }) {
             do {
                 _ = try await warm.adopt(req, target: t, onFrame: onFrame)
                 log("desktop: warm capture adopted\(last == nil ? " (no frame yet)" : "")")
@@ -779,6 +782,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let cap = ScreenCapturer(queue: queue)
         cap.forceNextFrame = forceFirst
         if comp { cap.source = .desktop }   // the compositor model: the desktop alone, never an app window
+        cap.presetLocked(lockedNow)
         _ = try await cap.start(req, target: t, excluding: excluding, onFrame: onFrame)
         return (cap, nil)
     }
@@ -1485,6 +1489,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         return out
     }
 
+    /// The lock screen whole (phrz, 2026-10-28): while the host is locked every capture is the whole display (minus the
+    /// curtain, which is down while locked), never the desktop beneath it; window layers pause (reconcileLayers) and the
+    /// overlay is not shown. The display layer goes out whole: a keyframe after a full diff, so the viewer presents one full
+    /// frame of the lock screen, never a mix with the desktop it held; on unlock the same, back to the desktop and layers.
+    /// Frames captured during the switch are dropped (ScreenCapturer.setLocked).
+    private func lockSwitch(_ locked: Bool) {
+        for cap in [capturer, overlay, fallbackCapture].compactMap({ $0 }) { cap.setLocked(locked, log: log) }
+        if let d = display { d.forceFullDiff = true; d.wantKeyframe = true }
+    }
+
     /// Creates, resizes, stops and reprioritises window layers after a window-list sample; computes
     /// occlusion; keeps the display stream's exclusion list in step with the layers the viewer shows.
     private func reconcileLayers(_ s: WindowTracker.Sample, now: UInt64) {
@@ -1496,6 +1510,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             screenLocked = signals.locked
             log(screenLocked ? "screen locked (\(signals.description)): window layers paused, the display shows the lock screen" : "screen unlocked: window layers resume")
             lastHostStatusNanos = 0   // announce it at the next status tick
+            lockSwitch(screenLocked)
         }
         let planned = screenLocked ? [] : plannedLayers(in: s.windows, displayPixels: t.pixelWidth * t.pixelHeight)
         for w in planned { if let f = plannedFrames[w.id], f != w.frame { recentFrames.append((f, now)) } }
