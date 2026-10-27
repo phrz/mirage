@@ -102,12 +102,25 @@ public enum UpdateHealth {
 
     /// What a healthy host has shown (DESIGN §3.10): the QUIC listener is ready, the local control socket is up, and a
     /// capture probe returned a frame or said exactly which grant is missing.
+    ///
+    /// With every display asleep there is nothing to capture (green-machine, 2026-10-27: SCShareableContent listed no
+    /// display for 5 min and a good build rolled back; the Automatic policy's night window always meets this). Then the
+    /// capture check is deferred (`captureDeferred`), health is listener and control, and the probe runs at the next wake.
+    /// With a display awake the capture stays mandatory.
     public struct Checks: Equatable, Sendable {
         public var listener = false
         public var control = false
         public var capture: String?
+        public var captureDeferred: String?
         public init() {}
-        public var healthy: Bool { listener && control && capture != nil }
+        public var healthy: Bool { listener && control && (capture != nil || captureDeferred != nil) }
+    }
+
+    /// What the capture probe does after a failed attempt: retry while a display is awake (the capture is mandatory then),
+    /// defer while none is (nothing to capture; never wake one for the check).
+    public enum CaptureFailure: Equatable, Sendable { case retry, deferAsleep }
+    public static func onCaptureFailure(noDisplay: Bool, allDisplaysAsleep: Bool) -> CaptureFailure {
+        noDisplay || allDisplaysAsleep ? .deferAsleep : .retry
     }
 
     static func standardized(_ p: String) -> String { URL(fileURLWithPath: p).standardizedFileURL.resolvingSymlinksInPath().path }

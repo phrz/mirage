@@ -146,6 +146,12 @@ final class UpdateHealthTests: XCTestCase {
         XCTAssertFalse(c.healthy, "the capture probe has not reported")
         c.capture = "Screen Recording missing (no frame)"
         XCTAssertTrue(c.healthy, "a probe that names the missing grant counts")
+        var asleep = UpdateHealth.Checks()
+        asleep.listener = true; asleep.control = true; asleep.captureDeferred = "display asleep"
+        XCTAssertTrue(asleep.healthy, "every display asleep: listener and control decide")
+        XCTAssertEqual(UpdateHealth.onCaptureFailure(noDisplay: true, allDisplaysAsleep: false), .deferAsleep, "green-machine's noDisplay")
+        XCTAssertEqual(UpdateHealth.onCaptureFailure(noDisplay: false, allDisplaysAsleep: true), .deferAsleep)
+        XCTAssertEqual(UpdateHealth.onCaptureFailure(noDisplay: false, allDisplaysAsleep: false), .retry, "a display awake: the capture is mandatory")
     }
 }
 

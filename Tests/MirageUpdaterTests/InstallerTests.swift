@@ -99,6 +99,40 @@ final class InstallerTests: XCTestCase {
         if case .nothing(.upToDate) = try await updater(running: m.mirageVersion).install() {} else { XCTFail("up to date") }
     }
 
+    /// green-machine, 2026-10-27: every display asleep through the trial. The capture check is deferred, the build commits
+    /// on listener and control, and the capture after the wake lands in the update's record; a failure then does not roll
+    /// back. With a display awake and the capture never working, it still rolls back at the deadline.
+    func testADisplayAsleepCommitsAndAnAwakeFailureStillRollsBack() async throws {
+        let m = try publish(ver(483))
+        guard case .swapped(let p, _) = try await updater().install() else { return XCTFail("expected a swap") }
+        let exits = Exits()
+        let h = HostHealth(paths: paths, running: m.mirageVersion, logFile: nil, log: { _ in }, exitProcess: { exits.n += 1 })
+        XCTAssertTrue(h.launch())
+        h.passed(.listener); h.passed(.control)
+        h.passed(.captureDeferred("display asleep"))
+        XCTAssertNil(Installer(paths: paths).readPending(), "committed with the capture deferred")
+        let r = Installer(paths: paths).readResult()
+        XCTAssertEqual(r?.outcome, .committed)
+        XCTAssertTrue(r?.message.contains("capture check deferred: display asleep") ?? false, r?.message ?? "")
+        h.checkDeadline(p, now: p.deadline.addingTimeInterval(1))
+        XCTAssertEqual(exits.n, 0, "not rolled back")
+        h.capturedAfterWake("Screen Recording stopped working", ok: false)
+        XCTAssertTrue(Installer(paths: paths).readResult()?.message.contains("capture FAILED after wake") ?? false)
+        XCTAssertEqual(installed(), 483, "a committed build stays")
+
+        // A display awake, the capture never works: no commit, rolled back at the deadline.
+        let m2 = try publish(ver(490))
+        guard case .swapped(let p2, _) = try await updater(running: ver(483)).install() else { return XCTFail("expected a swap") }
+        let h2 = HostHealth(paths: paths, running: m2.mirageVersion, logFile: nil, log: { _ in }, exitProcess: { exits.n += 1 })
+        XCTAssertTrue(h2.launch())
+        h2.passed(.listener); h2.passed(.control)
+        XCTAssertNotNil(Installer(paths: paths).readPending(), "no commit without the capture")
+        h2.checkDeadline(p2, now: p2.deadline.addingTimeInterval(1))
+        XCTAssertEqual(exits.n, 1)
+        XCTAssertEqual(Installer(paths: paths).readResult()?.outcome, .rolledBack)
+        XCTAssertEqual(installed(), 483)
+    }
+
     /// The broken-build test as pure files: a build that exits in main is started three times, the third start swaps the
     /// previous bundle back, and the build is skipped from then on.
     func testABuildThatNeverCommitsRollsBackOnItsThirdStart() async throws {

@@ -211,7 +211,8 @@ public final class HostHealth: @unchecked Sendable {
         }
     }
 
-    public enum Check: Sendable { case listener, control, capture(String) }
+    /// `captureDeferred`: every display asleep; the capture probe runs at the next wake (`capturedAfterWake`).
+    public enum Check: Sendable { case listener, control, capture(String), captureDeferred(String) }
 
     /// One health check passed; the last one commits.
     public func passed(_ c: Check) {
@@ -220,6 +221,7 @@ public final class HostHealth: @unchecked Sendable {
         case .listener: checks.listener = true
         case .control: checks.control = true
         case .capture(let detail): checks.capture = detail
+        case .captureDeferred(let why): checks.captureDeferred = why
         }
         let commit = checks.healthy && !committed && pending != nil
         if commit { committed = true }
@@ -227,12 +229,24 @@ public final class HostHealth: @unchecked Sendable {
         lock.unlock()
         if commit, let p {
             let secs = Date().timeIntervalSince(p.started)
-            log("update committed \(p.from.build) → \(p.to.build) (\(p.from.display) → \(p.to.display), \(String(format: "%.1f", secs)) s after the swap; capture: \(checks.capture ?? ""))")
-            finish(p, outcome: .committed, message: "committed \(String(format: "%.1f", secs)) s after the swap", skip: false)
+            let capture = checks.capture ?? "check deferred: \(checks.captureDeferred ?? "")"
+            log("update committed \(p.from.build) → \(p.to.build) (\(p.from.display) → \(p.to.display), \(String(format: "%.1f", secs)) s after the swap; capture: \(capture))")
+            finish(p, outcome: .committed, message: "committed \(String(format: "%.1f", secs)) s after the swap"
+                   + (checks.capture == nil ? "; capture check deferred: \(checks.captureDeferred ?? "")" : ""), skip: false)
             var s = UpdateSettings.load(paths.settings)
             s.identity = SigningIdentity.of(bundle: paths.app)
             try? s.save(paths.settings)
         }
+    }
+
+    /// The deferred capture probe ran (the display woke, or a session started): its result goes into the update's record,
+    /// which the Welcome reports. A committed build is never rolled back for it.
+    public func capturedAfterWake(_ detail: String, ok: Bool) {
+        log("update health: capture check after wake \(ok ? "passed" : "FAILED"): \(detail)")
+        let installer = self.installer
+        guard var r = installer.readResult(), r.outcome == .committed, r.to.build == running.build else { return }
+        r.message += ok ? "; capture after wake: \(detail)" : "; capture FAILED after wake: \(detail)"
+        try? installer.writeResult(r)
     }
 
     func scheduleDeadline(_ p: PendingUpdate) {
