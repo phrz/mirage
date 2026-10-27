@@ -134,6 +134,30 @@ final class FeedAPITests: XCTestCase {
         XCTAssertEqual(gh.count, 4, "the next process sends the ETag and reuses the assets")
     }
 
+    /// The file is merged, not overwritten: another process's channel stays; a stored pause is capped at 2 h.
+    func testTheCacheFileIsMergedAndAPauseIsCapped() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("mirage-releaseapi-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        var other = ReleaseAPI.Cache()
+        other.etags["beta"] = "\"b1\""
+        other.assets["beta"] = [.init(id: 7, name: "manifest.json", url: "https://api.github.com/x/7")]
+        other.bytes["7"] = Data("beta".utf8)
+        try JSONEncoder().encode(other).write(to: file)
+        let gh = FakeGitHub(api: try Self.manifest(483), cdn: try Self.manifest(483))
+        _ = try await Feed(base: Feed.github, transport: gh.transport, api: ReleaseAPI(cacheFile: file)).check(.nightly, trust: Self.trust)
+        let merged = try XCTUnwrap(ReleaseAPI.readCache(file))
+        XCTAssertEqual(merged.etags["beta"], "\"b1\"", "the other process's channel stays")
+        XCTAssertEqual(merged.bytes["7"], Data("beta".utf8))
+        XCTAssertNotNil(merged.etags["nightly"])
+        // A pause far in the future (a clock change) is read as at most 2 h.
+        var paused = merged; paused.pausedUntil = Date().addingTimeInterval(30 * 86_400)
+        try JSONEncoder().encode(paused).write(to: file)
+        let api = ReleaseAPI(cacheFile: file)
+        _ = try? await api.files(channel: .nightly, names: ["manifest.json"], transport: gh.transport)
+        let p = await api.pausedUntil
+        XCTAssertLessThanOrEqual(try XCTUnwrap(p), Date().addingTimeInterval(2 * 3600 + 5))
+    }
+
     /// A local or test feed never calls GitHub.
     func testALocalFeedHasNoAPI() {
         XCTAssertNil(Feed(base: URL(fileURLWithPath: "/tmp/feed", isDirectory: true)).api)

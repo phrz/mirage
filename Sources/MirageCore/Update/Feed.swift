@@ -111,31 +111,49 @@ public actor ReleaseAPI {
 
     public init(cacheFile: URL? = nil) { self.cacheFile = cacheFile }
 
-    private func load() {
+    /// A pause read from the file never reaches past this (a clock change or a bad header must not stop API use for long).
+    static let longestPause: TimeInterval = 2 * 3600
+    /// Channels this process read: only these overwrite the file's entries when saving.
+    private var touched: Set<UpdateChannel> = []
+
+    static func readCache(_ f: URL) -> Cache? {
+        guard let d = try? Data(contentsOf: f) else { return nil }
+        return try? JSONDecoder().decode(Cache.self, from: d)
+    }
+
+    private func load(now: Date = Date()) {
         guard !loaded else { return }
         loaded = true
-        guard let f = cacheFile, let d = try? Data(contentsOf: f), let c = try? JSONDecoder().decode(Cache.self, from: d) else { return }
+        guard let f = cacheFile, let c = Self.readCache(f) else { return }
         for (k, v) in c.etags { if let ch = UpdateChannel(rawValue: k) { etags[ch] = v } }
         for (k, v) in c.assets { if let ch = UpdateChannel(rawValue: k) { assets[ch] = v } }
         for (k, v) in c.bytes { if let id = Int(k) { bytes[id] = v } }
-        pausedUntil = c.pausedUntil
+        pausedUntil = c.pausedUntil.map { min($0, now.addingTimeInterval(Self.longestPause)) }
     }
 
-    private func save() {
+    /// Merged with the file as it is now (another process may have written it since this one read it): this process's
+    /// channels win, the others stay, the assets' bytes follow the assets still listed, and the later pause stands.
+    private func save(now: Date = Date()) {
         guard let f = cacheFile else { return }
-        var c = Cache()
-        for (k, v) in etags { c.etags[k.rawValue] = v }
-        for (k, v) in assets { c.assets[k.rawValue] = v }
+        var c = Self.readCache(f) ?? Cache()
+        for ch in touched {
+            c.etags[ch.rawValue] = etags[ch]
+            c.assets[ch.rawValue] = assets[ch]
+        }
         for (k, v) in bytes { c.bytes[String(k)] = v }
-        c.pausedUntil = pausedUntil
+        let live = Set(c.assets.values.flatMap { $0.map { String($0.id) } })
+        c.bytes = c.bytes.filter { live.contains($0.key) }
+        let pauses = [c.pausedUntil, pausedUntil].compactMap { $0 }.filter { $0 > now }
+        c.pausedUntil = pauses.max().map { min($0, now.addingTimeInterval(Self.longestPause)) }
         guard let d = try? JSONEncoder().encode(c) else { return }
         try? d.write(to: f, options: .atomic)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: f.path)
     }
 
     public func files(channel: UpdateChannel, names: [String], transport: Feed.Transport, now: Date = Date()) async throws -> [String: Data] {
-        load()
-        defer { save() }
+        load(now: now)
+        touched.insert(channel)
+        defer { save(now: now) }
         if let p = pausedUntil, now < p { throw UpdateError.feed("GitHub API rate limit: paused until \(ISO8601DateFormatter().string(from: p))") }
         var req = Self.request(Self.base.appendingPathComponent("channel-\(channel.rawValue)"), accept: "application/vnd.github+json")
         if let e = etags[channel], assets[channel] != nil { req.setValue(e, forHTTPHeaderField: "If-None-Match") }
