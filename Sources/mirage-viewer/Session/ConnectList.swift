@@ -86,6 +86,7 @@ struct PairedHost: Identifiable, Equatable {
             rows.append(.init(label: "Version", value: "Mirage \(v.display)"))
             rows.append(.init(label: "Channel", value: v.channel.map { $0.rawValue.capitalized } ?? "Local build"))
         }
+        if case .updateAvailable(_, let to) = update { rows.append(.init(label: "Available", value: "Mirage \(to.display)")) }
         switch policy {
         case .automatic?: rows.append(.init(label: "Updates", value: "Automatically"))
         case .ask?: rows.append(.init(label: "Updates", value: "When asked"))
@@ -129,9 +130,11 @@ enum ConnectList {
         }
     }
 
-    /// From the store (MIRAGE_TEST_STORE for a throwaway one) and the recent list in `defaults`, with each Mac's own icon.
-    static func load(store: Store? = try? Store(), defaults: UserDefaults = .standard) -> [PairedHost] {
-        let known = (try? store?.knownHosts()) ?? [:]
+    /// From the store (MIRAGE_TEST_STORE for a throwaway one) and the recent list in `defaults`, with each Mac's own icon,
+    /// and the newest build each one is offered (its own report, or this viewer's verified feed check: `ViewerFeed`).
+    static func load(store: Store? = try? Store(), defaults: UserDefaults = .standard, now: Date = Date()) -> [PairedHost] {
+        let feed = ViewerFeed.verified(store?.viewerFeed() ?? [:], now: now)
+        let known = ((try? store?.knownHosts()) ?? [:]).mapValues { ViewerFeed.applying(feed, to: $0) }
         return hosts(known: known, recent: ViewerSettings.recentHosts(defaults)).map { h in
             var h = h
             if let id = known[h.alias]?.hostID, let icon = store?.hostIcon(hostID: id) { h.icon = icon.png256 ?? icon.png128 }
@@ -866,5 +869,62 @@ enum UpdateOutcomeNotice: Equatable {
                                     message: end.message + ". It keeps the update once its checks pass, and rolls back by itself if they fail."))
         default: return .quiet
         }
+    }
+}
+
+/// The viewer's own feed checks (`ViewerFeed`): each channel its paired hosts follow, on launch and when a list appears or
+/// the app comes forward (at most every 10 min), and hourly; a failure is quiet and backs off (5 min doubling to an
+/// hour, with jitter). GitHub's unauthenticated API allows 60 requests an hour per address, and an unchanged head costs
+/// none (its ETag), so this cadence leaves the hosts theirs.
+@MainActor
+final class ViewerFeedCenter: ObservableObject {
+    static let shared = ViewerFeedCenter()
+    /// Bumped after a check that changed something: the lists reload.
+    @Published private(set) var revision = 0
+    var store: () -> Store? = { try? Store() }
+    var feed = Feed()
+    static let every: TimeInterval = 3600
+    static let atMostEvery: TimeInterval = 600
+    private var lastRun: Date?
+    private var backoff: TimeInterval = 0
+    private var loop: Task<Void, Never>?
+
+    /// A list appeared, or the app came forward (launch included).
+    func nudge(now: Date = Date()) {
+        if loop == nil {
+            loop = Task { [weak self] in
+                while !Task.isCancelled {
+                    await self?.checkAll()
+                    let wait = (self?.backoff ?? 0) > 0 ? self!.backoff : Self.every
+                    try? await Task.sleep(for: .seconds(wait * Double.random(in: 0.9...1.1)))
+                }
+            }
+            return
+        }
+        if let l = lastRun, now.timeIntervalSince(l) < max(Self.atMostEvery, backoff) { return }
+        Task { await checkAll() }
+    }
+
+    /// The channels the paired hosts follow.
+    static func channels(_ known: [String: Store.KnownHost]) -> Set<UpdateChannel> {
+        Set(known.values.compactMap { $0.hostVersion?.channel })
+    }
+
+    func checkAll(now: Date = Date()) async {
+        lastRun = now
+        guard let store = store() else { return }
+        let feed = self.feed
+        var failed = false, changed = false
+        for ch in Self.channels((try? store.knownHosts()) ?? [:]).sorted(by: { $0.rawValue < $1.rawValue }) {
+            do {
+                let (_, _, m, s) = try await feed.checkWithBytes(ch, trust: ManifestTrust(), now: now)
+                if store.viewerFeed()[ch]?.manifest != m { changed = true }
+                try store.saveViewerFeed(.init(manifest: m, signatures: s, checked: now), channel: ch)
+            } catch {
+                failed = true   // quiet: the hosts' own reports still stand
+            }
+        }
+        backoff = failed ? min(Self.every, max(300, backoff * 2)) : 0
+        if changed { revision += 1 }
     }
 }

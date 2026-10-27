@@ -183,6 +183,8 @@ public final class Store: @unchecked Sendable {
         /// DESIGN §3.12: the host's Curtain and Lock when finished settings, from its last Welcome.
         public var hostSettings: HostSettings?
         public var hostLockFailedAt: Date?
+        /// Its macOS version from its last Welcome ("26.1"), for a build's minOS. nil from older hosts.
+        public var hostOS: String?
         public var hostStreaming: Bool?
         public var hostProtocol: Int?
         public var hostMinProtocol: Int?

@@ -48,15 +48,22 @@ public struct Feed: Sendable {
     /// The channel head, verified: through the API first (fresh), else the download URL. A head from the API that does not
     /// verify is not trusted either: the download URL is tried before giving up.
     public func check(_ channel: UpdateChannel, trust: ManifestTrust, now: Date = Date()) async throws -> (VerifiedManifest, URL) {
+        let (v, url, _, _) = try await checkWithBytes(channel, trust: trust, now: now)
+        return (v, url)
+    }
+
+    /// `check`, with the bytes that verified (a viewer keeps them and verifies them again at each use).
+    public func checkWithBytes(_ channel: UpdateChannel, trust: ManifestTrust, now: Date = Date()) async throws -> (VerifiedManifest, URL, Data, Data) {
         let mu = manifestURL(channel)
         if let api, let files = try? await api.files(channel: channel, names: ["manifest.json", "manifest.sigs.json"], transport: transport),
            let m = files["manifest.json"], let sg = files["manifest.sigs.json"],
            let v = try? ManifestVerifier.verify(manifest: m, signatures: sg, trust: trust, channel: channel, now: now) {
-            return (v, mu)
+            return (v, mu, m, sg)
         }
         async let m = Feed.fetch(mu, transport: transport)
         async let s = Feed.fetch(signaturesURL(channel), transport: transport)
-        return (try ManifestVerifier.verify(manifest: try await m, signatures: try await s, trust: trust, channel: channel, now: now), mu)
+        let (md, sd) = (try await m, try await s)
+        return (try ManifestVerifier.verify(manifest: md, signatures: sd, trust: trust, channel: channel, now: now), mu, md, sd)
     }
 
     /// A small file over HTTPS (or file:// for a local feed). No cache: a check must see the current head.

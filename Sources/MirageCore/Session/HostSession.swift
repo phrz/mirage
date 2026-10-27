@@ -348,7 +348,7 @@ public enum HostSession {
                                              hostStreaming: streamingElsewhere, minProtocolVersion: Mirage.minProtocolVersion,
                                              hostIcon: HostIcon.forViewer(features: hello.features, cachedHash: hello.hostIconHash, icon: ctx.hostIcon),
                                              hostSettings: HostSettings.load(from: ctx.store.url(HostSettings.fileName)),
-                                             lockFailedAt: HostLockStatus.lastFailure)))
+                                             lockFailedAt: HostLockStatus.lastFailure, hostOS: ViewerFeed.osString(ProcessInfo.processInfo.operatingSystemVersion))))
         ctx.welcomed?()
         if quiet {
             // A status probe: one line per device every 10 min at most, no timings.

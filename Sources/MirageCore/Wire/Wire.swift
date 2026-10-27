@@ -330,7 +330,8 @@ public enum ControlMessage: Codable, Equatable {
         public init(hostName: String, sessionID: String, resumeToken: Data? = nil, resumed: Bool? = nil, hostBuild: String? = nil, hostModel: String? = nil, hostFamily: String? = nil,
                     hostVersion: MirageVersion? = nil, latestAvailable: MirageVersion? = nil, updatePolicy: UpdatePermission? = nil, protocolVersion: Int? = nil,
                     features: [String]? = nil, updateResult: UpdateStatus? = nil, hostStreaming: Bool? = nil, minProtocolVersion: Int? = nil,
-                    hostIcon: HostIcon? = nil, hostSettings: HostSettings? = nil, lockFailedAt: Date? = nil) {
+                    hostIcon: HostIcon? = nil, hostSettings: HostSettings? = nil, lockFailedAt: Date? = nil, hostOS: String? = nil) {
+            self.hostOS = hostOS
             self.hostName = hostName; self.sessionID = sessionID; self.resumeToken = resumeToken; self.resumed = resumed; self.hostBuild = hostBuild
             self.hostModel = hostModel; self.hostFamily = hostFamily
             self.hostVersion = hostVersion; self.latestAvailable = latestAvailable; self.updatePolicy = updatePolicy; self.protocolVersion = protocolVersion
@@ -343,6 +344,8 @@ public enum ControlMessage: Codable, Equatable {
         public var minProtocolVersion: Int?
         /// The host's own icon, to a viewer that asked for it and holds another (or none). nil otherwise, and from older hosts.
         public var hostIcon: HostIcon?
+        /// The host's macOS version ("26.1"), so a viewer checks a build's minOS before offering it. nil from older hosts.
+        public var hostOS: String?
         /// DESIGN §3.12: the host's Curtain and Lock when finished settings, for Get Info. nil from older hosts.
         public var hostSettings: HostSettings?
         /// When "Lock when finished" last failed to lock the host; nil when it has not, and from older hosts.

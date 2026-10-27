@@ -514,6 +514,7 @@ struct ConnectView: View {
     /// The Mac whose removal waits for confirmation (right-click Remove…, or Delete on the selected row).
     @State private var removing: PairedHost?
     @ObservedObject private var notices = ListNotices.shared
+    @ObservedObject private var feedChecks = ViewerFeedCenter.shared
     let onConnect: (String, String?) -> Void
 
     init(hosts: [PairedHost], lastHost: String?, openAdd: Bool = false, onConnect: @escaping (String, String?) -> Void) {
@@ -557,7 +558,8 @@ struct ConnectView: View {
         }
         .onChange(of: updates.revision) { reload() }
         .onChange(of: probes.revision) { reload() }
-        .onAppear { probes.listAppeared() }
+        .onChange(of: feedChecks.revision) { reload() }
+        .onAppear { probes.listAppeared(); feedChecks.nudge() }
         .onDisappear { probes.listDisappeared() }
         .hostUpdatePrompt(updates)
     }

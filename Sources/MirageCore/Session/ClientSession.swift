@@ -103,6 +103,7 @@ public struct ClientSession {
             h.lastSeen = Date(); h.unreachableSince = nil; h.failedProbes = nil; h.refusal = nil
             h.triggerFeature = (welcome.features ?? []).contains(ControlMessage.Feature.updateTrigger)
             h.hostPolicy = welcome.updatePolicy
+            if let os = welcome.hostOS { h.hostOS = os }
             h.hostSettings = welcome.hostSettings; h.hostLockFailedAt = welcome.lockFailedAt   // (nil from an older host: unknown)
             h.hostStreaming = welcome.hostStreaming
             h.hostProtocol = welcome.protocolVersion; h.hostMinProtocol = welcome.minProtocolVersion

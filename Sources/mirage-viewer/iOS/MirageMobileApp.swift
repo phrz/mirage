@@ -123,6 +123,7 @@ struct ConnectScreen: View {
     @ObservedObject private var removal = HostRemovalCenter.shared
     @ObservedObject private var pairing = HostPairingCenter.shared
     @ObservedObject private var notices = ListNotices.shared
+    @ObservedObject private var feedChecks = ViewerFeedCenter.shared
     /// The new Mac's row, highlighted after pairing (a phone's list has no selection).
     @State private var highlighted: String?
     /// The Mac whose Get Info sheet shows (long-press → Get Info).
@@ -192,6 +193,7 @@ struct ConnectScreen: View {
         .onChange(of: probes.revision) { reload() }
         .onChange(of: removal.revision) { reload() }
         .onChange(of: pairing.revision) { reload() }
+        .onChange(of: feedChecks.revision) { reload() }
         // A passing note (a Mac ready after pairing, an update done): gone after a few seconds.
         .safeAreaInset(edge: .bottom) {
             if let n = notices.note { Text(n).font(.footnote).foregroundStyle(.secondary).padding(.horizontal).padding(.bottom, 8) }
@@ -204,9 +206,9 @@ struct ConnectScreen: View {
             Text(a.message)
         }
         // Status probes (U7): while this list shows, and when the app comes back to the foreground with it showing.
-        .onAppear { probes.listAppeared() }
+        .onAppear { probes.listAppeared(); feedChecks.nudge() }
         .onDisappear { probes.listDisappeared() }
-        .onChange(of: scenePhase) { if scenePhase == .active { probes.appBecameActive() } }
+        .onChange(of: scenePhase) { if scenePhase == .active { probes.appBecameActive(); feedChecks.nudge() } }
         .hostUpdatePrompt(updates)
         .sheet(item: $infoHost) { h in HostInfoSheet(host: h) }
     }
