@@ -322,6 +322,13 @@ final class HostUpdateCenter: ObservableObject {
         }
     }
 
+    /// A probe after the restart decides a row's update the trigger's own wait may not have seen end: it runs the target.
+    func reconcile(_ alias: String, record: Store.KnownHost?) {
+        guard let s = status[alias], !s.isFinal, let t = s.to, let v = record?.hostVersion, v.build >= t.build else { return }
+        status[alias] = nil
+        revision += 1
+    }
+
     /// The Macs' names while their updates run.
     private var names: [String: String] = [:]
     /// The row's line while an update runs (in place of its detail): one line, the whole way through.
@@ -450,6 +457,7 @@ final class HostProbeCenter: ObservableObject {
         let connect = connector(alias)
         probesRun += 1
         _ = await Task.detached { await HostProbe.probe(connect: connect, store: store, alias: alias) }.value
+        HostUpdateCenter.shared.reconcile(alias, record: (try? store.knownHosts())?[alias])
         revision += 1
     }
 }

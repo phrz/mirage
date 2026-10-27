@@ -333,8 +333,8 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertNotNil(try store.knownHosts()["mac-daddy"]?.unreachableSince)
     }
 
-    /// U6 review 6: a status never overwrites a step under way from this app's own update; a rollback reported after the
-    /// restart shows once.
+    /// U6 review 6: a status never overwrites a step under way from this app's own update; how an update this app did not
+    /// start ended is not shown (CLAUDE.md).
     @MainActor
     func testTheHostBarsStep() {
         let m = LocalHostUpdate()
@@ -350,12 +350,13 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertEqual(fresh.step, elsewhere)
         fresh.apply(event: nil, updating: nil, lastUpdate: nil)
         XCTAssertNil(fresh.step, "it goes when the host's update ends")
+        // An update this app did not start (Automatic, another device) says nothing when it ends, rollback included.
         let rolled = ControlMessage.UpdateStatus(phase: .rolledBack, message: "started 3 times", at: Date(timeIntervalSince1970: 100))
         fresh.apply(event: nil, updating: nil, lastUpdate: rolled)
-        XCTAssertEqual(fresh.step, rolled, "the rollback shows")
-        fresh.dismissStep()
-        fresh.apply(event: nil, updating: nil, lastUpdate: rolled)
-        XCTAssertNil(fresh.step, "once")
+        XCTAssertNil(fresh.step, "no note for an update the person didn't start")
+        let done = ControlMessage.UpdateStatus(phase: .done, message: "committed", at: Date(timeIntervalSince1970: 100))
+        fresh.apply(event: nil, updating: nil, lastUpdate: done)
+        XCTAssertNil(fresh.step)
     }
 
     /// Remove (phrz, 2026-10-26): an open session ends first; this device forgets the Mac (record, recents, last host)
@@ -632,6 +633,50 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertEqual(ManualUpdateAnswer.alert(for: done, running: v(529))?.message, "Mirage 0.1 (529) is the newest version available.")
         XCTAssertNil(ManualUpdateAnswer.alert(for: .init(phase: .failed, message: "x"), running: v(529)), "a failure shows in the card")
         XCTAssertNil(ManualUpdateAnswer.alert(for: .init(phase: .downloading, message: "x"), running: v(529)))
+    }
+
+    /// phrz-mbp-m4, 2026-10-27: the commit went out while the app was disconnected, and the card said "Updating…" forever.
+    /// Each status reconciles the step: the target running, or the host's record of the end, decides; a timeout ends it.
+    func testTheUpdateStepReconcilesWithTheHostsStatus() {
+        func v(_ b: Int) -> MirageVersion { MirageVersion(version: "0.1", build: b, commit: "c", channel: .nightly) }
+        let t0 = Date()
+        let restarting = ControlMessage.UpdateStatus(phase: .restarting, message: "Updating phrz-mbp-m4…", from: v(529), to: v(534), yours: true)
+        typealias R = UpdateReconcile
+        XCTAssertEqual(R.decide(step: restarting, started: t0, current: v(529), lastUpdate: nil, now: t0.addingTimeInterval(5)), .keep)
+        XCTAssertEqual(R.decide(step: restarting, started: t0, current: v(534), lastUpdate: nil, now: t0.addingTimeInterval(5)), .done, "it runs the target")
+        let committed = ControlMessage.UpdateStatus(phase: .done, message: "committed", from: v(529), to: v(534), at: t0.addingTimeInterval(1))
+        XCTAssertEqual(R.decide(step: restarting, started: t0, current: v(529), lastUpdate: committed, now: t0.addingTimeInterval(5)), .done)
+        let rolled = ControlMessage.UpdateStatus(phase: .rolledBack, message: "not healthy", from: v(529), to: v(534), at: t0.addingTimeInterval(200))
+        XCTAssertEqual(R.decide(step: restarting, started: t0, current: v(529), lastUpdate: rolled, now: t0.addingTimeInterval(201)), .show(rolled))
+        let older = ControlMessage.UpdateStatus(phase: .done, message: "x", from: v(520), to: v(525), at: t0.addingTimeInterval(-3600))
+        XCTAssertEqual(R.decide(step: restarting, started: t0, current: v(529), lastUpdate: older, now: t0.addingTimeInterval(5)), .keep, "an earlier update's record")
+        XCTAssertEqual(R.decide(step: restarting, started: t0, current: v(529), lastUpdate: nil, now: t0.addingTimeInterval(11 * 60)), .done, "a timeout")
+
+        // The model: its event step ends on the next status after a reconnect.
+        let m = LocalHostUpdate()
+        m.apply(event: restarting, updating: nil, lastUpdate: nil, now: t0)
+        XCTAssertNotNil(m.step)
+        m.apply(event: nil, updating: nil, lastUpdate: nil, current: v(529), now: t0.addingTimeInterval(3))
+        XCTAssertNotNil(m.step, "still updating")
+        m.apply(event: nil, updating: nil, lastUpdate: committed, current: v(534), now: t0.addingTimeInterval(6))
+        XCTAssertNil(m.step, "done: the card goes")
+
+        XCTAssertTrue(AppRelaunch.needed(running: 529, installed: 534))
+        XCTAssertFalse(AppRelaunch.needed(running: 534, installed: 534))
+        XCTAssertFalse(AppRelaunch.needed(running: 534, installed: nil))
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mirage-relaunch-\(UUID().uuidString)/Mirage.app")
+        defer { try? FileManager.default.removeItem(at: tmp.deletingLastPathComponent()) }
+        try? FileManager.default.createDirectory(at: tmp.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        (["CFBundleVersion": "534"] as NSDictionary).write(to: tmp.appendingPathComponent("Contents/Info.plist"), atomically: true)
+        XCTAssertEqual(AppRelaunch.installedBuild(of: tmp), 534)
+
+        // A remote row: a probe that finds the target running ends its "Updating…".
+        let c = HostUpdateCenter.shared
+        XCTAssertNil(c.line("nobody"))
+        var rec = Store.KnownHost(hostID: "g", hostName: "g", publicKey: Data(), endpoint: "g", pairedAt: Date())
+        rec.hostVersion = v(534)
+        c.reconcile("nobody", record: rec)
+        XCTAssertNil(c.line("nobody"))
     }
 
     /// Get Info on the Mac: one small window per Mac, "<host> Info", not resizable, brought forward when asked again.

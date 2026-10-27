@@ -29,6 +29,7 @@ final class HostMenu: NSObject, NSMenuDelegate {
     private var permissionPoll: Timer?
 
     override init() {
+        _ = AppRelaunch.runningBuild   // this process's build, read now
         store = try? Store()
         super.init()
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -200,7 +201,7 @@ final class HostMenu: NSObject, NSMenuDelegate {
             model.line = line
             model.canUpdate = can
             let status = self.status
-            model.apply(event: step, updating: status?.updating, lastUpdate: status?.lastUpdate)
+            model.apply(event: step, updating: status?.updating, lastUpdate: status?.lastUpdate, current: status?.currentVersion)
             model.updateNow = { [weak self] in self?.updateNow() }
             if let s = status {
                 model.running = s.currentVersion; model.reported = s.latestAvailable
@@ -209,8 +210,30 @@ final class HostMenu: NSObject, NSMenuDelegate {
             } else {
                 model.running = nil; model.reported = nil
             }
+            // The menu's "Updating this Mac…" follows the card's step.
+            if model.step.map({ $0.isFinal }) ?? true { self.updateStatus = nil }
         }
         refreshDot()
+        relaunchIfOlder()
+    }
+
+    /// Set by the app: whether a session is open, and how to relaunch.
+    var sessionOpen: () -> Bool = { false }
+    var relaunchApp: () -> Void = {}
+    private var relaunchAsked = false
+    /// After an update this app still runs the old binary: relaunch at once with no session open, else offer it in the card.
+    private func relaunchIfOlder() {
+        guard !relaunchAsked, let running = AppRelaunch.runningBuild, AppRelaunch.needed(running: running, installed: AppRelaunch.installedBuild()) else { return }
+        if sessionOpen() {
+            MainActor.assumeIsolated {
+                LocalHostUpdate.shared.relaunch = { [weak self] in self?.relaunchApp() }
+                LocalHostUpdate.shared.relaunchNeeded = true
+            }
+        } else {
+            relaunchAsked = true
+            AppLog.write("relaunching: this app is \(running), the installed bundle \(AppRelaunch.installedBuild() ?? 0)")
+            relaunchApp()
+        }
     }
 
     /// The dot means exactly what the card means: this Mac's own Mirage has an update to offer (the same rule).
@@ -652,9 +675,17 @@ final class LocalHostUpdate: ObservableObject {
     /// One place decides the bar's step (U6 review): an event from this app's update wins; a status never overwrites a
     /// step under way from an event; a running update elsewhere shows while it runs and goes with it; a rollback (or
     /// failure) the host reports after its restart shows once.
-    func apply(event: ControlMessage.UpdateStatus?, updating: ControlMessage.UpdateStatus?, lastUpdate: ControlMessage.UpdateStatus?) {
+    /// When this app's own update step began (for the reconcile's timeout).
+    private(set) var stepStarted: Date?
+    /// The app itself is older than the installed bundle (after an update) and a session is open: the card offers Relaunch.
+    @Published var relaunchNeeded = false
+    var relaunch: (() -> Void)?
+
+    func apply(event: ControlMessage.UpdateStatus?, updating: ControlMessage.UpdateStatus?, lastUpdate: ControlMessage.UpdateStatus?,
+               current: MirageVersion? = nil, now: Date = Date()) {
         if let e = event {
-            step = e.isFinal && e.phase == .done ? nil : e
+            if !e.isFinal, step == nil || step?.isFinal == true || stepFromStatus { stepStarted = now }
+            if step?.to != nil, e.to == nil, !e.isFinal { var k = e; k.to = step?.to; step = k } else { step = e.isFinal && e.phase == .done ? nil : e }
             stepFromStatus = false
             if e.isFinal { shownOutcome = e.at ?? Date() }
             return
@@ -663,10 +694,19 @@ final class LocalHostUpdate: ObservableObject {
             if step == nil || stepFromStatus || step?.isFinal == true { step = u; stepFromStatus = true }
             return
         }
-        if stepFromStatus, step?.isFinal == false { step = nil; stepFromStatus = false }
-        if let l = lastUpdate, [.rolledBack, .failed].contains(l.phase), step == nil, let at = l.at, shownOutcome.map({ at > $0 }) ?? true {
-            step = l; stepFromStatus = true; shownOutcome = at
+        // No update runs on the host now: this app's own step is reconciled with what the host says (its end may have come
+        // while this app was disconnected: phrz-mbp-m4, 2026-10-27, "Updating…" forever after the commit).
+        if !stepFromStatus, let s = step, !s.isFinal {
+            switch UpdateReconcile.decide(step: s, started: stepStarted, current: current, lastUpdate: lastUpdate, now: now) {
+            case .keep: return
+            case .done: step = nil; stepStarted = nil; return
+            case .show(let l): step = l; stepFromStatus = true; shownOutcome = l.at ?? now; return
+            }
         }
+        if stepFromStatus, step?.isFinal == false { step = nil; stepFromStatus = false }
+        // How an update this app did not start ended (Automatic, another device, while it was closed) says nothing
+        // (CLAUDE.md): the version and the dot show the new state.
+        _ = lastUpdate
     }
     func dismissStep() { if let at = step?.at { shownOutcome = at }; step = nil; stepFromStatus = false }
 }
@@ -680,7 +720,10 @@ struct LocalUpdateBar: View {
 
     var body: some View {
         Group {
-            if let step = model.step {
+            if model.relaunchNeeded, model.step == nil {
+                UpdateCardView(title: "Relaunch to finish updating", action: "Relaunch",
+                               onAction: { model.relaunch?() }, onClose: { model.relaunchNeeded = false })
+            } else if let step = model.step {
                 let failed = step.phase == .failed || step.phase == .rolledBack
                 // In place: "Updating Mirage…" the whole way; a failure keeps the host's reason until closed; done goes.
                 UpdateCardView(title: failed ? (step.phase == .rolledBack ? "Mirage kept its previous version" : "Mirage didn't update")
@@ -751,4 +794,44 @@ enum ManualUpdateAnswer {
         guard end.isFinal, end.phase == .done, end.notPublished != true, let running else { return nil }
         return UpdateCheckOutcome.upToDate(running).alert
     }
+}
+
+/// This app's own update step against the host's status, when the host runs no update (its events may have been missed).
+enum UpdateReconcile: Equatable {
+    case keep
+    case done
+    /// The host's failure or rollback, to show.
+    case show(ControlMessage.UpdateStatus)
+
+    /// How long a step may wait with no update running on the host and nothing else to decide it.
+    static let timeout: TimeInterval = 10 * 60
+
+    static func decide(step: ControlMessage.UpdateStatus, started: Date?, current: MirageVersion?, lastUpdate: ControlMessage.UpdateStatus?,
+                       now: Date) -> UpdateReconcile {
+        // The host's record of how an update ended, from after this step began (or for its target).
+        if let l = lastUpdate, l.isFinal {
+            let ours = (step.to != nil && l.to?.build == step.to?.build) || (started.map { s in (l.at ?? .distantPast) >= s.addingTimeInterval(-5) } ?? false)
+            if ours { return l.phase == .done ? .done : .show(l) }
+        }
+        // It runs the target (or newer): done.
+        if let t = step.to, let c = current, c.build >= t.build { return .done }
+        if let s = started, now.timeIntervalSince(s) > timeout { return .done }
+        return .keep
+    }
+}
+
+/// The app itself after an update: its own build older than the installed bundle's (the app keeps running the old binary
+/// until it is relaunched).
+enum AppRelaunch {
+    /// The installed bundle's build, read from its Info.plist on disk now.
+    static func installedBuild(of bundle: URL = Bundle.main.bundleURL) -> Int? {
+        guard let d = try? Data(contentsOf: bundle.appendingPathComponent("Contents/Info.plist")),
+              let p = try? PropertyListSerialization.propertyList(from: d, format: nil) as? [String: Any],
+              let v = p["CFBundleVersion"] as? String else { return nil }
+        return Int(v)
+    }
+    static func needed(running: Int, installed: Int?) -> Bool { (installed ?? 0) > running }
+    /// This process's own build: its bundle's Info.plist as read at launch (Bundle caches it), so a newer bundle on disk
+    /// does not change it.
+    static let runningBuild: Int? = (Bundle.main.infoDictionary?["CFBundleVersion"] as? String).flatMap { Int($0) }
 }

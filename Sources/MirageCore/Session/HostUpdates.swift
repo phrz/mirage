@@ -117,20 +117,13 @@ public enum HostProbe {
 public enum ResumeNotice {
     public static let within: TimeInterval = 10 * 60
 
+    /// Only an update under way now (the session's banner says "Updating <host>…"). How one ended while the viewer was away
+    /// says nothing (CLAUDE.md, 2026-10-27): done or on trial, the host simply runs its build; rolled back, it runs the
+    /// build it had, and nothing needs the person. The rows show the new state.
     public static func make(lastResult r: ControlMessage.UpdateStatus?, hostName: String, now: Date) -> ControlMessage.UpdateStatus? {
-        guard let r, r.phase != .unknown else { return nil }
+        guard let r, r.phase != .unknown, !r.isFinal, r.phase != .trial else { return nil }
         var n = r; n.yours = false
-        if !r.isFinal && r.phase != .trial { return n }   // under way now
-        guard let at = r.at else { return nil }
-        let age = now.timeIntervalSince(at)
-        guard age >= 0, age < within else { return nil }
-        let to = r.to.map { " \($0.display)" } ?? ""
-        switch r.phase {
-        case .done, .trial: n.message = "\(hostName) was updated to\(to) while you were away"
-        case .rolledBack: n.message = "\(hostName) tried to update to\(to) while you were away, and rolled back"
-        case .failed: return nil
-        default: break
-        }
+        n.message = "Updating \(hostName)…"
         return n
     }
 }

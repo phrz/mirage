@@ -133,6 +133,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let m = HostMenu()
             m.onConnectWindow = { [weak self] in MainActor.assumeIsolated { self?.openViewer() } }
             m.onQuit = { [weak self] in self?.requestQuit() }
+            m.sessionOpen = { [weak self] in self?.session != nil }
+            // A new instance of the installed (newer) app, then this one quits (a session ends first).
+            m.relaunchApp = {
+                let c = NSWorkspace.OpenConfiguration()
+                c.createsNewApplicationInstance = true; c.activates = false; c.arguments = ["--background"]
+                NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: c) { _, _ in
+                    DispatchQueue.main.async { NSApp.terminate(nil) }
+                }
+            }
             hostMenu = m
             // The update card reads this Mac's own channel too (its host's, as it reports it).
             MainActor.assumeIsolated { ViewerFeedCenter.shared.ownChannels = { LocalHostUpdate.shared.channel.map { [$0] } ?? [] } }
