@@ -408,7 +408,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     public func start(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         queue.sync { holdWarm(true) }
-        do { return try await startStream(req, output: output) } catch { queue.sync { holdWarm(false) }; throw error }
+        beginCurtain()   // before any capture exists: every filter built from here on leaves the curtain out
+        do { return try await startStream(req, output: output) } catch { queue.sync { holdWarm(false) }; endCurtain(stopped: true); throw error }
     }
     private func startStream(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         // Connect setup, concurrent where it can be (they ran one after the other: 1.26 s of a 20 Mbps connect on mac-daddy):
@@ -442,6 +443,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.setLive(true)
                     self.capturer = cap
                     self.compositor = comp; self.overlay = ov
+                    self.reapplyCurtainExclusion()
                     self.target = t
                     self.request = req
                     self.windows = tracker
@@ -582,6 +584,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.queue.async {
                     guard self.output != nil else { Task { await cap.stop(); await ov.stop() }; return }
                     self.capturer = cap; self.overlay = ov
+                    self.reapplyCurtainExclusion()
                     cap.onStop = { [weak self] err in self?.log("capture stopped: \(err.map { "\($0)" } ?? "ok")") }
                     self.ensureOverlayLayer()
                     self.feedWarmFrames(desktop: deskFrame, overlay: overlayFrame, t)
@@ -590,6 +593,54 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             } catch { self.log("connect setup: display capture failed after the early start: \(error)") }
         }
         return info
+    }
+    // MARK: Curtain (DESIGN §3.12)
+
+    private var curtainObserver: NSObjectProtocol?
+    private var curtainID: String { "streamer-\(ObjectIdentifier(self).hashValue)" }
+    /// A stream starts (or resumes): the session joins the curtain before any of its captures exists (the `curtain` tunable),
+    /// and this streamer re-applies its capture filters and acknowledges whenever the curtain's windows change. Until every
+    /// session has acknowledged, the curtain stays invisible; and a capture whose filter predates the curtain drops its frames.
+    private func beginCurtain() {
+        if curtainObserver == nil {
+            curtainObserver = NotificationCenter.default.addObserver(forName: Curtain.windowsChanged, object: nil, queue: nil) { [weak self] _ in
+                self?.queue.async { self?.reapplyCurtainExclusion() }
+            }
+        }
+        loadHostTunables()
+        Curtain.shared.sessionBegan(curtainID, enabled: hostTunables[.curtain] >= 0.5)
+    }
+    /// `stopped`: the session is over (stop), not suspended (local ownership of the Mac is kept across a suspend).
+    private func endCurtain(stopped: Bool) {
+        Curtain.shared.sessionEnded(curtainID, stopped: stopped)
+        if let o = curtainObserver { NotificationCenter.default.removeObserver(o); curtainObserver = nil }
+    }
+    /// On `queue`: every capture this streamer owns re-applies its filter with the curtain's current windows left out (the
+    /// display, overlay and fallback filters append them in ScreenCapturer.displayFilter; the desktop filter leaves out every
+    /// window above level 0 and the curtain's; window captures add them in their own filter), then the curtain hears this
+    /// session's acknowledgement for the generation. Called on every curtain change and wherever a capture is assigned.
+    private func reapplyCurtainExclusion() {
+        let gen = CurtainExclusion.generation
+        let log: (String) -> Void = { [weak self] in self?.log($0) }
+        let caps = [capturer, overlay, fallbackCapture].compactMap { $0 }
+        for l in layers.values { l.capturer?.refilterForCurtain() }
+        WarmPool.shared.curtainChanged()
+        let group = DispatchGroup()
+        nonisolated(unsafe) var allOK = true
+        for cap in caps {
+            group.enter()
+            cap.refilter(curtainGen: gen, log: log) { ok in self.queue.async { if !ok { allOK = false }; group.leave() } }
+        }
+        group.notify(queue: queue) { [weak self] in
+            guard let self else { return }
+            guard allOK else {
+                self.log("curtain: a capture filter failed to re-apply (generation \(gen)); retrying")
+                self.queue.asyncAfter(deadline: .now() + 0.3) { [weak self] in if CurtainExclusion.generation == gen { self?.reapplyCurtainExclusion() } }
+                return
+            }
+            if self.debugLayers { self.log("curtain: generation \(gen) left out of \(caps.count) display captures and \(self.layers.values.filter { $0.capturer != nil }.count) window captures") }
+            Curtain.shared.acknowledge(self.curtainID, generation: gen)
+        }
     }
     static let testHoldProvisionalMs = ProcessInfo.processInfo.environment["MIRAGE_TEST_HOLD_PROVISIONAL_MS"].flatMap(Int.init)
     private var provisionalSince: UInt64 = 0
@@ -1208,6 +1259,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Whatever was in flight is treated as lost: unacked tile messages have their rects queued for a
     /// lossless resend, unacked video frames are forgotten (the resume keyframe replaces them).
     public func suspend() async {
+        endCurtain(stopped: false)
         queue.sync { holdWarm(false) }
         queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.priorDeliveryNetwork) }   // the next connect starts there
         // The session is cut loose first (output, timers, captures detached), then the captures are stopped, each within 3 s:
@@ -1309,7 +1361,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Taken over from a connection the host had not yet noticed was dead: suspend that side first.
         if capturer != nil { await suspend() }
         queue.sync { holdWarm(true) }
-        do { return try await resumeStream(req, output: output) } catch { queue.sync { holdWarm(false) }; throw error }
+        beginCurtain()
+        do { return try await resumeStream(req, output: output) } catch { queue.sync { holdWarm(false) }; endCurtain(stopped: false); throw error }
     }
     private func resumeStream(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         await catalog.refreshNow()
@@ -1327,6 +1380,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.setLive(true)
                     self.capturer = cap
                     self.compositor = comp; self.overlay = ov
+                    self.reapplyCurtainExclusion()
                     self.ensureOverlayLayer()
                     self.ensureUnderlay(t)
                     if !self.fallbackLayers.isEmpty { self.ensureFallbackCapture() }
@@ -1371,6 +1425,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     public func stop() async {
+        endCurtain(stopped: true)
         queue.sync { holdWarm(false) }
         queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.priorDeliveryNetwork) }
         // Cut loose first, then stop the captures within 3 s each (suspend()).
@@ -1642,6 +1697,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // layer's first; no ScreenCaptureKit start to wait for.
         if let (cap, last) = WarmPool.shared.take(l.id) {
             l.capturer = cap
+            cap.refilterForCurtain()
             l.forceFullDiff = true
             cap.onStop = { [weak self, weak l] err in self?.queue.async {
                 guard let l, l.capturer === cap else { return }; l.capturer = nil; self?.log("layer \(l.id) capture stopped: \(err.map { "\($0)" } ?? "ok")")
@@ -1657,6 +1713,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }
         let cap = WindowCapturer(window: sc, display: display, pointFrame: pointFrame, width: l.width, height: l.height, fps: 10, queue: queue)
         l.capturer = cap
+        cap.refilterForCurtain()
         l.forceFullDiff = true
         cap.onStop = { [weak self, weak l] err in self?.queue.async {
             guard let l, l.capturer === cap else { return }; l.capturer = nil; self?.log("layer \(l.id) capture stopped: \(err.map { "\($0)" } ?? "ok")")
@@ -1769,7 +1826,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     static func displayShot(_ display: SCDisplay, width shotW: Int, height shotH: Int) async -> [UInt8]? {
         let c = SCStreamConfiguration()
         c.width = shotW; c.height = shotH; c.showsCursor = false
-        guard let img = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(display: display, excludingWindows: []), configuration: c) else { return nil }
+        let gen = CurtainExclusion.generation
+        guard let img = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(display: display, excludingWindows: CurtainExclusion.windows + CurtainExclusion.foreign), configuration: c),
+              !CurtainExclusion.stale(gen) else { return nil }
         var px = [UInt8](repeating: 0, count: shotW * shotH * 4)
         let ok = px.withUnsafeMutableBytes { buf -> Bool in
             guard let ctx = CGContext(data: buf.baseAddress, width: shotW, height: shotH, bitsPerComponent: 8, bytesPerRow: shotW * 4, space: CGColorSpaceCreateDeviceRGB(),
@@ -1941,7 +2000,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         Task { [weak self] in
             do {
                 _ = try await cap.start(req, target: t, excluding: []) { [weak self] pb, nanos, _ in self?.queue.async { self?.fallbackFrame(pb, nanos) } }
-                self?.queue.async { self?.fallbackCapture = cap; self?.fallbackStarting = false; self?.log("fallback capture started (full display)") }
+                self?.queue.async { self?.fallbackCapture = cap; self?.fallbackStarting = false; self?.log("fallback capture started (full display)"); self?.reapplyCurtainExclusion() }
             } catch { self?.queue.async { self?.fallbackStarting = false; self?.log("fallback capture failed: \(error)") } }
         }
     }

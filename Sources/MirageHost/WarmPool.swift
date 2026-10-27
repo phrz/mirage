@@ -45,6 +45,16 @@ public final class WarmPool: @unchecked Sendable {
 
     /// On the host queue. The running capture for `windowID` (the streamer adopts it and reconfigures it for its layer) and
     /// its latest frame, at the native scale the pool captures at.
+    /// The curtain (DESIGN §3.12) appeared, went or changed: every warm capture re-applies its filter with it left out (their
+    /// frames are dropped until then), and the frames kept so far are dropped, so none is adopted as a first frame.
+    public func curtainChanged() {
+        queue.async {
+            for k in Array(self.entries.keys) { self.entries[k]?.last = nil; self.entries[k]?.cap.refilterForCurtain() }
+            self.desk?.last = nil; self.overlay?.last = nil
+            let gen = CurtainExclusion.generation
+            for d in [self.desk?.cap, self.overlay?.cap].compactMap({ $0 }) { d.refilter(curtainGen: gen, log: { _ in }, done: { _ in }) }
+        }
+    }
     func take(_ windowID: UInt32) -> (WindowCapturer, CVPixelBuffer?)? {
         guard let e = entries.removeValue(forKey: windowID) else { return nil }
         e.cap.onStop = nil

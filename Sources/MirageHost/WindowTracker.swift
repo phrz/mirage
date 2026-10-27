@@ -128,6 +128,8 @@ final class WindowTracker {
         return true
     }
 
+    /// This process (the curtain's windows are its only ones).
+    static let ownPID = getpid()
     /// Samples the window list (throttled). Returns the new sample, the windows that moved without
     /// resizing since the previous sample, and whether anything changed; nil if throttled.
     func sample(captureSeq: UInt32, now: UInt64, force: Bool = false) -> (sample: Sample, moved: [Delta], changed: Bool)? {
@@ -142,6 +144,8 @@ final class WindowTracker {
                   let num = w[kCGWindowNumber] as? UInt32, let pid = w[kCGWindowOwnerPID] as? Int32,
                   let b = w[kCGWindowBounds] as? NSDictionary, let bounds = CGRect(dictionaryRepresentation: b),
                   bounds.intersects(display) else { continue }
+            // The curtain (DESIGN §3.12), this process's or another miraged's (a test instance): never a layer, never listed.
+            if pid == Self.ownPID || (w[kCGWindowName] as? String) == Curtain.windowTitle { continue }
             let owner = (w[kCGWindowOwnerName] as? String) ?? ""
             let alpha = w[kCGWindowAlpha] as? Double ?? 1
             guard Self.wanted(level: layer, owner: owner, bounds: bounds, alpha: alpha) else { continue }

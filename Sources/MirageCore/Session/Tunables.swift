@@ -78,6 +78,9 @@ public struct Tunables: Codable, Equatable, Sendable {
         // deferred, rate-held or in a video frame (ghost carets, a selection painted in one tile: phrz's Duo, 2026-10-25).
         // Typing + select-all at 5.4 Mbps on the bench: split window captures 30 % (both off), 35 % (TRUTH only), 0.6 % (both).
         case atomicCapture
+        // 1 = the curtain (DESIGN §3.12): while a session streams, the host's screens show a lock-screen-like curtain, left
+        // out of every capture; the first local click, key or scroll locks the Mac. 0 = the host's screens show the session.
+        case curtain
 
         /// Compiled-in default and the bounds a host value is clamped to.
         public var spec: (default: Double, min: Double, max: Double) {
@@ -120,6 +123,7 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .alphaMask: return (0, 0, 1)
             case .transactional: return (1, 0, 1)
             case .atomicCapture: return (1, 0, 1)
+            case .curtain: return (1, 0, 1)
             }
         }
     }

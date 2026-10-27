@@ -103,6 +103,11 @@ struct Serve: AsyncParsableCommand {
         // The Mirage app on this Mac drives pairing through the local control socket (Pair a Device…, Allow / Deny).
         let control = LocalControlServer(ctx: ctx, port: port, log: { log($0) })
         if noLocalControl { log("test instance: no local control, no permission watcher") }
+        // The curtain (DESIGN §3.12) is the login-item host's: a test instance never curtains (or locks) the Mac someone may be
+        // using, unless a test asks for it.
+        Curtain.allowed = !noLocalControl || ProcessInfo.processInfo.environment["MIRAGE_TEST_CURTAIN"] == "1"
+        Curtain.testInstance = noLocalControl
+        if noLocalControl { log("test instance: curtain \(Curtain.allowed ? "on (MIRAGE_TEST_CURTAIN=1)" : "off")") }
         else {
             do { try control.start(); health?.passed(.control) } catch { log("local control unavailable: \(error)") }
             if !(screen && ax) { watchPermissions(screen: screen, ax: ax, control: control) }

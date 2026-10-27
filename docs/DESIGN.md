@@ -1710,6 +1710,119 @@ About 4.5–5 days for 1–4.
 2. On the outer display (closed), should a connect start in Desktop or Unified, or the last one used?
 3. Open inner display: two windows side by side by default, or one window with the strip until you drag a second?
 
+### 3.12 The curtain: evil-maid protection while a session streams (phrz approved, 2026-10-26; as built)
+
+**Threat.** While someone uses the host remotely, the Mac itself sits unlocked at its desk: anyone walking past could see
+the remote person's work and use the Mac as them.
+
+**Why no input blocking.** Blanking the screen or blocking local input would also shut out the Mac's owner when they come
+back to it (or an already-signed-in local person who needs it now), and would make a stuck host unrecoverable at the
+desk. The curtain blocks nothing.
+- It looks like a lock screen.
+- The remote picture never includes it.
+- The first genuine local input locks the Mac for real. The person at the desk then signs in as they always would, which
+  is the macOS security boundary, not ours.
+
+**Look** (phrz):
+- the screen's own desktop picture, blurred and aspect-filled as the lock screen does;
+- centred as one block: the app icon (128 pt), "This Mac is in use remotely" (system semibold, 22 pt) and "Click to log
+  in" (system regular, 13 pt, secondary);
+- no clock and no buttons;
+- the text is black or white at 85–90 % opacity, chosen from the mean luminance of the blurred picture behind the block
+  (`CurtainLogic.textStyle`, unit-tested).
+
+**Mechanics** (public API only; `Sources/MirageHost/Curtain.swift`, `CurtainLogic.swift`):
+- **Windows:** one borderless window per screen, titled "Mirage Curtain".
+  - Level 1999: above every ordinary window (the screen saver is 1000), below loginwindow's lock-screen shield (≥ 2000), so
+    the lock screen always covers it.
+  - It joins all Spaces, stays put, is full-screen auxiliary and is out of the window cycle.
+  - It ignores mouse events, so the remote person's injected clicks reach the apps beneath.
+  - miraged is `.prohibited` (no windows); it becomes `.accessory` (still no Dock tile) while the curtain shows, and goes
+    back to `.prohibited` when it hides.
+- **The picture:** the wallpaper alone (phrz), captured through ScreenCaptureKit and blurred.
+  - Candidates are windows at or below the desktop window level covering the display, owned by the Dock, the wallpaper
+    agent, WindowManager or the window server (an allowlist: no other app, nothing without an owner). macOS 27 has nothing
+    exactly at that level: on mac-daddy, WindowManager sits one below and the window server's backdrops lower.
+  - Each candidate is captured alone and measured: its opaque fraction, its luminance variance, and its mean difference from
+    a reference composited from everything below the icon level. The opaque one (≥ 95 %) with real variance that is closest
+    to the reference wins, and the numbers are logged.
+  - Never anything at or above Finder's icon level, never widgets or a third-party desktop app.
+  - The exclusion is published before the picture is taken, so the shot never delays the curtain at a connect.
+  - If the wallpaper can't be isolated on a display, the curtain is plain gray there, never a picture with icons.
+  - Never the picture file: reading one from ~/Desktop, iCloud or another app's container would raise a privacy prompt on
+    an unattended Mac.
+  - The chosen windows are logged per display (id, owner, level); MIRAGE_TEST_CURTAIN_WALLPAPER saves the unblurred shot.
+- **Never captured** (three layers):
+  1. Filters: miraged's windows and any window titled "Mirage Curtain" (another miraged's) never enter the window list, so
+     the curtain never becomes a layer. The display, overlay and fallback filters (`ScreenCapturer.displayFilter`), every
+     window capture's filter, the desktop filter, the band stills and the fresh display shot all leave out
+     `CurtainExclusion.windows`.
+  2. Frame gating: each capture records the curtain generation its filter in force was built with. While the curtain
+     exists, frames from a filter built before the current generation are dropped. A window-alone filter can't show the
+     curtain and is exempt. This covers the early-start path, the fallback capture, warm-pool captures, a second session and
+     a failed update, whatever the timing.
+  3. Acknowledgement:
+     - the curtain is ordered in at alpha 0, and its `SCWindow` IDs are taken on the main queue and set only if no newer
+       generation exists;
+     - every streaming session registers before building any capture, re-applies every capture's filter (`refilter`, which
+       re-pushes the latest wish, keeping each caller's `applied` closure) and acknowledges the generation;
+     - the curtain turns opaque only when every session has acknowledged, and otherwise stays invisible and asks again
+       every 5 s;
+     - a session joining a curtain that's already up makes it invisible again until that session acknowledges.
+- **Warm pool:** on a curtain change, warm captures drop their kept frames and re-filter.
+- **Telling local input from remote:** local means a hardware event: `kCGEventSourceUnixProcessID` 0 (programs that post
+  input, such as 1Password autofill, Keyboard Maestro, BetterTouchTool, TextExpander, Raycast or Voice Control, carry their
+  own pid) and no injection tag (the injector's `CGEventSource.userData` = `CurtainLogic.injectedTag`). Mouse-downs,
+  key-downs, modifiers and scrolls count; pointer motion doesn't.
+- **The tap** runs on its own thread and run loop, with a trivial callback.
+  - It's active only with the Accessibility grant: the triggering local events and what follows them (downs, their ups,
+    modifiers, scrolls; not pointer motion) are dropped for ~2.5 s or until locked, so the first local click never reaches
+    an app.
+  - With Input Monitoring alone it only listens.
+  - It never prompts: without either grant there's no tap and no curtain, since "Click to log in" would be a lie.
+- **No curtain, no lock:** local input locks only while the curtain is visible.
+- **The swallow is armed once per lock attempt**, never re-armed by the swallowed input. If neither ⌃⌘Q nor display sleep
+  locks the Mac (the shortcut remapped or grabbed by a VM or remote-desktop app, no password after sleep), swallowing stops
+  and the curtain stays off until every session has ended: a curtain that can't lock would only stand in the way of the
+  Mac's own user.
+- **The first trigger's source pid and user data are logged**, so a live test confirms hardware events report pid 0.
+- **Secure Event Input** (a focused password field, some terminals) hides key-downs from event taps. While it's on, only
+  clicks, scrolls and modifiers lock.
+- **One-off shots** (a window's snapshot, band stills, the fresh display shot) record the curtain generation their filter
+  was built with, and are dropped if the curtain on the screens is newer: ScreenCaptureKit serialises shots, ~0.75 s each
+  at a connect.
+- **Unconfirmed filters:**
+  - filter updates are bounded (3 s) and back off on failure (0.2–3.2 s);
+  - if not every session has acknowledged within 10 s, the curtain goes entirely, its windows and their exclusion (so
+    nothing stays gated), and is tried again 30 s later.
+- **Another miraged's curtain** (a test instance's) is left out of this process's display and overlay pictures too (from the
+  window catalog, by title), not only out of its window list.
+- **The lock:** ⌃⌘Q posted with the tag. If the Mac is still unlocked 2 s later while the curtain is still wanted,
+  `pmset displaysleepnow` (which locks when the Mac asks for its password immediately after the display sleeps), logged.
+- **Test instances:** the curtain is off for a test instance (`serve --no-local-control`) unless MIRAGE_TEST_CURTAIN=1, so a
+  passive test run never curtains or locks the Mac someone is using.
+
+**Lifecycle** (`CurtainLogic.Machine`, pure and unit-tested):
+- The curtain is wanted while a session streams, the Mac is unlocked, and no person at the Mac has signed in since.
+- **While locked** the curtain is down: the lock screen covers everything and is what the remote person unlocks through
+  Mirage. A session that starts while the Mac is locked waits.
+- **An unlock** with injected key-downs or clicks while locked (the remote person typing the password) is remote: the curtain
+  returns, and any earlier local ownership is cleared (the owner signed in, left and locked; the remote person must not get
+  an uncurtained Mac).
+- **An unlock without them** is a person at the Mac: the curtain hides and stays off. That ownership survives a suspend and
+  resume (a backgrounded phone, a Wi-Fi roam) and is cleared when every session has stopped.
+- **Screens** added or rearranged rebuild the curtain (checked once a second).
+- **Power:** the windows assert nothing, so they never keep the display awake or block sleep.
+- (Swift's async main drains through CFRunLoopRun, so miraged's main run loop does run; the tap has its own thread anyway.)
+
+**Tests:**
+- `swift test` (CurtainTests): the injector's tagged source (keys, modifiers, scrolls, clicks), hardware against tagged
+  and program-posted events, the text colour, luminance-rect orientation, and the state machine (a local unlock then a
+  remote one, a session starting while locked, suspend and resume after a local sign-in, pointer motion only, no curtain
+  no lock, two sessions).
+- The live check on the host: the curtain absent from a captured frame, a local click locking the Mac, unlocking through
+  the viewer bringing it back. It runs only when phrz isn't connected and isn't at the Mac.
+
 ## 4. Milestones
 
 | # | Deliverable | Done when |

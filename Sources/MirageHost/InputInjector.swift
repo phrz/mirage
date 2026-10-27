@@ -5,7 +5,10 @@ import MirageCore
 
 /// Posts CGEvents at the HID tap for input messages with display-normalized coordinates.
 final class InputInjector {
-    private let source = CGEventSource(stateID: .hidSystemState)
+    /// Every event carries the injection tag (its source's userData): the curtain tells remote input from local by it.
+    private let source: CGEventSource? = InputInjector.taggedSource()
+    /// The source every injected event comes from: HID state, tagged with CurtainLogic.injectedTag.
+    static func taggedSource() -> CGEventSource? { let s = CGEventSource(stateID: .hidSystemState); s?.userData = CurtainLogic.injectedTag; return s }
     private var displayBounds: CGRect
     private var buttonsDown: Set<Int> = []
     private var lastPos: CGPoint
@@ -114,6 +117,8 @@ final class InputInjector {
     }
 
     func handle(_ msg: ControlMessage) {
+        // The remote person's key-downs and clicks (not pointer motion): an unlock that follows them is theirs (DESIGN §3.12).
+        switch msg { case .key(let k) where k.down: Curtain.shared.noteInjectedDown(); case .mouseButton(let m) where m.down: Curtain.shared.noteInjectedDown(); default: break }
         if msg.isScripted, Self.consoleLocked() {
             if Clock.elapsed(since: lastRefusalLog, now: Clock.nowNanos()) > 2_000_000_000 { lastRefusalLog = Clock.nowNanos(); hostLog("refusing scripted input: console is locked") }
             return

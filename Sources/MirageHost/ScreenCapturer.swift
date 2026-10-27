@@ -114,6 +114,8 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         self.onFrame = onFrame
         self.target = t
         excluded = excluding
+        lastRequested = excluding
+        let gen = CurtainExclusion.generation
         let filter: SCContentFilter
         if source == .desktop { let (f, ex) = try await Self.desktopFilterAndExcluded(t.display); filter = f; setDesktopExcluded(ex) }
         else { filter = try await Self.displayFilter(t.display, excluding: excluding) }
@@ -122,6 +124,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await s.startCapture()
         stream = s
+        curtainApplied(gen, ok: true)
         if keepsDisplayAwake { holdDisplayAwake() }
         return t
     }
@@ -149,7 +152,9 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     static func bandShot(_ t: Target, _ r: PixelRect) async -> [UInt8]? {
         let c = SCStreamConfiguration()
         c.width = r.width; c.height = r.height; c.showsCursor = false; c.sourceRect = points(r, t)
-        guard let img = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(display: t.display, excludingWindows: []), configuration: c) else { return nil }
+        let gen = CurtainExclusion.generation
+        guard let img = try? await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(display: t.display, excludingWindows: CurtainExclusion.windows + CurtainExclusion.foreign), configuration: c),
+              !CurtainExclusion.stale(gen) else { return nil }
         var px = [UInt8](repeating: 0, count: r.width * r.height * 4)
         let ok = px.withUnsafeMutableBytes { buf -> Bool in
             guard let ctx = CGContext(data: buf.baseAddress, width: r.width, height: r.height, bitsPerComponent: 8, bytesPerRow: r.width * 4, space: CGColorSpaceCreateDeviceRGB(),
@@ -173,9 +178,13 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// applied one at a time, latest wish wins: concurrent `updateContentFilter` calls can finish out of order,
     /// leaving an older (empty) exclusion in force while the host believes the window is excluded (the
     /// suspected cause of the M3.1 ghosts on mac-daddy).
+    /// Every caller's `applied` runs once a filter at least as new as its wish is in force (a call while the loop runs used to
+    /// lose its closure: a layer's exclusion applied but never acknowledged, the layer later given up as unexcludable).
     func requestExcluded(_ windows: [SCWindow], log: @escaping (String) -> Void, applied: (([UInt32]) -> Void)? = nil) {
         filterLock.lock()
         wantedExcluded = windows
+        lastRequested = windows
+        if let applied { wantedApplied.append(applied) }
         let start = !applying
         applying = true
         filterLock.unlock()
@@ -185,22 +194,70 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 self.filterLock.lock()
                 guard let want = self.wantedExcluded else { self.applying = false; self.filterLock.unlock(); return }
                 self.wantedExcluded = nil
+                let callbacks = self.wantedApplied; self.wantedApplied = []
                 self.filterLock.unlock()
                 guard let stream = self.stream, let t = self.target else { continue }
                 let ids = want.map(\.windowID).sorted()
-                if Self.testNoExclude { log("TEST: display exclusion disabled (MIRAGE_TEST_NO_EXCLUDE); would exclude \(ids)"); self.excluded = []; applied?([]); continue }
+                if Self.testNoExclude { log("TEST: display exclusion disabled (MIRAGE_TEST_NO_EXCLUDE); would exclude \(ids)"); self.excluded = []; callbacks.forEach { $0([]) }; continue }
+                let gen = CurtainExclusion.generation
                 do {
-                    try await stream.updateContentFilter(Self.displayFilter(t.display, excluding: want))
+                    // Bounded: an update that never returns must not hold every later exclusion back (applying stays true).
+                    let f = try await Self.displayFilter(t.display, excluding: want)
+                    try await Self.bounded(seconds: 3, { try await stream.updateContentFilter(f) }, late: { _ in })
+                    self.failures = 0
                     self.excluded = want
                     log("display filter applied: excluding windows \(ids)")
-                    applied?(ids)
-                } catch { log("display exclusion update failed: \(error)") }
+                    callbacks.forEach { $0(ids) }
+                    self.curtainApplied(gen, ok: true)
+                } catch {
+                    log("display exclusion update failed: \(error)")
+                    // Kept for the next pass, which re-applies (a curtain waiter hears the failure and retries itself).
+                    self.filterLock.lock(); self.wantedApplied.insert(contentsOf: callbacks, at: 0); if self.wantedExcluded == nil { self.wantedExcluded = want }; self.filterLock.unlock()
+                    self.curtainApplied(gen, ok: false)
+                    // Backing off: 0.2, 0.4 … 3.2 s between attempts, not a retry every 200 ms forever.
+                    self.failures = min(self.failures + 1, 5)
+                    try? await Task.sleep(for: .milliseconds(100 << self.failures))
+                }
             }
         }
     }
     private let filterLock = NSLock()
     private var wantedExcluded: [SCWindow]? = nil
+    private var wantedApplied: [([UInt32]) -> Void] = []
+    private var lastRequested: [SCWindow]? = nil
     private var applying = false
+    private var failures = 0
+
+    // MARK: The curtain's exclusion (DESIGN §3.12)
+
+    /// The curtain generation (CurtainExclusion.generation) the filter in force was built with.
+    private(set) var curtainGen = 0
+    private(set) var curtainDropped = 0
+    private var curtainWaiters: [(gen: Int, done: (Bool) -> Void)] = []
+    private func curtainApplied(_ gen: Int, ok: Bool) {
+        filterLock.lock()
+        if ok { curtainGen = max(curtainGen, gen) }
+        let ready = curtainWaiters.filter { !ok || $0.gen <= curtainGen }
+        curtainWaiters.removeAll { w in !ok || w.gen <= curtainGen }
+        filterLock.unlock()
+        ready.forEach { $0.done(ok) }
+    }
+    /// Re-applies the filter in force with the curtain's current windows left out, the same wish as before (the latest one),
+    /// and calls `done(true)` once a filter with curtain generation `gen` or newer is in force (`false` on a failure: the
+    /// caller retries). A display/overlay source re-pushes its last exclusion list; a desktop source rebuilds its filter.
+    func refilter(curtainGen gen: Int, log: @escaping (String) -> Void, done: @escaping (Bool) -> Void) {
+        guard stream != nil, target != nil else { done(true); return }   // not capturing: nothing can show the curtain
+        if source == .desktop {
+            refreshDesktop(log: log, done: done)
+            return
+        }
+        filterLock.lock()
+        if curtainGen >= gen { filterLock.unlock(); done(true); return }
+        curtainWaiters.append((gen, done))
+        let want = wantedExcluded ?? lastRequested ?? excluded
+        filterLock.unlock()
+        requestExcluded(want, log: log)
+    }
     static let testNoExclude = ProcessInfo.processInfo.environment["MIRAGE_TEST_NO_EXCLUDE"] != nil
     /// Test only: MIRAGE_TEST_ONLY_APP=<bundle ID> puts that app's windows alone in the display picture (everything else
     /// on the display is left out, black), for screenshots of a client against a person's own Mac. Pair it with
@@ -232,21 +289,27 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         let desk = content.windows.filter { ($0.windowLayer < 0 || testMenuBarInDesktop && $0.windowLayer == menuBarLevel) && $0.frame.intersects(display.frame) }
         guard !desk.isEmpty else { throw MirageError.transport("no desktop-level windows on display \(display.displayID)") }
         if testDesktopInclude { return (SCContentFilter(display: display, including: desk), []) }
-        let above = content.windows.filter { $0.windowLayer >= 0 }
+        let above = CurtainExclusion.adding(to: content.windows.filter { $0.windowLayer >= 0 })   // (the curtain is above 0 too; listed or not)
         return (SCContentFilter(display: display, excludingWindows: above), Set(above.map(\.windowID)))
     }
     /// Re-reads the desktop-level windows (a widget added or removed) and applies them; desktop sources only.
-    func refreshDesktop(log: @escaping (String) -> Void) {
-        guard source == .desktop, let stream, let t = target else { return }
+    func refreshDesktop(log: @escaping (String) -> Void, done: ((Bool) -> Void)? = nil) {
+        guard source == .desktop, let stream, let t = target else { done?(true); return }
         Task {
-            do { let (f, ex) = try await Self.desktopFilterAndExcluded(t.display); try await stream.updateContentFilter(f); self.setDesktopExcluded(ex) } catch { log("desktop filter update failed: \(error)") }
+            let gen = CurtainExclusion.generation
+            do {
+                let (f, ex) = try await Self.desktopFilterAndExcluded(t.display)
+                try await Self.bounded(seconds: 3, { try await stream.updateContentFilter(f) }, late: { _ in })
+                self.setDesktopExcluded(ex)
+                self.filterLock.lock(); self.curtainGen = max(self.curtainGen, gen); self.filterLock.unlock(); done?(true)
+            } catch { log("desktop filter update failed: \(error)"); done?(false) }
         }
     }
 
     /// The display picture's filter: the display minus `excluding` (window layers), or under MIRAGE_TEST_ONLY_APP that app only.
     static func displayFilter(_ display: SCDisplay, excluding: [SCWindow]) async throws -> SCContentFilter {
         guard let id = testOnlyApp else {
-            let f = SCContentFilter(display: display, excludingWindows: excluding)
+            let f = SCContentFilter(display: display, excludingWindows: CurtainExclusion.adding(to: excluding) + CurtainExclusion.foreign)
             // The menu bar's own content (the frontmost app's menu titles) is not a window in the list: without this the
             // overlay held the status items and the bar but not the titles (check 5: menu-bar left at 0.03-0.23 of the screen
             // in the host's own model, the viewer showing the connect's half-size still there for good: phrz's "permablur").
@@ -283,6 +346,8 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     // MARK: SCStreamOutput
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer, of type: SCStreamOutputType) {
+        // The curtain (DESIGN §3.12): while it is up, nothing from a filter built before its windows were left out goes on.
+        if CurtainExclusion.active { filterLock.lock(); let stale = curtainGen < CurtainExclusion.generation; filterLock.unlock(); if stale { curtainDropped += 1; return } }
         guard type == .screen, sb.isValid,
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let statusRaw = attachments.first?[.status] as? Int, let status = SCFrameStatus(rawValue: statusRaw), status == .complete,
@@ -356,5 +421,12 @@ final class WindowCatalog: @unchecked Sendable {
         displays = content.displays
         lastRefreshNanos = Clock.nowNanos()
         lock.unlock()
+        // Another miraged's curtain (a test instance's): left out of this process's display and overlay pictures as well.
+        let me = getpid()
+        let foreign = content.windows.filter { $0.title == Curtain.windowTitle && $0.owningApplication?.processID != me }
+        if Set(foreign.map(\.windowID)) != Set(CurtainExclusion.foreign.map(\.windowID)) {
+            CurtainExclusion.setForeign(foreign)
+            DispatchQueue.main.async { NotificationCenter.default.post(name: Curtain.windowsChanged, object: nil) }
+        }
     }
 }

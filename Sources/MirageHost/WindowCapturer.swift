@@ -103,9 +103,16 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         return c
     }
 
+    /// The curtain generation the filter in force leaves out (DESIGN §3.12); frames from an older filter are dropped while
+    /// the curtain is up. A window-alone filter never shows another window, the curtain included.
+    private var curtainGen = 0
+    private var filterGen = 0
+    private(set) var curtainDropped = 0
+    private var curtainSafe: Bool { warm?.independent == true || !CurtainExclusion.active || curtainGen >= CurtainExclusion.generation }
     private func filter() -> SCContentFilter {
+        filterGen = CurtainExclusion.generation
         if warm?.independent == true { return SCContentFilter(desktopIndependentWindow: window) }
-        return SCContentFilter(display: display, excludingWindows: Array(excluded.values))
+        return SCContentFilter(display: display, excludingWindows: CurtainExclusion.adding(to: Array(excluded.values)))
     }
 
     /// The warm pool's low-cost mode (WarmPool, tunables warmScale/warmIndependent): captured at the given (small) size as
@@ -156,7 +163,7 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
 
     /// `independent`: with the window-alone filter (desktopIndependentWindow) instead of the stream's.
     func snapshot(excluding others: [SCWindow], independent: Bool = false) async -> CVPixelBuffer? {
-        let (f, cfg): (SCContentFilter, SCStreamConfiguration) = queue.sync {
+        let (f, cfg, gen): (SCContentFilter, SCStreamConfiguration, Int) = queue.sync {
             for w in others where w.windowID != windowID { excluded[w.windowID] = w }
             let cfg = configuration()
             if independent {
@@ -164,18 +171,21 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 cfg.sourceRect = CGRect(origin: .zero, size: pointFrame.size)
                 if clipped { let f = fullNativeSize; cfg.width = f.0; cfg.height = f.1 }
             }
-            return (independent ? SCContentFilter(desktopIndependentWindow: window) : filter(), cfg)
+            return independent ? (SCContentFilter(desktopIndependentWindow: window), cfg, Int.max) : (filter(), cfg, filterGen)
         }
         let t0 = Clock.nowNanos()
         guard let sb = try? await SCScreenshotManager.captureSampleBuffer(contentFilter: f, configuration: cfg), let pb = CMSampleBufferGetImageBuffer(sb) else { return nil }
+        // Shots queue in ScreenCaptureKit (~0.75 s each at a connect): one whose filter predates the curtain is dropped.
+        if CurtainExclusion.stale(gen) { hostLog("capture \(windowID): snapshot dropped (its filter predates the curtain)"); return nil }
         hostLog("capture \(windowID): \(independent ? "window-alone " : "")snapshot in \(Clock.elapsed(since: t0, now: Clock.nowNanos()) / 1_000_000) ms")
         return pb
     }
     func start(excluding others: [SCWindow], onFrame: @escaping (CVPixelBuffer, UInt64) -> Void) async throws {
         self.onFrame = onFrame
-        let (f, cfg, ids, k): (SCContentFilter, SCStreamConfiguration, Set<UInt32>, ConfigKey) = queue.sync {
+        let (f, cfg, ids, k, gen): (SCContentFilter, SCStreamConfiguration, Set<UInt32>, ConfigKey, Int) = queue.sync {
             for w in others where w.windowID != windowID { excluded[w.windowID] = w }
-            return (filter(), configuration(), Set(excluded.keys), key)
+            let f = filter()
+            return (f, configuration(), Set(excluded.keys), key, filterGen)
         }
         let s = SCStream(filter: f, configuration: cfg, delegate: self)
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
@@ -185,7 +195,7 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         defer { _ = Self.starting.add(-1) }
         try await s.startCapture()
         hostLog("capture \(windowID): startCapture took \(Clock.elapsed(since: t0, now: Clock.nowNanos()) / 1_000_000) ms (\(inFlight) starting at once)")
-        queue.sync { stream = s; appliedFilter = ids; appliedConfig = k; needFull = true; apply() }
+        queue.sync { stream = s; appliedFilter = ids; appliedConfig = k; curtainGen = max(curtainGen, gen); needFull = true; apply() }
     }
 
     /// On `queue`: a running capture changes hands (the warm pool's, taken over by a streamer): frames go to `onFrame` now.
@@ -204,6 +214,8 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
 
     /// On `queue`: windows to leave out (new ones over the layer). Already excluded ones stay excluded.
+    /// On `queue`: re-applies the filter with the curtain's current windows left out (frames wait until it is in force).
+    func refilterForCurtain() { apply() }
     func exclude(_ windows: [SCWindow]) {
         var changed = false
         for w in windows where w.windowID != windowID && excluded[w.windowID] == nil { excluded[w.windowID] = w; changed = true }
@@ -218,10 +230,11 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     private func apply() {
         guard let stream else { return }
         let ids = Set(excluded.keys), k = key
-        guard ids != appliedFilter || k != appliedConfig else { return }
+        guard ids != appliedFilter || k != appliedConfig || curtainGen < CurtainExclusion.generation else { return }
         if updating { dirtyAgain = true; return }
         updating = true
-        let f: SCContentFilter? = ids != appliedFilter ? filter() : nil
+        let f: SCContentFilter? = ids != appliedFilter || curtainGen < CurtainExclusion.generation ? filter() : nil
+        let gen = filterGen
         let cfg: SCStreamConfiguration? = k != appliedConfig ? configuration() : nil
         Task { [weak self] in
             var ok = true
@@ -230,7 +243,7 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             guard let self else { return }
             self.queue.async {
                 self.updating = false
-                if ok { if f != nil { self.appliedFilter = ids }; if cfg != nil { self.appliedConfig = k } }
+                if ok { if f != nil { self.appliedFilter = ids; self.curtainGen = max(self.curtainGen, gen) }; if cfg != nil { self.appliedConfig = k } }
                 self.needFull = true
                 if self.dirtyAgain || !ok { self.dirtyAgain = false; self.apply() }
             }
@@ -248,6 +261,7 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let info = attachments.first,
               let statusRaw = info[.status] as? Int, let status = SCFrameStatus(rawValue: statusRaw) else { return }
+        guard curtainSafe else { curtainDropped += 1; return }
         guard status == .complete, let pb = CMSampleBufferGetImageBuffer(sb) else {
             if !statusLogged, status != .idle { statusLogged = true; hostLog("layer \(windowID): frame status \(statusRaw)") }
             return
