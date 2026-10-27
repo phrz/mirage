@@ -882,6 +882,30 @@ if CommandLine.arguments.contains("--headless") {
     session.start()
     session.requestStream(width: Int(Double(o.window.0) * o.pixelFactor), height: Int(Double(o.window.1) * o.pixelFactor))
     if o.probeInput { Task { try? await Task.sleep(for: .seconds(8)); await session.probeInput() } }
+    // Test knob MIRAGE_TEST_LOCK_TYPE=N (a host whose screen is locked, phrz's OK): from 4 s, N keystrokes "a" into the lock
+    // screen's password field, 700 ms apart, then N Deletes (never Return), sent as a person's keys (not scripted: the host
+    // refuses scripted input while locked); each logs how long until the picture next changed.
+    if let n = ProcessInfo.processInfo.environment["MIRAGE_TEST_LOCK_TYPE"].flatMap({ Int($0) }), n > 0 {
+        let lock = NSLock()
+        nonisolated(unsafe) var changes: [UInt64] = []
+        let prev = session.onChange
+        session.onChange = { lock.lock(); changes.append(Clock.nowNanos()); lock.unlock(); prev?() }
+        Task {
+            try? await Task.sleep(for: .seconds(4))
+            for i in 0..<(2 * n) {
+                let del = i >= n
+                let code: UInt16 = del ? 51 : 0, chars = del ? "\u{7F}" : "a"
+                lock.lock(); let before = changes.count; lock.unlock()
+                let t0 = Clock.nowNanos()
+                session.send(.key(.init(keyCode: code, down: true, isRepeat: false, modifiers: 0, characters: chars)))
+                session.send(.key(.init(keyCode: code, down: false, isRepeat: false, modifiers: 0, characters: nil)))
+                try? await Task.sleep(for: .milliseconds(700))
+                lock.lock(); let after = changes[before...].filter { $0 >= t0 }; lock.unlock()
+                let first = after.first.map { String(format: "%.0f ms", Double($0 - t0) / 1e6) } ?? "none"
+                FileHandle.standardError.write(Data("TEST lock-type \(del ? "delete" : "key") \(i + 1): first picture change after \(first), \(after.count) changes in 700 ms\n".utf8))
+            }
+        }
+    }
     if let (name, secs) = o.scenario {
         let runner = ScenarioRunner(session: session, name: name, seconds: secs)
         session.scenario = runner

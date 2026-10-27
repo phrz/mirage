@@ -1524,6 +1524,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
     /// The display's still is owed for a lock switch: sent at the next refine with a frame, before any gate (refine).
     private var lockStillDue = false
+    private var lastLockRefNanos: UInt64 = 0
     private func lockSwitch(_ locked: Bool) {
         for cap in [capturer, fallbackCapture].compactMap({ $0 }) { cap.setLocked(locked, log: log) }
         if let d = display { d.lastFrame = nil; d.forceFullDiff = true; d.wantKeyframe = true }
@@ -2478,6 +2479,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         guard request != nil, output != nil, let windows, let layer = layers[layerID] else { return }
         // Locked: the overlay is not part of the picture (lockSwitch).
         if screenLocked, layerID == ControlMessage.WindowInfo.overlayID { return }
+        // (Test knob: while locked, the host's own frame's cell means every 200 ms, the reference for a viewer that types.)
+        if Self.testLockReference, screenLocked, layer.isDisplay, Clock.elapsed(since: lastLockRefNanos, now: nanos) > 200_000_000 {
+            lastLockRefNanos = nanos; log("lock frame: TEST reference: \(Self.flatDarkShare(pbIn))")
+        }
         // The desktop's real first frame after a provisional one (the warm snapshot): it replaces it without a diff; the
         // fresh picture's lossless blocks are read from it from now on.
         if layer.isDisplay, layer.provisional, !provisionalFrame {
@@ -4157,6 +4162,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let d = display, lockStillDue, d.lastFrame != nil, case .still = d.fresh {
             lockStillDue = false
             freshStep(d, now: now, stage1: true, force: true)
+            // Locked: no lossless blocks after the still. The lock screen changes everywhere (an animated wallpaper: ~12,000
+            // changed tiles a second on mac-daddy at 3200x1800), so blocks never finished, the display stayed in its fresh
+            // picture, video never started, and the password dots and caret waited behind 1,450 queued tiles (phrz, 518: "no
+            // feedback when typing"). Done at once: the changing picture goes as video, like any motion.
+            if screenLocked { d.fresh = .done }
             log("lock switch: the display's whole still sent")
             if Self.testLockReference, let f = d.lastFrame { log("lock switch: TEST reference: \(Self.flatDarkShare(f))") }
         }
