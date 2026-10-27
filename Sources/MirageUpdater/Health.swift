@@ -15,6 +15,8 @@ public struct PendingUpdate: Codable, Equatable, Sendable {
     /// The agent was registered again for the new build's signature (launchd refused to spawn it under the old one): a
     /// rollback must register it again for the old build's, or launchd refuses that one in turn.
     public var reregistered: Bool?
+    /// What the trial still waits for ("a screen capture: …"), for the viewer that triggered it.
+    public var waitingFor: String?
 
     public init(from: MirageVersion, to: MirageVersion, attempts: Int = 0, deadline: Date, appPath: String, started: Date, reregistered: Bool? = nil) {
         self.from = from; self.to = to; self.attempts = attempts; self.deadline = deadline; self.appPath = appPath; self.started = started

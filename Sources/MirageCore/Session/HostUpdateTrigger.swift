@@ -9,10 +9,12 @@ public enum HostUpdateTrigger {
     public typealias Connect = @Sendable () async throws -> (session: ClientSession, close: @Sendable () -> Void)
 
     public struct Timing: Sendable {
-        /// How long to keep reconnecting after the host restarts (download and verification happen before it).
-        public var reconnectFor: TimeInterval = 180
-        public var pollEvery: TimeInterval = 2
-        public init(reconnectFor: TimeInterval = 180, pollEvery: TimeInterval = 2) { self.reconnectFor = reconnectFor; self.pollEvery = pollEvery }
+        /// How long to keep reconnecting after the host restarts: past the host's own commit window (5 min, then it rolls
+        /// back by itself), so the wait ends with the host's verdict rather than a guess (green-machine, 2026-10-27: 180 s
+        /// ran out while its trial waited for a capture with the display asleep).
+        public var reconnectFor: TimeInterval = 6.5 * 60
+        public var pollEvery: TimeInterval = 3
+        public init(reconnectFor: TimeInterval = 6.5 * 60, pollEvery: TimeInterval = 3) { self.reconnectFor = reconnectFor; self.pollEvery = pollEvery }
     }
 
     /// Runs the trigger to its end and returns the final status (done, failed or rolledBack); `onStatus` hears every step.
@@ -73,10 +75,15 @@ public enum HostUpdateTrigger {
             if verdict.isFinal { onStatus(verdict); return verdict }
             if verdict != lastTrial { onStatus(verdict); lastTrial = verdict }
         }
-        let why = lastTrial != nil ? "\(hostName) runs the new build, but it has not passed its health checks within \(Int(timing.reconnectFor)) s"
-            : lost ? "lost the connection to \(hostName), and it has not reported how the update went within \(Int(timing.reconnectFor)) s"
-            : "\(hostName) did not come back within \(Int(timing.reconnectFor)) s"
-        let s = ControlMessage.UpdateStatus(phase: .failed, message: why, from: from, yours: true)
+        // The host's own words when it answered (its trial status says what it waits for); else nothing is known: no
+        // verdict, and the list keeps quiet (the row shows the host as it is, Not reachable or updating).
+        if let t = lastTrial {
+            let s = ControlMessage.UpdateStatus(phase: .unknown, message: t.message, from: from, to: t.to, yours: true)
+            onStatus(s)
+            return s
+        }
+        let why = lost ? "lost the connection to \(hostName); it has not said how the update went" : "\(hostName) has not answered since it restarted"
+        let s = ControlMessage.UpdateStatus(phase: .unknown, message: why, from: from, yours: true, unanswered: true)
         onStatus(s)
         return s
     }
@@ -101,9 +108,13 @@ public enum HostUpdateTrigger {
         }
         guard arrived else { return nil }
         if let r, r.phase == .trial, r.to?.build == now.build {
-            return .init(phase: .trial, message: "\(w.hostName) runs \(now.display), checking its health", from: was, to: now, yours: true)
+            let waiting = r.message.range(of: "waiting for ").map { " (" + r.message[$0.lowerBound...] + ")" } ?? ""
+            return .init(phase: .trial, message: "\(w.hostName) runs \(now.display), checking its health\(waiting)", from: was, to: now, yours: true)
         }
         let verb = command == .rollback ? "rolled back to" : "runs"
-        return .init(phase: .done, message: "\(w.hostName) \(verb) \(now.display)", from: was, to: now, yours: true)
+        // What the commit noted: a grant missing at the Mac, or the capture check deferred while the display slept.
+        let note = r.flatMap { $0.phase == .done && $0.to?.build == now.build ? $0.message.split(separator: ";", maxSplits: 1).dropFirst().first : nil }
+            .map { ";" + $0 } ?? ""
+        return .init(phase: .done, message: "\(w.hostName) \(verb) \(now.display)\(note)", from: was, to: now, yours: true)
     }
 }

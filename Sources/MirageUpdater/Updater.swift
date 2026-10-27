@@ -40,7 +40,8 @@ public final class Updater: @unchecked Sendable {
         let installer = Installer(paths: paths)
         if let p = installer.readPending(), p.to.build == running.build {
             // On trial: the viewer that triggered it waits for the commit.
-            info.lastResult = .init(phase: .trial, message: "start \(p.attempts), not yet healthy", from: p.from, to: p.to, at: p.started)
+            info.lastResult = .init(phase: .trial, message: "start \(p.attempts), not yet healthy" + (p.waitingFor.map { ": waiting for \($0)" } ?? ""),
+                                    from: p.from, to: p.to, at: p.started)
         } else if let r = installer.readResult() {
             let age = now.timeIntervalSince(r.at)
             if age >= 0, age < recent {   // a clock moved backwards makes the record stale, not fresh
@@ -231,12 +232,22 @@ public final class HostHealth: @unchecked Sendable {
             let secs = Date().timeIntervalSince(p.started)
             let capture = checks.capture ?? "check deferred: \(checks.captureDeferred ?? "")"
             log("update committed \(p.from.build) → \(p.to.build) (\(p.from.display) → \(p.to.display), \(String(format: "%.1f", secs)) s after the swap; capture: \(capture))")
-            finish(p, outcome: .committed, message: "committed \(String(format: "%.1f", secs)) s after the swap"
-                   + (checks.capture == nil ? "; capture check deferred: \(checks.captureDeferred ?? "")" : ""), skip: false)
+            // A grant the probe found missing is said in the record: the viewer asks for it at the Mac.
+            let note = checks.capture.map { $0.hasPrefix("frame") ? "" : "; \($0)" } ?? "; capture check deferred: \(checks.captureDeferred ?? "")"
+            finish(p, outcome: .committed, message: "committed \(String(format: "%.1f", secs)) s after the swap" + note, skip: false)
             var s = UpdateSettings.load(paths.settings)
             s.identity = SigningIdentity.of(bundle: paths.app)
             try? s.save(paths.settings)
         }
+    }
+
+    /// A check still failing on trial: said in the trial status (the viewer that triggered the update shows it).
+    public func waiting(for why: String) {
+        lock.lock(); let p = pending; let done = committed; lock.unlock()
+        guard var p, !done, var onDisk = installer.readPending(), onDisk.to.build == p.to.build, onDisk.waitingFor != why else { return }
+        onDisk.waitingFor = why; p.waitingFor = why
+        try? installer.writePending(onDisk)
+        lock.lock(); pending = p; lock.unlock()
     }
 
     /// The deferred capture probe ran (the display woke, or a session started): its result goes into the update's record,

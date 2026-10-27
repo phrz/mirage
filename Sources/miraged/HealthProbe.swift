@@ -40,6 +40,7 @@ func probeCaptureForHealth(screen: Bool, ax: Bool, health: HostHealth) {
                         return
                     }
                     log("update health: capture probe failed (\(error)); retrying in 10 s")
+                    health.waiting(for: "a screen capture (\(error))")
                     try? await Task.sleep(for: .seconds(10))
                 }
             }

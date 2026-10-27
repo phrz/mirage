@@ -232,10 +232,13 @@ public enum ControlMessage: Codable, Equatable {
         /// A failed update that only asked too early: the build the viewer showed is not on the host's feed yet. Not an
         /// error to the person ("not published yet"). nil from older hosts.
         public var notPublished: Bool?
+        /// The viewer's own end of a wait (never sent): the host did not answer, so how the update went is not known; the
+        /// device list says nothing and the row's own status takes over.
+        public var unanswered: Bool?
         public init(phase: UpdatePhase, progress: Double? = nil, message: String, from: MirageVersion? = nil, to: MirageVersion? = nil, at: Date? = nil, yours: Bool? = nil,
-                    notPublished: Bool? = nil) {
+                    notPublished: Bool? = nil, unanswered: Bool? = nil) {
             self.phase = phase; self.progress = progress; self.message = message; self.from = from; self.to = to; self.at = at; self.yours = yours
-            self.notPublished = notPublished
+            self.notPublished = notPublished; self.unanswered = unanswered
         }
         public var isFinal: Bool { [.done, .failed, .rolledBack].contains(phase) }
     }

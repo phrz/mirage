@@ -298,11 +298,10 @@ final class HostUpdateCenter: ObservableObject {
             ListNotices.shared.flash("\(name) doesn't see that build yet. Try again in a few minutes.")
             return
         }
-        switch end.phase {
-        case .done: ListNotices.shared.flash("Updated \(name): \(end.message)")
-        case .failed: ListNotices.shared.alert(ListAlert(title: "\(name) did not update", message: end.message))
-        case .rolledBack: ListNotices.shared.alert(ListAlert(title: "\(name) rolled back its update", message: end.message))
-        default: break
+        switch UpdateOutcomeNotice.make(end, name: name) {
+        case .quiet: break
+        case .note(let s): ListNotices.shared.flash(s)
+        case .alert(let a): ListNotices.shared.alert(a)
         }
     }
 
@@ -833,4 +832,30 @@ final class ListNotices: ObservableObject {
     func dismiss() { if !alerts.isEmpty { alerts.removeFirst() } }
     /// Tests: nothing showing.
     func reset() { clearing?.cancel(); note = nil; alerts = [] }
+}
+
+/// How an update from the list ended, for the person (phrz, 2026-10-27): the host's own reason, never a timeout guess.
+enum UpdateOutcomeNotice: Equatable {
+    /// Not known (the host did not answer): nothing said; the row shows the host as it is.
+    case quiet
+    case note(String)
+    case alert(ListAlert)
+
+    static func make(_ end: ControlMessage.UpdateStatus, name: String) -> UpdateOutcomeNotice {
+        if end.unanswered == true { return .quiet }
+        if end.notPublished == true { return .note("\(name) doesn't see that build yet. Try again in a few minutes.") }
+        switch end.phase {
+        case .done:
+            if end.message.contains("missing") {
+                return .alert(ListAlert(title: "\(name) updated, and needs a permission", message: end.message + ". Grant it on that Mac."))
+            }
+            return .note("Updated \(name): \(end.message)")
+        case .failed: return .alert(ListAlert(title: "\(name) did not update", message: end.message))
+        case .rolledBack: return .alert(ListAlert(title: "\(name) rolled back its update", message: end.message))
+        case .unknown, .trial:
+            return .alert(ListAlert(title: "\(name) is still checking the update",
+                                    message: end.message + ". It keeps the update once its checks pass, and rolls back by itself if they fail."))
+        default: return .quiet
+        }
+    }
 }

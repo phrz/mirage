@@ -415,6 +415,22 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertEqual(n.current?.title, "mac-daddy rolled back its update")
     }
 
+    /// How an update's end reaches the person: the host's reason as an alert, a passing note when it simply worked, nothing
+    /// when the host never answered (its row says Not reachable).
+    func testUpdateOutcomeNotices() {
+        typealias S = ControlMessage.UpdateStatus
+        XCTAssertEqual(UpdateOutcomeNotice.make(S(phase: .unknown, message: "green-machine has not answered", unanswered: true), name: "g"), .quiet)
+        XCTAssertEqual(UpdateOutcomeNotice.make(S(phase: .failed, message: "x", notPublished: true), name: "g"),
+                       .note("g doesn't see that build yet. Try again in a few minutes."))
+        XCTAssertEqual(UpdateOutcomeNotice.make(S(phase: .done, message: "g runs 0.1 (483)"), name: "g"), .note("Updated g: g runs 0.1 (483)"))
+        guard case .alert(let grant) = UpdateOutcomeNotice.make(S(phase: .done, message: "g runs 0.1 (483); Screen Recording missing (System Settings)"), name: "g") else { return XCTFail() }
+        XCTAssertTrue(grant.title.contains("needs a permission"))
+        guard case .alert(let rb) = UpdateOutcomeNotice.make(S(phase: .rolledBack, message: "not healthy within 5 min"), name: "g") else { return XCTFail() }
+        XCTAssertEqual(rb.message, "not healthy within 5 min")
+        guard case .alert(let trial) = UpdateOutcomeNotice.make(S(phase: .unknown, message: "g runs 0.1 (483), checking its health (waiting for a screen capture)"), name: "g") else { return XCTFail() }
+        XCTAssertTrue(trial.message.contains("waiting for a screen capture"))
+    }
+
     /// Get Info on the Mac: one small window per Mac, "<host> Info", not resizable, brought forward when asked again.
     func testGetInfoWindow() {
         var h = PairedHost(alias: "green.local", name: "green-machine", model: "Mac15,4")

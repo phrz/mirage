@@ -215,15 +215,38 @@ final class UpdateTriggerTests: XCTestCase {
 
     func testATrialThatNeverCommitsIsNotDone() async throws {
         let target = MirageVersion.current.build
-        let trial = ControlMessage.UpdateStatus(phase: .trial, message: "start 1", from: nil, to: .current, at: Date())
+        let trial = ControlMessage.UpdateStatus(phase: .trial, message: "start 1, not yet healthy: waiting for a screen capture (noDisplay)", from: nil, to: .current, at: Date())
         let r = try await rig(permission: anyDevice, results: Results([nil, trial]), handler: { _, _, reply in
             reply(.init(phase: .restarting, message: "restarting", yours: true))
         })
         defer { r.host.stop(); try? FileManager.default.removeItem(at: r.tmp) }
         let end = await HostUpdateTrigger.run(connect: connect(r), command: .update(targetBuild: target), hostName: "test-host",
                                               timing: .init(reconnectFor: 1.5, pollEvery: 0.2)) { _ in }
-        XCTAssertEqual(end.phase, .failed)
-        XCTAssertTrue(end.message.contains("has not passed its health checks"), end.message)
+        // Not a failure and not a timeout guess (green-machine, 2026-10-27): the host's own trial status, with what it waits for.
+        XCTAssertEqual(end.phase, .unknown)
+        XCTAssertNil(end.unanswered)
+        XCTAssertTrue(end.message.hasSuffix("checking its health (waiting for a screen capture (noDisplay))"), end.message)
+    }
+
+    /// A host that never answers after the restart: no verdict, and marked unanswered (the list keeps quiet); the
+    /// default wait covers the host's own 5 min commit window.
+    func testAnUnansweredHostIsNoVerdict() async {
+        let refused: HostUpdateTrigger.Connect = { throw MirageError.transport("asleep") }
+        let end = await HostUpdateTrigger.awaitRestart(connect: refused, command: .update(targetBuild: 483), from: nil, hostName: "green-machine",
+                                                       timing: .init(reconnectFor: 0.3, pollEvery: 0.1), lost: false) { _ in }
+        XCTAssertEqual(end.phase, .unknown)
+        XCTAssertEqual(end.unanswered, true)
+        XCTAssertGreaterThan(HostUpdateTrigger.Timing().reconnectFor, 5 * 60)
+    }
+
+    /// The commit's note travels: a grant missing at the Mac, or the capture deferred while the display slept.
+    func testTheCommitNoteIsInTheOutcome() {
+        let was = MirageVersion(version: "0.1", build: 475, commit: "a", channel: .nightly)
+        let now = MirageVersion(version: "0.1", build: 483, commit: "b", channel: .nightly)
+        let r = ControlMessage.UpdateStatus(phase: .done, message: "committed 2.4 s after the swap; capture check deferred: display asleep", from: was, to: now, at: Date())
+        let w = ControlMessage.Welcome(hostName: "green-machine", sessionID: "s", hostVersion: now, updateResult: r)
+        XCTAssertEqual(HostUpdateTrigger.outcome(welcome: w, command: .update(targetBuild: 479), from: was)?.message,
+                       "green-machine runs 0.1 (483); capture check deferred: display asleep")
     }
 
     /// The connection is lost before "restarting": the viewer does not claim a restart; the host's record (a failed
