@@ -18,6 +18,9 @@ public struct PendingUpdate: Codable, Equatable, Sendable {
     /// Starts of the replaced build after the swap (the old binary restarted before the new one ran): each exits so launchd
     /// starts the installed one.
     public var oldBuildStarts: Int?
+    /// The old build kept running past the cap: the new build's next start begins a fresh trial (attempts and deadline
+    /// from then), so it is still checked, committed or rolled back.
+    public var freshTrial: Bool?
     /// What the trial still waits for ("a screen capture: …"), for the viewer that triggered it.
     public var waitingFor: String?
 
@@ -98,8 +101,12 @@ public enum UpdateHealth {
         guard standardized(p.appPath) == standardized(appPath) else { return .none }
         if running.build == p.to.build {
             var next = p
+            if p.freshTrial == true {
+                next.freshTrial = nil; next.attempts = 0
+                next.deadline = now.addingTimeInterval(commitWindow)
+            }
             next.attempts += 1
-            if now >= p.deadline { return .rollBack(next, reason: "no commit within \(Int(commitWindow / 60)) min of the swap") }
+            if now >= next.deadline { return .rollBack(next, reason: "no commit within \(Int(commitWindow / 60)) min of the swap") }
             if next.attempts >= maxAttempts { return .rollBack(next, reason: "started \(next.attempts) times without becoming healthy") }
             return .trial(next)
         }
@@ -107,6 +114,8 @@ public enum UpdateHealth {
             if installed?.build == p.to.build, (p.oldBuildStarts ?? 0) < maxOldBuildStarts {
                 var next = p
                 next.oldBuildStarts = (p.oldBuildStarts ?? 0) + 1
+                // The new build gets its whole window from now (the old one may start long after the swap).
+                next.deadline = now.addingTimeInterval(commitWindow)
                 return .restartIntoInstalled(next)
             }
             return .rolledBackOutside(p)

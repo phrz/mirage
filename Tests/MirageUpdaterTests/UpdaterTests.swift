@@ -178,6 +178,17 @@ final class UpdateHealthTests: XCTestCase {
         }
         XCTAssertEqual(UpdateHealth.onLaunch(q, running: ver(525), appPath: "/Applications/Mirage.app", now: t0, installed: ver(529)), .rolledBackOutside(q),
                        "bounded: no restart loop")
+        // Long after the swap (a later kickstart or reboot): the new build gets its window from that start, not the swap's.
+        let late = t0.addingTimeInterval(3600)
+        guard case .restartIntoInstalled(let l) = UpdateHealth.onLaunch(p, running: ver(525), appPath: "/Applications/Mirage.app", now: late, installed: ver(529)) else { return XCTFail() }
+        XCTAssertEqual(l.deadline, late.addingTimeInterval(UpdateHealth.commitWindow))
+        guard case .trial = UpdateHealth.onLaunch(l, running: ver(529), appPath: "/Applications/Mirage.app", now: late.addingTimeInterval(10), installed: ver(529)) else {
+            return XCTFail("a trial, not a rollback for a passed deadline")
+        }
+        // Past the cap the old build runs; the new one's next start begins a fresh trial.
+        var marked = q; marked.freshTrial = true; marked.attempts = 2
+        guard case .trial(let fresh) = UpdateHealth.onLaunch(marked, running: ver(529), appPath: "/Applications/Mirage.app", now: late, installed: ver(529)) else { return XCTFail() }
+        XCTAssertEqual(fresh.attempts, 1); XCTAssertNil(fresh.freshTrial); XCTAssertEqual(fresh.deadline, late.addingTimeInterval(UpdateHealth.commitWindow))
         XCTAssertEqual(UpdateHealth.onLaunch(p, running: ver(525), appPath: "/Applications/Mirage.app", now: t0, installed: ver(525)), .rolledBackOutside(p),
                        "the old bundle installed: really undone")
         guard case .trial = UpdateHealth.onLaunch(a, running: ver(529), appPath: "/Applications/Mirage.app", now: t0, installed: ver(529)) else { return XCTFail("then the new build's trial") }

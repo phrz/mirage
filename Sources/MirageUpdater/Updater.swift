@@ -217,14 +217,19 @@ public final class HostHealth: @unchecked Sendable {
             rollBack(p, reason: reason)
             return false
         case .restartIntoInstalled(let p):
-            try? installer.writePending(p)
+            // Counted first: if that cannot be written, the old build runs (no restart every 10 s forever).
+            do { try installer.writePending(p) } catch {
+                log("update \(p.from.display) → \(p.to.display): \(p.to.display) is installed, but the pending update could not be written (\(error)); running \(p.from.display)")
+                return true
+            }
             log("update \(p.from.display) → \(p.to.display): \(p.from.display) started, but \(p.to.display) is installed; restarting into it (\(p.oldBuildStarts ?? 1) of \(UpdateHealth.maxOldBuildStarts))")
             return false
         case .rolledBackOutside(let p):
             // The installed build is never skipped: only a build that is no longer installed was undone.
             if Installer.version(of: paths.app)?.build == p.to.build {
-                log("update \(p.from.display) → \(p.to.display): \(p.to.display) is installed but \(p.from.display) keeps starting; leaving the update to a restart of the agent (not skipped)")
-                installer.clearPending()
+                log("update \(p.from.display) → \(p.to.display): \(p.to.display) is installed but \(p.from.display) keeps starting; \(p.to.display) begins a fresh trial at its next start (not skipped)")
+                var marked = p; marked.freshTrial = true
+                try? installer.writePending(marked)
                 return true
             }
             log("update \(p.from.display) → \(p.to.display) was undone outside the updater; \(p.to.display) is skipped")

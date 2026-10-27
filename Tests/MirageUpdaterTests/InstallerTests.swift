@@ -176,6 +176,23 @@ final class InstallerTests: XCTestCase {
         XCTAssertEqual(installed(), 420)
     }
 
+    /// Past the cap the old agent runs, and the pending update stays marked: the new build's next start begins a fresh
+    /// trial (still checked, committed or rolled back), and 420 is never skipped.
+    func testPastTheCapTheNewBuildStillGetsATrial() async throws {
+        let m = try publish(ver(420))
+        guard case .swapped = try await updater().install() else { return XCTFail("expected a swap") }
+        for _ in 1...UpdateHealth.maxOldBuildStarts { XCTAssertFalse(HostHealth(paths: paths, running: ver(412), logFile: nil, log: { _ in }).launch()) }
+        XCTAssertTrue(HostHealth(paths: paths, running: ver(412), logFile: nil, log: { _ in }).launch(), "past the cap the old build runs")
+        XCTAssertEqual(Installer(paths: paths).readPending()?.freshTrial, true)
+        XCTAssertFalse(UpdateSettings.load(paths.settings).skippedBuilds.contains(420))
+        let new = HostHealth(paths: paths, running: m.mirageVersion, logFile: nil, log: { _ in })
+        XCTAssertTrue(new.launch())
+        XCTAssertTrue(new.onTrial, "a fresh trial")
+        XCTAssertEqual(Installer(paths: paths).readPending()?.attempts, 1)
+        new.passed(.listener); new.passed(.control); new.passed(.capture("frame"))
+        XCTAssertEqual(Installer(paths: paths).readResult()?.outcome, .committed)
+    }
+
     /// The broken-build test as pure files: a build that exits in main is started three times, the third start swaps the
     /// previous bundle back, and the build is skipped from then on.
     func testABuildThatNeverCommitsRollsBackOnItsThirdStart() async throws {

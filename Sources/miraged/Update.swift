@@ -96,7 +96,11 @@ struct Update: AsyncParsableCommand {
             restartAgent(paths: paths)
             return
         }
-        if now, !allowIdentityChange, channel == nil, targetBuild == nil, !noRestart, let outcome = await handToAgent(store: store) {
+        // Hand over only for the agent's own install: no other feed, no other app.
+        let otherFeed = (feed ?? "").isEmpty == false || !(ProcessInfo.processInfo.environment["MIRAGE_UPDATE_FEED"] ?? "").isEmpty
+        let otherApp = app.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath).standardizedFileURL.path
+                                 != InstallPaths.installedApp(support: store.root).standardizedFileURL.path } ?? false
+        if now, !allowIdentityChange, channel == nil, targetBuild == nil, !noRestart, !otherFeed, !otherApp, let outcome = await handToAgent(store: store) {
             // One updater at a time (phrz-mbp-m4, 2026-10-27): with the agent running, it installs, restarts and commits.
             if !outcome { throw ExitCode(1) }
             return
@@ -344,6 +348,9 @@ func handToAgent(store: Store, timeout: TimeInterval = 8 * 60) async -> Bool? {
     guard (try? client.connect(client: "miraged update --now")) != nil else { return nil }
     for _ in 0..<20 where !box.lock.withLock({ box.hello }) { try? await Task.sleep(for: .milliseconds(100)) }
     guard box.lock.withLock({ box.hello }) else { client.disconnect(); return nil }
+    for _ in 0..<20 where box.lock.withLock({ box.status == nil }) { try? await Task.sleep(for: .milliseconds(100)) }
+    // An agent that cannot update itself (a development build, a test instance): the CLI installs, as before.
+    guard box.lock.withLock({ box.status?.canUpdate }) != false else { client.disconnect(); return nil }
     let before = box.lock.withLock { box.status?.currentVersion }
     print("the host agent is running: it installs the update")
     try? client.send(.updateNow)
@@ -367,7 +374,8 @@ func handToAgent(store: Store, timeout: TimeInterval = 8 * 60) async -> Bool? {
         c.disconnect()
         guard let s = b.lock.withLock({ b.status }) else { continue }
         if let r = s.lastUpdate, r.isFinal { print("[\(r.phase.rawValue)] \(r.message)"); return UpdateCLIOutcome.ok(r) }
-        if s.updating == nil, let now = s.currentVersion, now.build != before?.build { print("[done] now \(now.display)"); return true }
+        // A changed version counts only against a known one, and not while on trial (lastUpdate says the outcome then).
+        if s.updating == nil, let before, let now = s.currentVersion, now.build != before.build { print("[done] now \(now.display)"); return true }
     }
     print("[failed] the host agent did not say how the update went within \(Int(timeout / 60)) min")
     return false
