@@ -184,10 +184,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
 
-    /// Quit (the app menu or the menu-bar item): while hosting, ask whether this Mac keeps accepting connections. The host
-    /// runs headless either way; only "Stop" turns it off.
-    func requestQuit() {
-        guard hostingCompanion else { session?.stop(); NSApp.terminate(nil); return }
+    /// Quit (the app menu or the menu-bar item): while this Mac is shared, ask whether it keeps accepting connections. The
+    /// host runs headless either way; "Stop Allowing" turns Share This Mac off (the agent stays, keeping Mirage up to date).
+    /// A Mac that isn't shared (viewer only), or whose sharing isn't known yet, just quits: nothing to ask about.
+    @MainActor func requestQuit() {
+        guard hostingCompanion, HostShareState.shared.sharing == true else { endSessionAndQuit(); return }
         NSApp.activate(ignoringOtherApps: true)
         let a = NSAlert()
         a.messageText = "Keep allowing connections to this Mac?"
@@ -197,11 +198,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         a.addButton(withTitle: "Cancel")
         switch a.runModal() {
         case .alertFirstButtonReturn: break
-        case .alertSecondButtonReturn: try? HostMenu.stopHosting()
+        case .alertSecondButtonReturn:
+            HostShareState.shared.set(false)
+            // The setting goes to the host over the local socket: give it a moment before the app (and the socket) goes.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.endSessionAndQuit() }
+            return
         default: return
         }
-        session?.stop(); NSApp.terminate(nil)
+        endSessionAndQuit()
     }
+    /// Quitting ends an open session first (applicationShouldTerminate waits for the host to hear it).
+    private func endSessionAndQuit() { NSApp.terminate(nil) }
 
     /// The GUI entry point: the paired Macs (double-click or Return connects), + for another one with its pairing code.
     @MainActor private func showConnectWindow() {
@@ -466,7 +473,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.windowsMenu = windowMenu
         NSApp.mainMenu = main
     }
-    @objc func quit(_ sender: Any?) { requestQuit() }
+    @objc func quit(_ sender: Any?) { MainActor.assumeIsolated { requestQuit() } }
     @objc func pairDeviceMenu(_ sender: Any?) { MainActor.assumeIsolated { pairDevice() } }
 
     /// Settings (⌘, from the menu, ⌃⌥⌘, over the picture, the toolbar's gear): iOS's sections, applied to the connected
