@@ -26,6 +26,7 @@ struct SettingsSheet: View {
                     }
                     Toggle("Keyboard Accessory Row", isOn: $accessoryRow)
                 }
+                UnlockSettingsSection()
                 Section {
                     Picker("On Connect", selection: $startAtOneToOne) {
                         Text("Fit to Screen").tag(false)

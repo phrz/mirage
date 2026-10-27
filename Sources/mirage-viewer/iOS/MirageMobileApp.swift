@@ -252,6 +252,7 @@ struct HostInfoSheet: View {
                 }
             }
             .font(.footnote)
+            UnlockInfoSection(host: host).font(.footnote)
         }
         .padding(24)
         .presentationDetents([.medium])

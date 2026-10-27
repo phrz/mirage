@@ -121,6 +121,24 @@ public final class LocalControlServer: @unchecked Sendable {
                 StayReachable.shared.set(new.stayReachable)
             } catch { log("host settings not saved: \(error)") }
             sendStatus(to: c)
+        case .requestUnlock(let reason, _):
+            // The requester as the host finds it from the socket's peer (what the asker says about itself is ignored).
+            guard ctx.unlockHandler != nil else { send(.unlockOutcome(.refused), to: c); return }
+            let peer = PeerIdentity.requester(fd: c.fd)
+            let who = UnlockLogic.clean(peer.label, limit: 160), why = UnlockLogic.clean(reason)
+            log("unlock requested by \(who): \(why)")
+            let requests = ctx.unlockRequests
+            Task {
+                let o = await requests.request(reason: why, requester: who, anchor: peer.anchor)
+                self.log("unlock request by \(who): \(o.rawValue)")
+                self.queue.async { self.send(.unlockOutcome(o), to: c) }
+            }
+        case .agentSessionExtend:
+            // Only the program that asked for the unlock keeps its session going (verified from this peer, not claimed).
+            let anchor = PeerIdentity.requester(fd: c.fd).anchor
+            AgentSessions.shared.extend(anchor: anchor) { open, extended in self.queue.async { self.send(.agentSession(open: open && extended), to: c) } }
+        case .agentSessionDone:
+            AgentSessions.shared.end(by: UnlockLogic.clean(PeerIdentity.requester(fd: c.fd).label, limit: 160)) { had in self.queue.async { self.send(.agentSession(open: had), to: c) } }
         case .revoke(let id):
             // Future connections and resumes are refused (both authenticate against the store); a stream in progress ends
             // with its connection.

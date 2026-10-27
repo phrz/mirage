@@ -11,7 +11,7 @@ struct Miraged: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "miraged",
         abstract: "Mirage host daemon: serves this Mac to paired devices over QUIC.",
-        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Install.self, Uninstall.self, ProbeLayers.self, Update.self],
+        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Unlock.self, Install.self, Uninstall.self, ProbeLayers.self, Update.self],
         defaultSubcommand: Serve.self)
 }
 
@@ -23,6 +23,9 @@ struct Miraged: AsyncParsableCommand {
 func stayInvisible() {
     _ = NSApplication.shared.setActivationPolicy(.prohibited)
 }
+
+/// Kept for the process's life: SIGTERM ends an open agent session before exiting (AgentSessions.endForShutdown).
+nonisolated(unsafe) var terminationSource: DispatchSourceSignal?
 
 func log(_ s: String) {
     let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -91,6 +94,30 @@ struct Serve: AsyncParsableCommand {
         let ax = HostPermissions.accessibilityGranted(prompt: prompts)
         log("permissions: screen recording \(screen ? "granted" : "MISSING (\(PrivacyPane.path(PrivacyPane.screenRecording)) → enable miraged)")"
             + ", accessibility \(ax ? "granted" : "MISSING (\(PrivacyPane.path(PrivacyPane.accessibility())) → enable miraged)")")
+        // Unlock with biometry (DESIGN §3.13): the login-item host only; a test instance never types at the lock screen.
+        // And only with the hardened runtime (a debugger could otherwise attach and read a password mid-typing).
+        if !noLocalControl {
+            if LockScreenUnlocker.hardenedRuntime() {
+                ctx.unlockHandler = { secret in
+                    log("unlock: lock check: \(LockScreenUnlocker.StrictLock.describe())")
+                    return await LockScreenUnlocker.unlock(secret)
+                }
+                let coordinator = ctx.unlockCoordinator
+                LockScreenUnlocker.watchUnlocks { Task { await coordinator.macUnlocked() } }
+                ctx.agentUnlocked = { who, anchor in AgentSessions.shared.begin(requester: who, anchor: anchor) }
+                ctx.endAgentSession = { by in AgentSessions.shared.end(by: by) }
+                let notices = ctx.agentSessionNotices
+                AgentSessions.shared.start(store: store, log: { log($0) }, notify: { info in Task { await notices.set(info) } })
+                // A clean stop (bootout, uninstall, an update's restart) ends an open agent session first.
+                signal(SIGTERM, SIG_IGN)
+                let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+                term.setEventHandler { AgentSessions.shared.endForShutdown { Foundation.exit(0) } }
+                term.resume()
+                terminationSource = term
+            } else {
+                log("unlock with biometry: off (this miraged is not signed with the hardened runtime)")
+            }
+        }
         host.start(onStream: { conn, id, remote in
             Task { await HostSession.handle(connection: conn, connectionID: id, remote: remote, ctx: ctx) }
         }, onState: { state in
@@ -213,6 +240,46 @@ struct Revoke: ParsableCommand {
         let removed = try Store().revoke(idPrefix: idPrefix)
         if removed.isEmpty { print("no device matches \(idPrefix)"); throw ExitCode(1) }
         for d in removed { print("revoked \(d.name) (\(d.id.prefix(12)))") }
+    }
+}
+
+/// Unlock with biometry (DESIGN §3.13), for agents: asks phrz's connected viewers to approve unlocking this Mac. The
+/// password never passes through here; the exit code says how it went (0 unlocked or not locked, 3 declined, 4 no viewer
+/// connected, 5 no answer in time, 6 refused or still locked).
+struct Unlock: ParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Ask a connected viewer to approve unlocking this Mac (for agents).",
+        discussion: "An approved unlock opens an agent session: the curtain stays up while you work. Run `miraged unlock --extend` at least every 15 minutes while working, and `miraged unlock --done` when finished (then Lock When Finished applies).")
+    @Option(help: "What the unlock is for, shown to the person (at most 120 characters).") var reason: String?
+    @Flag(help: "The agent session is still in use (keeps it from ending after 15 idle minutes).") var extend = false
+    @Flag(help: "The agent session is over.") var done = false
+    func run() throws {
+        let client = LocalControlClient(store: try Store())
+        let finished = DispatchSemaphore(value: 0)
+        nonisolated(unsafe) var outcome: UnlockLogic.RequestOutcome?
+        nonisolated(unsafe) var open: Bool?
+        client.onEvent = { e in
+            if case .unlockOutcome(let o) = e { outcome = o; finished.signal() }
+            if case .agentSession(let o) = e { open = o; finished.signal() }
+        }
+        client.onClose = { finished.signal() }
+        try client.connect(client: "miraged unlock")
+        if extend || done {
+            try client.send(done ? .agentSessionDone : .agentSessionExtend)
+            _ = finished.wait(timeout: .now() + 10)
+            client.disconnect()
+            guard let open else { print("no answer from the host"); throw ExitCode(5) }
+            print(open ? (done ? "agent session ended" : "agent session extended") : "no agent session was open")
+            return
+        }
+        guard let reason, !reason.isEmpty else { print("--reason is required"); throw ExitCode.validationFailure }
+        let done = finished
+        try client.send(.requestUnlock(reason: reason, requester: ""))
+        print("asking connected viewers to approve: \(UnlockLogic.clean(reason))")
+        _ = done.wait(timeout: .now() + 150)
+        client.disconnect()
+        guard let o = outcome else { print("no answer from the host (an older host, or it stopped)"); throw ExitCode(5) }
+        print(o.rawValue)
+        throw ExitCode(o.exitCode)
     }
 }
 

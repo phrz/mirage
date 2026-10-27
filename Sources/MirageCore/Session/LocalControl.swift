@@ -26,6 +26,14 @@ public enum LocalControl {
         /// The host's own settings (DESIGN §3.12: Curtain, Lock when finished); the host saves them and answers with `status`.
         /// An older host ignores it.
         case setHostSettings(HostSettings)
+        /// Unlock with biometry (DESIGN §3.13): ask every viewer that answers requests to approve an unlock of this Mac, for
+        /// `reason` (`miraged unlock`, an agent). The host answers with `unlockOutcome`; the asker never sees the password.
+        /// An older host ignores it.
+        case requestUnlock(reason: String, requester: String)
+        /// The agent session an agent's unlock opened: the agent is still working (`extend`), or done (`done`). The host
+        /// answers with `agentSession`.
+        case agentSessionExtend
+        case agentSessionDone
     }
 
     /// The host's events.
@@ -40,6 +48,10 @@ public enum LocalControl {
         case status(Status)
         /// An update's progress (U4), whoever triggered it.
         case updateStatus(ControlMessage.UpdateStatus)
+        /// What a `requestUnlock` came to.
+        case unlockOutcome(UnlockLogic.RequestOutcome)
+        /// Whether an agent session was open (after `agentSessionExtend` or `agentSessionDone`).
+        case agentSession(open: Bool)
     }
 
     public struct Pairing: Codable, Equatable {

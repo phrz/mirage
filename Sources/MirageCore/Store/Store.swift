@@ -193,6 +193,8 @@ public final class Store: @unchecked Sendable {
         public var hostOS: String?
         /// The channel it follows, from its last Welcome. nil from older hosts.
         public var hostChannel: UpdateChannel?
+        /// DESIGN §3.13: the host types an `unlock` at its lock screen (its last Welcome listed `Feature.unlock`).
+        public var hostUnlock: Bool?
         public var hostStreaming: Bool?
         public var hostProtocol: Int?
         public var hostMinProtocol: Int?

@@ -192,6 +192,23 @@ public enum ControlMessage: Codable, Equatable {
     /// Host → viewer: done, this device is no longer authorized.
     case unpaired
 
+    // Unlock with biometry (DESIGN §3.13). Sent only to a peer that announced `Feature.unlock`.
+    /// Viewer → host: the host's account password from this device's Keychain, after biometric approval, to type at the
+    /// lock screen if (and only if) it is up at that moment. Never logged, never echoed.
+    case unlock(Unlock)
+    /// Host → viewer: how an `unlock` went.
+    case unlockResult(UnlockResult)
+    /// Host → viewer: something on the host (an agent, through `miraged unlock`) asks for an unlock, for a reason; the
+    /// viewer asks its person (biometric approval) and answers with `unlock` carrying the id, or `unlockDecline`.
+    case unlockRequest(UnlockRequest)
+    /// Viewer → host: its person declined (or could not approve) that request.
+    case unlockDecline(UnlockDecline)
+    /// Host → viewer: an agent session is open (or just closed): the Mac unlocked for an agent, the curtain up (§3.13).
+    /// Sent to viewers whose Hello lists `Feature.agentSession`, on change and when they connect.
+    case agentSession(AgentSessionInfo)
+    /// Viewer → host: end that agent session now (then Lock When Finished applies).
+    case endAgentSession
+
     /// Optional abilities a peer announces in its Hello or Welcome, so newer messages go only to peers that decode them
     /// (within one protocol version).
     public enum Feature {
@@ -206,6 +223,59 @@ public enum ControlMessage: Codable, Equatable {
         public static let unpair = "unpair"
         /// A viewer that keeps the host's own icon (Hello): the Welcome carries `hostIcon` when its copy differs.
         public static let hostIcon = "hostIcon"
+        /// A host that types an `unlock` at its lock screen (Welcome); a viewer that answers `unlockRequest` (Hello).
+        public static let unlock = "unlock"
+        /// A viewer that shows agent sessions (Hello); a host that has them (Welcome).
+        public static let agentSession = "agentSession"
+    }
+
+    /// The password travels as UTF-8 bytes (`Data` prints as "N bytes", never its content) and is zeroed after typing.
+    public struct Unlock: Codable, Equatable, CustomStringConvertible, CustomDebugStringConvertible {
+        public var password: Data
+        /// The `UnlockRequest` this answers; nil when the person asked themselves.
+        public var requestID: String?
+        public init(password: Data, requestID: String? = nil) { self.password = password; self.requestID = requestID }
+        public var description: String { "Unlock(password: <redacted>, requestID: \(requestID ?? "nil"))" }
+        public var debugDescription: String { description }
+    }
+    public struct UnlockResult: Codable, Equatable, Sendable {
+        public enum Outcome: String, Codable, Sendable {
+            /// The Mac unlocked after the password was typed.
+            case unlocked
+            /// Typed, and the Mac is still locked: most likely the wrong password. No retry until the person types it.
+            case stillLocked
+            /// The lock screen was not up when it came (already unlocked, or asleep): nothing was typed.
+            case notLocked
+            /// The lock screen went away (or could no longer be confirmed) while typing: the rest, and Return, were not sent.
+            case interrupted
+            /// Refused before typing: too soon after the last attempt, after a failed one, or no handler.
+            case refused
+        }
+        public var outcome: Outcome
+        public var message: String
+        public var requestID: String?
+        public init(outcome: Outcome, message: String, requestID: String? = nil) { self.outcome = outcome; self.message = message; self.requestID = requestID }
+    }
+    public struct UnlockRequest: Codable, Equatable, Sendable {
+        public var id: String
+        /// What it is for, as the requester put it ("run the nightly build"); shown to the person verbatim.
+        public var reason: String
+        /// Who asks ("an agent on mac-daddy", a process name).
+        public var requester: String
+        public var expiresAt: Date
+        public init(id: String, reason: String, requester: String, expiresAt: Date) { self.id = id; self.reason = reason; self.requester = requester; self.expiresAt = expiresAt }
+    }
+    public struct AgentSessionInfo: Codable, Equatable, Sendable {
+        public var open: Bool
+        /// Who it is for, as the host verified it ("claude (team ABCDE12345)").
+        public var requester: String
+        /// When it ends at the latest (the hard maximum), and after how long without a sign of life.
+        public var endsBy: Date?
+        public init(open: Bool, requester: String, endsBy: Date? = nil) { self.open = open; self.requester = requester; self.endsBy = endsBy }
+    }
+    public struct UnlockDecline: Codable, Equatable, Sendable {
+        public var requestID: String
+        public init(requestID: String) { self.requestID = requestID }
     }
 
     public struct UpdateHost: Codable, Equatable {

@@ -81,3 +81,4 @@ targets:
         # changing an Apple Development miraged's signing flags broke the login-item agent's launch constraint on mac-daddy
         # (2026-10-26, "Launch Constraint Violation", EX_CONFIG).
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Mirage connects to the Macs you pair with on your network or tailnet."
+        INFOPLIST_KEY_NSFaceIDUsageDescription: "Face ID unlocks your Mac's password, kept on this device, to type it at your Mac's lock screen."

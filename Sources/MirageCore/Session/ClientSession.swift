@@ -102,6 +102,7 @@ public struct ClientSession {
             h.incompatibility = tooOld?.rawValue
             h.lastSeen = Date(); h.unreachableSince = nil; h.failedProbes = nil; h.lastProbeFailure = nil; h.refusal = nil
             h.triggerFeature = (welcome.features ?? []).contains(ControlMessage.Feature.updateTrigger)
+            h.hostUnlock = (welcome.features ?? []).contains(ControlMessage.Feature.unlock)
             h.hostPolicy = welcome.updatePolicy
             if let os = welcome.hostOS { h.hostOS = os }
             if let c = welcome.updateChannel { h.hostChannel = c }

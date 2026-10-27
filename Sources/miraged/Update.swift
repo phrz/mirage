@@ -248,6 +248,8 @@ func runSelfTest() throws {
         let settings = UpdateSettings.load(root.appendingPathComponent("updates.json"))
         notes.append("channel \(settings.channel.rawValue)")
     }
+    // Unlock with biometry needs it (DESIGN §3.13): a release build must say "hardened runtime".
+    notes.append(LockScreenUnlocker.hardenedRuntime() ? "hardened runtime" : "no hardened runtime (unlock with biometry off)")
     print("self-test ok: Mirage \(v.display) \(v.commit) \(v.channelName); protocol \(Mirage.minProtocolVersion)–\(Mirage.protocolVersion); \(notes.joined(separator: ", "))")
     print(SelfTest.line(v))
 }

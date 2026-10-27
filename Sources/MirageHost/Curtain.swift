@@ -56,6 +56,46 @@ public final class Curtain: @unchecked Sendable {
             if !self.windows.isEmpty, CurtainExclusion.generation == self.generation { self.setVisible(false); self.publish(self.generation) }
         }
     }
+    /// An agent's session (DESIGN §3.13: an unlock an agent asked for): like a streaming session that captures nothing, so
+    /// no acknowledgement is waited for.
+    public func agentSessionBegan(_ id: String, curtain: Bool, lockWhenFinished: Bool) {
+        DispatchQueue.main.async {
+            guard Self.allowed else { return }
+            self.machine.sessionBegan(id, .init(curtain: curtain, lockWhenFinished: lockWhenFinished), now: Clock.nowNanos())
+            self.machine.sessionStreamed(id)
+            self.startWatchingLock()
+            self.update(reason: "agent session \(id)")
+            self.tryOpaque()
+        }
+    }
+    /// An agent session an earlier miraged left open (AgentSessions' record, same boot, nobody at the Mac lately): opened and
+    /// stopped in the state machine now, so the usual rules decide the lock after the debounce (not already locked, nobody
+    /// signed in at it).
+    public func endRecoveredAgentSession(_ id: String) {
+        DispatchQueue.main.async {
+            guard Self.allowed else { return }
+            let now = Clock.nowNanos()
+            self.machine.sessionBegan(id, .init(curtain: false, lockWhenFinished: true), now: now)
+            self.machine.sessionStreamed(id)
+            self.startWatchingLock()
+            self.machine.sessionStopped(id, now: now)
+        }
+    }
+    /// miraged is stopping with an agent session open: the session ends and its lock is decided now (no debounce: the
+    /// process is going); `done` once the lock, if any, is posted.
+    public func endAgentSessionNow(_ id: String, done: @escaping @Sendable () -> Void) {
+        DispatchQueue.main.async {
+            guard Self.allowed else { done(); return }
+            let now = Clock.nowNanos()
+            self.machine.lockChanged(InputInjector.consoleLocked())
+            self.machine.sessionStopped(id, now: now)
+            if self.machine.tick(now: now &+ self.machine.debounceNanos &+ 1), !InputInjector.consoleLocked() {
+                self.log("curtain: miraged is stopping with an agent session open: locking this Mac")
+                self.lockNow(endOfSessions: true)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { done() }
+        }
+    }
     /// Its stream started (a connect that fails before this never locks the Mac at the end).
     public func sessionStreamed(_ id: String) { DispatchQueue.main.async { if Self.allowed { self.machine.sessionStreamed(id) } } }
     /// A client's stream ended: `stopped` for good, or suspended (a backgrounded phone, a roam, a dropped viewer: the curtain
@@ -286,6 +326,10 @@ public final class Curtain: @unchecked Sendable {
         w.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         w.ignoresMouseEvents = true        // injected clicks reach the apps beneath; a local click is seen by the tap
         w.isOpaque = true; w.hasShadow = false; w.isReleasedWhenClosed = false
+        // Left out of every process's screen capture, not only Mirage's (measured on macOS 27, 2026-10-27: another process's
+        // ScreenCaptureKit display capture sees 0 % of a sharingType-none window, 100 % of a readOnly one): an agent working
+        // under an agent session (DESIGN §3.13) sees the desktop, not the curtain. The test shot needs it readable.
+        w.sharingType = Self.testShotPath == nil ? .none : .readOnly
         w.backgroundColor = NSColor(white: 0.25, alpha: 1)
         w.setFrame(screen.frame, display: false)
         w.contentView = CurtainView(frame: NSRect(origin: .zero, size: screen.frame.size))

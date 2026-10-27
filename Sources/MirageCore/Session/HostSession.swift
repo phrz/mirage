@@ -28,6 +28,18 @@ public struct HostContext: Sendable {
     public var advertisesUnpair = true
     /// This Mac's own icon (rendered once per start by miraged), for viewers that ask for it.
     public var hostIcon: HostIcon?
+    /// Unlock with biometry (DESIGN §3.13): types a password at the lock screen if it is up at that moment, and says how it
+    /// went. Set by miraged (MirageHost's LockScreenUnlocker); nil: the host does not offer it.
+    public var unlockHandler: (@Sendable (SecretBytes) async -> ControlMessage.UnlockResult.Outcome)?
+    public let unlockCoordinator = UnlockCoordinator()
+    /// An unlock an agent asked for went through: the host opens an agent session (the curtain up while it works, DESIGN
+    /// §3.13), with who asked.
+    public var agentUnlocked: (@Sendable (_ requester: String, _ anchor: String) -> Void)?
+    /// Viewers that show the agent session (a banner with End), and a viewer's End.
+    public let agentSessionNotices = AgentSessionNotices()
+    public var endAgentSession: (@Sendable (_ by: String) -> Void)?
+    /// Viewers that answer agents' unlock requests, and the requests waiting.
+    public let unlockRequests = UnlockRequests()
 
     public init(identity: DeviceIdentity, store: Store, tlsFingerprint: Data, log: @escaping @Sendable (String) -> Void,
                 makeStreamer: (@Sendable () -> DesktopStreamer)? = nil) {
@@ -112,6 +124,8 @@ public enum HostSession {
             }
             _ = await ctx.connections.remove(connectionID)
             await ctx.updateListeners.remove(connectionID)
+            await ctx.unlockRequests.remove(connectionID)
+            await ctx.agentSessionNotices.remove(connectionID)
             ctx.probes.end(connectionID)
         } else if conn.streamer != nil {
             ctx.log("[\(remote)] datagram flow closed while streaming")
@@ -159,6 +173,14 @@ public enum HostSession {
                 authenticated = try await authenticate(hello, stream, conn: conn, remote: remote, ctx: ctx, quiet: probe)
                 if !probe, (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) {
                     await ctx.updateListeners.add(conn.id, sendUpdate)
+                }
+                if !probe, ctx.unlockHandler != nil, (hello.features ?? []).contains(ControlMessage.Feature.unlock) {
+                    await ctx.unlockRequests.add(conn.id, sendUpdate)
+                }
+                if !probe, ctx.endAgentSession != nil, (hello.features ?? []).contains(ControlMessage.Feature.agentSession) {
+                    await ctx.agentSessionNotices.add(conn.id, sendUpdate)
+                }
+                if !probe, (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) {
                     // A viewer back from a suspended session hears what happened (or is happening) while it was away.
                     if hello.resumeToken != nil, let n = ResumeNotice.make(lastResult: ctx.updateInfo?().lastResult, hostName: ctx.identity.name, now: Date()) {
                         sendUpdate(.updateStatus(n))
@@ -175,6 +197,19 @@ public enum HostSession {
                 ctx.log("[\(remote)] \(device.name) (\(device.id.prefix(12))) removed this Mac from its list: unpaired")
                 try await stream.send(.unpaired)
                 authenticated = nil
+            case .unlock(var u):
+                guard let device = authenticated else { throw MirageError.protocolViolation("unlock before auth") }
+                // One owned buffer from here on; the message's copy is zeroed now.
+                let secret = SecretBytes(taking: &u.password)
+                unlock(secret, requestID: u.requestID, device: device, reply: sendUpdate, remote: remote, ctx: ctx)
+            case .endAgentSession:
+                guard let device = authenticated else { throw MirageError.protocolViolation("endAgentSession before auth") }
+                ctx.log("[\(remote)] \(device.name) ended the agent session")
+                ctx.endAgentSession?(device.name)
+            case .unlockDecline(let d):
+                guard let device = authenticated else { throw MirageError.protocolViolation("unlockDecline before auth") }
+                if await ctx.unlockRequests.isPending(d.requestID) { ctx.log("[\(remote)] \(device.name) declined the unlock request") }
+                await ctx.unlockRequests.decline(d.requestID)
             case .rollbackHost:
                 guard let device = authenticated else { throw MirageError.protocolViolation("rollbackHost before auth") }
                 trigger(.rollback, device: device, connection: conn.id, reply: { sendUpdate(.updateStatus($0)) }, remote: remote, ctx: ctx)
@@ -257,6 +292,50 @@ public enum HostSession {
                 conn.streamer?.handle(input: msg)
             default:
                 throw MirageError.protocolViolation("unexpected \(msg)")
+            }
+        }
+    }
+
+    // MARK: Unlock with biometry (DESIGN §3.13)
+
+    /// A paired viewer sends the host's password (from its Keychain, after its person's biometric approval): typed at the lock
+    /// screen while it is confirmed up, one unlock at a time host-wide, through the gate (one attempt per device per 10 s,
+    /// none host-wide after a failed one). The password is never logged; its one owned buffer is zeroed once typed (the
+    /// decoder's and TLS layer's buffers are beyond reach).
+    static func unlock(_ secret: SecretBytes, requestID rid: String?, device: DeviceRecord, reply: @escaping @Sendable (ControlMessage) -> Void,
+                       remote: String, ctx: HostContext) {
+        func answer(_ o: ControlMessage.UnlockResult.Outcome, _ m: String) { reply(.unlockResult(.init(outcome: o, message: m, requestID: rid))) }
+        guard let handler = ctx.unlockHandler else { secret.wipe(); answer(.refused, "\(ctx.identity.name) does not offer Unlock with biometry"); return }
+        guard (try? ctx.store.authorizedDevices())?.contains(where: { $0.id == device.id && $0.publicKey == device.publicKey }) == true else {
+            secret.wipe()
+            ctx.log("[\(remote)] \(device.name) sent an unlock but is no longer paired: refused")
+            answer(.refused, "this device is no longer paired with \(ctx.identity.name)"); return
+        }
+        Task {
+            defer { secret.wipe() }
+            // One unlock at a time, host-wide, through the gate; a request's answer takes the request before typing.
+            if let why = await ctx.unlockCoordinator.begin(device.id) {
+                ctx.log("[\(remote)] \(device.name) asked to unlock: refused (\(why))")
+                answer(.refused, why); return
+            }
+            if let rid, await !ctx.unlockRequests.claim(rid) {
+                await ctx.unlockCoordinator.cancel()
+                answer(.refused, "that unlock request is no longer waiting"); return
+            }
+            ctx.log("[\(remote)] \(device.name) asks to unlock this Mac\(rid != nil ? " (answering a request)" : "")")
+            let outcome = await handler(secret)
+            await ctx.unlockCoordinator.end(outcome)
+            ctx.log("[\(remote)] unlock from \(device.name): \(outcome.rawValue)")
+            if let rid {
+                if outcome == .unlocked, let who = await ctx.unlockRequests.requester(rid) { ctx.agentUnlocked?(who.label, who.anchor) }
+                await ctx.unlockRequests.settle(rid, UnlockLogic.RequestOutcome(rawValue: outcome.rawValue) ?? .refused)
+            }
+            switch outcome {
+            case .unlocked: answer(.unlocked, "\(ctx.identity.name) is unlocked")
+            case .stillLocked: answer(.stillLocked, "\(ctx.identity.name) is still locked: the saved password may be out of date")
+            case .notLocked: answer(.notLocked, "\(ctx.identity.name)'s lock screen was not up: nothing was typed")
+            case .interrupted: answer(.interrupted, "\(ctx.identity.name)'s lock screen went away while typing: Return was not pressed")
+            case .refused: answer(.refused, "\(ctx.identity.name) did not type it")
             }
         }
     }
@@ -344,7 +423,9 @@ public enum HostSession {
                                              hostModel: DeviceModel.current, hostFamily: DeviceModel.currentFamily?.rawValue,
                                              hostVersion: .current, latestAvailable: updates?.latestAvailable, updatePolicy: updates?.permission,
                                              protocolVersion: Mirage.protocolVersion,
-                                             features: (ctx.advertisesUnpair ? [ControlMessage.Feature.unpair] : []) + (ctx.updateHandler != nil ? [ControlMessage.Feature.updateTrigger] : []),
+                                             features: (ctx.advertisesUnpair ? [ControlMessage.Feature.unpair] : []) + (ctx.updateHandler != nil ? [ControlMessage.Feature.updateTrigger] : [])
+                                                + (ctx.unlockHandler != nil ? [ControlMessage.Feature.unlock] : [])
+                                                + (ctx.endAgentSession != nil ? [ControlMessage.Feature.agentSession] : []),
                                              // Only to a viewer that decodes update statuses (one from before U4 never sees it).
                                              updateResult: (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) ? updates?.lastResult : nil,
                                              hostStreaming: streamingElsewhere, minProtocolVersion: Mirage.minProtocolVersion,

@@ -504,6 +504,7 @@ struct MacSettingsView: View {
             } footer: {
                 Text("⌘-shortcuts typed over the picture go to the remote Mac. Off, Mirage's menus get them first (⌘Q, ⌘W, ⌘,) and the rest still go to the Mac. ⌃⌥⌘ shortcuts are always Mirage's.")
             }
+            UnlockSettingsSection()
             Section {
                 Toggle("Stats Overlay", isOn: Binding(get: { controls.showStats }, set: { controls.setShowStats($0) }))
             } header: {
@@ -735,6 +736,7 @@ struct HostInfoView: View {
                 }
                 .font(.callout)
             }
+            UnlockInfoSection(host: host).font(.callout)
         }
         .padding(20)
         .frame(minWidth: 260, alignment: .leading)

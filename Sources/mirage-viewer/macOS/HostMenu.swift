@@ -76,6 +76,7 @@ final class HostMenu: NSObject, NSMenuDelegate {
         case .pairingClosed(let reason): panel?.closed(reason)
         case .paired(let name): panel?.succeeded(name)
         case .confirm(let c): ask(c)
+        case .unlockOutcome, .agentSession: break   // (miraged unlock's, not the menu's)
         case .updateStatus(let u):
             updateStatus = u.isFinal ? nil : u
             AppLog.write("update: \(u.phase.rawValue) \(u.message)")

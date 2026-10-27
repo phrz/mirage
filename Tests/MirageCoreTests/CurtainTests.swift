@@ -365,6 +365,18 @@ final class CurtainSettingsTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(HostSettings.self, from: Data(#"{"curtain": false}"#.utf8)).stayReachable, true, "default on")
         XCTAssertEqual(try JSONDecoder().decode(HostSettings.self, from: Data(#"{"stayReachable": false}"#.utf8)).stayReachable, false)
     }
+    /// An unlock an agent asked for opens an agent session (DESIGN §3.13): the curtain up while it works (no capture, so no
+    /// acknowledgement), local input locking the Mac, and Lock When Finished at its end (`--done` or idle).
+    func testAgentSessionCurtainsAndLocksWhenFinished() {
+        var m = M()
+        m.sessionBegan("agent-1", .init(curtain: true, lockWhenFinished: true), now: 0); m.sessionStreamed("agent-1")
+        XCTAssertTrue(m.wantsCurtain); XCTAssertTrue(m.lockOnLocalInput(), "someone at the Mac locks it")
+        m.sessionStopped("agent-1", now: 900 * Self.s)
+        XCTAssertTrue(m.tick(now: 900 * Self.s + m.debounceNanos), "the agent is done: locked")
+        // A viewer connecting during it does not end it; the agent's end with the viewer still streaming is not the end.
+        var v = M(); v.sessionBegan("agent-1"); v.sessionStreamed("agent-1"); v.sessionBegan("viewer"); v.sessionStreamed("viewer")
+        v.sessionStopped("agent-1", now: 0); XCTAssertNil(v.pendingEnd); XCTAssertTrue(v.wantsCurtain)
+    }
     func testSettingsFileDefaultsAndTolerance() throws {
         XCTAssertEqual(try JSONDecoder().decode(HostSettings.self, from: Data("{}".utf8)), HostSettings(curtain: true, lockWhenFinished: true))
         XCTAssertEqual(try JSONDecoder().decode(HostSettings.self, from: Data(#"{"curtain": false, "future": 3, "lockWhenFinished": "x"}"#.utf8)),

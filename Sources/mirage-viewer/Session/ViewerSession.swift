@@ -46,6 +46,17 @@ final class ViewerModel: ObservableObject {
     @Published var inputHeld = false
     /// Unified mode: remote windows as native windows (DESIGN §3.2); Desktop mode otherwise. Local; no reconnect.
     @Published var unified = false
+    /// Unlock with biometry (DESIGN §3.13, UnlockController): offered (the host types passwords, one is saved, this device
+    /// has biometry), its name and symbol, an attempt under way, a password to offer for saving, a result to show, and an
+    /// agent's request waiting for the person.
+    @Published var unlockReady = false
+    @Published var unlockBiometry: UnlockStore.Biometry?
+    @Published var unlockBusy = false
+    @Published var unlockOffer: UnlockController.Offer?
+    @Published var unlockMessage: String?
+    @Published var unlockRequest: ControlMessage.UnlockRequest?
+    /// An agent session open on the host (the Mac unlocked for an agent, the curtain up): the banner says for whom, with End.
+    @Published var agentSession: ControlMessage.AgentSessionInfo?
 
     struct Stats {
         var rttMs = 0.0, fps = 0.0, kbps = 0.0, frameAgeMs = 0.0, decodeMs = 0.0
@@ -203,6 +214,9 @@ final class ViewerSession: @unchecked Sendable {
     @MainActor weak var unified: UnifiedController?
     #endif
 
+    /// Unlock with biometry (DESIGN §3.13). Set at the end of init (it holds the session weakly).
+    private(set) var unlock: UnlockController!
+
     init(host: String, port: UInt16, pairCode: String?, pairLink: PairingLink? = nil, model: ViewerModel) {
         self.host = host; self.port = port; self.pairCode = pairCode; self.pairLink = pairLink; self.model = model
         let throttle = MainActor.assumeIsolated { () -> NetworkThrottle? in model.hostName = host; return model.throttle }
@@ -212,6 +226,7 @@ final class ViewerSession: @unchecked Sendable {
             // A relaunched app (iOS): resume the host's session; input numbering continues past what the host has applied.
             resumeToken = saved.token; input.continueAfter(saved.inputSeq + (1 << 20))
         }
+        unlock = UnlockController(session: self, model: model)
     }
 
     /// The host is this Mac (loopback tests).
@@ -380,7 +395,9 @@ final class ViewerSession: @unchecked Sendable {
                 }
             }
             log("connect timing: control stream open at \(since())")
-            let welcome = try await session.authenticate(resumeToken: resumeToken, features: [ControlMessage.Feature.updateStatus])   // U4 hook: notices
+            let knownID = (try? store.knownHosts())?[host]?.hostID
+            let welcome = try await session.authenticate(resumeToken: resumeToken, features: [ControlMessage.Feature.updateStatus, ControlMessage.Feature.agentSession] + UnlockController.helloFeatures(hostID: knownID))   // U4 hook: notices
+            unlock.connected(hostID: knownID, welcome: welcome)
             log("connect timing: authenticated at \(since())")
             let resumed = welcome.resumed == true
             hostProtocol = welcome.protocolVersion ?? 5
@@ -683,6 +700,7 @@ final class ViewerSession: @unchecked Sendable {
                 statsLock.lock(); let wasLocked = hostStatus?.consoleLocked; hostStatus = h; statsLock.unlock()
                 if wasLocked != h.consoleLocked, h.consoleLocked || wasLocked == true { log(h.consoleLocked ? "host: \(host)'s screen is locked (window layers paused on the host)" : "host: \(host)'s screen is unlocked") }
                 Task { @MainActor in model.hostStatus = h }
+                unlock.hostStatus(locked: h.consoleLocked)
             case .caret(let c):
                 predictorLock.lock(); typeahead.host(c, now: Clock.nowNanos()); predictorLock.unlock()
                 if let d = try? Frame.encode(msg) { statsLock.lock(); sControlBytes += d.count; statsLock.unlock() }
@@ -697,6 +715,13 @@ final class ViewerSession: @unchecked Sendable {
             case .reject(let r):
                 log("host: \(r.reason)")
                 Task { @MainActor in model.error = r.reason; model.status = "host refused"; lastRequest = nil }   // a later resize/bitrate change retries
+            case .unlockResult(let r):
+                unlock.result(r)
+            case .unlockRequest(let r):
+                unlock.request(r)
+            case .agentSession(let a):
+                log("host: agent session \(a.open ? "open for \(a.requester)" : "ended")")
+                Task { @MainActor in model.agentSession = a.open ? a : nil }
             case .updateStatus(let u):
                 // U4 hook: the host restarts into an update; the session reconnects by itself. The banner goes after a minute.
                 log("host update: \(u.message)")
@@ -1431,6 +1456,9 @@ final class ViewerSession: @unchecked Sendable {
     @discardableResult
     func send(_ m: ControlMessage, scripted: Bool = false) -> UInt64 {
         let m = scripted ? m.markedScripted() : m
+        if !scripted {
+            switch m { case .key(let k): unlock.key(k); case .mouseButton(let b) where b.down: unlock.click(); default: break }
+        }
         return inputQueue.sync {
             let seq: UInt64
             if case .mouseMove(let mm) = m { seq = input.pointer(x: mm.x, y: mm.y) }

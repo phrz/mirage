@@ -28,6 +28,9 @@
 		ECB3983ACC10C20F61032EB2 /* FrameRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA8357B3AEC263F39103FAC9 /* FrameRecorder.swift */; };
 		B2C3D4E5F607182930415201 /* ScenePresenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F607182930415202 /* ScenePresenter.swift */; };
 		B2C3D4E5F607182930415203 /* SessionBanners.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F607182930415204 /* SessionBanners.swift */; };
+		D4E5F60718293041520101 /* UnlockStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4E5F60718293041520102 /* UnlockStore.swift */; };
+		D4E5F60718293041520103 /* UnlockController.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4E5F60718293041520104 /* UnlockController.swift */; };
+		D4E5F60718293041520105 /* UnlockInfoSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = D4E5F60718293041520106 /* UnlockInfoSection.swift */; };
 		C3D4E5F60718293041520001 /* ConnectList.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3D4E5F60718293041520002 /* ConnectList.swift */; };
 		B2C3D4E5F607182930415205 /* ViewerToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2C3D4E5F607182930415206 /* ViewerToolbar.swift */; platformFilters = (macos, ); };
 /* End PBXBuildFile section */
@@ -56,6 +59,9 @@
 		EEEE1C67B65AE477DCDF5D99 /* DesktopUIView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopUIView.swift; sourceTree = "<group>"; };
 		B2C3D4E5F607182930415202 /* ScenePresenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScenePresenter.swift; sourceTree = "<group>"; };
 		B2C3D4E5F607182930415204 /* SessionBanners.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionBanners.swift; sourceTree = "<group>"; };
+		D4E5F60718293041520102 /* UnlockStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnlockStore.swift; sourceTree = "<group>"; };
+		D4E5F60718293041520104 /* UnlockController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnlockController.swift; sourceTree = "<group>"; };
+		D4E5F60718293041520106 /* UnlockInfoSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnlockInfoSection.swift; sourceTree = "<group>"; };
 		C3D4E5F60718293041520002 /* ConnectList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectList.swift; sourceTree = "<group>"; };
 		B2C3D4E5F607182930415206 /* ViewerToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewerToolbar.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -133,6 +139,9 @@
 				325AE3F4F8CE4455604ECEFB /* Platform.swift */,
 				0E1152201D0785134F2ADEBA /* ViewerSession.swift */,
 				B2C3D4E5F607182930415204 /* SessionBanners.swift */,
+				D4E5F60718293041520102 /* UnlockStore.swift */,
+				D4E5F60718293041520104 /* UnlockController.swift */,
+				D4E5F60718293041520106 /* UnlockInfoSection.swift */,
 				B2C3D4E5F607182930415202 /* ScenePresenter.swift */,
 				C3D4E5F60718293041520002 /* ConnectList.swift */,
 			);
@@ -302,6 +311,9 @@
 				3E6A04A7673B4F5012946E47 /* main.swift in Sources */,
 				B2C3D4E5F607182930415205 /* ViewerToolbar.swift in Sources */,
 				B2C3D4E5F607182930415203 /* SessionBanners.swift in Sources */,
+				D4E5F60718293041520101 /* UnlockStore.swift in Sources */,
+				D4E5F60718293041520103 /* UnlockController.swift in Sources */,
+				D4E5F60718293041520105 /* UnlockInfoSection.swift in Sources */,
 				B2C3D4E5F607182930415201 /* ScenePresenter.swift in Sources */,
 				C3D4E5F60718293041520001 /* ConnectList.swift in Sources */,
 			);
@@ -323,6 +335,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "$(MIRAGE_DISPLAY_NAME)";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Paul Herz. MIT License.";
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Face ID unlocks your Mac's password, kept on this device, to type it at your Mac's lock screen.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Mirage connects to the Macs you pair with on your network or tailnet.";
 				"INFOPLIST_KEY_NSPrincipalClass[sdk=macosx*]" = NSApplication;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
@@ -489,6 +502,7 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "$(MIRAGE_DISPLAY_NAME)";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "© 2026 Paul Herz. MIT License.";
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Face ID unlocks your Mac's password, kept on this device, to type it at your Mac's lock screen.";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Mirage connects to the Macs you pair with on your network or tailnet.";
 				"INFOPLIST_KEY_NSPrincipalClass[sdk=macosx*]" = NSApplication;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

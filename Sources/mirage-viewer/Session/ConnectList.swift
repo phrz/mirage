@@ -40,6 +40,9 @@ struct PairedHost: Identifiable, Equatable {
     /// DESIGN §3.12: its Curtain and Lock when finished settings, as of its last Welcome.
     var hostSettings: HostSettings?
     var lockFailedAt: Date?
+    /// DESIGN §3.13: its id (the Keychain account of its saved password) and whether it types an `unlock`.
+    var hostID: String?
+    var unlockFeature = false
     /// The Mac's own icon (PNG, its model and colour), when it sent one.
     var icon: Data?
     var id: String { alias }
@@ -126,7 +129,8 @@ enum ConnectList {
             return PairedHost(alias: alias, name: h.hostName, model: h.model, family: h.deviceFamily, lastConnected: h.lastConnected, update: h.updateState,
                               canTrigger: h.updateTrigger ?? false, lastSeen: h.lastSeen, unreachable: h.isUnreachable, refusal: h.refusal,
                               triggerFeature: h.triggerFeature, viewerMayTrigger: h.hostPolicy?.viewerMayTrigger, streamingElsewhere: h.hostStreaming ?? false,
-                              hostVersion: h.hostVersion, policy: h.hostPolicy?.policy, hostSettings: h.hostSettings, lockFailedAt: h.hostLockFailedAt)
+                              hostVersion: h.hostVersion, policy: h.hostPolicy?.policy, hostSettings: h.hostSettings, lockFailedAt: h.hostLockFailedAt,
+                              hostID: h.hostID, unlockFeature: h.hostUnlock ?? false)
         }
     }
 

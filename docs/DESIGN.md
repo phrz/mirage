@@ -1752,6 +1752,10 @@ desk. The curtain blocks nothing.
   - Never the picture file: reading one from ~/Desktop, iCloud or another app's container would raise a privacy prompt on
     an unattended Mac.
   - The chosen windows are logged per display (id, owner, level); MIRAGE_TEST_CURTAIN_WALLPAPER saves the unblurred shot.
+- **Never captured by anyone:** the windows' `sharingType` is `.none` (except with the test shot), which macOS honours for
+  every process's capture: measured on macOS 27 (2026-10-27), another process's ScreenCaptureKit display capture saw 0 %
+  of such a window against 100 % of a `.readOnly` one, and it stays listed in `SCShareableContent` (so the layers below
+  still work). An agent working under an agent session (§3.13) sees the desktop, not the curtain.
 - **Never captured** (three layers):
   1. Filters: miraged's windows and any window titled "Mirage Curtain" (another miraged's) never enter the window list, so
      the curtain never becomes a layer. The display, overlay and fallback filters (`ScreenCapturer.displayFilter`), every
@@ -1912,6 +1916,152 @@ desk. The curtain blocks nothing.
   wanted no lock, two sessions, a failed lock, local input locking whenever the curtain is wanted, opaque or not).
 - The live check on the host: the curtain absent from a captured frame, a local click locking the Mac, unlocking through
   the viewer bringing it back. It runs only when phrz isn't connected and isn't at the Mac.
+
+### 3.13 Unlock with biometry (phrz approved, 2026-10-27; as built, security review applied)
+
+**Goal.** Unlock a locked host from a viewer without typing the password each time, without the password ever living on
+the host, and let agents on the host ask for an unlock that phrz approves on his device.
+
+**Naming.** Never a hard-coded "Face ID": the viewer names this device's biometry as the system does
+(`LAEnvironment.currentUser.state.biometry`: `localizedName` "Touch ID", "Face ID", "Optic ID", and `iconSystemName` for
+the SF Symbol). Without usable biometry or a Secure Enclave the feature is not offered at all. A Mac with no biometry but
+an Apple Watch (`state.companions`) is noted for later.
+
+**Storage (viewer only, `UnlockStore`).** Per host, the host's macOS account password sealed to a Secure Enclave key of
+this device:
+- the key is a CryptoKit `SecureEnclave.P256.KeyAgreement` key with access control `.privateKeyUsage` +
+  `.biometryCurrentSet` (`WhenPasscodeSetThisDeviceOnly`): it never leaves the Secure Enclave, its blob is useless on any
+  other device, every use needs biometry (no passcode fallback: the policy is biometrics only), and re-enrolling a finger
+  or a face voids it;
+- the password is AES-GCM sealed under a key agreed between that key and an ephemeral one (HKDF-SHA256, salted with the
+  host's id); the store keeps `unlock/<host id>.json` (0600, the directory 0700): the Secure Enclave blob, the ephemeral
+  public key and the box. A replace writes the new file before the old one goes, so a failed replace keeps the working
+  password, and errors are shown;
+- why not a Keychain item: the data-protection Keychain, the only one that takes biometric access control, needs an
+  application-identifier entitlement the Developer ID Mac viewer does not have (checked on phrz's MacBook 2026-10-27: an
+  unentitled `SecItemAdd` there returns -34018, while an unentitled Secure Enclave key works). Same design on iOS;
+- saved when the person types the password at the host's lock screen through Mirage and the Mac unlocks: the viewer
+  follows what it sends while the host reports its screen locked (`UnlockLogic.Capture`: characters, Delete, Escape;
+  arrows, a ⌘/⌃ shortcut, Forward Delete or a click spoil the attempt), and when the host reports unlocked within 10 s of
+  Return it asks "Save this password for Unlock with Face ID?" (or "Update…" after the saved one failed). An attempt still
+  locked after those 10 s is dropped. Memory only until answered, then wiped;
+- or entered in Get Info (Set Up… / Replace Password… / Forget), on the Mac and iOS alike; the field has no content type,
+  so neither AutoFill nor the (synced) Passwords app offers to keep it;
+- never sent anywhere except as an `unlock` message to that host, to type at its lock screen.
+
+**Use.**
+- The host reports its lock state (`HostStatus.consoleLocked`). While it is locked, a password is saved for it and its
+  Welcome lists `Feature.unlock`, the locked banner carries "Unlock with Face ID". With "Ask on Connect to a Locked Mac"
+  (on by default) the viewer prompts once per connection when the session shows the host locked.
+- After biometric approval ("Unlock <host>" in the system prompt) the viewer sends `ControlMessage.unlock` with the
+  password as UTF-8 `Data` (printing as "N bytes"; `Unlock`'s description is redacted too), never as key events.
+- **The host** (`HostSession.unlock`, `LockScreenUnlocker`):
+  - refuses it from a device no longer paired; one unlock at a time host-wide (`UnlockCoordinator`: two viewers, or a
+    request's answer and a banner tap, never type interleaved), and through the gate: one attempt per device per 10 s,
+    and, host-wide, none after a typed attempt left the Mac locked until the Mac has been unlocked some other way or
+    15 minutes passed. A machine never types a wrong saved password twice;
+  - **its own fail-closed lock check** (`StrictLock`), read fresh each time: the session dictionary's
+    CGSSessionScreenIsLocked and the IORegistry's IOConsoleLocked both true, and Secure Event Input, when the session
+    dictionary names a holder, held by `/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow` itself
+    (by executable path). Never the shield-window signal (any process of the user can draw a window it names
+    loginwindow), never the 250 ms cache, never the MIRAGE_TEST_SCREEN_LOCK override;
+  - checks it, posts a bare modifier event to wake the display and the field, waits 0.6 s, and checks again before
+    every keystroke and before Return; each character is a key-down/up carrying it as its Unicode string, then Return.
+    If the lock screen goes (Touch ID, a Watch, someone at the Mac) the typing stops and Return is never sent
+    (`interrupted`). Every event carries the injection tag and counts as the remote person's key-down, so the curtain
+    treats the unlock as remote (§3.12);
+  - waits up to 6 s for the lock screen to go: `unlocked`, or `stillLocked` (most likely the wrong password);
+  - IOConsoleLocked was once seen false on a locked Mac (ScreenLock's notes): if it is false at a real lock screen the
+    strict check refuses (safe, but the feature does nothing). Each attempt logs the signals (`StrictLock.describe`), and
+    the live test decides with data. The pause after a failure ends on an unlock seen by either reading, not the strict
+    one alone (ending it only allows one more strictly checked attempt);
+  - holds the password in one owned buffer (`SecretBytes`, taken from the message, whose storage is zeroed then) and
+    zeroes it after typing. The decoder's and the TLS layer's buffers are beyond reach, and a small `Data` keeps its
+    bytes inline in each copy: best effort, said so;
+  - offers the feature only when miraged runs with the hardened runtime (the code directory's flags, from
+    `SecCodeCopySigningInformation` with the signing information; a test checks the installed Developer ID miraged reports
+    it, and the self-test line says "hardened runtime"), so no debugger can attach to read a password mid-typing; an Apple
+    Development build logs that it is off. A test instance never offers it.
+- The password field's focus is not detectable through public API; the strict check (secure input held by loginwindow)
+  stands in for it. A lock screen showing a user list would take the keys elsewhere and end in `stillLocked`.
+- After `stillLocked` the viewer stops: no automatic prompt, a banner asks the person to type the password, and the next
+  typed password that unlocks the Mac is offered as an update.
+
+**Agents.** `miraged unlock --reason "<what for>"` (or the local control's `requestUnlock`, from any process of the same
+user: the control socket checks the peer's uid) asks the connected viewers that can answer:
+- a viewer lists `Feature.unlock` in its Hello only where it has biometry and a password saved for that host, so no device
+  with nothing to send is asked;
+- the requester is what the host finds out, never what the asker says (`PeerIdentity`): the socket peer by its audit
+  token (LOCAL_PEERTOKEN), each parent by its own audit token (its task name port), so code is looked up by token, never
+  by a reusable pid. `miraged unlock`, shells and wrappers are skipped; interpreters (python3, node, osascript…) are too,
+  and named ("a script run by python3, under Terminal (Apple)"). The program shown is the first that is neither, labelled
+  by a requirement, not mere integrity: "Apple" only for `anchor apple`, "team ABCDE12345" only for `anchor apple generic`
+  with that team as the leaf certificate's OU, anything else "unsigned". The reason is cleaned (`UnlockLogic.clean`: no control
+  or format characters, so no newlines, bidi overrides or zero-width marks; at most 120 characters), on the host and again
+  on the viewer;
+- a viewer lists the feature from its next connection: a password saved during a session (the offer, Get Info) reaches
+  that host's agent requests after a reconnect;
+- one request at a time, and not within 10 s of the last: otherwise `refused`;
+- the host sends `unlockRequest` (id, reason, requester, expiry 120 s); a viewer connecting meanwhile is asked too; each
+  shows "Unlock <host> for <reason>?", who asked, and "It never sees the password", with Unlock with Face ID / Decline;
+- the approval reads the password and sends `unlock` naming the request, which takes it before typing (a decline or a
+  second answer after that no longer counts). Decline sends `unlockDecline`; a cancelled biometric check sends nothing
+  (another device may still answer);
+- the first answer settles it; the other viewers get an `unlockResult` naming it and close their prompts;
+- the agent gets only the outcome, as the exit code: 0 unlocked (or it was not locked), 3 declined, 4 no viewer
+  connected, 5 no answer in time, 6 refused or still locked, 7 interrupted. It never sees the password.
+- **The agent session.** An unlock an agent asked for opens one (`AgentSessions`): the curtain up while the agent works,
+  exactly as for a viewer's session (it captures nothing, so it waits for no acknowledgement; local input locks the Mac;
+  the curtain is invisible to the agent's own screenshots, §3.12). It ends at `miraged unlock --done`, a viewer's End
+  Session (the banner "<host> is unlocked for <requester>."), 15 minutes without a sign of life (`miraged unlock
+  --extend`, counted only when the host verifies it comes from the program that asked: same pid and pid version from its
+  audit token, same verified signer and identifier, so a fresh interpreter per command under the same agent still
+  counts and a reused pid does not), or at one hour whatever the extends (then a new approval is needed). Its end always
+  locks the Mac where the curtain's rules allow (not already locked, nobody signed in at it), even with Lock When
+  Finished off: an agent unlock is the exception that setting does not cover. Viewers listing
+  `Feature.agentSession` are told when it opens and closes, and on connecting while it is open. miraged stopping (SIGTERM:
+  bootout, uninstall, an update's restart) ends an open session first, its lock decided at once by the state machine. A
+  record in the store (`agent-session.json`, with kern.boottime) covers a crash: the next start ends it through the state
+  machine too, but only in the same boot (a reboot already locked the Mac) and only when nobody has used the Mac for 2
+  minutes (HID idle; they may have unlocked it themselves). One at a time.
+- Not yet: reaching a phone that is not connected (a push through APNs to wake the viewer, which then connects and
+  answers). The protocol needs nothing new for it: a viewer that connects is sent the pending request.
+
+**Security review** (an independent review, 2026-10-27, applied):
+- *A local attacker* (any process running as phrz on the host) could draw a fake lock screen, ask through `miraged unlock`
+  with a plausible reason, and wait for the password to be typed into its window. Answers: the strict lock check reads
+  system state such a process cannot set (the session's screen-lock flag, the console lock, the secure-input holder by
+  path) and runs before every keystroke; the requester is derived by the host, so the prompt names the real process
+  chain; the reason is cleaned and short. Such a process can still ask, and phrz decides. It already runs as phrz, so it
+  can do much else; the password is the line this feature must not move.
+- *A compromised host* (miraged itself) learns the password when phrz approves an unlock: the host types it. The trust is
+  the session's own: a paired host already sees and controls everything the person does on it, and the password unlocks
+  only that host's account. Matching the host-reported state against the viewer's last frame would not help: the host
+  renders the frames too.
+- *A stolen viewer device* learns nothing without its owner's biometry: the Secure Enclave key needs it for every use,
+  it is bound to that device, and re-enrolling biometrics voids it.
+- *The network* sees nothing: the control stream is QUIC (TLS 1.3) with mutual device authentication and the pinned host
+  key (§3.1).
+- *Downgrade.* An older host does not list `Feature.unlock`: the viewer never sends the message. An older viewer never
+  lists it: the host never sends it requests. A message to a host that dropped the feature is refused, not typed.
+- *Replay and races.* Each attempt needs a fresh biometric approval; one unlock in flight host-wide; the per-device spacing
+  and the host-wide pause after a failure; a request is taken by the first unlock that answers it.
+- *Floods.* One pending request, 10 s apart.
+- *Logging.* Neither side logs the password; the viewer logs "sent the saved password", the host the device and outcome.
+
+**Tests** (`swift test`): UnlockTests: the wire round trip and that no description of an `unlock` contains the password;
+the gate (spacing, per device, the host-wide pause after a failure, its end; the pause's end watches only the system's
+own flags, never the shield signal); one unlock at a time host-wide; the strict
+lock check failing closed (one signal, a fake secure-input holder); cleaning; `SecretBytes` zeroing a shared buffer; the
+capture (Delete, Option characters, Escape, arrows, a shortcut, a click, the window, dropped when still locked after it);
+agent requests (no viewer, reaching viewers and late joiners, one at a time, 10 s apart, the claim, a decline after it
+ignored, settling, others' prompts closed, the timeout, exit codes); the host typing only at the lock screen (nothing when
+not locked, the characters then Return, unlocked, still locked, interrupted mid-typing without Return); the agent
+session's idle rule. CurtainSettingsTests: the agent session curtains and locks when finished.
+- Live test (needs phrz's OK): save from a typed unlock on the iPhone and on this MacBook, lock mac-daddy, Unlock with Face
+  ID / Touch ID; a wrong saved password (one attempt, then the update offer); `miraged unlock --reason test` approved and
+  declined, then `--done`; the strict check's signals as logged at a real lock screen (CGSSessionScreenIsLocked,
+  IOConsoleLocked, the secure-input holder), since the check fails closed if one is absent there.
 
 ## 4. Milestones
 
