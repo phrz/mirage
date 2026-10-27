@@ -222,6 +222,14 @@ public enum CurtainLogic {
             return (!streaming && !locked && !ownedLocally && !lockUnavailable && !curtainUnavailable, Int(g / 1_000_000_000))
         }
         public mutating func injectedDown() { if locked { remoteDownsWhileLocked += 1 } }
+        /// The lock state as found when watching starts (a session beginning with none before it): taken as it is, with
+        /// nobody's ownership decided. An unlock between sessions (a person, another remote tool) is not one at the Mac during
+        /// a session: the new session curtains an unlocked Mac as any other.
+        public mutating func lockObserved(_ nowLocked: Bool) {
+            guard nowLocked != locked else { return }
+            locked = nowLocked; remoteDownsWhileLocked = 0
+            if nowLocked { visible = false; lastLocalInput = nil }
+        }
         /// The lock state changed: an unlock is remote (Mirage typed the password) when injected downs came in while locked,
         /// local otherwise.
         public mutating func lockChanged(_ nowLocked: Bool) {

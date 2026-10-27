@@ -63,6 +63,30 @@ final class CurtainTests: XCTestCase {
         m.lockChanged(false)
         XCTAssertFalse(m.ownedLocally, "a remote unlock takes it back (the evil-maid case)"); XCTAssertTrue(m.wantsCurtain)
     }
+    /// phrz, 2026-10-27: a session ended at the lock screen, another tool unlocked the Mac, and the next session (begun on
+    /// that unlocked Mac) took it for an unlock at the Mac: no curtain and no Lock When Finished.
+    func testAnUnlockBetweenSessionsIsNotOneAtTheMac() {
+        var m = M(); m.sessionBegan("a"); m.sessionStreamed("a"); m.lockChanged(true)
+        m.sessionStopped("a", now: 0); _ = m.tick(now: 60_000_000_000)   // ended while locked: nothing watches now
+        XCTAssertFalse(m.needsWatching)
+        m.sessionBegan("b"); m.sessionStreamed("b"); m.visible = true
+        m.lockObserved(false)                             // what watching finds at the new session's start
+        XCTAssertFalse(m.ownedLocally); XCTAssertTrue(m.wantsCurtain, "an unlocked Mac curtained as any other")
+        m.sessionStopped("b", now: 0)
+        XCTAssertTrue(m.tick(now: 60_000_000_000), "Lock When Finished applies")
+    }
+    /// The shield-window signal is fed only by streams: the last one ending drops it, so it never outlives them.
+    func testTheShieldSignalEndsWithTheStreams() {
+        InputInjector.shieldWindow = true
+        XCTAssertTrue(InputInjector.lockSignals().shieldWindow)
+        InputInjector.streamsEnded()
+        XCTAssertFalse(InputInjector.shieldWindow); XCTAssertFalse(InputInjector.lockSignals().shieldWindow)
+    }
+    func testObservingTheLockAtStartDecidesNoOwner() {
+        var m = M(locked: true); m.lockObserved(false); XCTAssertFalse(m.ownedLocally)
+        var l = M(); l.lockObserved(true); XCTAssertTrue(l.locked); XCTAssertFalse(l.wantsCurtain)
+        l.lockChanged(false); XCTAssertTrue(l.ownedLocally, "an unlock while watched is still judged")
+    }
     func testSessionBeginningWhileLocked() {
         var m = M(locked: true); m.sessionBegan("a")
         XCTAssertFalse(m.wantsCurtain, "deferred while locked")

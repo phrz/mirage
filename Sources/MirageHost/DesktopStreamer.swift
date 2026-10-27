@@ -392,7 +392,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private static let liveLock = NSLock()
     nonisolated(unsafe) private static var live = Set<ObjectIdentifier>()
     static func liveCount() -> Int { liveLock.lock(); defer { liveLock.unlock() }; return live.count }
-    private func setLive(_ on: Bool) { Self.liveLock.lock(); if on { Self.live.insert(ObjectIdentifier(self)) } else { Self.live.remove(ObjectIdentifier(self)) }; Self.liveLock.unlock() }
+    private func setLive(_ on: Bool) {
+        Self.liveLock.lock(); if on { Self.live.insert(ObjectIdentifier(self)) } else { Self.live.remove(ObjectIdentifier(self)) }
+        let none = Self.live.isEmpty; Self.liveLock.unlock()
+        if !on, none { InputInjector.streamsEnded() }
+    }
 
     public init(log: @escaping @Sendable (String) -> Void) {
         self.log = log

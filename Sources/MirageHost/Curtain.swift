@@ -579,7 +579,7 @@ public final class Curtain: @unchecked Sendable {
 
     private func startWatchingLock() {
         guard lockTimer == nil else { return }
-        machine.lockChanged(InputInjector.consoleLocked())
+        machine.lockObserved(InputInjector.consoleLocked())
         let t = DispatchSource.makeTimerSource(queue: .main)
         t.schedule(deadline: .now() + 1, repeating: 1)
         t.setEventHandler { [weak self] in self?.lockTick() }

@@ -96,6 +96,12 @@ final class InputInjector {
     private static let cacheLock = NSLock()
     /// The streamer feeds the shield-window signal from its window list.
     nonisolated(unsafe) static var shieldWindow = false
+    /// The last stream stopped or suspended: nothing feeds the shield-window signal any more, so it is dropped (phrz,
+    /// 2026-10-27: left "locked" by a session that ended at the lock screen, it read the next session's start on a Mac
+    /// unlocked meanwhile as locked, and the curtain then took the stream's first window list for an unlock at the Mac).
+    static func streamsEnded() {
+        cacheLock.lock(); shieldWindow = false; cachedSignals = nil; cacheLock.unlock()
+    }
     static let testLockPath = ProcessInfo.processInfo.environment["MIRAGE_TEST_SCREEN_LOCK"]
     static func lockSignals() -> ScreenLock.Signals {
         cacheLock.lock(); defer { cacheLock.unlock() }
