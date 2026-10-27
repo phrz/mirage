@@ -78,6 +78,10 @@ final class PermissionPromptTests: XCTestCase {
         XCTAssertEqual(st1.permissionsAsked, ["screenRecording"], "a second Allow goes to System Settings")
         XCTAssertEqual(c.axRequests, 0)
 
+        // Asked again (a second Allow, or another client): never a second request in this run.
+        try app.send(.requestPermission("screenRecording"))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(c.screenRequests, 1, "once per kind per run")
         c.ax = true
         try app.send(.requestPermission("accessibility"))
         try app.send(.requestPermission("nonsense"))
@@ -109,5 +113,34 @@ final class PermissionPromptTests: XCTestCase {
         XCTAssertEqual(w.needsPermissions, ["screenRecording", "accessibility"])
         XCTAssertEqual(try viewerStore.knownHosts()["test-host"]?.hostNeedsPermissions, ["screenRecording", "accessibility"])
         XCTAssertEqual(c.requests, 0)
+    }
+
+    /// The window-name heuristic (review, 2026-10-27): only ordinary apps' normal windows count. The Dock's, the window
+    /// server's and the menu bar servers' names may be readable without the grant, so they never read as granted.
+    /// Recorded window lists, not live: the live behaviour without a grant is checked separately (see the report).
+    func testWindowNamesCountOnlyOrdinaryAppWindows() {
+        func w(_ owner: String, _ name: String?, layer: Int = 0, pid: Int = 500) -> [String: Any] {
+            var d: [String: Any] = [kCGWindowOwnerName as String: owner, kCGWindowLayer as String: layer, kCGWindowOwnerPID as String: pid]
+            if let name { d[kCGWindowName as String] = name }
+            return d
+        }
+        let ungranted: [[String: Any]] = [w("Dock", "Dock", layer: 20), w("Window Server", "Menubar", layer: 24), w("Control Center", "BentoBox", layer: 25),
+                                          w("SystemUIServer", "AppleClock", layer: 25), w("Finder", nil), w("Safari", nil), w("Notification Center", "Notification Center", layer: 0)]
+        XCTAssertFalse(HostPermissions.namesVisible(in: ungranted, ownPID: 1), "system windows' names say nothing")
+        XCTAssertFalse(HostPermissions.namesVisible(in: [w("Dock", "Dock")], ownPID: 1), "the Dock never counts, whatever its layer")
+        XCTAssertFalse(HostPermissions.namesVisible(in: [w("miraged", "x", pid: 1)], ownPID: 1), "this process never counts")
+        XCTAssertFalse(HostPermissions.namesVisible(in: [w("Safari", "Apple", layer: 3)], ownPID: 1), "only normal windows")
+        XCTAssertTrue(HostPermissions.namesVisible(in: ungranted + [w("Safari", "Apple")], ownPID: 1), "an app's window name: granted")
+        XCTAssertFalse(HostPermissions.namesVisible(in: [], ownPID: 1), "nothing on screen: says nothing")
+    }
+
+    func testTheAppIsOpenedAtMostOncePerBoot() throws {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mirage-open-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let store = try Store(root: tmp)
+        XCTAssertTrue(PermissionAppOpen.mayOpen(store: store, boot: 1000))
+        XCTAssertFalse(PermissionAppOpen.mayOpen(store: store, boot: 1000), "the same boot: not again")
+        XCTAssertTrue(PermissionAppOpen.mayOpen(store: store, boot: 2000), "after a restart of the Mac")
+        XCTAssertGreaterThan(PermissionAppOpen.bootTime(), 0)
     }
 }

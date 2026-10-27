@@ -464,6 +464,7 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertEqual(log.sent, ["accessibility"]); XCTAssertTrue(log.opened.isEmpty, "the first time: the system's own sheet")
         m.allow("accessibility")
         XCTAssertEqual(log.opened.map(\.absoluteString), ["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"])
+        XCTAssertEqual(log.sent, ["accessibility"], "the second Allow only opens Settings")
         // The host remembers what it asked (another launch of the app): straight to the pane.
         let m2 = PermissionsModel()
         s.permissionsAsked = ["screenRecording"]

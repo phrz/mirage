@@ -54,7 +54,7 @@ final class PermissionsModel: ObservableObject {
     func allow(_ id: String) {
         switch Self.allowAction(for: id, asked: asked) {
         case .request: asked.insert(id); request(id)
-        case .openSettings: request(id); openSettings(Self.settingsURL(id))
+        case .openSettings: openSettings(Self.settingsURL(id))   // only Settings: the host asks once
         }
     }
 

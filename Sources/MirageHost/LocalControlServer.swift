@@ -17,6 +17,8 @@ public final class LocalControlServer: @unchecked Sendable {
     private var shownIssue: Date?
     private var pendingConfirms: [String: CheckedContinuation<Bool?, Never>] = [:]
     private var restarting = false
+    /// The permissions requested in this run (each at most once).
+    private var requestedThisRun: Set<HostPermissions.Kind> = []
     /// Tells the app the host is about to restart (to apply newly granted permissions).
     public func announceRestart() {
         queue.sync {
@@ -154,7 +156,10 @@ public final class LocalControlServer: @unchecked Sendable {
             AgentSessions.shared.end(by: UnlockLogic.clean(PeerIdentity.requester(fd: c.fd).label, limit: 160)) { had in self.queue.async { self.send(.agentSession(open: had), to: c) } }
         case .requestPermission(let raw):
             guard let kind = HostPermissions.Kind(rawValue: raw) else { return }
-            if HostPermissions.granted(kind) { sendStatus(to: c); return }
+            // At most once per kind in this run: a second ask (another Allow, or any client of this user) never raises the
+            // dialog again over System Settings.
+            if HostPermissions.granted(kind) || requestedThisRun.contains(kind) { sendStatus(to: c); return }
+            requestedThisRun.insert(kind)
             log("permissions: requesting \(raw), asked in the Mirage app")
             PermissionRequests.record(kind, store: ctx.store)
             DispatchQueue.main.async { HostPermissions.request(kind) }

@@ -188,10 +188,13 @@ func showPermissionsWindow(control: LocalControlServer) {
         }
         let app = Bundle.main.bundleURL
         guard app.pathExtension == "app" else { log("permissions: no Mirage app around this host to show the window"); return }
+        // At most once per boot (a KeepAlive crash loop, or an app quit on purpose, is not reopened again and again), and
+        // without taking the foreground: the app brings its own window up.
+        guard let store = try? Store(), PermissionAppOpen.mayOpen(store: store) else { log("permissions: Mirage.app was opened for this once since boot; not again"); return }
         log("permissions: opening \(app.path) to show its window")
         let config = NSWorkspace.OpenConfiguration()
         config.arguments = ["--permissions"]
-        config.activates = true
+        config.activates = false
         _ = try? await NSWorkspace.shared.openApplication(at: app, configuration: config)
     }
 }

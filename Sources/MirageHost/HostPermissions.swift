@@ -87,14 +87,45 @@ public enum HostPermissions {
     /// Tests: forget what was seen.
     public static func resetForTests() { lock.lock(); screenSeen = false; lock.unlock() }
 
-    /// Whether any window owned by another process has a name in the window list: macOS strips names without the grant.
+    /// Whether an ordinary app's window has a name in the window list: macOS strips other apps' window names without the
+    /// grant. Only normal windows (layer 0) of ordinary apps count. The system's own processes (the Dock, the window
+    /// server, the menu bar's servers, the login window) are left out, since their names may be readable without it, and
+    /// so is this process. No such window on screen: this says nothing (false), and preflight decides alone.
     static func otherWindowNamesVisible() -> Bool {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
-        let me = Int(getpid())
-        // The Dock and window server own windows that are always listed; their names count like any app's.
-        return list.contains { w in
-            (w[kCGWindowOwnerPID as String] as? Int) != me && !((w[kCGWindowName as String] as? String) ?? "").isEmpty
+        return namesVisible(in: list, ownPID: Int(getpid()))
+    }
+
+    /// Owners whose window names do not show the grant.
+    static let systemOwners: Set<String> = ["Dock", "Window Server", "WindowServer", "SystemUIServer", "Control Center", "ControlCenter",
+                                            "Notification Center", "NotificationCenter", "loginwindow", "Spotlight", "TextInputMenuAgent",
+                                            "Wallpaper", "WallpaperAgent", "universalAccessAuthWarn", "CursorUIViewService", "AXVisualSupportAgent"]
+
+    static func namesVisible(in list: [[String: Any]], ownPID: Int) -> Bool {
+        list.contains { w in
+            guard (w[kCGWindowOwnerPID as String] as? Int) != ownPID,
+                  (w[kCGWindowLayer as String] as? Int) == 0,
+                  let owner = w[kCGWindowOwnerName as String] as? String, !systemOwners.contains(owner) else { return false }
+            return !((w[kCGWindowName as String] as? String) ?? "").isEmpty
         }
+    }
+}
+
+/// The host opens Mirage.app for its permissions window at most once per boot (permissions-app-opened.json: the boot time).
+public enum PermissionAppOpen {
+    static let file = "permissions-app-opened.json"
+    /// This boot's start, from the kernel.
+    public static func bootTime() -> Double {
+        var tv = timeval(); var size = MemoryLayout<timeval>.size
+        guard sysctlbyname("kern.boottime", &tv, &size, nil, 0) == 0 else { return 0 }
+        return Double(tv.tv_sec)
+    }
+    /// True once per boot: records this boot when it says yes.
+    public static func mayOpen(store: Store, boot: Double = bootTime()) -> Bool {
+        let u = store.url(file)
+        if let d = try? Data(contentsOf: u), let last = try? JSONDecoder().decode(Double.self, from: d), last == boot { return false }
+        try? JSONEncoder().encode(boot).write(to: u, options: .atomic)
+        return true
     }
 }
 
