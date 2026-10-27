@@ -233,6 +233,19 @@ final class InstallerTests: XCTestCase {
         if case .swapped = try await updater().install(targetBuild: 420) {} else { XCTFail() }
     }
 
+    /// The Automatic policy installs exactly the build whose try it recorded: a feed that moved on is transient (the try is
+    /// given back, and the next quiet moment decides on the newer build).
+    func testAutomaticInstallsExactlyTheBuildItRecorded() async throws {
+        try publish(ver(483))
+        do { _ = try await updater().install(targetBuild: 479, exactTarget: true); XCTFail("not 479") }
+        catch {
+            XCTAssertTrue((error as? UpdateError)?.isTransient ?? false, "\(error)")
+            XCTAssertTrue("\(error)".contains("moved on to build 483"), "\(error)")
+        }
+        XCTAssertEqual(installed(), 412)
+        if case .swapped(let p, _) = try await updater().install(targetBuild: 483, exactTarget: true) { XCTAssertEqual(p.to.build, 483) } else { XCTFail() }
+    }
+
     /// green-machine, 2026-10-27: its record said 479 (the viewer showed that), the feed already listed 483. The request is
     /// "at least 479": 483 installs, read fresh from the feed.
     func testTheGreenMachineRace() async throws {

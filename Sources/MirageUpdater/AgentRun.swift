@@ -81,7 +81,8 @@ public struct AgentUpdater: Sendable {
 
     /// One update attempt; how it ended (the Automatic policy keeps or gives back its try by it). `gate`: asked before
     /// the swap and again before the restart; a reason defers the update (an undone swap if it came after it).
-    public func update(target: Int?, requester: UpdateRequester, gate: (@Sendable () async -> String?)? = nil,
+    /// `exact`: only exactly `target` (the Automatic policy); else at least it (a viewer's trigger).
+    public func update(target: Int?, exact: Bool = false, requester: UpdateRequester, gate: (@Sendable () async -> String?)? = nil,
                        replyTo: @escaping @Sendable (ControlMessage.UpdateStatus) -> Void) async -> AutomaticUpdate.Ending {
         let running = Installer.version(of: paths.app) ?? .current
         let r = UpdateReporter(from: running, listeners: listeners, inProgress: inProgress, requester: requester, replyTo: replyTo)
@@ -99,7 +100,7 @@ public struct AgentUpdater: Sendable {
         }
         do {
             // A remote trigger never crosses a signing-identity change: that needs a person at the Mac.
-            switch try await updater.install(targetBuild: target, allowIdentityChange: false, gate: gate) {
+            switch try await updater.install(targetBuild: target, exactTarget: exact, allowIdentityChange: false, gate: gate) {
             case .nothing(let d):
                 if d.endsCleanly { r.reply(.init(phase: .done, message: d.message, yours: true)); return .nothingToDo }
                 fail(d.message, transient: false); return .failed(transient: false)

@@ -97,7 +97,9 @@ public final class Updater: @unchecked Sendable {
     /// older newest is `notPublished`. A viewer never names code, only a build the signed feed offers.
     /// `gate`: asked again right before the swap (the download can take minutes); a reason defers the update (nothing
     /// replaced, the staging removed: `UpdateError.deferred`).
-    public func install(channel: UpdateChannel? = nil, targetBuild: Int? = nil, allowIdentityChange: Bool = false, now: Date = Date(),
+    /// `exactTarget`: only exactly `targetBuild` (the Automatic policy, which records its one try per build): a feed that
+    /// moved on is a transient failure, and the next quiet moment decides on the newer build.
+    public func install(channel: UpdateChannel? = nil, targetBuild: Int? = nil, exactTarget: Bool = false, allowIdentityChange: Bool = false, now: Date = Date(),
                         gate: (@Sendable () async -> String?)? = nil) async throws -> Outcome {
         let fd = try installer.lock()
         defer { flock(fd, LOCK_UN); close(fd) }
@@ -105,6 +107,7 @@ public final class Updater: @unchecked Sendable {
         let c = try await check(channel: channel, now: now)
         let m = c.manifest.manifest
         if let t = targetBuild, m.build < t { throw UpdateError.notPublished(build: t, newest: m.build, channel: c.channel) }
+        if let t = targetBuild, exactTarget, m.build != t { throw UpdateError.feed("the feed moved on to build \(m.build) since \(t) was chosen") }
         guard case .available(let from, let to) = c.decision else { return .nothing(c.decision) }
         learnedTarget(to)
 

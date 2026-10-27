@@ -82,7 +82,8 @@ func scheduleAutomaticUpdates(paths: InstallPaths, ctx: HostContext, handler: @e
                 }
                 log("automatic update: installing \(v.display) now (a quiet moment)")
                 let ending = await agentUpdater(paths: paths, ctx: ctx, log: log)
-                    .update(target: v.build, requester: UpdateRequester(name: "the Automatic policy", connectionID: nil),
+                    // Exactly the build whose one try was recorded (review, 2026-10-27: "at least" could install another).
+                    .update(target: v.build, exact: true, requester: UpdateRequester(name: "the Automatic policy", connectionID: nil),
                             gate: { AutomaticUpdate.gateReason(await moment()) },
                             replyTo: { st in if st.isFinal { log("automatic update: \(st.phase.rawValue): \(st.message)") } })
                 if !ending.consumesTry {
