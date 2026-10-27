@@ -80,9 +80,21 @@ self-signed TLS certificate on first start under `~/Library/Application Support/
 
 ## Viewer app (GUI)
 
-`scripts/make-viewer-app.sh` builds `Mirage.app` (the universal app's macOS slice, incremental);
-`scripts/install-viewer-app.sh [DIR]` builds it and installs it as `DIR/Mirage.app` (default `~/Applications`), removing
-a `MirageViewer.app` or `Mirage Viewer.app` from older builds (same bundle ID; pairings and settings stay). On iPhone and iPad the same app (TestFlight) runs Desktop mode: touches act where they land
+Every Mac runs the same signed release, `/Applications/Mirage.app`, from the release feed:
+
+```sh
+sh scripts/install-host.sh --channel nightly                 # a Mac you share (a host)
+sh scripts/install-host.sh --channel nightly --viewer-only   # a Mac that only connects to others
+```
+
+`--viewer-only` installs the same app with Share This Mac off: its host agent only keeps Mirage up to date, and no
+permission is ever asked for. Turn Share This Mac on later in Mirage's menu or Settings.
+
+**Developer only:** `scripts/make-viewer-app.sh` builds `Mirage.app` (the universal app's macOS slice, incremental) and
+`scripts/install-viewer-app.sh [DIR]` installs that development build as `DIR/Mirage.app` (default `~/Applications`).
+It is Apple Development signed, without the release's embedded host or updates: do not use it as a Mac's everyday
+Mirage. It removes a `MirageViewer.app` or `Mirage Viewer.app` from older builds (same bundle ID; pairings and settings
+stay). On iPhone and iPad the same app (TestFlight) runs Desktop mode: touches act where they land
 (a tap clicks there, a hold presses there and drags, two fingers scroll there; a trackpad-style pointer is the other
 touch mode), and the on-screen or a hardware keyboard types, with the same scroll prediction and typeahead. Launched from Finder or the Dock it opens a window listing your paired
 Macs with their own device icons (double-click or Return connects); + in its toolbar adds another by name or address

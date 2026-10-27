@@ -32,6 +32,7 @@ struct Update: AsyncParsableCommand {
     @Flag(help: ArgumentHelp("Print what a person must do at this Mac after a signing identity change (deploy-host.sh).", visibility: .hidden)) var grantSteps = false
     @Flag(help: ArgumentHelp("After the agent swapped in an update (a remote trigger): restart it onto the new build and watch it start, as --now does.", visibility: .hidden)) var supervise = false
     @Option(help: ArgumentHelp("Install this verified bundle (scripts/install-host.sh, with --manifest and --sigs).", visibility: .hidden)) var installBundle: String?
+    @Option(help: ArgumentHelp("With --install-bundle: Share This Mac on or off (install-host.sh --viewer-only: off).", visibility: .hidden)) var share: String?
     @Option(help: ArgumentHelp("The channel head's manifest.json, for --install-bundle.", visibility: .hidden)) var manifest: String?
     @Option(help: ArgumentHelp("Its manifest.sigs.json.", visibility: .hidden)) var sigs: String?
     @Flag(help: ArgumentHelp("With --install-bundle: reinstall even when this build or a newer one is installed.", visibility: .hidden)) var force = false
@@ -54,6 +55,9 @@ struct Update: AsyncParsableCommand {
                 try await MirageUpdate_installBundle(url(b), manifest: url(manifest), sigs: url(sigs), channel: channel,
                                                      appPath: app.map { url($0) } ?? URL(fileURLWithPath: "/Applications/Mirage.app", isDirectory: true),
                                                      store: store, assignments: assignments, force: force, allowIdentityChange: allowIdentityChange, dryRun: dryRun,
+                                                     share: try share.map { v -> Bool in
+                                                         switch v.lowercased() { case "on": return true; case "off": return false
+                                                         default: throw ValidationError("--share is on or off") } },
                                                      afterSwap: { p, installPaths, changed in try await afterSwap(p, paths: installPaths, identityChanged: changed) })
             } catch let e as ExitCode { throw e } catch { print("error: \(error)"); throw ExitCode(1) }
             return

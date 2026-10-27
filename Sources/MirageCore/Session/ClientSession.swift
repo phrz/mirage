@@ -107,6 +107,7 @@ public struct ClientSession {
             if let os = welcome.hostOS { h.hostOS = os }
             if let c = welcome.updateChannel { h.hostChannel = c }
             h.hostNeedsPermissions = welcome.needsPermissions
+            h.hostShared = welcome.shared
             h.hostSettings = welcome.hostSettings; h.hostLockFailedAt = welcome.lockFailedAt   // (nil from an older host: unknown)
             h.hostStreaming = welcome.hostStreaming
             h.hostProtocol = welcome.protocolVersion; h.hostMinProtocol = welcome.minProtocolVersion

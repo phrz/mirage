@@ -91,15 +91,22 @@ struct Serve: AsyncParsableCommand {
             log("not starting: system prompt windows on screen \(WarmPool.systemPromptWindows()) (UserNotificationCenter); a person must answer them")
             throw ExitCode(3)
         }
-        WarmPool.shared.start(log: { log($0) })   // warm host (M-FIVE): a display snapshot kept while nobody is connected
-        let screen = HostPermissions.screenRecordingGranted()
-        let ax = HostPermissions.accessibilityGranted()
-        ctx.missingPermissions = { HostPermissions.missing().map(\.rawValue) }
-        log("permissions: screen recording \(screen ? "granted" : "MISSING (\(PrivacyPane.path(PrivacyPane.screenRecording)) → enable miraged)")"
-            + ", accessibility \(ax ? "granted" : "MISSING (\(PrivacyPane.path(PrivacyPane.accessibility())) → enable miraged)")")
+        // Share This Mac (HostSettings): off, this agent only keeps Mirage up to date (HostRole); a change restarts it.
+        let role = HostRole(settings: HostSettings.load(from: ctx.store.url(HostSettings.fileName)))
+        ctx.sharing = { role.sharing }
+        if role.warmCaptures { WarmPool.shared.start(log: { log($0) }) }   // warm host (M-FIVE): a display snapshot kept while nobody is connected
+        let (screen, ax) = role.grantsAtStart()
+        ctx.missingPermissions = { role.missingPermissions() }
+        if role.sharing {
+            log("permissions: screen recording \(screen ? "granted" : "MISSING (\(PrivacyPane.path(PrivacyPane.screenRecording)) → enable miraged)")"
+                + ", accessibility \(ax ? "granted" : "MISSING (\(PrivacyPane.path(PrivacyPane.accessibility())) → enable miraged)")")
+        } else {
+            log("this Mac is not shared (Share This Mac off): only updates run; no streams, pairing, capture or permission requests")
+        }
         // Unlock with biometry (DESIGN §3.13): the login-item host only; a test instance never types at the lock screen.
-        // And only with the hardened runtime (a debugger could otherwise attach and read a password mid-typing).
-        if !noLocalControl {
+        // And only with the hardened runtime (a debugger could otherwise attach and read a password mid-typing). Not on a
+        // Mac that is not shared: no unlock and no agent sessions there.
+        if !noLocalControl, role.sharing {
             if LockScreenUnlocker.hardenedRuntime() {
                 ctx.unlockHandler = { secret in
                     log("unlock: lock check: \(LockScreenUnlocker.StrictLock.describe())")
@@ -135,15 +142,34 @@ struct Serve: AsyncParsableCommand {
         if noLocalControl { log("test instance: no local control, no permission watcher") }
         // The curtain (DESIGN §3.12) is the login-item host's: a test instance never curtains (or locks) the Mac someone may be
         // using, unless a test asks for it.
-        Curtain.allowed = !noLocalControl || ProcessInfo.processInfo.environment["MIRAGE_TEST_CURTAIN"] == "1"
+        Curtain.allowed = role.curtain && (!noLocalControl || ProcessInfo.processInfo.environment["MIRAGE_TEST_CURTAIN"] == "1")
         Curtain.testInstance = noLocalControl
         if noLocalControl { log("test instance: curtain \(Curtain.allowed ? "on (MIRAGE_TEST_CURTAIN=1)" : "off")") }
         else {
             do { try control.start(); health?.passed(.control) } catch { log("local control unavailable: \(error)") }
-            StayReachable.shared.start(enabled: HostSettings.load(from: ctx.store.url(HostSettings.fileName)).stayReachable, log: { log($0) })
-            watchPermissions(screen: screen, ax: ax, control: control)
-            if !(screen && ax) { showPermissionsWindow(control: control) }
-            if let health, health.onTrial { probeCaptureForHealth(screen: screen, ax: ax, health: health) }
+            let underLaunchd = ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == "com.paulherz.mirage.host" || getppid() == 1
+            control.onShareChange = { on in
+                guard underLaunchd else { log("restart miraged to \(on ? "share this Mac" : "stop sharing it")"); return }
+                log("restarting to \(on ? "share this Mac" : "stop sharing it")")
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.5) { Foundation.exit(0) }
+            }
+            if role.stayReachable { StayReachable.shared.start(enabled: HostSettings.load(from: ctx.store.url(HostSettings.fileName)).stayReachable, log: { log($0) }) }
+            if role.watchesPermissions {
+                let store = ctx.store
+                ctx.onShareAttempt = { reason in
+                    let settings = HostSettings.load(from: store.url(HostSettings.fileName))
+                    guard PermissionWindowRule.shouldShow(reason, settings: settings, missing: role.missingPermissions()) else { return }
+                    showPermissionsWindow(control: control, reason: reason)
+                }
+                watchPermissions(screen: screen, ax: ax, control: control, role: role)
+                if PermissionWindowRule.shouldShow(.startup, settings: HostSettings.load(from: ctx.store.url(HostSettings.fileName)), missing: role.missingPermissions()) {
+                    showPermissionsWindow(control: control, reason: .startup)
+                }
+            }
+            if let health, health.onTrial {
+                if role.sharing { probeCaptureForHealth(screen: screen, ax: ax, health: health) }
+                else { health.passed(.capture("not shared: no capture")) }   // a viewer-only Mac never captures
+            }
             scheduleUpdateChecks(paths: paths, ctx: ctx, log: { log($0) })
         }
         try await Task.sleep(for: .seconds(60 * 60 * 24 * 365))
@@ -155,7 +181,7 @@ struct Serve: AsyncParsableCommand {
 /// shows too). The Mirage app hears every change. When a grant arrives, a host run by launchd restarts itself once (exit;
 /// KeepAlive brings it back) so every grant is in force, quietly (the app's window keeps its rows; phrz's grants on
 /// mac-daddy took effect only after `launchctl kickstart`). A revoked grant asks the app to show its window again.
-func watchPermissions(screen: Bool, ax: Bool, control: LocalControlServer) {
+func watchPermissions(screen: Bool, ax: Bool, control: LocalControlServer, role: HostRole) {
     let underLaunchd = ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == "com.paulherz.mirage.host" || getppid() == 1
     Task.detached {
         var s = screen, a = ax
@@ -167,7 +193,9 @@ func watchPermissions(screen: Bool, ax: Bool, control: LocalControlServer) {
             let revoked = (s && !s2) || (a && !a2), arrived = (!s && s2) || (!a && a2)
             s = s2; a = a2
             control.broadcastStatus()
-            if revoked { showPermissionsWindow(control: control) }
+            if revoked, PermissionWindowRule.shouldShow(.revoked, settings: HostSettings.load(from: (try? Store())?.url(HostSettings.fileName) ?? URL(fileURLWithPath: "/nonexistent")), missing: role.missingPermissions()) {
+                showPermissionsWindow(control: control, reason: .revoked)
+            }
             if arrived, underLaunchd {
                 log("restarting to apply the new permissions")
                 control.announceRestart()
@@ -180,10 +208,10 @@ func watchPermissions(screen: Bool, ax: Bool, control: LocalControlServer) {
 
 /// A grant is missing: the Mirage app shows its permissions window. With no app connected yet (a login, or just after
 /// install-host.sh), it waits a little, then opens Mirage.app, which shows it; never a system prompt from here.
-func showPermissionsWindow(control: LocalControlServer) {
+func showPermissionsWindow(control: LocalControlServer, reason: PermissionWindowRule.Reason) {
     Task.detached {
         for _ in 0..<10 {
-            if control.askToShowPermissions() { log("permissions: asked the Mirage app to show its window"); return }
+            if control.askToShowPermissions(reason: PermissionWindowRule.message(reason)) { log("permissions: asked the Mirage app to show its window (\(reason))"); return }
             try? await Task.sleep(for: .seconds(1))
         }
         let app = Bundle.main.bundleURL

@@ -197,6 +197,8 @@ public final class Store: @unchecked Sendable {
         public var hostUnlock: Bool?
         /// The grants it lacked at its last Welcome (DESIGN §3.7a). nil: none, or not known.
         public var hostNeedsPermissions: [String]?
+        /// false: it did not share itself at its last Welcome (a viewer-only Mac).
+        public var hostShared: Bool?
         public var hostStreaming: Bool?
         public var hostProtocol: Int?
         public var hostMinProtocol: Int?

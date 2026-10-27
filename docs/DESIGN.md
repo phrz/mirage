@@ -1084,6 +1084,15 @@ So the host needs exactly two toggles, the viewers need none. Rules:
   closes itself once both are in. The pairing code shows in it while a pairing window is open, and one line explains the
   monthly screen-picker reminder. It comes up on its own once per launch for a missing grant, again on the host's request
   (a revocation), never on a Mac whose host is off (no host, no status).
+- **Later and Share This Mac (2026-10-27).** Later persists in the host settings (`permissionsSnoozed`): from then on the
+  window comes back only when someone tries to share this Mac (a device's pairing request, Pair a Device…, Share This
+  Mac turned on, a connection refused for a missing grant, with that device's name), or when a grant that was there is
+  revoked (`PermissionWindowRule`). Share This Mac (`shareThisMac`, default on) is the host's switch: off, the agent
+  stays registered and only keeps Mirage up to date (feed checks, Automatic, a paired viewer's trigger, status probes);
+  it refuses streams and pairing, takes no warm captures, raises no curtain or event tap, and never reads or asks for its
+  grants. Every Mac runs the same signed release: `install-host.sh --viewer-only` installs it with sharing off, and the
+  Apple Development copy from `install-viewer-app.sh` is for development only. A viewer's row for a Mac that does not
+  share says "Not shared" and offers no connection.
 
 ### 3.8 Native chrome: menu bar, dock, status items, notifications
 

@@ -48,6 +48,9 @@ final class HostMenu: NSObject, NSMenuDelegate {
         }
         MainActor.assumeIsolated {
             permissions.model.request = { [weak self] id in try? self?.client?.send(.requestPermission(id)) }
+            // Later: the window comes back only when someone tries to share this Mac, or a grant is revoked.
+            permissions.onLater = { [weak self] in self?.snoozePermissions(true) }
+            HostShareState.shared.set = { [weak self] on in self?.setSharing(on) }
         }
         connect()
         // Test knob MIRAGE_TEST_OPEN_PAIRING: the pairing window opens at launch (screenshots without clicking the menu bar).
@@ -87,7 +90,10 @@ final class HostMenu: NSObject, NSMenuDelegate {
         case .pairingClosed(let reason):
             panel?.closed(reason)
             MainActor.assumeIsolated { permissions.model.pairingCode = nil }
-        case .showPermissions: showPermissions()
+        case .showPermissions(let reason):
+            guard PermissionsWindow.mayShowOnRequest(status) else { return }
+            MainActor.assumeIsolated { permissions.model.reason = reason }
+            showPermissions()
         case .paired(let name): panel?.succeeded(name)
         case .confirm(let c): ask(c)
         case .unlockOutcome, .agentSession: break   // (miraged unlock's, not the menu's)
@@ -103,12 +109,52 @@ final class HostMenu: NSObject, NSMenuDelegate {
 
     private func permissionsStatus(_ s: LocalControl.Status) {
         MainActor.assumeIsolated {
+            HostShareState.shared.sharing = s.hostSettings.map(\.shareThisMac) ?? true
             permissions.update(s)
-            let missing = s.screenRecording == false || s.accessibility == false
-            if forcePermissions, missing || s.screenRecording == nil { forcePermissions = false; showPermissions() }
-            else if PermissionsWindow.shouldShow(s, visible: permissions.isVisible, dismissed: permissions.dismissed) { showPermissions() }
+            if pendingShareOn {
+                // Share This Mac turned on with the host just registered: say so to it now that it answers.
+                pendingShareOn = false
+                if s.hostSettings?.shareThisMac == false { setSharing(true); return }
+            }
+            if s.hostSettings?.shareThisMac == false { if permissions.isVisible { permissions.close() }; forcePermissions = false; return }
+            if forcePermissions {
+                // Share This Mac turned on, or --permissions: up if a grant is missing, whatever Later said.
+                if s.screenRecording != nil { forcePermissions = false }
+                if PermissionsWindow.mayShowOnRequest(s), s.screenRecording != nil { permissions.model.reason = nil; showPermissions() }
+            } else if PermissionsWindow.shouldShow(s, visible: permissions.isVisible, dismissed: permissions.dismissed) { showPermissions() }
+            if permissions.model.allGranted, s.hostSettings?.permissionsSnoozed == true { snoozePermissions(false) }
         }
     }
+
+    private func snoozePermissions(_ on: Bool) {
+        guard var hs = status?.hostSettings, hs.permissionsSnoozed != on else { return }
+        hs.permissionsSnoozed = on
+        setHostSettings(hs)
+    }
+
+    /// Share This Mac turned on with the host not yet registered: set once it answers.
+    private var pendingShareOn = false
+
+    /// The menu's and Settings' switch. On: the host agent is registered if it is not, the host shares (it restarts into
+    /// it), and the permissions window comes up if a grant is missing. Off: the agent stays (it keeps Mirage up to date),
+    /// nothing is shared.
+    func setSharing(_ on: Bool) {
+        if on {
+            forcePermissions = true
+            if !Self.hosting { pendingShareOn = true; toggleAllow(); return }
+            guard var hs = status?.hostSettings else { pendingShareOn = true; return }
+            if !hs.shareThisMac { hs.shareThisMac = true; setHostSettings(hs) }
+            try? client?.send(.status)
+        } else {
+            guard var hs = status?.hostSettings, hs.shareThisMac else { return }
+            hs.shareThisMac = false
+            setHostSettings(hs)
+            MainActor.assumeIsolated { if permissions.isVisible { permissions.close() } }
+        }
+    }
+    @objc private func toggleShare() { setSharing(!sharing) }
+    /// Shared now, as far as known: the agent runs and its setting is on.
+    var sharing: Bool { Self.hosting && status?.hostSettings?.shareThisMac != false }
 
     /// Shows the window and follows the host's grants every second while it is up.
     @objc func showPermissions() {
@@ -181,8 +227,8 @@ final class HostMenu: NSObject, NSMenuDelegate {
             let i = NSMenuItem(title: title, action: action, keyEquivalent: ""); i.target = self; i.representedObject = object; menu.addItem(i); return i
         }
         let agent = Self.agent.status
-        let allow = item("Allow Connections to This Mac", #selector(toggleAllow))
-        allow.state = agent == .enabled ? .on : agent == .requiresApproval ? .mixed : .off
+        let share = item("Share This Mac", #selector(toggleShare))
+        share.state = agent == .requiresApproval ? .mixed : sharing ? .on : .off
         switch agent {
         case .requiresApproval:
             // Registered, but macOS holds it until it is approved: nothing runs until then.
@@ -198,12 +244,12 @@ final class HostMenu: NSObject, NSMenuDelegate {
             if status?.canUpdate == true { _ = item("Update Now", #selector(updateNow)) }
         }
         if isConnected, let s = status, s.restarting == true { label("Restarting to apply permissions…") }
-        else if isConnected, let s = status {
+        else if isConnected, let s = status, s.hostSettings?.shareThisMac != false {
             if s.screenRecording == false || s.accessibility == false { _ = item("Allow Permissions…", #selector(showPermissions)) }
             if let c = s.connected, !c.isEmpty { label("Connected: \(c.joined(separator: ", "))") }
         }
         // The host's own settings (DESIGN §3.12), both on by default; shown once the host reports them (older hosts do not).
-        if isConnected, let hs = status?.hostSettings {
+        if isConnected, let hs = status?.hostSettings, hs.shareThisMac {
             menu.addItem(.separator())
             let curtain = item("Curtain While Connected", #selector(toggleCurtain)); curtain.state = hs.curtain ? .on : .off
             curtain.toolTip = "While someone is connected, this Mac's screen looks locked and is left out of what they see; touching it locks the Mac."
@@ -214,7 +260,7 @@ final class HostMenu: NSObject, NSMenuDelegate {
             awake.toolTip = "Keep this Mac from sleeping on its own so devices can connect (on the power adapter); the display still sleeps."
         }
         menu.addItem(.separator())
-        _ = item("Pair a Device…", isConnected ? #selector(pairDevice) : nil)
+        _ = item("Pair a Device…", isConnected && sharing ? #selector(pairDevice) : nil)
         if isConnected, let devices = status?.devices, !devices.isEmpty {
             defer {
                 menu.addItem(.separator())
@@ -329,7 +375,12 @@ final class HostMenu: NSObject, NSMenuDelegate {
     }
 
     @objc func pairDevice() {
-        guard isConnected else { return }
+        guard isConnected, sharing else { return }
+        // A pairing to this Mac: the permissions window too if a grant is missing, whatever Later said.
+        if PermissionsWindow.mayShowOnRequest(status), status?.screenRecording != nil {
+            MainActor.assumeIsolated { permissions.model.reason = nil }
+            showPermissions()
+        }
         if panel == nil {
             panel = PairingPanel(onCancel: { [weak self] in try? self?.client?.send(.closePairing) }, onClose: { [weak self] in self?.panel = nil })
         }

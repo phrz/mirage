@@ -1,4 +1,11 @@
 #!/bin/sh
+# ============================================================================================================================
+# DEVELOPER ONLY. This installs a local development build (Apple Development signed, no release host, no updates): a
+# "crippled" copy that says the host is missing. Every Mac's everyday Mirage is the signed release from the feed:
+#     sh scripts/install-host.sh --channel nightly                 (a Mac you share)
+#     sh scripts/install-host.sh --channel nightly --viewer-only   (a Mac that only connects to others)
+# Set MIRAGE_DEV_VIEWER=1 to run this anyway.
+# ============================================================================================================================
 # Installs the Mac app as DEST/Mirage.app (DEST: ~/Applications by default), replacing a copy from older builds named
 # MirageViewer.app or "Mirage Viewer.app" (same bundle ID, com.paulherz.mirage): one Mirage in Finder, Launchpad and
 # Spotlight. Pairings and settings are untouched (~/Library/Application Support/Mirage and the com.paulherz.mirage
@@ -7,6 +14,12 @@
 #   APP=path/Mirage.app scripts/install-viewer-app.sh [DEST]   installs that build
 # A running Mirage keeps running from the old copy until it is quit; open the new one afterwards.
 set -e
+if [ "${MIRAGE_DEV_VIEWER:-}" != 1 ]; then
+    echo "install-viewer-app.sh installs a DEVELOPMENT build, not the release (no host, no updates)." >&2
+    echo "For a Mac's everyday Mirage: sh scripts/install-host.sh --channel nightly [--viewer-only]" >&2
+    echo "Set MIRAGE_DEV_VIEWER=1 to install the development build anyway." >&2
+    exit 2
+fi
 cd "$(dirname "$0")/.."
 DEST=${1:-$HOME/Applications}
 APP=${APP:-$(sh scripts/make-viewer-app.sh | tail -1)}

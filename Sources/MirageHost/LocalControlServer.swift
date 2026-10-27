@@ -26,14 +26,16 @@ public final class LocalControlServer: @unchecked Sendable {
             for c in clients.values { sendStatus(to: c) }
         }
     }
+    /// Share This Mac changed (miraged restarts into the new role).
+    public var onShareChange: ((Bool) -> Void)?
     /// Every connected app hears the current status (a grant changed).
     public func broadcastStatus() { queue.async { for c in self.clients.values { self.sendStatus(to: c) } } }
     /// Asks the Mirage app to show its permissions window; false when no app is connected.
     @discardableResult
-    public func askToShowPermissions() -> Bool {
+    public func askToShowPermissions(reason: String? = nil) -> Bool {
         queue.sync {
             guard !clients.isEmpty else { return false }
-            broadcast(.showPermissions)
+            broadcast(.showPermissions(reason: reason))
             return true
         }
     }
@@ -96,9 +98,20 @@ public final class LocalControlServer: @unchecked Sendable {
         c.buffer.append(contentsOf: chunk[0..<n])
         if c.buffer.count > 65536 { drop(c); return }
         for line in LocalControl.takeLines(&c.buffer) {
-            guard let r = try? LocalControl.decode(LocalControl.Request.self, line: line) else { continue }
+            guard var r = try? LocalControl.decode(LocalControl.Request.self, line: line) else { continue }
+            if case .setHostSettings = r, let sent = Self.sentSettings(line) {
+                // Keys an older app leaves out keep their stored values (not the defaults).
+                r = .setHostSettings(HostSettings.merged(message: sent, over: HostSettings.load(from: ctx.store.url(HostSettings.fileName))))
+            }
             handle(r, from: c)
         }
+    }
+
+    /// The settings object as sent in a `setHostSettings` line (`{"setHostSettings":{"_0":{…}}}`).
+    static func sentSettings(_ line: Data) -> Data? {
+        guard let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any], let wrap = obj["setHostSettings"] as? [String: Any],
+              let inner = wrap["_0"] ?? wrap.values.first else { return nil }
+        return try? JSONSerialization.data(withJSONObject: inner)
     }
 
     private func drop(_ c: Client) {
@@ -118,7 +131,9 @@ public final class LocalControlServer: @unchecked Sendable {
             send(.hello(version: LocalControl.version, hostName: ctx.identity.name, hostID: ctx.identity.id), to: c)
             sendStatus(to: c)
             if let w = ctx.pairing.window, w.isOpen() { shownIssue = nil; tick() }
-        case .openPairing: openPairing()
+        case .openPairing:
+            guard ctx.sharing() else { send(.pairingClosed(reason: "this Mac is not shared"), to: c); return }
+            openPairing()
         case .closePairing: closePairing("closed in the app")
         case .decide(let id, let allow):
             if let k = pendingConfirms.removeValue(forKey: id) { k.resume(returning: allow) }
@@ -130,15 +145,21 @@ public final class LocalControlServer: @unchecked Sendable {
             log("update now, from the Mirage app")
             Task { await handler(.update(targetBuild: nil), .thisMac, { [weak self] st in self?.queue.async { self?.broadcast(.updateStatus(st)) } }) }
         case .setHostSettings(let new):
+            let was = HostSettings.load(from: ctx.store.url(HostSettings.fileName))
             do {
                 try new.save(to: ctx.store.url(HostSettings.fileName))
                 log("host settings from the Mirage app: curtain \(new.curtain ? "on" : "off"), lock when finished \(new.lockWhenFinished ? "on" : "off") (from the next session), stay reachable \(new.stayReachable ? "on" : "off")")
-                StayReachable.shared.set(new.stayReachable)
+                if new.shareThisMac { StayReachable.shared.set(new.stayReachable) }
+                if new.shareThisMac != was.shareThisMac {
+                    log("share this Mac: \(new.shareThisMac ? "on" : "off"), from the Mirage app")
+                    onShareChange?(new.shareThisMac)
+                }
             } catch { log("host settings not saved: \(error)") }
             sendStatus(to: c)
         case .requestUnlock(let reason, _):
             // The requester as the host finds it from the socket's peer (what the asker says about itself is ignored).
-            guard ctx.unlockHandler != nil else { send(.unlockOutcome(.refused), to: c); return }
+            // A Mac that is not shared offers no unlock (and no agent sessions).
+            guard ctx.sharing(), ctx.unlockHandler != nil else { send(.unlockOutcome(.refused), to: c); return }
             let peer = PeerIdentity.requester(fd: c.fd)
             let who = UnlockLogic.clean(peer.label, limit: 160), why = UnlockLogic.clean(reason)
             log("unlock requested by \(who): \(why)")
@@ -148,6 +169,8 @@ public final class LocalControlServer: @unchecked Sendable {
                 self.log("unlock request by \(who): \(o.rawValue)")
                 self.queue.async { self.send(.unlockOutcome(o), to: c) }
             }
+        case .agentSessionExtend where !ctx.sharing(), .agentSessionDone where !ctx.sharing():
+            send(.agentSession(open: false), to: c)
         case .agentSessionExtend:
             // Only the program that asked for the unlock keeps its session going (verified from this peer, not claimed).
             let anchor = PeerIdentity.requester(fd: c.fd).anchor
@@ -156,6 +179,8 @@ public final class LocalControlServer: @unchecked Sendable {
             AgentSessions.shared.end(by: UnlockLogic.clean(PeerIdentity.requester(fd: c.fd).label, limit: 160)) { had in self.queue.async { self.send(.agentSession(open: had), to: c) } }
         case .requestPermission(let raw):
             guard let kind = HostPermissions.Kind(rawValue: raw) else { return }
+            // A Mac that is not shared never asks for a grant.
+            guard ctx.sharing() else { log("permissions: \(raw) asked while this Mac is not shared; ignored"); sendStatus(to: c); return }
             // At most once per kind in this run: a second ask (another Allow, or any client of this user) never raises the
             // dialog again over System Settings.
             if HostPermissions.granted(kind) || requestedThisRun.contains(kind) { sendStatus(to: c); return }
@@ -178,7 +203,9 @@ public final class LocalControlServer: @unchecked Sendable {
         let devices = (try? ctx.store.authorizedDevices()) ?? []
         let base = LocalControl.Status(hostName: ctx.identity.name, pairedDevices: devices.count, pairingOpen: ctx.pairing.window?.isOpen() ?? false,
                                        devices: devices.map { .init(id: $0.id, name: $0.name, pairedAt: $0.pairedAt, model: $0.model) },
-                                       screenRecording: HostPermissions.screenRecordingGranted(), accessibility: HostPermissions.accessibilityGranted())
+                                       // Not shared: the grants are never read (nil: nothing to ask for).
+                                       screenRecording: ctx.sharing() ? HostPermissions.screenRecordingGranted() : nil,
+                                       accessibility: ctx.sharing() ? HostPermissions.accessibilityGranted() : nil)
         let asked = PermissionRequests.asked(store: ctx.store).map(\.rawValue)
         let conns = ctx.connections
         Task {

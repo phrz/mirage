@@ -29,6 +29,11 @@ public struct HostContext: Sendable {
     /// The grants this host lacks ("screenRecording", "accessibility"; DESIGN §3.7a): said in the Welcome, and a stream is
     /// refused without Screen Recording (capturing would raise the system prompt). nil: none known missing.
     public var missingPermissions: (@Sendable () -> [String])?
+    /// Share This Mac (HostSettings): off, streams and pairing are refused and the Welcome says "not shared".
+    public var sharing: @Sendable () -> Bool = { true }
+    /// Someone tried to share this Mac (a pairing request, a connection refused for a missing grant): the host may show the
+    /// permissions window (PermissionWindowRule).
+    public var onShareAttempt: (@Sendable (PermissionWindowRule.Reason) -> Void)?
     /// This Mac's own icon (rendered once per start by miraged), for viewers that ask for it.
     public var hostIcon: HostIcon?
     /// Unlock with biometry (DESIGN §3.13): types a password at the lock screen if it is up at that moment, and says how it
@@ -65,6 +70,8 @@ public struct HostUpdateInfo: Sendable {
 
 /// Handles one incoming stream or datagram flow on the host.
 public enum HostSession {
+    /// Why a Mac that is not shared refuses a stream or a pairing.
+    public static let notShared = "this Mac is not shared: turn on Share This Mac in Mirage on it"
     /// The viewer's tunables (Tunables), after every streamInfo, to viewers that asked for them: the defaults overridden by
     /// `tunables.json` in the store directory, read each time (retuned without a restart).
     static func sendTunables(_ out: ConnectionOutput, _ req: ControlMessage.StreamRequest, _ ctx: HostContext) {
@@ -177,10 +184,10 @@ public enum HostSession {
                 if !probe, (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) {
                     await ctx.updateListeners.add(conn.id, sendUpdate)
                 }
-                if !probe, ctx.unlockHandler != nil, (hello.features ?? []).contains(ControlMessage.Feature.unlock) {
+                if !probe, ctx.sharing(), ctx.unlockHandler != nil, (hello.features ?? []).contains(ControlMessage.Feature.unlock) {
                     await ctx.unlockRequests.add(conn.id, sendUpdate)
                 }
-                if !probe, ctx.endAgentSession != nil, (hello.features ?? []).contains(ControlMessage.Feature.agentSession) {
+                if !probe, ctx.sharing(), ctx.endAgentSession != nil, (hello.features ?? []).contains(ControlMessage.Feature.agentSession) {
                     await ctx.agentSessionNotices.add(conn.id, sendUpdate)
                 }
                 if !probe, (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) {
@@ -207,6 +214,7 @@ public enum HostSession {
                 unlock(secret, requestID: u.requestID, device: device, reply: sendUpdate, remote: remote, ctx: ctx)
             case .endAgentSession:
                 guard let device = authenticated else { throw MirageError.protocolViolation("endAgentSession before auth") }
+                guard ctx.sharing() else { ctx.log("[\(remote)] \(device.name) asked to end an agent session, but this Mac is not shared: refused"); continue }
                 ctx.log("[\(remote)] \(device.name) ended the agent session")
                 ctx.endAgentSession?(device.name)
             case .unlockDecline(let d):
@@ -217,6 +225,10 @@ public enum HostSession {
                 guard let device = authenticated else { throw MirageError.protocolViolation("rollbackHost before auth") }
                 trigger(.rollback, device: device, connection: conn.id, reply: { sendUpdate(.updateStatus($0)) }, remote: remote, ctx: ctx)
             case .pairRequest(let req):
+                guard ctx.sharing() else {
+                    try await stream.send(.reject(.init(reason: Self.notShared))); throw MirageError.pairingFailed("this Mac is not shared")
+                }
+                if !(ctx.missingPermissions?() ?? []).isEmpty { ctx.onShareAttempt?(.pairing(device: req.deviceName)) }
                 try await pair(req, stream, remote: remote, ctx: ctx)
             case .ping(var p):
                 guard authenticated != nil else { throw MirageError.protocolViolation("ping before auth") }
@@ -240,8 +252,10 @@ public enum HostSession {
                     guard let make = ctx.makeStreamer else {
                         try await stream.send(.reject(.init(reason: "host cannot stream"))); continue
                     }
+                    guard ctx.sharing() else { try await stream.send(.reject(.init(reason: Self.notShared))); continue }
                     // Never capture without the grant: that would raise the prompt on the host (DESIGN §3.7a).
                     if (ctx.missingPermissions?() ?? []).contains("screenRecording") {
+                        if let d = authenticated { ctx.onShareAttempt?(.connectionRefused(device: d.name)) }
                         try await stream.send(.reject(.init(reason: "host is missing Screen Recording permission: open Mirage on that Mac and allow it in the window it shows"))); continue
                     }
                     guard let flow = await conn.waitForFlow(timeout: .seconds(5)) else {
@@ -312,7 +326,7 @@ public enum HostSession {
     static func unlock(_ secret: SecretBytes, requestID rid: String?, device: DeviceRecord, reply: @escaping @Sendable (ControlMessage) -> Void,
                        remote: String, ctx: HostContext) {
         func answer(_ o: ControlMessage.UnlockResult.Outcome, _ m: String) { reply(.unlockResult(.init(outcome: o, message: m, requestID: rid))) }
-        guard let handler = ctx.unlockHandler else { secret.wipe(); answer(.refused, "\(ctx.identity.name) does not offer Unlock with biometry"); return }
+        guard ctx.sharing(), let handler = ctx.unlockHandler else { secret.wipe(); answer(.refused, "\(ctx.identity.name) does not offer Unlock with biometry"); return }
         guard (try? ctx.store.authorizedDevices())?.contains(where: { $0.id == device.id && $0.publicKey == device.publicKey }) == true else {
             secret.wipe()
             ctx.log("[\(remote)] \(device.name) sent an unlock but is no longer paired: refused")
@@ -431,8 +445,8 @@ public enum HostSession {
                                              hostVersion: .current, latestAvailable: updates?.latestAvailable, updatePolicy: updates?.permission,
                                              protocolVersion: Mirage.protocolVersion,
                                              features: (ctx.advertisesUnpair ? [ControlMessage.Feature.unpair] : []) + (ctx.updateHandler != nil ? [ControlMessage.Feature.updateTrigger] : [])
-                                                + (ctx.unlockHandler != nil ? [ControlMessage.Feature.unlock] : [])
-                                                + (ctx.endAgentSession != nil ? [ControlMessage.Feature.agentSession] : []),
+                                                + (ctx.sharing() && ctx.unlockHandler != nil ? [ControlMessage.Feature.unlock] : [])
+                                                + (ctx.sharing() && ctx.endAgentSession != nil ? [ControlMessage.Feature.agentSession] : []),
                                              // Only to a viewer that decodes update statuses (one from before U4 never sees it).
                                              updateResult: (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) ? updates?.lastResult : nil,
                                              hostStreaming: streamingElsewhere, minProtocolVersion: Mirage.minProtocolVersion,
@@ -440,7 +454,8 @@ public enum HostSession {
                                              hostSettings: HostSettings.load(from: ctx.store.url(HostSettings.fileName)),
                                              lockFailedAt: HostLockStatus.lastFailure, hostOS: ViewerFeed.osString(ProcessInfo.processInfo.operatingSystemVersion),
                                              updateChannel: updates?.channel,
-                                             needsPermissions: ctx.missingPermissions?().nilIfEmpty)))
+                                             needsPermissions: ctx.missingPermissions?().nilIfEmpty,
+                                             shared: ctx.sharing() ? nil : false)))
         ctx.welcomed?()
         if quiet {
             // A status probe: one line per device every 10 min at most, no timings.

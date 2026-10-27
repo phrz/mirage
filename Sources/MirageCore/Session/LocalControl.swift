@@ -57,7 +57,8 @@ public enum LocalControl {
         case agentSession(open: Bool)
         /// A grant the host needs is missing (at its start, or revoked since): show the permissions window. An older app
         /// ignores it.
-        case showPermissions
+        /// `reason`: why now, for the window's line (a device's name), when someone caused it.
+        case showPermissions(reason: String?)
     }
 
     public struct Pairing: Codable, Equatable {

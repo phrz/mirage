@@ -121,7 +121,7 @@ public struct SystemInstallAgent: InstallAgent {
         return "\(how); \(Self.describe(v))"
     }
     public func ensureRunning() -> String { Self.describe(control.ensureRunning(restart: false, log: { print($0) })) }
-    static func describe(_ v: AgentWatch.Verdict) -> String {
+    public static func describe(_ v: AgentWatch.Verdict) -> String {
         switch v {
         case .started: return "host agent running"
         case .cannotSpawn(let why): return "host agent not running (\(why))"

@@ -67,7 +67,7 @@ final class PermissionPromptTests: XCTestCase {
         XCTAssertEqual(st0.screenRecording, false); XCTAssertEqual(st0.accessibility, false); XCTAssertNil(st0.permissionsAsked)
         XCTAssertEqual(c.requests, 0, "a status read asks nothing")
         XCTAssertTrue(server.askToShowPermissions())
-        _ = try await events.wait("showPermissions") { $0 == .showPermissions }
+        _ = try await events.wait("showPermissions") { if case .showPermissions = $0 { return true }; return false }
         XCTAssertEqual(c.requests, 0)
 
         let before = events.count
@@ -132,6 +132,11 @@ final class PermissionPromptTests: XCTestCase {
         XCTAssertFalse(HostPermissions.namesVisible(in: [w("Safari", "Apple", layer: 3)], ownPID: 1), "only normal windows")
         XCTAssertTrue(HostPermissions.namesVisible(in: ungranted + [w("Safari", "Apple")], ownPID: 1), "an app's window name: granted")
         XCTAssertFalse(HostPermissions.namesVisible(in: [], ownPID: 1), "nothing on screen: says nothing")
+        // Only regular apps count: an agent this list does not know (Stage Manager's WindowManager, "Siri AI") says nothing.
+        let agent = [w("SomeNewSystemAgent", "Overlay", pid: 600)]
+        XCTAssertFalse(HostPermissions.namesVisible(in: agent, ownPID: 1, regularPIDs: [500]))
+        XCTAssertTrue(HostPermissions.namesVisible(in: [w("Safari", "Apple", pid: 500)], ownPID: 1, regularPIDs: [500]))
+        XCTAssertFalse(HostPermissions.namesVisible(in: [w("WindowManager", "x"), w("Siri AI", "y")], ownPID: 1))
     }
 
     func testTheAppIsOpenedAtMostOncePerBoot() throws {

@@ -497,6 +497,7 @@ struct MacSettingsView: View {
     let model: ViewerModel?
     var body: some View {
         Form {
+            ShareThisMacSection()
             ConnectionSettingsSection(prefs: prefs)
             Section {
                 Toggle("Send Keyboard Shortcuts to Mac", isOn: Binding(get: { controls.captureShortcuts }, set: { controls.setCaptureShortcuts($0) }))

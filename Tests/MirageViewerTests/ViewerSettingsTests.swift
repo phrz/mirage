@@ -250,6 +250,10 @@ final class ViewerSettingsTests: XCTestCase {
         h.unreachable = true
         XCTAssertEqual(h.detail(now: now, locale: en), "Not reachable")
         XCTAssertTrue(h.dimmed)
+        var viewerOnly = PairedHost(alias: "macbook", name: "macbook"); viewerOnly.notShared = true
+        XCTAssertEqual(viewerOnly.detail(now: now, locale: en), "Not shared")
+        XCTAssertFalse(viewerOnly.canConnect, "no connection offered")
+        XCTAssertTrue(viewerOnly.info().contains(.init(label: "Status", value: "Not shared")))
         h.unreachable = false; h.refusal = "unknown device"
         XCTAssertEqual(h.detail(now: now, locale: en), "Not accepting this device", "refusing is not unreachable")
         XCTAssertTrue(h.dimmed)
@@ -479,6 +483,16 @@ final class ViewerSettingsTests: XCTestCase {
         m.apply(s)
         XCTAssertTrue(m.allGranted)
         XCTAssertEqual(m.headline, "This Mac is ready. Your paired devices can connect.")
+        // Later: not by itself again; a request (a pairing, a refused connection, the switch) still brings it up.
+        var later = LocalControl.Status(hostName: "big-mac", pairedDevices: 0, pairingOpen: false, screenRecording: false, accessibility: false)
+        later.hostSettings = HostSettings(permissionsSnoozed: true)
+        XCTAssertFalse(PermissionsWindow.shouldShow(later, visible: false, dismissed: false), "Later: not at the next launch")
+        XCTAssertTrue(PermissionsWindow.mayShowOnRequest(later), "someone tries to share this Mac")
+        later.hostSettings = HostSettings(shareThisMac: false)
+        XCTAssertFalse(PermissionsWindow.shouldShow(later, visible: false, dismissed: false))
+        XCTAssertFalse(PermissionsWindow.mayShowOnRequest(later), "never while sharing is off")
+        let viewerOnly = LocalControl.Status(hostName: "macbook", pairedDevices: 0, pairingOpen: false)   // not shared: no grants reported
+        XCTAssertFalse(PermissionsWindow.mayShowOnRequest(viewerOnly))
         let old = LocalControl.Status(hostName: "old", pairedDevices: 0, pairingOpen: false)
         XCTAssertFalse(PermissionsWindow.shouldShow(old, visible: false, dismissed: false), "an older host that does not say: nothing shown")
         for line in m.grants.flatMap({ [$0.title, $0.why] }) + [m.headline] { XCTAssertFalse(line.contains("·"), line) }

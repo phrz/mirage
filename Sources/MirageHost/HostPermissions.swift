@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import CoreGraphics
 import ApplicationServices
 import MirageCore
@@ -93,17 +94,24 @@ public enum HostPermissions {
     /// so is this process. No such window on screen: this says nothing (false), and preflight decides alone.
     static func otherWindowNamesVisible() -> Bool {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return false }
-        return namesVisible(in: list, ownPID: Int(getpid()))
+        // Regular apps only (a Dock icon and a menu bar): no system agent, whatever this macOS calls it.
+        let regular = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map { Int($0.processIdentifier) })
+        return namesVisible(in: list, ownPID: Int(getpid()), regularPIDs: regular)
     }
 
     /// Owners whose window names do not show the grant.
     static let systemOwners: Set<String> = ["Dock", "Window Server", "WindowServer", "SystemUIServer", "Control Center", "ControlCenter",
                                             "Notification Center", "NotificationCenter", "loginwindow", "Spotlight", "TextInputMenuAgent",
-                                            "Wallpaper", "WallpaperAgent", "universalAccessAuthWarn", "CursorUIViewService", "AXVisualSupportAgent"]
+                                            "Wallpaper", "WallpaperAgent", "universalAccessAuthWarn", "CursorUIViewService", "AXVisualSupportAgent",
+                                            "WindowManager", "Siri AI"]
 
-    static func namesVisible(in list: [[String: Any]], ownPID: Int) -> Bool {
+    /// `regularPIDs`: the processes that are regular apps (NSRunningApplication.activationPolicy == .regular); nil skips
+    /// that check (the owner deny-list still applies).
+    static func namesVisible(in list: [[String: Any]], ownPID: Int, regularPIDs: Set<Int>? = nil) -> Bool {
         list.contains { w in
-            guard (w[kCGWindowOwnerPID as String] as? Int) != ownPID,
+            let pid = w[kCGWindowOwnerPID as String] as? Int
+            if let regularPIDs, !regularPIDs.contains(pid ?? -1) { return false }
+            guard pid != ownPID,
                   (w[kCGWindowLayer as String] as? Int) == 0,
                   let owner = w[kCGWindowOwnerName as String] as? String, !systemOwners.contains(owner) else { return false }
             return !((w[kCGWindowName as String] as? String) ?? "").isEmpty
@@ -142,5 +150,27 @@ public enum PermissionRequests {
         guard !list.contains(k) else { return }
         list.append(k)
         try? JSONEncoder().encode(list.map(\.rawValue)).write(to: store.url(file), options: .atomic)
+    }
+}
+
+/// What the host agent runs, from Share This Mac (HostSettings; phrz, 2026-10-27). Shared: everything. Not shared (a
+/// viewer-only Mac): only the updater (feed checks, Automatic, a paired viewer's trigger, status probes) and the local
+/// control socket; no warm captures, no curtain or event tap, no Stay Reachable, no permission watcher, window or request,
+/// and its grants are never read: a viewer-only Mac never touches TCC.
+public struct HostRole: Equatable, Sendable {
+    public var sharing: Bool
+    public init(sharing: Bool) { self.sharing = sharing }
+    public init(settings: HostSettings) { sharing = settings.shareThisMac }
+
+    public var warmCaptures: Bool { sharing }
+    public var curtain: Bool { sharing }
+    public var stayReachable: Bool { sharing }
+    public var watchesPermissions: Bool { sharing }
+
+    /// The grants it lacks, as reported: none while not shared, and then nothing is read.
+    public func missingPermissions() -> [String] { sharing ? HostPermissions.missing().map(\.rawValue) : [] }
+    /// The grants as read at the start: (false, false) while not shared, without reading them.
+    public func grantsAtStart() -> (screen: Bool, ax: Bool) {
+        sharing ? (HostPermissions.screenRecordingGranted(), HostPermissions.accessibilityGranted()) : (false, false)
     }
 }

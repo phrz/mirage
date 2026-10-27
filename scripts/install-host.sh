@@ -17,8 +17,14 @@
 #      through the updater's own swap, trial and commit), sets the channel and policy, turns the host on, and prints the
 #      Screen Recording and Device Control (Accessibility) steps, named as this Mac's System Settings names them.
 #
-#   scripts/install-host.sh [--channel stable|beta|nightly] [--policy ask|automatic] [--force] [--allow-identity-change]
-#                           [--dry-run] [--verify-only] [--feed URL] [--app PATH]
+#   scripts/install-host.sh [--channel stable|beta|nightly] [--policy ask|automatic] [--viewer-only] [--force]
+#                           [--allow-identity-change] [--dry-run] [--verify-only] [--feed URL] [--app PATH]
+#     --viewer-only  this Mac connects to others but is not shared: the same signed /Applications/Mirage.app, with Share
+#                    This Mac off (the host agent only keeps Mirage up to date; no permissions are asked). Turn sharing on
+#                    later in Mirage's menu.
+#
+#   A host (shared):   sh install-host.sh --channel nightly
+#   A viewer-only Mac: sh install-host.sh --channel nightly --viewer-only
 #     --dry-run      verify everything and say what would happen; change nothing
 #     --verify-only  verify the channel head (step 1) and stop
 #     --force        reinstall even when this build or a newer one is installed
@@ -37,19 +43,20 @@ MIN_BUILD_BETA=0
 MIN_BUILD_NIGHTLY=498
 # END MIRAGE MANIFEST KEYS
 
-CHANNEL=stable; POLICY=; FORCE=; ALLOW_ID=; DRY=; TARGET=; VERIFY_ONLY=
+CHANNEL=stable; POLICY=; FORCE=; ALLOW_ID=; DRY=; TARGET=; VERIFY_ONLY=; VIEWER_ONLY=
 FEED=https://github.com/phrz/mirage/releases/download
 while [ $# -gt 0 ]; do
     case "$1" in
         --channel) CHANNEL=$2; shift 2 ;;
         --policy) POLICY=$2; shift 2 ;;
         --force) FORCE=1; shift ;;
+        --viewer-only) VIEWER_ONLY=1; shift ;;
         --allow-identity-change) ALLOW_ID=1; shift ;;
         --dry-run) DRY=1; shift ;;
         --verify-only) VERIFY_ONLY=1; shift ;;
         --feed) FEED=${2%/}; shift 2 ;;
         --app) TARGET=$2; shift 2 ;;
-        -h|--help) sed -n '2,31p' "$0" 2>/dev/null || true; exit 0 ;;
+        -h|--help) sed -n '2,34p' "$0" 2>/dev/null || true; exit 0 ;;
         *) echo "error: unknown option $1 (see --help)" >&2; exit 2 ;;
     esac
 done
@@ -216,5 +223,10 @@ set -- update --install-bundle "$APP" --manifest "$WORK/manifest.json" --sigs "$
 [ -n "$ALLOW_ID" ] && set -- "$@" --allow-identity-change
 [ -n "$DRY" ] && set -- "$@" --dry-run
 [ -n "$TARGET" ] && set -- "$@" --app "$TARGET"
+if [ -n "$VIEWER_ONLY" ]; then
+    "$APP/Contents/MacOS/miraged" update --help-hidden 2>/dev/null | grep -q -- --share \
+        || die "Mirage $VERSION ($BUILD) predates --viewer-only: wait for a newer $CHANNEL build"
+    set -- "$@" --share off
+fi
 echo "== installing (the bundle's own miraged verifies the manifest again with its built-in keys)"
 "$APP/Contents/MacOS/miraged" "$@"

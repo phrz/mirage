@@ -30,7 +30,9 @@ struct PairedHost: Identifiable, Equatable {
     /// It lacks a grant (DESIGN §3.7a): a person has to allow it on that Mac (its Mirage app shows the window).
     var needsPermissions = false
     /// Shown greyed (phrz, 2026-10-27): nothing to do with it until it answers again, or accepts this device.
-    var dimmed: Bool { unreachable || refusal != nil }
+    var dimmed: Bool { unreachable || refusal != nil || notShared }
+    /// It does not share itself (a viewer-only Mac): no connection is offered.
+    var notShared = false
     var triggerFeature: Bool?
     var viewerMayTrigger: Bool?
     var streamingElsewhere = false
@@ -49,7 +51,7 @@ struct PairedHost: Identifiable, Equatable {
     var icon: Data?
     var id: String { alias }
     /// Connect is offered (double-click, Return, a tap): not while the Mac has yet to allow this device.
-    var canConnect: Bool { !(pairing?.inProgress ?? false) }
+    var canConnect: Bool { !(pairing?.inProgress ?? false) && !notShared }
 
     var title: String { name.isEmpty ? alias : name }
 
@@ -73,6 +75,7 @@ struct PairedHost: Identifiable, Equatable {
         case .hostTooOld, .viewerTooOld, .updating: return update.note(hostName: title)
         case .current, .updateAvailable: break
         }
+        if notShared { return "Not shared" }
         if unreachable { return "Not reachable" }
         if refusal != nil { return "Not accepting this device" }
         if lastSeen != nil, streamingElsewhere { return "In use by another device" }
@@ -106,7 +109,8 @@ struct PairedHost: Identifiable, Equatable {
         if let m = model, !m.isEmpty { rows.append(.init(label: "Model", value: m)) }
         if let t = lastSeen { rows.append(.init(label: "Last seen", value: Self.ago(t, now: now, locale: locale))) }
         else if let t = lastConnected { rows.append(.init(label: "Last connected", value: Self.ago(t, now: now, locale: locale))) }
-        if unreachable { rows.append(.init(label: "Status", value: "Not reachable")) }
+        if notShared { rows.append(.init(label: "Status", value: "Not shared")) }
+        else if unreachable { rows.append(.init(label: "Status", value: "Not reachable")) }
         else if let r = refusal { rows.append(.init(label: "Status", value: "Refuses this device: \(r)")) }
         else if needsPermissions { rows.append(.init(label: "Status", value: "Needs permissions on that Mac")) }
         else if streamingElsewhere { rows.append(.init(label: "Status", value: "In use by another device")) }
@@ -131,6 +135,7 @@ enum ConnectList {
             let h = known[alias]!
             return PairedHost(alias: alias, name: h.hostName, model: h.model, family: h.deviceFamily, lastConnected: h.lastConnected, update: h.updateState,
                               canTrigger: h.updateTrigger ?? false, lastSeen: h.lastSeen, unreachable: h.isUnreachable, refusal: h.refusal, needsPermissions: !(h.hostNeedsPermissions ?? []).isEmpty,
+                              notShared: h.hostShared == false,
                               triggerFeature: h.triggerFeature, viewerMayTrigger: h.hostPolicy?.viewerMayTrigger, streamingElsewhere: h.hostStreaming ?? false,
                               hostVersion: h.hostVersion, policy: h.hostPolicy?.policy, hostSettings: h.hostSettings, lockFailedAt: h.hostLockFailedAt,
                               hostID: h.hostID, unlockFeature: h.hostUnlock ?? false)

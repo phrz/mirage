@@ -20,6 +20,8 @@ final class PermissionsModel: ObservableObject {
     @Published var accessibility: Bool?
     @Published var restarting = false
     @Published var pairingCode: String?
+    /// Why it is up now, when someone caused it ("iPhone tried to connect…").
+    @Published var reason: String?
     var asked: Set<String> = []
 
     var grants: [Grant] {
@@ -70,6 +72,7 @@ final class PermissionsModel: ObservableObject {
 struct PermissionsView: View {
     @ObservedObject var model: PermissionsModel
     var onDone: () -> Void
+    var onLater: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -78,6 +81,7 @@ struct PermissionsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Allow Mirage to Share This Mac").font(.title2).fontWeight(.semibold)
                     Text(model.headline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    if let r = model.reason, !model.allGranted { Text(r).fixedSize(horizontal: false, vertical: true) }
                 }
             }
             VStack(spacing: 0) {
@@ -99,7 +103,7 @@ struct PermissionsView: View {
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Spacer()
-                Button(model.allGranted ? "Done" : "Later", action: onDone)
+                Button(model.allGranted ? "Done" : "Later", action: model.allGranted ? onDone : onLater)
                     .keyboardShortcut(model.allGranted ? .defaultAction : .cancelAction)
             }
         }
@@ -134,6 +138,8 @@ struct PermissionsView: View {
 final class PermissionsWindow: NSObject, NSWindowDelegate {
     let model = PermissionsModel()
     private(set) var window: NSWindow?
+    /// Later (persisted by the host: HostSettings.permissionsSnoozed).
+    var onLater: () -> Void = {}
     /// The person closed it (Later, or the close button) this launch: only a host's request shows it again.
     private(set) var dismissed = false
     private var closing: DispatchWorkItem?
@@ -151,7 +157,8 @@ final class PermissionsWindow: NSObject, NSWindowDelegate {
             w.title = "Mirage"
             w.isReleasedWhenClosed = false
             w.delegate = self
-            w.contentViewController = NSHostingController(rootView: PermissionsView(model: model, onDone: { [weak self] in self?.close() }))
+            w.contentViewController = NSHostingController(rootView: PermissionsView(model: model, onDone: { [weak self] in self?.close() },
+                                                                                    onLater: { [weak self] in self?.onLater(); self?.close() }))
             w.center()
             window = w
         }
@@ -178,10 +185,18 @@ final class PermissionsWindow: NSObject, NSWindowDelegate {
         }
     }
 
-    /// When the host's status should bring the window up: a grant missing, the window not up and not put away this launch.
-    static func shouldShow(_ s: LocalControl.Status, visible: Bool, dismissed: Bool) -> Bool {
-        guard !visible, !dismissed, s.restarting != true else { return false }
+    /// When the host's status brings the window up by itself (a launch, a status): a grant missing, this Mac shared, Later
+    /// not chosen (HostSettings.permissionsSnoozed), the window not up and not closed this launch. The rest (a pairing, a
+    /// refused connection, a revocation, Share This Mac turned on) come as the host's request or the switch.
+    nonisolated static func shouldShow(_ s: LocalControl.Status, visible: Bool, dismissed: Bool) -> Bool {
+        guard !visible, !dismissed, s.restarting != true, s.hostSettings?.shareThisMac != false, s.hostSettings?.permissionsSnoozed != true else { return false }
         return s.screenRecording == false || s.accessibility == false
+    }
+
+    /// Whether a request (the host's, or the switch) may bring it up: never while this Mac is not shared.
+    nonisolated static func mayShowOnRequest(_ s: LocalControl.Status?) -> Bool {
+        guard let s else { return true }
+        return s.hostSettings?.shareThisMac != false && (s.screenRecording == false || s.accessibility == false)
     }
 
     /// `Mirage.app --render-permissions PATH screenRecording=1 accessibility=0`: the window in a sample state, drawn to a PNG
@@ -199,5 +214,30 @@ final class PermissionsWindow: NSObject, NSWindowDelegate {
         guard let png = rep.representation(using: .png, properties: [:]) else { return false }
         p.close()
         return (try? png.write(to: URL(fileURLWithPath: path))) != nil
+    }
+}
+
+/// Share This Mac, for the Settings window's switch (the menu has its own item): HostMenu keeps it and acts on it.
+@MainActor
+final class HostShareState: ObservableObject {
+    static let shared = HostShareState()
+    /// nil: this copy has no host, or it is not known yet.
+    @Published var sharing: Bool?
+    var set: (Bool) -> Void = { _ in }
+}
+
+/// The Settings window's "This Mac" section.
+struct ShareThisMacSection: View {
+    @ObservedObject var state = HostShareState.shared
+    var body: some View {
+        if let on = state.sharing {
+            Section {
+                Toggle("Share This Mac", isOn: Binding(get: { on }, set: { state.set($0) }))
+            } header: {
+                Text("This Mac")
+            } footer: {
+                Text("Your other devices can see and use this Mac. Off, Mirage only keeps itself up to date here.")
+            }
+        }
     }
 }
