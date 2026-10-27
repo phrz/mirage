@@ -20,6 +20,12 @@ final class HostMenu: NSObject, NSMenuDelegate {
     /// Set by the app: open the connect window (a viewer), and quit the app.
     var onConnectWindow: (() -> Void)?
     var onQuit: (() -> Void)?
+    /// The permissions window (DESIGN §3.7a): shown when the host lacks a grant, never on a Mac whose host is off (no host,
+    /// no status). `--permissions` (miraged opens the app with it, as does install-host.sh's first run) shows it on the
+    /// first status.
+    private let permissions = MainActor.assumeIsolated { PermissionsWindow() }
+    private var forcePermissions = CommandLine.arguments.contains("--permissions")
+    private var permissionPoll: Timer?
 
     override init() {
         store = try? Store()
@@ -39,6 +45,9 @@ final class HostMenu: NSObject, NSMenuDelegate {
         // miraged is signed differently now (an update or deploy from Apple Development to Developer ID).
         if Self.agent.status == .enabled, let why = Self.reregistrationReason() {
             AppLog.write("host agent: \(why): registering it again"); Self.reregisterAgent(requestID: "launch")
+        }
+        MainActor.assumeIsolated {
+            permissions.model.request = { [weak self] id in try? self?.client?.send(.requestPermission(id)) }
         }
         connect()
         // Test knob MIRAGE_TEST_OPEN_PAIRING: the pairing window opens at launch (screenshots without clicking the menu bar).
@@ -71,9 +80,14 @@ final class HostMenu: NSObject, NSMenuDelegate {
     private func handle(_ e: LocalControl.Event) {
         switch e {
         case .hello(_, let name, _): hostName = name
-        case .status(let s): status = s; updateIndicators()
-        case .pairing(let p): panel?.show(p)
-        case .pairingClosed(let reason): panel?.closed(reason)
+        case .status(let s): status = s; updateIndicators(); permissionsStatus(s)
+        case .pairing(let p):
+            panel?.show(p)
+            MainActor.assumeIsolated { permissions.model.pairingCode = "\(p.code.prefix(3)) \(p.code.suffix(3))" }
+        case .pairingClosed(let reason):
+            panel?.closed(reason)
+            MainActor.assumeIsolated { permissions.model.pairingCode = nil }
+        case .showPermissions: showPermissions()
         case .paired(let name): panel?.succeeded(name)
         case .confirm(let c): ask(c)
         case .unlockOutcome, .agentSession: break   // (miraged unlock's, not the menu's)
@@ -83,6 +97,30 @@ final class HostMenu: NSObject, NSMenuDelegate {
             updateIndicators(u)
             if u.isFinal { try? client?.send(.status) }
         }
+    }
+
+    // MARK: Permissions (DESIGN §3.7a)
+
+    private func permissionsStatus(_ s: LocalControl.Status) {
+        MainActor.assumeIsolated {
+            permissions.update(s)
+            let missing = s.screenRecording == false || s.accessibility == false
+            if forcePermissions, missing || s.screenRecording == nil { forcePermissions = false; showPermissions() }
+            else if PermissionsWindow.shouldShow(s, visible: permissions.isVisible, dismissed: permissions.dismissed) { showPermissions() }
+        }
+    }
+
+    /// Shows the window and follows the host's grants every second while it is up.
+    @objc func showPermissions() {
+        MainActor.assumeIsolated { permissions.show() }
+        permissionPoll?.invalidate()
+        let t = Timer(timeInterval: 1, repeats: true) { [weak self] t in
+            guard let self else { t.invalidate(); return }
+            guard MainActor.assumeIsolated({ self.permissions.isVisible }) else { t.invalidate(); self.permissionPoll = nil; return }
+            try? self.client?.send(.status)
+        }
+        RunLoop.main.add(t, forMode: .common)
+        permissionPoll = t
     }
 
     // MARK: Update indicator (DESIGN §3.10, U4)
@@ -161,8 +199,7 @@ final class HostMenu: NSObject, NSMenuDelegate {
         }
         if isConnected, let s = status, s.restarting == true { label("Restarting to apply permissions…") }
         else if isConnected, let s = status {
-            if s.screenRecording == false { _ = item("⚠︎ Mirage needs Screen Recording — Open Settings…", #selector(openScreenRecording)) }
-            if s.accessibility == false { _ = item("⚠︎ Mirage needs \(PrivacyPane.accessibility()) — Open Settings…", #selector(openAccessibility)) }
+            if s.screenRecording == false || s.accessibility == false { _ = item("Allow Permissions…", #selector(showPermissions)) }
             if let c = s.connected, !c.isEmpty { label("Connected: \(c.joined(separator: ", "))") }
         }
         // The host's own settings (DESIGN §3.12), both on by default; shown once the host reports them (older hosts do not).
@@ -280,8 +317,6 @@ final class HostMenu: NSObject, NSMenuDelegate {
         AppLog.write("stopped hosting: \(AppLog.services())")
     }
     @objc private func openLoginItems() { SMAppService.openSystemSettingsLoginItems() }
-    @objc private func openScreenRecording() { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!) }
-    @objc private func openAccessibility() { NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!) }
 
     @objc private func revoke(_ sender: NSMenuItem) {
         guard let d = sender.representedObject as? LocalControl.Device else { return }

@@ -1068,6 +1068,22 @@ So the host needs exactly two toggles, the viewers need none. Rules:
 - Pairing lives in the same window: show the 6-digit code there as well as in `miraged pair`.
 - Nothing prompts at launch after first run. If a grant is later revoked, the viewer gets a
   specific, human message (already done for Screen Recording in M1) rather than a dead stream.
+- **As built (2026-10-27, after "all the permissions requests just pop up unbridled" on big-mac).** `miraged` never
+  raises a prompt by itself: it reads its grants only (`CGPreflightScreenCaptureAccess`, other apps' window names in the
+  window list, which macOS shows only with the grant, and `AXIsProcessTrusted`), and no ScreenCaptureKit call (the warm
+  pool, the curtain's wallpaper, a stream, the health probe, `probe-layers`) runs before the grant reads as present
+  (`HostPermissions.mayCapture`). The curtain's event tap is created only with Accessibility or a preflighted Input
+  Monitoring grant. Without its grants the host stays up for pairing and probes, its status and Welcome say what is
+  missing (Get Info: "Needs permissions on that Mac"), a stream is refused with that reason, and it asks Mirage.app to
+  show the window (`LocalControl.Event.showPermissions`; with no app connected after 10 s it opens Mirage.app with
+  `--permissions`, as install-host.sh's install does). The window is Mirage.app's: the app icon, one line, a row per
+  grant (this Mac's pane names, `PrivacyPane`) with a short why, a checkmark when granted, and Allow. The grants belong to
+  `miraged`, so Allow asks the host over the control socket (`requestPermission`) to raise the system's request for
+  itself the first time; macOS shows its sheet only once, so a later Allow opens the exact pane. Rows follow the host's
+  status every second while the window is up; the host's restart on a grant's arrival only shows as a spinner; the window
+  closes itself once both are in. The pairing code shows in it while a pairing window is open, and one line explains the
+  monthly screen-picker reminder. It comes up on its own once per launch for a missing grant, again on the host's request
+  (a revocation), never on a Mac whose host is off (no host, no status).
 
 ### 3.8 Native chrome: menu bar, dock, status items, notifications
 

@@ -447,6 +447,42 @@ final class ViewerSettingsTests: XCTestCase {
         for _ in 0..<50 { let f = ViewerFeedCenter.freshFor(); XCTAssertTrue((1800...3600).contains(f)) }
     }
 
+    /// The permissions window (DESIGN §3.7a): the first Allow asks the host (macOS shows its sheet), a later one opens the
+    /// exact pane; rows follow the host's status; it comes up only for a missing grant and not again once put away.
+    func testPermissionsWindowModel() {
+        let m = PermissionsModel()
+        final class Log { var sent: [String] = []; var opened: [URL] = [] }
+        let log = Log()
+        m.request = { log.sent.append($0) }
+        m.openSettings = { log.opened.append($0) }
+        var s = LocalControl.Status(hostName: "big-mac", pairedDevices: 0, pairingOpen: false, screenRecording: true, accessibility: false)
+        m.apply(s)
+        XCTAssertEqual(m.grants.map(\.granted), [true, false])
+        XCTAssertEqual(m.grants.map(\.title), [PrivacyPane.screenRecording, PrivacyPane.accessibility()])
+        XCTAssertEqual(m.headline, "Mirage needs one more permission to share this Mac.")
+        m.allow("accessibility")
+        XCTAssertEqual(log.sent, ["accessibility"]); XCTAssertTrue(log.opened.isEmpty, "the first time: the system's own sheet")
+        m.allow("accessibility")
+        XCTAssertEqual(log.opened.map(\.absoluteString), ["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"])
+        // The host remembers what it asked (another launch of the app): straight to the pane.
+        let m2 = PermissionsModel()
+        s.permissionsAsked = ["screenRecording"]
+        m2.apply(s)
+        XCTAssertEqual(PermissionsModel.allowAction(for: "screenRecording", asked: m2.asked), .openSettings)
+        XCTAssertEqual(PermissionsModel.allowAction(for: "accessibility", asked: m2.asked), .request)
+        XCTAssertTrue(PermissionsWindow.shouldShow(s, visible: false, dismissed: false))
+        XCTAssertFalse(PermissionsWindow.shouldShow(s, visible: false, dismissed: true), "put away this launch")
+        XCTAssertFalse(PermissionsWindow.shouldShow(s, visible: true, dismissed: false))
+        s.accessibility = true
+        XCTAssertFalse(PermissionsWindow.shouldShow(s, visible: false, dismissed: false), "all granted")
+        m.apply(s)
+        XCTAssertTrue(m.allGranted)
+        XCTAssertEqual(m.headline, "This Mac is ready. Your paired devices can connect.")
+        let old = LocalControl.Status(hostName: "old", pairedDevices: 0, pairingOpen: false)
+        XCTAssertFalse(PermissionsWindow.shouldShow(old, visible: false, dismissed: false), "an older host that does not say: nothing shown")
+        for line in m.grants.flatMap({ [$0.title, $0.why] }) + [m.headline] { XCTAssertFalse(line.contains("·"), line) }
+    }
+
     /// Get Info on the Mac: one small window per Mac, "<host> Info", not resizable, brought forward when asked again.
     func testGetInfoWindow() {
         var h = PairedHost(alias: "green.local", name: "green-machine", model: "Mac15,4")

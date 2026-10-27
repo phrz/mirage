@@ -26,6 +26,9 @@ public struct HostContext: Sendable {
     public var welcomed: (@Sendable () -> Void)?
     /// Tests: a host from before `unpairDevice` (its Welcome does not list the feature).
     public var advertisesUnpair = true
+    /// The grants this host lacks ("screenRecording", "accessibility"; DESIGN §3.7a): said in the Welcome, and a stream is
+    /// refused without Screen Recording (capturing would raise the system prompt). nil: none known missing.
+    public var missingPermissions: (@Sendable () -> [String])?
     /// This Mac's own icon (rendered once per start by miraged), for viewers that ask for it.
     public var hostIcon: HostIcon?
     /// Unlock with biometry (DESIGN §3.13): types a password at the lock screen if it is up at that moment, and says how it
@@ -237,6 +240,10 @@ public enum HostSession {
                     guard let make = ctx.makeStreamer else {
                         try await stream.send(.reject(.init(reason: "host cannot stream"))); continue
                     }
+                    // Never capture without the grant: that would raise the prompt on the host (DESIGN §3.7a).
+                    if (ctx.missingPermissions?() ?? []).contains("screenRecording") {
+                        try await stream.send(.reject(.init(reason: "host is missing Screen Recording permission: open Mirage on that Mac and allow it in the window it shows"))); continue
+                    }
                     guard let flow = await conn.waitForFlow(timeout: .seconds(5)) else {
                         try await stream.send(.reject(.init(reason: "no datagram flow"))); continue
                     }
@@ -432,7 +439,8 @@ public enum HostSession {
                                              hostIcon: HostIcon.forViewer(features: hello.features, cachedHash: hello.hostIconHash, icon: ctx.hostIcon),
                                              hostSettings: HostSettings.load(from: ctx.store.url(HostSettings.fileName)),
                                              lockFailedAt: HostLockStatus.lastFailure, hostOS: ViewerFeed.osString(ProcessInfo.processInfo.operatingSystemVersion),
-                                             updateChannel: updates?.channel)))
+                                             updateChannel: updates?.channel,
+                                             needsPermissions: ctx.missingPermissions?().nilIfEmpty)))
         ctx.welcomed?()
         if quiet {
             // A status probe: one line per device every 10 min at most, no timings.
@@ -527,4 +535,9 @@ public enum HostPermissionHint {
         }
         return nil
     }
+}
+
+extension Array {
+    /// nil for an empty array (an optional wire field left out).
+    var nilIfEmpty: [Element]? { isEmpty ? nil : self }
 }

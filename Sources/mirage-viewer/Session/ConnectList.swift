@@ -27,6 +27,8 @@ struct PairedHost: Identifiable, Equatable {
     var unreachable = false
     /// It answered and refused this device (not for its version), in its words.
     var refusal: String?
+    /// It lacks a grant (DESIGN §3.7a): a person has to allow it on that Mac (its Mirage app shows the window).
+    var needsPermissions = false
     /// Shown greyed (phrz, 2026-10-27): nothing to do with it until it answers again, or accepts this device.
     var dimmed: Bool { unreachable || refusal != nil }
     var triggerFeature: Bool?
@@ -106,6 +108,7 @@ struct PairedHost: Identifiable, Equatable {
         else if let t = lastConnected { rows.append(.init(label: "Last connected", value: Self.ago(t, now: now, locale: locale))) }
         if unreachable { rows.append(.init(label: "Status", value: "Not reachable")) }
         else if let r = refusal { rows.append(.init(label: "Status", value: "Refuses this device: \(r)")) }
+        else if needsPermissions { rows.append(.init(label: "Status", value: "Needs permissions on that Mac")) }
         else if streamingElsewhere { rows.append(.init(label: "Status", value: "In use by another device")) }
         if addressDiffers || name.isEmpty { rows.append(.init(label: "Address", value: alias)) }
         return rows
@@ -127,7 +130,7 @@ enum ConnectList {
         return (recentPaired + rest).map { alias in
             let h = known[alias]!
             return PairedHost(alias: alias, name: h.hostName, model: h.model, family: h.deviceFamily, lastConnected: h.lastConnected, update: h.updateState,
-                              canTrigger: h.updateTrigger ?? false, lastSeen: h.lastSeen, unreachable: h.isUnreachable, refusal: h.refusal,
+                              canTrigger: h.updateTrigger ?? false, lastSeen: h.lastSeen, unreachable: h.isUnreachable, refusal: h.refusal, needsPermissions: !(h.hostNeedsPermissions ?? []).isEmpty,
                               triggerFeature: h.triggerFeature, viewerMayTrigger: h.hostPolicy?.viewerMayTrigger, streamingElsewhere: h.hostStreaming ?? false,
                               hostVersion: h.hostVersion, policy: h.hostPolicy?.policy, hostSettings: h.hostSettings, lockFailedAt: h.hostLockFailedAt,
                               hostID: h.hostID, unlockFeature: h.hostUnlock ?? false)

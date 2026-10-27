@@ -195,6 +195,8 @@ public final class Store: @unchecked Sendable {
         public var hostChannel: UpdateChannel?
         /// DESIGN §3.13: the host types an `unlock` at its lock screen (its last Welcome listed `Feature.unlock`).
         public var hostUnlock: Bool?
+        /// The grants it lacked at its last Welcome (DESIGN §3.7a). nil: none, or not known.
+        public var hostNeedsPermissions: [String]?
         public var hostStreaming: Bool?
         public var hostProtocol: Int?
         public var hostMinProtocol: Int?

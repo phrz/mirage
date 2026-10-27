@@ -47,7 +47,7 @@ struct Options {
         if let i = args.firstIndex(of: "--probe-input") { o.probeInput = true; args.remove(at: i) }
         // The host companion's flags (HostMenu, applicationWillFinishLaunching), and the -NSDocumentRevisionsDebugMode style
         // pairs macOS may pass: not a host name.
-        args.removeAll { $0 == "--background" || $0 == "--allow-connections" }
+        args.removeAll { $0 == "--background" || $0 == "--allow-connections" || $0 == "--permissions" }
         _ = value(HostAgent.reregisterFlag)   // the updater's request (HostMenu.reregisterAgent): not a host name
         if let v = value("--window") { let p = v.split(separator: "x").compactMap { Int($0) }; if p.count == 2 { o.window = (p[0], p[1]) } }
         if args.isEmpty { return o }   // launched from Finder/Dock: show the connect window
@@ -114,7 +114,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if HostMenu.reregisterRequest != nil { NSApp.setActivationPolicy(.prohibited); return }
         let e = NSAppleEventManager.shared().currentAppleEvent
         let loginItem = e?.eventID == kAEOpenApplication && e?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
-        launchedInBackground = options.host.isEmpty && (loginItem || CommandLine.arguments.contains("--allow-connections") || CommandLine.arguments.contains("--background"))
+        launchedInBackground = options.host.isEmpty && (loginItem || CommandLine.arguments.contains("--allow-connections") || CommandLine.arguments.contains("--background")
+                                                       || CommandLine.arguments.contains("--permissions"))
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -855,6 +856,16 @@ if CommandLine.arguments.contains("--headless") {
         exit(failed ? 1 : 0)
     }
     RunLoop.main.run()
+} else if let i = CommandLine.arguments.firstIndex(of: "--render-permissions"), i + 1 < CommandLine.arguments.count {
+    // The permissions window in a sample state, drawn to a PNG (no screen capture): `--render-permissions PATH
+    // screenRecording=1 accessibility=0`.
+    let app = NSApplication.shared
+    _ = app.setActivationPolicy(.accessory)
+    let args = CommandLine.arguments
+    let ok = MainActor.assumeIsolated {
+        PermissionsWindow.render(to: args[i + 1], screenRecording: args.contains("screenRecording=1"), accessibility: args.contains("accessibility=1"))
+    }
+    exit(ok ? 0 : 1)
 } else {
     let app = NSApplication.shared
     let delegate = AppDelegate()

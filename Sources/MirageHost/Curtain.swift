@@ -171,7 +171,8 @@ public final class Curtain: @unchecked Sendable {
         let keep = Set(retiring.map { CGWindowID($0.windowNumber) })
         let screens = NSScreen.screens.map { ($0.backingScaleFactor, Self.displayID($0)) }
         Task {
-            let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+            // Never without the grant: ScreenCaptureKit would raise the prompt (DESIGN §3.7a).
+            let content = HostPermissions.mayCapture ? try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false) : nil
             let sc = content?.windows.filter { ids.contains($0.windowID) || keep.contains($0.windowID) } ?? []
             let found = sc.filter { ids.contains($0.windowID) }.count
             // The exclusion first, so the sessions re-filter while the picture is taken (it must not delay the curtain).

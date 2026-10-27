@@ -134,7 +134,9 @@ public struct AgentControl: Sendable {
     public func allowConnections() -> (AgentWatch.Verdict, String) {
         let r = reregister()
         guard case .done(let reg) = r else { return (.cannotSpawn(Self.describe(r)), "registration \(Self.describe(r))") }
-        _ = SystemBundleVerifier.run(URL(fileURLWithPath: "/usr/bin/open"), ["-g", "-a", app.path], timeout: 20)   // its menu-bar item; harmless if running
+        // Its menu-bar item, and (DESIGN §3.7a) the permissions window if the host lacks a grant; harmless if running (a
+        // running app hears the host's own request to show the window).
+        _ = SystemBundleVerifier.run(URL(fileURLWithPath: "/usr/bin/open"), ["-g", "-a", app.path, "--args", "--permissions"], timeout: 20)
         if reg.status == "requiresApproval" {
             return (.cannotSpawn("Login Items must approve Mirage (System Settings > General > Login Items)"), "registered: \(Self.describe(r))")
         }

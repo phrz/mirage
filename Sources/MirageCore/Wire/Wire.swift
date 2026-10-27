@@ -401,8 +401,8 @@ public enum ControlMessage: Codable, Equatable {
                     hostVersion: MirageVersion? = nil, latestAvailable: MirageVersion? = nil, updatePolicy: UpdatePermission? = nil, protocolVersion: Int? = nil,
                     features: [String]? = nil, updateResult: UpdateStatus? = nil, hostStreaming: Bool? = nil, minProtocolVersion: Int? = nil,
                     hostIcon: HostIcon? = nil, hostSettings: HostSettings? = nil, lockFailedAt: Date? = nil, hostOS: String? = nil,
-                    updateChannel: UpdateChannel? = nil) {
-            self.hostOS = hostOS; self.updateChannel = updateChannel
+                    updateChannel: UpdateChannel? = nil, needsPermissions: [String]? = nil) {
+            self.hostOS = hostOS; self.updateChannel = updateChannel; self.needsPermissions = needsPermissions
             self.hostName = hostName; self.sessionID = sessionID; self.resumeToken = resumeToken; self.resumed = resumed; self.hostBuild = hostBuild
             self.hostModel = hostModel; self.hostFamily = hostFamily
             self.hostVersion = hostVersion; self.latestAvailable = latestAvailable; self.updatePolicy = updatePolicy; self.protocolVersion = protocolVersion
@@ -419,6 +419,9 @@ public enum ControlMessage: Codable, Equatable {
         public var hostOS: String?
         /// The channel the host follows (its settings; not necessarily the running build's). nil from older hosts.
         public var updateChannel: UpdateChannel?
+        /// The grants the host lacks ("screenRecording", "accessibility"): Get Info says it needs permissions. nil: none
+        /// missing, or an older host.
+        public var needsPermissions: [String]?
         /// DESIGN §3.12: the host's Curtain and Lock when finished settings, for Get Info. nil from older hosts.
         public var hostSettings: HostSettings?
         /// When "Lock when finished" last failed to lock the host; nil when it has not, and from older hosts.

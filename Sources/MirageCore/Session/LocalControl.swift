@@ -34,6 +34,9 @@ public enum LocalControl {
         /// answers with `agentSession`.
         case agentSessionExtend
         case agentSessionDone
+        /// The person pressed Allow in the permissions window (DESIGN §3.7a): the host raises the system's request for
+        /// itself ("screenRecording" or "accessibility"), the only way it ever does. An older host ignores it.
+        case requestPermission(String)
     }
 
     /// The host's events.
@@ -52,6 +55,9 @@ public enum LocalControl {
         case unlockOutcome(UnlockLogic.RequestOutcome)
         /// Whether an agent session was open (after `agentSessionExtend` or `agentSessionDone`).
         case agentSession(open: Bool)
+        /// A grant the host needs is missing (at its start, or revoked since): show the permissions window. An older app
+        /// ignores it.
+        case showPermissions
     }
 
     public struct Pairing: Codable, Equatable {
@@ -83,6 +89,8 @@ public enum LocalControl {
         public var accessibility: Bool?
         /// The host is restarting itself to apply newly granted permissions.
         public var restarting: Bool?
+        /// The permissions the host has already requested once (on an Allow): a second Allow goes to System Settings.
+        public var permissionsAsked: [String]?
         /// The host's own settings (Curtain, Lock when finished); nil from older hosts.
         public var hostSettings: HostSettings?
         /// When "Lock when finished" last failed to lock this Mac (`HostLockStatus`); nil when it has not, and from older hosts.

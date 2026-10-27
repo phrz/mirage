@@ -24,6 +24,19 @@ public final class LocalControlServer: @unchecked Sendable {
             for c in clients.values { sendStatus(to: c) }
         }
     }
+    /// Every connected app hears the current status (a grant changed).
+    public func broadcastStatus() { queue.async { for c in self.clients.values { self.sendStatus(to: c) } } }
+    /// Asks the Mirage app to show its permissions window; false when no app is connected.
+    @discardableResult
+    public func askToShowPermissions() -> Bool {
+        queue.sync {
+            guard !clients.isEmpty else { return false }
+            broadcast(.showPermissions)
+            return true
+        }
+    }
+    public var hasClients: Bool { queue.sync { !clients.isEmpty } }
+
     /// The tailnet name and address, looked up once per pairing window (it runs the Tailscale CLI).
     private var net: (name: String?, address: String?) = (nil, nil)
 
@@ -139,6 +152,13 @@ public final class LocalControlServer: @unchecked Sendable {
             AgentSessions.shared.extend(anchor: anchor) { open, extended in self.queue.async { self.send(.agentSession(open: open && extended), to: c) } }
         case .agentSessionDone:
             AgentSessions.shared.end(by: UnlockLogic.clean(PeerIdentity.requester(fd: c.fd).label, limit: 160)) { had in self.queue.async { self.send(.agentSession(open: had), to: c) } }
+        case .requestPermission(let raw):
+            guard let kind = HostPermissions.Kind(rawValue: raw) else { return }
+            if HostPermissions.granted(kind) { sendStatus(to: c); return }
+            log("permissions: requesting \(raw), asked in the Mirage app")
+            PermissionRequests.record(kind, store: ctx.store)
+            DispatchQueue.main.async { HostPermissions.request(kind) }
+            sendStatus(to: c)
         case .revoke(let id):
             // Future connections and resumes are refused (both authenticate against the store); a stream in progress ends
             // with its connection.
@@ -153,13 +173,15 @@ public final class LocalControlServer: @unchecked Sendable {
         let devices = (try? ctx.store.authorizedDevices()) ?? []
         let base = LocalControl.Status(hostName: ctx.identity.name, pairedDevices: devices.count, pairingOpen: ctx.pairing.window?.isOpen() ?? false,
                                        devices: devices.map { .init(id: $0.id, name: $0.name, pairedAt: $0.pairedAt, model: $0.model) },
-                                       screenRecording: HostPermissions.screenRecordingGranted(), accessibility: HostPermissions.accessibilityGranted(prompt: false))
+                                       screenRecording: HostPermissions.screenRecordingGranted(), accessibility: HostPermissions.accessibilityGranted())
+        let asked = PermissionRequests.asked(store: ctx.store).map(\.rawValue)
         let conns = ctx.connections
         Task {
             let ids = await conns.streamingDeviceIDs()
             self.queue.async {
                 var s = base
                 s.restarting = self.restarting ? true : nil
+                s.permissionsAsked = asked.isEmpty ? nil : asked
                 s.hostSettings = HostSettings.load(from: self.ctx.store.url(HostSettings.fileName))
                 s.lockFailedAt = HostLockStatus.lastFailure
                 s.hostVersion = .current

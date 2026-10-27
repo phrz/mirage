@@ -212,6 +212,7 @@ public final class WarmPool: @unchecked Sendable {
         promptsSeen = prompts
         guard !refreshing else { return }
         if activeStreams > 0 { return }                       // the streamer owns the captures now
+        if !HostPermissions.mayCapture { dropAll("no Screen Recording grant"); return }   // capturing would prompt (DESIGN §3.7a)
         if !enabled() { dropAll("warmCapture off"); return }
         if InputInjector.consoleLocked() { dropAll("screen locked"); return }
         if CGDisplayIsAsleep(CGMainDisplayID()) != 0 { dropAll("display asleep"); return }

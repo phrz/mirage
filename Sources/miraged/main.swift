@@ -80,8 +80,10 @@ struct Serve: AsyncParsableCommand {
         host.log = { log($0) }
         log("mirage host build \(MirageVersion.current.display) \(MirageVersion.current.commit) (\(MirageVersion.current.channelName))")
         log("mirage host \(identity.name) id=\(identity.id.prefix(12)) tls=\(tls.fingerprint.prefix(6).map { String(format: "%02x", $0) }.joined()) devices=\(try store.authorizedDevices().count)")
-        // TCC: prompting registers this binary in System Settings → Privacy & Security so it can be ticked once.
-        // MIRAGE_NO_PERMISSION_PROMPTS: check only (test runs on a Mac whose grants belong to another binary).
+        // TCC (DESIGN §3.7a): the host never raises a permission prompt by itself. It reads its grants without prompting,
+        // stays up for pairing and probes without them, says so in its status, and asks the Mirage app to show its
+        // permissions window, where the person's Allow makes the request (LocalControl.requestPermission).
+        // MIRAGE_NO_PERMISSION_PROMPTS: a test instance (on a Mac whose grants belong to another binary).
         let prompts = ProcessInfo.processInfo.environment["MIRAGE_NO_PERMISSION_PROMPTS"] == nil
         // A test host (no permission prompts of its own) does not start while a system prompt is on screen: it may be this
         // binary's own consent prompt, which is a person's to answer, and it changes every picture measured.
@@ -90,8 +92,9 @@ struct Serve: AsyncParsableCommand {
             throw ExitCode(3)
         }
         WarmPool.shared.start(log: { log($0) })   // warm host (M-FIVE): a display snapshot kept while nobody is connected
-        let screen = HostPermissions.screenRecordingGranted() || (prompts && HostPermissions.requestScreenRecording())
-        let ax = HostPermissions.accessibilityGranted(prompt: prompts)
+        let screen = HostPermissions.screenRecordingGranted()
+        let ax = HostPermissions.accessibilityGranted()
+        ctx.missingPermissions = { HostPermissions.missing().map(\.rawValue) }
         log("permissions: screen recording \(screen ? "granted" : "MISSING (\(PrivacyPane.path(PrivacyPane.screenRecording)) → enable miraged)")"
             + ", accessibility \(ax ? "granted" : "MISSING (\(PrivacyPane.path(PrivacyPane.accessibility())) → enable miraged)")")
         // Unlock with biometry (DESIGN §3.13): the login-item host only; a test instance never types at the lock screen.
@@ -138,7 +141,8 @@ struct Serve: AsyncParsableCommand {
         else {
             do { try control.start(); health?.passed(.control) } catch { log("local control unavailable: \(error)") }
             StayReachable.shared.start(enabled: HostSettings.load(from: ctx.store.url(HostSettings.fileName)).stayReachable, log: { log($0) })
-            if !(screen && ax) { watchPermissions(screen: screen, ax: ax, control: control) }
+            watchPermissions(screen: screen, ax: ax, control: control)
+            if !(screen && ax) { showPermissionsWindow(control: control) }
             if let health, health.onTrial { probeCaptureForHealth(screen: screen, ax: ax, health: health) }
             scheduleUpdateChecks(paths: paths, ctx: ctx, log: { log($0) })
         }
@@ -147,28 +151,48 @@ struct Serve: AsyncParsableCommand {
     }
 }
 
-/// While Screen Recording or Accessibility is missing, re-checks every 2 s (Accessibility is live; Screen Recording by a
-/// ScreenCaptureKit probe). When a grant arrives, a host run by launchd restarts itself once (exit; KeepAlive brings it
-/// back) so every grant is in force, and the Mirage app says "Restarting to apply permissions…" meanwhile. phrz's grants on
-/// mac-daddy took effect only after `launchctl kickstart`. Never restarts periodically: each start asks for Screen
-/// Recording, and a loop would keep prompting.
+/// Re-reads the grants without prompting: every 2 s while one is missing, every 10 s once both are there (a revocation
+/// shows too). The Mirage app hears every change. When a grant arrives, a host run by launchd restarts itself once (exit;
+/// KeepAlive brings it back) so every grant is in force, quietly (the app's window keeps its rows; phrz's grants on
+/// mac-daddy took effect only after `launchctl kickstart`). A revoked grant asks the app to show its window again.
 func watchPermissions(screen: Bool, ax: Bool, control: LocalControlServer) {
     let underLaunchd = ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"] == "com.paulherz.mirage.host" || getppid() == 1
     Task.detached {
         var s = screen, a = ax
         while true {
-            try? await Task.sleep(for: .seconds(2))
-            let s2 = await HostPermissions.probeScreenRecording(), a2 = HostPermissions.accessibilityGranted(prompt: false)
+            try? await Task.sleep(for: .seconds(s && a ? 10 : 2))
+            let s2 = HostPermissions.screenRecordingGrantedNow(), a2 = HostPermissions.accessibilityGranted()
             guard s2 != s || a2 != a else { continue }
             log("permissions now: screen recording \(s2 ? "granted" : "missing"), accessibility \(a2 ? "granted" : "missing")")
+            let revoked = (s && !s2) || (a && !a2), arrived = (!s && s2) || (!a && a2)
             s = s2; a = a2
-            if underLaunchd {
+            control.broadcastStatus()
+            if revoked { showPermissionsWindow(control: control) }
+            if arrived, underLaunchd {
                 log("restarting to apply the new permissions")
                 control.announceRestart()
                 try? await Task.sleep(for: .milliseconds(1500))
                 exit(0)
-            } else if s && a { log("restart miraged to be sure they apply"); return }
+            }
         }
+    }
+}
+
+/// A grant is missing: the Mirage app shows its permissions window. With no app connected yet (a login, or just after
+/// install-host.sh), it waits a little, then opens Mirage.app, which shows it; never a system prompt from here.
+func showPermissionsWindow(control: LocalControlServer) {
+    Task.detached {
+        for _ in 0..<10 {
+            if control.askToShowPermissions() { log("permissions: asked the Mirage app to show its window"); return }
+            try? await Task.sleep(for: .seconds(1))
+        }
+        let app = Bundle.main.bundleURL
+        guard app.pathExtension == "app" else { log("permissions: no Mirage app around this host to show the window"); return }
+        log("permissions: opening \(app.path) to show its window")
+        let config = NSWorkspace.OpenConfiguration()
+        config.arguments = ["--permissions"]
+        config.activates = true
+        _ = try? await NSWorkspace.shared.openApplication(at: app, configuration: config)
     }
 }
 
@@ -218,6 +242,10 @@ struct ProbeLayers: AsyncParsableCommand {
     @Option(help: "window (one stream per matched window), display (whole display), exclude (display minus the matched windows).") var mode: String = "window"
     func run() async throws {
         stayInvisible()
+        // Never prompts (DESIGN §3.7a): without the grant, say so instead of asking ScreenCaptureKit.
+        guard HostPermissions.mayCapture else {
+            log("probe: this binary has no Screen Recording grant; allow it in Mirage's permissions window first"); throw ExitCode(2)
+        }
         try await LayerProbe.run(match: match, seconds: seconds, scale: scale, dump: dump, mode: mode, log: { log($0) })
     }
 }
