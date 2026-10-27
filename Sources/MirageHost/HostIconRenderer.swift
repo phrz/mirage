@@ -4,10 +4,26 @@ import MirageCore
 /// This Mac's own icon for the viewers' device lists (phrz, 2026-10-26): `NSImage.computerName`, the picture Finder and
 /// About This Mac show for it (its model and colour), drawn at 128 and 256 px as PNG, once per start.
 public enum HostIconRenderer {
-    public static func make() -> HostIcon? {
-        guard let image = NSImage(named: NSImage.computerName),
-              let small = png(image, pixels: 128) else { return nil }
-        return HostIcon.make(png128: small, png256: png(image, pixels: 256))
+    public static func make() -> HostIcon? { make(log: { _ in }) }
+
+    /// Within the budget whatever the model's picture weighs: 128 and 256 px, else 128 alone, else smaller (a detailed,
+    /// colourful icon can be heavier than a Mac Studio's). Says what it made, or why none (the host's log).
+    public static func make(log: (String) -> Void) -> HostIcon? {
+        guard let image = NSImage(named: NSImage.computerName) else { log("host icon: none (no computer image)"); return nil }
+        return fit(small: { png(image, pixels: $0) }, big: png(image, pixels: 256), log: log)
+    }
+
+    /// The ladder, given how to draw a small one (tests: sizes of their choosing).
+    static func fit(small: (Int) -> Data?, big: Data?, log: (String) -> Void) -> HostIcon? {
+        for px in [128, 96, 64] {
+            guard let s = small(px) else { continue }
+            if let icon = HostIcon.make(png128: s, png256: px == 128 ? big : nil) {
+                log("host icon: \(px) px \(s.count) bytes" + (icon.png256.map { ", 256 px \($0.count) bytes" } ?? "") + ", hash \(icon.hash.prefix(12))")
+                return icon
+            }
+        }
+        log("host icon: none (over \(HostIcon.budget) bytes even at 64 px)")
+        return nil
     }
 
     static func png(_ image: NSImage, pixels: Int) -> Data? {

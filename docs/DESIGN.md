@@ -1294,6 +1294,13 @@ A bad build rolls itself back.
     updater. TODO (iOS): no card. testflight.sh sets the iOS CFBundleVersion to the upload time (`date -u +%Y%m%d%H%M`),
     not a feed build, so there is no trustworthy "newer iOS build" signal without App Store Connect, and TestFlight
     notifies by itself. `OwnUpdateCard` takes `os: nil` and `policy: nil` for when that signal exists.
+  - **Host metadata is the probe's (2026-10-27).** A host's metadata is one record, the authenticated Welcome
+    (`HostMetadata`): name, model and family, macOS, build and newest found, update policy, channel and trigger, features,
+    streaming, protocol range, settings, Lock When Finished's last failure, missing grants, sharing, and its icon.
+    A status probe brings it (control-only, no session), and so does a session's connection. The viewer keeps it through
+    one path. The icon goes by hash: the Hello carries the hash of the viewer's copy, and the record carries the icon
+    (at most 30 KB, smaller sizes if a picture is heavy) only when the host's differs. So a host that gains or changes
+    its icon is drawn with it at the next probe.
   - **Viewers trust only the compiled keys.** A viewer's own feed check (the update badge's freshness, `ViewerFeed`)
     verifies with the keys compiled into the viewer and never learns `nextKey`. After a rotation, until the viewer runs
     a build that compiles the new key, a manifest signed by the new key alone does not count on that viewer: its rows

@@ -91,4 +91,68 @@ final class HostIconTests: XCTestCase {
         XCTAssertTrue(icon.isValid)
         XCTAssertLessThanOrEqual(icon.png128.count + (icon.png256?.count ?? 0), HostIcon.budget)
     }
+
+    /// A status probe (U7) carries the icon too: a host that gained one after the viewer's last session is drawn with it
+    /// at the next probe, no session needed (green-machine, 2026-10-27).
+    func testAStatusProbeDeliversTheIcon() async throws {
+        let icon = HostIcon.make(png128: Self.png + Data(repeating: 3, count: 4_000), png256: nil)!
+        let r = try await rig(icon: icon)
+        defer { r.host.stop(); try? FileManager.default.removeItem(at: r.tmp) }
+        XCTAssertNil(r.viewerStore.hostIcon(hostID: r.hostID.id))
+        let port = r.port, store = r.viewerStore, viewer = r.viewer
+        let connect: HostUpdateTrigger.Connect = {
+            let client = QUICClient(host: "127.0.0.1", port: port)
+            try await client.connect(timeout: Loopback.timeout)
+            let control = try await client.openStream()
+            return (ClientSession(identity: viewer, store: store, alias: "test-host", tlsFingerprint: client.tlsFingerprint!, stream: control), { client.close() })
+        }
+        let answered = await HostProbe.probe(connect: connect, store: r.viewerStore, alias: "test-host")
+        XCTAssertTrue(answered)
+        XCTAssertEqual(r.viewerStore.hostIcon(hostID: r.hostID.id), icon, "kept from the probe's answer")
+    }
+
+    /// A heavy picture still fits: 128 and 256 px, else 128 alone, else smaller; nothing only past 64 px.
+    func testTheIconFitsTheBudgetBySize() {
+        var lines: [String] = []
+        let light = HostIconRenderer.fit(small: { Self.png + Data(count: $0 * 50) }, big: Self.png + Data(count: 20_000), log: { lines.append($0) })
+        XCTAssertNotNil(light?.png256, "both sizes when they fit")
+        let heavy = HostIconRenderer.fit(small: { Self.png + Data(count: $0 == 128 ? 34_000 : $0 == 96 ? 20_000 : 9_000) }, big: Self.png + Data(count: 60_000),
+                                         log: { lines.append($0) })
+        XCTAssertEqual(heavy?.png128.count, 20_008, "128 px over the budget: 96 px")
+        XCTAssertNil(heavy?.png256)
+        XCTAssertNil(HostIconRenderer.fit(small: { _ in Self.png + Data(count: 40_000) }, big: nil, log: { lines.append($0) }))
+        XCTAssertTrue(lines.last?.contains("none") ?? false, "the log says why")
+    }
+}
+
+/// The host's metadata record (DESIGN §3.10, U7): one record from a probe or a session, one cache path.
+final class HostMetadataTests: XCTestCase {
+    func testOneRecordOneCachePath() {
+        var w = ControlMessage.Welcome(hostName: "green-machine", sessionID: "s", hostModel: "iMac21,1",
+                                       hostVersion: MirageVersion(version: "0.1", build: 510, commit: "c", channel: .nightly),
+                                       updatePolicy: .init(policy: .automatic, viewerMayTrigger: true), protocolVersion: 6,
+                                       features: [ControlMessage.Feature.updateTrigger, ControlMessage.Feature.unlock],
+                                       hostSettings: HostSettings(curtain: false), hostOS: "26.1", updateChannel: .nightly, shared: false)
+        w.hostIcon = HostIcon.make(png128: Data([0x89, 0x50, 0x4E, 0x47, 1]), png256: nil)
+        let m = HostMetadata(welcome: w)
+        var h = Store.KnownHost(hostID: "g", hostName: "old-name", publicKey: Data(), endpoint: "g", pairedAt: Date())
+        h.unreachableSince = Date(timeIntervalSince1970: 1); h.failedProbes = 3; h.refusal = "device not paired"
+        let now = Date(timeIntervalSince1970: 1_000)
+        m.apply(to: &h, seenAt: now, incompatibility: nil, connected: false)
+        XCTAssertEqual(h.hostName, "green-machine")
+        XCTAssertEqual(h.model, "iMac21,1"); XCTAssertEqual(h.family, "iMac")
+        XCTAssertEqual(h.hostOS, "26.1"); XCTAssertEqual(h.hostChannel, .nightly)
+        XCTAssertEqual(h.hostVersion?.build, 510); XCTAssertEqual(h.hostPolicy?.policy, .automatic)
+        XCTAssertEqual(h.triggerFeature, true); XCTAssertEqual(h.hostUnlock, true)
+        XCTAssertEqual(h.hostSettings?.curtain, false); XCTAssertEqual(h.hostShared, false)
+        XCTAssertEqual(h.lastSeen, now); XCTAssertNil(h.unreachableSince); XCTAssertNil(h.failedProbes); XCTAssertNil(h.refusal)
+        XCTAssertNil(h.lastConnected, "a probe is not a connection")
+        m.apply(to: &h, seenAt: now, incompatibility: nil, connected: true)
+        XCTAssertEqual(h.lastConnected, now)
+        // An older host's record says less: what it leaves out stays known.
+        let old = HostMetadata(welcome: .init(hostName: "green-machine", sessionID: "s"))
+        old.apply(to: &h, seenAt: now, incompatibility: nil, connected: false)
+        XCTAssertEqual(h.model, "iMac21,1"); XCTAssertEqual(h.hostOS, "26.1"); XCTAssertEqual(h.hostChannel, .nightly)
+        XCTAssertNil(h.hostSettings, "unknown from an older host")
+    }
 }

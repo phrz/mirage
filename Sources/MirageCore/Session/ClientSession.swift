@@ -89,30 +89,8 @@ public struct ClientSession {
         try await stream.send(.authenticate(.init(clientPublicKey: identity.publicKey, clientSignature: try identity.sign(clientTranscript))))
         let welcome = try await stream.expect("welcome") { if case .welcome(let w) = $0 { return w } else { return nil } }
         let tooOld = ProtocolCompat.viewerCheck(hostProtocol: welcome.protocolVersion)
-        if let icon = welcome.hostIcon { try? store.saveHostIcon(icon, hostID: known.hostID) }
-        // What the host is (its icon in the connect list), its build and its feed's newest (the update indicator), and when
-        // it was last reached.
-        try? store.updateKnownHost(alias) { h in
-            if let m = welcome.hostModel { h.model = m }
-            if let f = welcome.hostFamily ?? DeviceModel.family(of: welcome.hostModel)?.rawValue { h.family = f }
-            h.hostVersion = welcome.hostVersion
-            h.latestAvailable = welcome.latestAvailable
-            h.updateTrigger = welcome.acceptsUpdateTrigger
-            h.updating = welcome.updateResult.flatMap { $0.isFinal ? nil : $0 }
-            h.incompatibility = tooOld?.rawValue
-            h.lastSeen = Date(); h.unreachableSince = nil; h.failedProbes = nil; h.lastProbeFailure = nil; h.refusal = nil
-            h.triggerFeature = (welcome.features ?? []).contains(ControlMessage.Feature.updateTrigger)
-            h.hostUnlock = (welcome.features ?? []).contains(ControlMessage.Feature.unlock)
-            h.hostPolicy = welcome.updatePolicy
-            if let os = welcome.hostOS { h.hostOS = os }
-            if let c = welcome.updateChannel { h.hostChannel = c }
-            h.hostNeedsPermissions = welcome.needsPermissions
-            h.hostShared = welcome.shared
-            h.hostSettings = welcome.hostSettings; h.hostLockFailedAt = welcome.lockFailedAt   // (nil from an older host: unknown)
-            h.hostStreaming = welcome.hostStreaming
-            h.hostProtocol = welcome.protocolVersion; h.hostMinProtocol = welcome.minProtocolVersion
-            if tooOld == nil, !probe { h.lastConnected = Date() }
-        }
+        // The host's metadata (HostMetadata): the same record a status probe and a session bring, kept through one path.
+        HostMetadata(welcome: welcome).save(store: store, alias: alias, hostID: known.hostID, incompatibility: tooOld, connected: !probe)
         if tooOld != nil {
             throw MirageError.authenticationFailed("host rejected: \(welcome.hostName) (Mirage \(welcome.hostVersion?.display ?? "older"), protocol \(welcome.protocolVersion ?? 0)) is too old for this viewer (needs protocol \(Mirage.minProtocolVersion)): update \(welcome.hostName)")
         }
