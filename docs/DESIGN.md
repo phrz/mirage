@@ -166,8 +166,9 @@ presents one full frame of the lock screen, never a mix. A stream that starts wh
 display (no warm desktop frame). On unlock the same in reverse. The overlay is not captured into the stream while locked (the whole display already holds
 the shield): on 505 it carried 9.5 MB of the lock screen with its black made transparent while the display layer got 251
 tiles in 5 s, and phrz saw a mosaic. The switch itself is a fresh picture (`screenLock` / `screenUnlock`): the display's old
-frame is dropped, and its first frame after the switch goes out as one coherent still presented at once (stage 1), no
-placeholders. Before this, the compositor model's desktop capture went on
+frame is dropped, and its first frame after the switch goes out as one coherent still presented at once, ahead of every
+budget and pacing gate (on 510 the still waited behind the changed tiles of a lock screen that keeps changing, the clock
+and the blur, and never went: 60 % of the picture unfilled), no placeholders. Before this, the compositor model's desktop capture went on
 showing the wallpaper and Finder's desktop icons behind mac-daddy's lock screen, and gray where nothing was captured.
 
 ### 3.0 M-FIVE: The first five seconds (milestone, phrz 2026-10-21; supersedes the connect sequence elsewhere)

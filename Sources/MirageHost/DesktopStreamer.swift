@@ -1498,10 +1498,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// level, and the whole display already shows it); it carried most of the bytes, its black made transparent, over a
     /// display layer that got 251 of its tiles in 5 s (phrz's mosaic on mac-daddy, 505). The display layer's old frame is
     /// dropped so the fresh picture (a coherent still, presented at once) is read from the first frame after the switch.
+    /// The display's still is owed for a lock switch: sent at the next refine with a frame, before any gate (refine).
+    private var lockStillDue = false
     private func lockSwitch(_ locked: Bool) {
         for cap in [capturer, fallbackCapture].compactMap({ $0 }) { cap.setLocked(locked, log: log) }
         if let d = display { d.lastFrame = nil; d.forceFullDiff = true; d.wantKeyframe = true }
         beginFreshPicture(locked ? .screenLock : .screenUnlock)
+        lockStillDue = compositor   // (the seam design's fresh picture is the keyframe ladder)
     }
 
     /// Creates, resizes, stops and reprioritises window layers after a window-list sample; computes
@@ -3541,7 +3544,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var statSmallAnimTiles = 0
 
     /// Sends the next large lossless block of a layer (pipelined: RefinementPacer), within budget.
-    private func freshStep(_ l: Layer, now: UInt64, stage1: Bool = false) {
+    private func freshStep(_ l: Layer, now: UInt64, stage1: Bool = false, force: Bool = false) {
         // A block whose ack never comes (a viewer that dropped the message, a stale ack) must not freeze the picture:
         // after ~3 RTT + 2 s it stops counting.
         if pacer.expire(now: now, srttNanos: srttNanos) > 0 { log("fresh picture: block ack timed out; continuing") }
@@ -3551,7 +3554,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // One block in flight and budget-limited: it does not yield to motion (that would starve the
         // base picture whenever something animates), it takes the leftover tokens or its own reserve.
         let fromReserve = tileTokens <= 0
-        guard !fromReserve || freshTokens > 0 else { return }
+        guard force || !fromReserve || freshTokens > 0 else { return }
         let charged = tileTokens
         defer { if fromReserve { freshTokens -= charged - tileTokens } }
         switch l.fresh {
@@ -4122,6 +4125,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var refineGates: [String: Int] = [:]
     private func gate(_ g: String) { refineGates[g, default: 0] += 1 }
     private func refine(now: UInt64) {
+        // A lock or unlock: the display's whole still first, from the first frame after the switch, ahead of every budget and
+        // pacing gate. Changed tiles of a lock screen that keeps changing (the clock, the blur) used the tile budget and the
+        // still never went: 60 % of mac-daddy's lock screen stayed unfilled on 510 (phrz, 2026-10-27).
+        if let d = display, lockStillDue, d.lastFrame != nil, case .still = d.fresh {
+            lockStillDue = false
+            freshStep(d, now: now, stage1: true, force: true)
+            log("lock switch: the display's whole still sent")
+        }
         crispCheck(now: now)
         sharpReference(now: now)
         // Whatever follows (a stall anywhere, the probe hold), what is in flight says whether the next acks measure the link.
