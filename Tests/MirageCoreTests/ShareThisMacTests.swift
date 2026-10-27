@@ -38,9 +38,9 @@ final class ShareThisMacTests: XCTestCase {
         for r: R.Reason in [.startup, .revoked, .pairing(device: nil), .shareTurnedOn, .connectionRefused(device: "iPad")] {
             XCTAssertFalse(R.shouldShow(r, settings: s, missing: missing), "\(r): never while sharing is off")
         }
-        XCTAssertEqual(R.message(.connectionRefused(device: "iPad")), "iPad tried to connect. It can once these are allowed.")
-        XCTAssertNil(R.message(.startup))
-        for r: R.Reason in [.revoked, .pairing(device: nil), .connectionRefused(device: "x")] { XCTAssertFalse(R.message(r)!.contains("·")) }
+        XCTAssertEqual(R.message(.connectionRefused(device: "iPad")), "iPad tried to connect.")
+        XCTAssertEqual(R.message(.pairing(device: "iPhone")), "iPhone is pairing with this Mac.")
+        XCTAssertNil(R.message(.startup)); XCTAssertNil(R.message(.revoked), "the heading says it")
     }
 
     func testOlderSettingsShareAndAreNotSnoozed() throws {

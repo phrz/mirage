@@ -1090,13 +1090,13 @@ So the host needs exactly two toggles, the viewers need none. Rules:
   Monitoring grant. Without its grants the host stays up for pairing and probes, its status and Welcome say what is
   missing (Get Info: "Needs permissions on that Mac"), a stream is refused with that reason, and it asks Mirage.app to
   show the window (`LocalControl.Event.showPermissions`; with no app connected after 10 s it opens Mirage.app with
-  `--permissions`, as install-host.sh's install does). The window is Mirage.app's: the app icon, one line, a row per
-  grant (this Mac's pane names, `PrivacyPane`) with a short why, a checkmark when granted, and Allow. The grants belong to
+  `--permissions`, as install-host.sh's install does). The window is Mirage.app's: the app icon, the heading, a row per
+  grant (this Mac's pane names, `PrivacyPane`) with a checkmark when granted, and Allow; a line under the heading only
+  when a device caused it ("iPhone tried to connect."). The grants belong to
   `miraged`, so Allow asks the host over the control socket (`requestPermission`) to raise the system's request for
   itself the first time; macOS shows its sheet only once, so a later Allow opens the exact pane. Rows follow the host's
   status every second while the window is up; the host's restart on a grant's arrival only shows as a spinner; the window
-  closes itself once both are in. The pairing code shows in it while a pairing window is open, and one line explains the
-  monthly screen-picker reminder. It comes up on its own once per launch for a missing grant, again on the host's request
+  closes itself once both are in. The pairing code shows in it while a pairing window is open. It comes up on its own once per launch for a missing grant, again on the host's request
   (a revocation), never on a Mac whose host is off (no host, no status).
 - **Later and Share This Mac (2026-10-27).** Later persists in the host settings (`permissionsSnoozed`): from then on the
   window comes back only when someone tries to share this Mac (a device's pairing request, Pair a Device…, Share This

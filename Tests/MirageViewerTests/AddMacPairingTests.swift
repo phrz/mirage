@@ -36,7 +36,7 @@ final class AddMacPairingTests: XCTestCase {
         XCTAssertEqual(a.next(.awaiting("x")), a, "a late event changes nothing")
         XCTAssertEqual(a.next(.answered), .connectable(hostName: "mac-daddy", answered: true))
         XCTAssertEqual(a.next(.gaveUp), .connectable(hostName: "mac-daddy", answered: false))
-        XCTAssertEqual(a.next(.answered).note(connectHint: "Double-click it to connect."), "mac-daddy is ready. Double-click it to connect.")
+        XCTAssertEqual(a.next(.answered).note, "Paired with mac-daddy.")
         let r = p.next(.awaiting("mac-daddy")).next(.failed("denied on the host"))
         XCTAssertEqual(r, .refused(hostName: "mac-daddy", reason: "denied on the host"))
         XCTAssertFalse(r.inProgress)
@@ -80,7 +80,7 @@ final class AddMacPairingTests: XCTestCase {
         rows = c.rows(existing)
         XCTAssertEqual(rows.map(\.alias), ["mac-daddy"], "a normal row now: the list shows it from known-hosts")
         XCTAssertEqual(c.takeSelection(), "studio.local", "selected again once ready")
-        XCTAssertEqual(ListNotices.shared.note, "studio is ready. \(HostPairingCenter.connectHint)", "a passing note")
+        XCTAssertEqual(ListNotices.shared.note, "Paired with studio.", "a passing note")
         XCTAssertTrue(ListNotices.shared.alerts.isEmpty, "nothing to acknowledge")
         XCTAssertEqual(ViewerSettings.recentHosts(defaults).first, "studio.local", "first in the list")
     }

@@ -93,10 +93,9 @@ public enum PermissionWindowRule {
     /// The window's line about why it is up now, when someone caused it.
     public static func message(_ r: Reason) -> String? {
         switch r {
-        case .startup, .shareTurnedOn: return nil
-        case .revoked: return "A permission Mirage had was turned off."
-        case .pairing(let d): return "\(d ?? "A device") is pairing with this Mac. It can connect once these are allowed."
-        case .connectionRefused(let d): return "\(d) tried to connect. It can once these are allowed."
+        case .startup, .shareTurnedOn, .revoked: return nil
+        case .pairing(let d): return "\(d ?? "A device") is pairing with this Mac."
+        case .connectionRefused(let d): return "\(d) tried to connect."
         }
     }
 }

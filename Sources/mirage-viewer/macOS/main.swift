@@ -902,7 +902,7 @@ if CommandLine.arguments.contains("--headless") {
         m.memory = OwnUpdateCard.Memory(defaults: UserDefaults(suiteName: suite)!)
         m.store = { nil }
         m.running = MirageVersion(version: "0.1", build: 498, commit: "a", channel: .nightly)
-        m.reported = MirageVersion(version: "0.1", build: 499, commit: "b", channel: .nightly)
+        m.reported = CommandLine.arguments.contains("nocard") ? nil : MirageVersion(version: "0.1", build: 499, commit: "b", channel: .nightly)
         m.policy = .ask; m.canUpdate = true
         let ago = Date().addingTimeInterval(-3 * 3600)
         let hosts = [PairedHost(alias: "mac-daddy", name: "mac-daddy", model: "Mac15,14", lastSeen: ago),

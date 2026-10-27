@@ -160,9 +160,9 @@ final class ViewerSettingsTests: XCTestCase {
         let en = Locale(identifier: "en_US")
         XCTAssertNil(PairedHost(alias: "mac-daddy", name: "mac-daddy").detail(now: now, locale: en), "nothing to add to the name")
         XCTAssertNil(PairedHost(alias: "mac-daddy.local", name: "mac-daddy").detail(now: now, locale: en))
-        XCTAssertEqual(PairedHost(alias: "100.80.102.7", name: "mac-daddy").detail(now: now, locale: en), "100.80.102.7")
-        XCTAssertEqual(PairedHost(alias: "m", name: "M", lastConnected: now.addingTimeInterval(-2 * 86_400)).detail(now: now, locale: en), "Connected 2 days ago")
-        XCTAssertEqual(PairedHost(alias: "x", name: "x", lastConnected: now.addingTimeInterval(-5)).detail(now: now, locale: en), "Connected just now")
+        // A healthy row is its icon and name (CLAUDE.md): the address and when it was connected are Get Info's.
+        XCTAssertNil(PairedHost(alias: "100.80.102.7", name: "mac-daddy").detail(now: now, locale: en))
+        XCTAssertNil(PairedHost(alias: "m", name: "M", lastConnected: now.addingTimeInterval(-2 * 86_400)).detail(now: now, locale: en))
         XCTAssertEqual(PairedHost(alias: "", name: "").title, "")
         XCTAssertEqual(PairedHost(alias: "10.0.0.2", name: "").title, "10.0.0.2", "a host with no name shows its address")
     }
@@ -183,7 +183,7 @@ final class ViewerSettingsTests: XCTestCase {
         k.latestAvailable = MirageVersion(version: "0.4.1", build: 420, commit: "b", channel: .nightly)
         let r2 = ConnectList.hosts(known: ["mac-daddy": k], recent: [])[0]
         XCTAssertEqual(r2.update, .updateAvailable(from: k.hostVersion!, to: k.latestAvailable!))
-        XCTAssertEqual(r2.detail(now: now, locale: Locale(identifier: "en_US")), "Connected just now")
+        XCTAssertNil(r2.detail(now: now, locale: Locale(identifier: "en_US")), "healthy again: just its name")
     }
 
     /// U4: the row's Update needs a host that takes triggers from this device; the prompt names both builds and the channel.
@@ -242,9 +242,9 @@ final class ViewerSettingsTests: XCTestCase {
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let en = Locale(identifier: "en_US")
         var h = PairedHost(alias: "mac-daddy", name: "mac-daddy", lastConnected: now.addingTimeInterval(-2 * 86_400))
-        XCTAssertEqual(h.detail(now: now, locale: en), "Connected 2 days ago")
+        XCTAssertNil(h.detail(now: now, locale: en), "a healthy row is quiet")
         h.lastSeen = now.addingTimeInterval(-120)
-        XCTAssertEqual(h.detail(now: now, locale: en), "Seen 2 minutes ago")
+        XCTAssertNil(h.detail(now: now, locale: en), "seen: still quiet")
         h.streamingElsewhere = true
         XCTAssertEqual(h.detail(now: now, locale: en), "In use by another device")
         h.unreachable = true
@@ -269,7 +269,7 @@ final class ViewerSettingsTests: XCTestCase {
         var h = PairedHost(alias: "green.local", name: "green-machine", model: "Mac15,4", lastSeen: now.addingTimeInterval(-120))
         h.hostVersion = MirageVersion(version: "0.1", build: 475, commit: "abc", channel: .nightly)
         h.policy = .automatic
-        XCTAssertEqual(h.detail(now: now, locale: en), "Seen 2 minutes ago", "no build or policy in the row")
+        XCTAssertNil(h.detail(now: now, locale: en), "no build, policy or seen time in the row")
         typealias R = PairedHost.InfoRow
         XCTAssertEqual(h.info(now: now, locale: en), [R(label: "Version", value: "Mirage 0.1 (475)"), R(label: "Channel", value: "Nightly"),
                                                       R(label: "Updates", value: "Automatically"), R(label: "Model", value: "Mac15,4"),
@@ -463,7 +463,6 @@ final class ViewerSettingsTests: XCTestCase {
         m.apply(s)
         XCTAssertEqual(m.grants.map(\.granted), [true, false])
         XCTAssertEqual(m.grants.map(\.title), [PrivacyPane.screenRecording, PrivacyPane.accessibility()])
-        XCTAssertEqual(m.headline, "Mirage needs one more permission to share this Mac.")
         m.allow("accessibility")
         XCTAssertEqual(log.sent, ["accessibility"]); XCTAssertTrue(log.opened.isEmpty, "the first time: the system's own sheet")
         m.allow("accessibility")
@@ -482,7 +481,6 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertFalse(PermissionsWindow.shouldShow(s, visible: false, dismissed: false), "all granted")
         m.apply(s)
         XCTAssertTrue(m.allGranted)
-        XCTAssertEqual(m.headline, "This Mac is ready. Your paired devices can connect.")
         // Later: not by itself again; a request (a pairing, a refused connection, the switch) still brings it up.
         var later = LocalControl.Status(hostName: "big-mac", pairedDevices: 0, pairingOpen: false, screenRecording: false, accessibility: false)
         later.hostSettings = HostSettings(permissionsSnoozed: true)
@@ -495,7 +493,7 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertFalse(PermissionsWindow.mayShowOnRequest(viewerOnly))
         let old = LocalControl.Status(hostName: "old", pairedDevices: 0, pairingOpen: false)
         XCTAssertFalse(PermissionsWindow.shouldShow(old, visible: false, dismissed: false), "an older host that does not say: nothing shown")
-        for line in m.grants.flatMap({ [$0.title, $0.why] }) + [m.headline] { XCTAssertFalse(line.contains("·"), line) }
+        for line in m.grants.map(\.title) { XCTAssertFalse(line.contains("·"), line) }
     }
 
     /// This device's own update card (phrz, 2026-10-27): the newer of the host's report and the verified feed; Ask at once,

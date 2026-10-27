@@ -12,7 +12,6 @@ final class PermissionsModel: ObservableObject {
     struct Grant: Identifiable, Equatable {
         var id: String          // "screenRecording", "accessibility"
         var title: String
-        var why: String
         var symbol: String
         var granted: Bool
     }
@@ -25,22 +24,13 @@ final class PermissionsModel: ObservableObject {
     var asked: Set<String> = []
 
     var grants: [Grant] {
-        [Grant(id: "screenRecording", title: PrivacyPane.screenRecording, why: "So your other devices can see this Mac's screen.",
+        [Grant(id: "screenRecording", title: PrivacyPane.screenRecording,
                symbol: "rectangle.dashed.badge.record", granted: screenRecording ?? false),
-         Grant(id: "accessibility", title: PrivacyPane.accessibility(), why: "So your other devices can use this Mac's pointer and keyboard.",
+         Grant(id: "accessibility", title: PrivacyPane.accessibility(),
                symbol: "hand.point.up.left", granted: accessibility ?? false)]
     }
     var allGranted: Bool { screenRecording == true && accessibility == true }
     var missingCount: Int { grants.filter { !$0.granted }.count }
-
-    /// The first line under the title.
-    var headline: String {
-        switch missingCount {
-        case 0: return "This Mac is ready. Your paired devices can connect."
-        case 1: return "Mirage needs one more permission to share this Mac."
-        default: return "Mirage needs two permissions to share this Mac."
-        }
-    }
 
     /// The pane's own address in System Settings.
     static func settingsURL(_ id: String) -> URL {
@@ -76,12 +66,12 @@ struct PermissionsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .top, spacing: 14) {
+            HStack(alignment: .center, spacing: 14) {
                 Image(nsImage: NSApp.applicationIconImage ?? NSImage()).resizable().frame(width: 64, height: 64)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Allow Mirage to Share This Mac").font(.title2).fontWeight(.semibold)
-                    Text(model.headline).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    if let r = model.reason, !model.allGranted { Text(r).fixedSize(horizontal: false, vertical: true) }
+                    // Only when a device caused it (its name); otherwise the heading says it.
+                    if let r = model.reason, !model.allGranted { Text(r).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
                 }
             }
             VStack(spacing: 0) {
@@ -99,8 +89,6 @@ struct PermissionsView: View {
                     Text(code).font(.system(.title3, design: .monospaced)).fontWeight(.semibold)
                 }
             }
-            Text("Once a month macOS asks whether Mirage may keep recording this screen without the screen picker. Choose Allow so your devices can keep connecting.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Spacer()
                 Button(model.allGranted ? "Done" : "Later", action: model.allGranted ? onDone : onLater)
@@ -115,10 +103,7 @@ struct PermissionsView: View {
     private func row(_ g: PermissionsModel.Grant) -> some View {
         HStack(alignment: .center, spacing: 12) {
             Image(systemName: g.symbol).font(.system(size: 18)).foregroundStyle(.secondary).frame(width: 28)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(g.title).fontWeight(.medium)
-                Text(g.why).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
+            Text(g.title).fontWeight(.medium)
             Spacer(minLength: 8)
             if g.granted {
                 Image(systemName: "checkmark.circle.fill").font(.system(size: 20)).foregroundStyle(.green)
@@ -235,8 +220,6 @@ struct ShareThisMacSection: View {
                 Toggle("Share This Mac", isOn: Binding(get: { on }, set: { state.set($0) }))
             } header: {
                 Text("This Mac")
-            } footer: {
-                Text("Your other devices can see and use this Mac. Off, Mirage only keeps itself up to date here.")
             }
         }
     }

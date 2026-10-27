@@ -79,9 +79,8 @@ struct PairedHost: Identifiable, Equatable {
         if unreachable { return "Not reachable" }
         if refusal != nil { return "Not accepting this device" }
         if lastSeen != nil, streamingElsewhere { return "In use by another device" }
-        if let t = lastSeen { return "Seen \(Self.ago(t, now: now, locale: locale))" }
-        if let t = lastConnected { return "Connected \(Self.ago(t, now: now, locale: locale))" }
-        return addressDiffers ? alias : nil
+        // A healthy row is its icon and name (CLAUDE.md UI rules): when it was seen, connected, its address, in Get Info.
+        return nil
     }
 
     /// One Get Info row: a label and its value.
@@ -637,11 +636,10 @@ enum PairingPhase: Equatable {
     }
 
     /// The note under the list once it ends.
-    func note(connectHint: String) -> String? {
+    var note: String? {
         switch self {
         case .pending, .accepted: return nil
-        case .connectable(let n, true): return "\(n) is ready. \(connectHint)"
-        case .connectable(let n, false): return "Paired with \(n). It hasn't answered since; connect when it's online."
+        case .connectable(let n, _): return "Paired with \(n)."
         case .refused(let n, let why): return "Not paired with \(n): \(why)"
         }
     }
@@ -714,11 +712,6 @@ final class HostPairingCenter: ObservableObject {
     /// The row to select (the new one): the lists take it and clear it.
     @Published var selectRequest: String?
 
-    #if os(macOS)
-    static let connectHint = "Double-click it to connect."
-    #else
-    static let connectHint = "Tap it to connect."
-    #endif
     /// Whether a recorded host takes this device now (tests replace it).
     var check: (String) -> @Sendable () async -> Bool = { alias in
         let connect = HostConnector.connect(alias: alias, timeout: 3)
@@ -778,7 +771,7 @@ final class HostPairingCenter: ObservableObject {
         // How it ended: a passing note when it worked, an alert when it did not (phrz, 2026-10-26: nothing stays).
         switch next {
         case .connectable:
-            if let n = next.note(connectHint: Self.connectHint) { ListNotices.shared.flash(n) }
+            if let n = next.note { ListNotices.shared.flash(n) }
             selectRequest = alias
             tasks[alias] = nil
         case .refused(let n, let why):
@@ -877,8 +870,7 @@ enum UpdateOutcomeNotice: Equatable {
         case .failed: return .alert(ListAlert(title: "\(name) did not update", message: end.message))
         case .rolledBack: return .alert(ListAlert(title: "\(name) rolled back its update", message: end.message))
         case .unknown, .trial:
-            return .alert(ListAlert(title: "\(name) is still checking the update",
-                                    message: end.message + ". It keeps the update once its checks pass, and rolls back by itself if they fail."))
+            return .alert(ListAlert(title: "\(name) is still checking the update", message: end.message))
         default: return .quiet
         }
     }
