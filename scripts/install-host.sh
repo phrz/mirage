@@ -29,7 +29,7 @@
 set -e
 
 # BEGIN MIRAGE MANIFEST KEYS (scripts/release.sh keys-init writes these; release.sh --check keeps them equal to
-# Sources/MirageUpdater/TrustedKeys.swift; release.sh raises the floors as it publishes)
+# Sources/MirageCore/Update/TrustedKeys.swift; release.sh raises the floors as it publishes)
 TRUSTED_KEYS="RkdiYPOI6pgPA7XtzSH8qSYzO01fsuWk2nXTGl4sA6c= xt0I5ZG+3e8M5gXc1odsxj+dC7xjmtH2+nqCSLGn3/I="
 REVOKED_KEYS=""
 MIN_BUILD_STABLE=0

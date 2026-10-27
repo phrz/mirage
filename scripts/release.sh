@@ -22,7 +22,7 @@
 #
 # The manifest's signing key: its private half is in the login keychain as the generic password service
 # com.paulherz.mirage.manifest-key, account current; its public half (and the offline next key's) are compiled into the
-# app in Sources/MirageUpdater/TrustedKeys.swift.
+# app in Sources/MirageCore/Update/TrustedKeys.swift.
 set -e
 cd "$(dirname "$0")/.."
 if [ -z "${DEVELOPER_DIR:-}" ]; then
@@ -68,22 +68,22 @@ check_manifest_key() {
     security find-generic-password -s "$KEY_SERVICE" -a current >/dev/null 2>&1 && return 0
     cat >&2 <<EOF
 missing: the manifest signing key (keychain item $KEY_SERVICE / current).
-  Set up once: scripts/release.sh keys-init (then commit Sources/MirageUpdater/TrustedKeys.swift).
+  Set up once: scripts/release.sh keys-init (then commit Sources/MirageCore/Update/TrustedKeys.swift).
 EOF
     return 1
 }
 check_compiled_keys() {
-    grep -q '^        "[A-Za-z0-9+/=]\{44\}",' Sources/MirageUpdater/TrustedKeys.swift && return 0
-    echo "missing: trusted manifest public keys in Sources/MirageUpdater/TrustedKeys.swift (scripts/release.sh keys-init writes them)" >&2
+    grep -q '^        "[A-Za-z0-9+/=]\{44\}",' Sources/MirageCore/Update/TrustedKeys.swift && return 0
+    echo "missing: trusted manifest public keys in Sources/MirageCore/Update/TrustedKeys.swift (scripts/release.sh keys-init writes them)" >&2
     return 1
 }
 # install-host.sh verifies the channel head before it downloads anything, with keys embedded in it: they must be the app's.
-swift_keys() { sed -n '/BEGIN MIRAGE MANIFEST KEYS/,/END MIRAGE MANIFEST KEYS/p' Sources/MirageUpdater/TrustedKeys.swift | sed -n 's/^ *"\([A-Za-z0-9+/=]*\)".*/\1/p' | sort | tr '\n' ' '; }
-swift_revoked() { sed -n '/static let revoked/,/]/p' Sources/MirageUpdater/TrustedKeys.swift | sed -n 's/^ *"\([0-9a-f]*\)".*/\1/p' | sort | tr '\n' ' '; }
+swift_keys() { sed -n '/BEGIN MIRAGE MANIFEST KEYS/,/END MIRAGE MANIFEST KEYS/p' Sources/MirageCore/Update/TrustedKeys.swift | sed -n 's/^ *"\([A-Za-z0-9+/=]*\)".*/\1/p' | sort | tr '\n' ' '; }
+swift_revoked() { sed -n '/static let revoked/,/]/p' Sources/MirageCore/Update/TrustedKeys.swift | sed -n 's/^ *"\([0-9a-f]*\)".*/\1/p' | sort | tr '\n' ' '; }
 script_var() { sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}$/\1/p" scripts/install-host.sh | tr ' ' '\n' | sed '/^$/d' | sort | tr '\n' ' '; }
 check_script_keys() {
     [ "$(swift_keys)" = "$(script_var TRUSTED_KEYS)" ] && [ "$(swift_revoked)" = "$(script_var REVOKED_KEYS)" ] && return 0
-    echo "mismatch: scripts/install-host.sh's TRUSTED_KEYS/REVOKED_KEYS differ from Sources/MirageUpdater/TrustedKeys.swift (update the script's block)" >&2
+    echo "mismatch: scripts/install-host.sh's TRUSTED_KEYS/REVOKED_KEYS differ from Sources/MirageCore/Update/TrustedKeys.swift (update the script's block)" >&2
     return 1
 }
 check_gh() {
@@ -138,7 +138,7 @@ EOF
     python3 - "$CUR_PUB" "$CUR_ID" "$NXT_PUB" "$NXT_ID" <<'PY'
 import sys, re
 cur, cur_id, nxt, nxt_id = sys.argv[1:]
-p = "Sources/MirageUpdater/TrustedKeys.swift"
+p = "Sources/MirageCore/Update/TrustedKeys.swift"
 s = open(p).read()
 block = (f'        // BEGIN MIRAGE MANIFEST KEYS\n        "{cur}", // current {cur_id}\n        "{nxt}", // next {nxt_id} (private half offline)\n'
          '        // END MIRAGE MANIFEST KEYS')
@@ -155,7 +155,7 @@ next key $NXT_ID: store this private half in 1Password now, and nowhere on this 
 
     $NXT_PRIV
 
-Both public keys are in Sources/MirageUpdater/TrustedKeys.swift: commit it. Hosts trust releases from the first build
+Both public keys are in Sources/MirageCore/Update/TrustedKeys.swift: commit it. Hosts trust releases from the first build
 that carries them.
 EOF
     exit 0
