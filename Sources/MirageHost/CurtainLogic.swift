@@ -72,7 +72,11 @@ public enum CurtainLogic {
         /// resume: its own decide its end.
         public struct Snapshot: Equatable, Sendable {
             public var curtain: Bool, lockWhenFinished: Bool
-            public init(curtain: Bool = true, lockWhenFinished: Bool = true) { self.curtain = curtain; self.lockWhenFinished = lockWhenFinished }
+            /// How long it keeps the curtain up once suspended before the Mac locks (its viewer's choice; 600 s by default).
+            public var suspendGraceNanos: UInt64
+            public init(curtain: Bool = true, lockWhenFinished: Bool = true, suspendGraceSeconds: Int = 600) {
+                self.curtain = curtain; self.lockWhenFinished = lockWhenFinished; suspendGraceNanos = UInt64(max(0, suspendGraceSeconds)) * 1_000_000_000
+            }
         }
         public struct Session: Equatable {
             public var snapshot: Snapshot
@@ -87,6 +91,8 @@ public enum CurtainLogic {
             /// When it last began (a start or a resume): a begin that has not streamed within `beginWaitNanos` no longer holds
             /// the end.
             public var beganAt: UInt64 = 0
+            /// Its suspend grace ran out and the Mac was locked for it (once per suspend).
+            public var graceLocked = false
         }
         /// The decision at the end of the sessions, waiting out the debounce after the last one stopped (a stream stopped to
         /// start over is followed at once by a new one, which holds it).
@@ -155,7 +161,10 @@ public enum CurtainLogic {
         /// A stream starts, or a suspended one resumes (keeping its snapshot). A pending end waits for it: off once it streams,
         /// back on its course if it fails.
         public mutating func sessionBegan(_ id: String, _ snapshot: Snapshot = Snapshot(), now: UInt64 = 0) {
-            if sessions[id] != nil { sessions[id]!.suspendedAt = nil; sessions[id]!.starting = true } else { sessions[id] = Session(snapshot: snapshot) }
+            if sessions[id] != nil {
+                sessions[id]!.suspendedAt = nil; sessions[id]!.starting = true; sessions[id]!.graceLocked = false
+                sessions[id]!.snapshot.suspendGraceNanos = snapshot.suspendGraceNanos   // (the viewer that suspends next decides)
+            } else { sessions[id] = Session(snapshot: snapshot) }
             sessions[id]!.beganAt = now
         }
         /// Its stream started: any pending end is off.
@@ -198,6 +207,20 @@ public enum CurtainLogic {
             pendingEnd = nil; ownedLocally = false; lastLocalInput = nil; lockUnavailable = false; curtainUnavailable = false
         }
 
+        /// A suspended session keeps the curtain up for its grace only (phrz, 2026-10-27: a day of curtain over a suspended iPhone
+        /// session blacked out ARD and Workbench, and he had to use a KVM): once it runs out, with nothing else streaming, the
+        /// Mac locks, so the curtain goes and any remote tool reaches a normal lock screen. Not when the Mac is already locked,
+        /// a person at it signed in, or the curtain cannot lock. Returns whether to lock now (once per suspend).
+        public mutating func graceLockDue(now: UInt64) -> (lock: Bool, graceSeconds: Int)? {
+            var due: UInt64?
+            for (id, s) in sessions where s.snapshot.curtain && !s.graceLocked {
+                guard let at = s.suspendedAt, now &- at >= s.snapshot.suspendGraceNanos else { continue }
+                sessions[id]!.graceLocked = true; due = s.snapshot.suspendGraceNanos
+            }
+            guard let g = due else { return nil }
+            let streaming = sessions.values.contains { $0.suspendedAt == nil && $0.streamed && !$0.starting }
+            return (!streaming && !locked && !ownedLocally && !lockUnavailable && !curtainUnavailable, Int(g / 1_000_000_000))
+        }
         public mutating func injectedDown() { if locked { remoteDownsWhileLocked += 1 } }
         /// The lock state changed: an unlock is remote (Mirage typed the password) when injected downs came in while locked,
         /// local otherwise.

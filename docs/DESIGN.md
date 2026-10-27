@@ -1886,8 +1886,16 @@ desk. The curtain blocks nothing.
   send: big-mac kept a closed session suspended for a day, the curtain over phrz's other remote tool.
 - **Suspended sessions** (a backgrounded phone, a roam, a dropped or crashed viewer, within the resume window): the curtain
   stays up exactly as while streaming, so a local click, key or scroll locks the Mac at once and the trigger is swallowed;
-  pointer motion alone does nothing (it reveals nothing under the curtain). A suspend is not an end: no lock on time
-  alone, so a mosh-like resume hours later finds the session as it was. With every session suspended nothing captures,
+  pointer motion alone does nothing (it reveals nothing under the curtain). For a grace only (phrz, 2026-10-27: a day of
+  curtain over a suspended iPhone session blacked out ARD and Workbench, sharingType .none hiding it from their captures,
+  and he had to use a KVM): the viewer's "Lock After Suspending" (Immediately, 1, 5, 10 minutes or 1 hour; 10 minutes by
+  default), sent in its Hello (`suspendGraceSeconds`, clamped to 0…86400, 600 from older viewers) and taken from the
+  session that suspended (a resume sets it again). Once it runs out, with nothing else streaming, the Mac locks
+  (`Machine.graceLockDue`, logged either way): the curtain goes and any remote tool, or a KVM, reaches a normal lock screen.
+  Not when the Mac is already locked or a person at it signed in. Within the grace a resume goes straight in; after it, it
+  lands on the lock screen (Unlock with Face ID applies). The session itself waits out the resume window as before; its
+  expiry after the lock just ends it. The curtain stays hidden from other captures during the grace (a black screen to
+  other tools is acceptable for that long). With every session suspended nothing captures,
   so the curtain goes opaque without waiting for acknowledgements (layer 2's frame gating and a resuming session's own
   acknowledgement still cover captures).
 - **The display while nothing streams:** the display-sleep assertion belongs to the display captures

@@ -66,6 +66,8 @@ public final class HostConnection: @unchecked Sendable {
     /// A newer connection took this session over: do not stop the streamer when this one ends.
     public var superseded = false
     public var lastRequest: ControlMessage.StreamRequest?
+    /// The viewer's suspend grace, from its Hello (DESIGN §3.12).
+    public var suspendGraceSeconds: Int?
     /// The viewer's simulated link (`StreamRequest.throttle`): everything this connection sends goes through it. nil = the real link.
     public var shaper: LinkShaper? { lock.lock(); defer { lock.unlock() }; return _shaper }
     private var _shaper: LinkShaper?

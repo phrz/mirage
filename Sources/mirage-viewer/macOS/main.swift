@@ -537,6 +537,11 @@ struct MacSettingsView: View {
             ShareThisMacSection()
             ConnectionSettingsSection(prefs: prefs)
             Section {
+                Picker("Lock After Suspending", selection: Binding(get: { ViewerSettings.lockAfterSuspend() }, set: { UserDefaults.standard.set($0, forKey: ViewerSettings.lockAfterSuspendKey) })) {
+                    ForEach(SuspendGrace.choices, id: \.self) { Text(ViewerSettings.suspendChoiceTitle($0)).tag($0) }
+                }
+            }
+            Section {
                 Toggle("Send Keyboard Shortcuts to Mac", isOn: Binding(get: { controls.captureShortcuts }, set: { controls.setCaptureShortcuts($0) }))
             } header: {
                 Text("Input")

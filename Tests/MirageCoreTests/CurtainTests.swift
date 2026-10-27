@@ -377,6 +377,31 @@ final class CurtainSettingsTests: XCTestCase {
         var v = M(); v.sessionBegan("agent-1"); v.sessionStreamed("agent-1"); v.sessionBegan("viewer"); v.sessionStreamed("viewer")
         v.sessionStopped("agent-1", now: 0); XCTAssertNil(v.pendingEnd); XCTAssertTrue(v.wantsCurtain)
     }
+    /// A suspended session keeps the curtain only for its grace, then the Mac locks (phrz, 2026-10-27: a day of curtain over a
+    /// suspended iPhone session blacked out ARD and Workbench).
+    func testSuspendGraceLocks() {
+        var m = M(); m.sessionBegan("a", .init(suspendGraceSeconds: 600), now: 0); m.sessionStreamed("a"); m.visible = true
+        m.sessionSuspended("a", now: 0)
+        XCTAssertNil(m.graceLockDue(now: 599 * Self.s), "within the grace: the curtain stays, resume goes straight in")
+        XCTAssertEqual(m.graceLockDue(now: 600 * Self.s)?.lock, true, "then the Mac locks")
+        XCTAssertNil(m.graceLockDue(now: 700 * Self.s), "once")
+        m.lockChanged(true); XCTAssertFalse(m.wantsCurtain, "locked: the curtain is down; any tool reaches the lock screen")
+        // Resume after it: the lock screen; a remote unlock brings the curtain back, and the grace starts again on the next suspend.
+        m.sessionBegan("a", .init(suspendGraceSeconds: 60), now: 800 * Self.s); m.sessionStreamed("a"); m.injectedDown(); m.lockChanged(false)
+        XCTAssertTrue(m.wantsCurtain)
+        m.sessionSuspended("a", now: 900 * Self.s)
+        XCTAssertEqual(m.graceLockDue(now: 960 * Self.s)?.lock, true, "the resuming viewer's grace (60 s)")
+        // Immediately (0 s); never over someone signed in at the Mac, nor while another session streams.
+        var z = M(); z.sessionBegan("a", .init(suspendGraceSeconds: 0)); z.sessionStreamed("a"); z.sessionSuspended("a", now: 5)
+        XCTAssertEqual(z.graceLockDue(now: 5)?.lock, true)
+        var o = M(); o.sessionBegan("a"); o.sessionStreamed("a"); o.lockChanged(true); o.lockChanged(false); o.sessionSuspended("a", now: 0)
+        XCTAssertEqual(o.graceLockDue(now: 600 * Self.s)?.lock, false, "someone signed in at the Mac")
+        var t = M(); t.sessionBegan("a"); t.sessionStreamed("a"); t.sessionBegan("b"); t.sessionStreamed("b"); t.sessionSuspended("a", now: 0)
+        XCTAssertEqual(t.graceLockDue(now: 600 * Self.s)?.lock, false, "another session streams")
+        var off = M(); off.sessionBegan("a", .init(curtain: false)); off.sessionStreamed("a"); off.sessionSuspended("a", now: 0)
+        XCTAssertNil(off.graceLockDue(now: 600 * Self.s), "no curtain: nothing to lock for (Lock When Finished decides at the end)")
+        XCTAssertEqual(SuspendGrace.clamp(nil), 600); XCTAssertEqual(SuspendGrace.clamp(-1), 0); XCTAssertEqual(SuspendGrace.clamp(10_000_000), 86_400)
+    }
     func testSettingsFileDefaultsAndTolerance() throws {
         XCTAssertEqual(try JSONDecoder().decode(HostSettings.self, from: Data("{}".utf8)), HostSettings(curtain: true, lockWhenFinished: true))
         XCTAssertEqual(try JSONDecoder().decode(HostSettings.self, from: Data(#"{"curtain": false, "future": 3, "lockWhenFinished": "x"}"#.utf8)),

@@ -1,5 +1,12 @@
 import Foundation
 
+/// A suspended session's curtain grace (DESIGN §3.12): the viewer's choice, 600 s when it says nothing, within 0…86400 s.
+public enum SuspendGrace {
+    public static let defaultSeconds = 600
+    public static let choices = [0, 60, 300, 600, 3600]
+    public static func clamp(_ s: Int?) -> Int { min(86_400, max(0, s ?? defaultSeconds)) }
+}
+
 /// Unlock with biometry (DESIGN §3.13): the pieces both sides share, apart from Keychain, LocalAuthentication and CGEvents
 /// so they can be tested.
 public enum UnlockLogic {

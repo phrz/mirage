@@ -408,7 +408,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     public func start(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         queue.sync { holdWarm(true) }
-        beginCurtain()   // before any capture exists: every filter built from here on leaves the curtain out
+        beginCurtain(req)   // before any capture exists: every filter built from here on leaves the curtain out
         do { let info = try await startStream(req, output: output); Curtain.shared.sessionStreamed(curtainID); return info }
         catch { queue.sync { holdWarm(false) }; endCurtain(stopped: true); throw error }
     }
@@ -602,7 +602,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// A stream starts (or resumes): the session joins the curtain before any of its captures exists (the `curtain` tunable),
     /// and this streamer re-applies its capture filters and acknowledges whenever the curtain's windows change. Until every
     /// session has acknowledged, the curtain stays invisible; and a capture whose filter predates the curtain drops its frames.
-    private func beginCurtain() {
+    private func beginCurtain(_ req: ControlMessage.StreamRequest) {
         if curtainObserver == nil {
             curtainObserver = NotificationCenter.default.addObserver(forName: Curtain.windowsChanged, object: nil, queue: nil) { [weak self] _ in
                 self?.queue.async { self?.reapplyCurtainExclusion() }
@@ -612,7 +612,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // The host's settings (host-settings.json: Curtain, Lock when finished) and the curtain tunable (an off switch for tests).
         let settings = HostSettings.load(from: (try? Store())?.url(HostSettings.fileName) ?? URL(fileURLWithPath: "/nonexistent"))
         StayReachable.shared.set(settings.stayReachable)   // (a hand edit of the file, picked up here)
-        Curtain.shared.sessionBegan(curtainID, curtain: settings.curtain && hostTunables[.curtain] >= 0.5, lockWhenFinished: settings.lockWhenFinished)
+        Curtain.shared.sessionBegan(curtainID, curtain: settings.curtain && hostTunables[.curtain] >= 0.5, lockWhenFinished: settings.lockWhenFinished,
+                                    suspendGraceSeconds: SuspendGrace.clamp(req.suspendGraceSeconds))
     }
     /// `stopped`: the session is over (stop), not suspended (local ownership of the Mac is kept across a suspend).
     private func endCurtain(stopped: Bool) {
@@ -1370,7 +1371,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // Taken over from a connection the host had not yet noticed was dead: suspend that side first.
         if capturer != nil { await suspend() }
         queue.sync { holdWarm(true) }
-        beginCurtain()
+        beginCurtain(req)
         do { let info = try await resumeStream(req, output: output); Curtain.shared.sessionStreamed(curtainID); return info }
         catch { queue.sync { holdWarm(false) }; endCurtain(stopped: false); throw error }
     }

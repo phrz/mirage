@@ -27,6 +27,11 @@ struct SettingsSheet: View {
                     Toggle("Keyboard Accessory Row", isOn: $accessoryRow)
                 }
                 Section {
+                    Picker("Lock After Suspending", selection: Binding(get: { ViewerSettings.lockAfterSuspend() }, set: { UserDefaults.standard.set($0, forKey: ViewerSettings.lockAfterSuspendKey) })) {
+                        ForEach(SuspendGrace.choices, id: \.self) { Text(ViewerSettings.suspendChoiceTitle($0)).tag($0) }
+                    }
+                }
+                Section {
                     Picker("On Connect", selection: $startAtOneToOne) {
                         Text("Fit to Screen").tag(false)
                         Text("1:1 Pixels").tag(true)

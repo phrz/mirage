@@ -11,7 +11,9 @@ final class SessionEndTests: XCTestCase {
         var stops: Int { lock.lock(); defer { lock.unlock() }; return _stops }
         var suspends: Int { lock.lock(); defer { lock.unlock() }; return _suspends }
         let info = ControlMessage.StreamInfo(width: 512, height: 384, displayID: 1, displayWidth: 256, displayHeight: 192, displayScale: 2, displayName: "test")
-        func start(_ request: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo { info }
+        private var _grace: Int?
+        var grace: Int? { lock.lock(); defer { lock.unlock() }; return _grace }
+        func start(_ request: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo { lock.lock(); _grace = request.suspendGraceSeconds; lock.unlock(); return info }
         func resume(_ request: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo { info }
         func update(_ request: ControlMessage.StreamRequest) async throws -> ControlMessage.StreamInfo { info }
         func handle(ack: ControlMessage.FrameAck) {}
@@ -26,7 +28,7 @@ final class SessionEndTests: XCTestCase {
         func shedCaches() async {}
     }
 
-    private func setUp(_ streamer: CountingStreamer) async throws -> (HostContext, QUICHost, () async throws -> (QUICClient, MessageStream)) {
+    private func setUp(_ streamer: CountingStreamer, grace: Int? = nil) async throws -> (HostContext, QUICHost, () async throws -> (QUICClient, MessageStream)) {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mirage-end-\(UUID().uuidString)")
         addTeardownBlock { try? FileManager.default.removeItem(at: tmp) }
         let hostStore = try Store(root: tmp.appendingPathComponent("host"))
@@ -43,7 +45,7 @@ final class SessionEndTests: XCTestCase {
             try await client.connect(timeout: Loopback.timeout)
             let control = try await client.openStream()
             let session = ClientSession(identity: viewerID, store: viewerStore, alias: "127.0.0.1", tlsFingerprint: client.tlsFingerprint!, stream: control)
-            _ = try await session.authenticate()
+            _ = try await session.authenticate(suspendGraceSeconds: grace)
             let tiles = try await client.openStream(); try await tiles.sendRaw(Data([tileStreamMagic]))
             let fast = try await client.openStream(); try await fast.sendRaw(Data([fastTileStreamMagic]))
             let flow = try await client.openDatagramFlow(); try await flow.sendRaw(DatagramPing.encode(seq: 1))
@@ -68,6 +70,22 @@ final class SessionEndTests: XCTestCase {
         XCTAssertEqual(streamer.suspends, 0, "ended, not suspended")
         let suspended = await ctx.connections.suspendedCount
         XCTAssertEqual(suspended, 0, "nothing kept for a resume")
+    }
+
+    /// The viewer's "Lock After Suspending" reaches the streamer (for the curtain), clamped; an older viewer's absence is 600 s.
+    func testTheSuspendGraceTravelsFromTheHello() async throws {
+        for (sent, expected) in [(60, 60), (100_000, 86_400), (-5, 0)] as [(Int, Int)] {
+            let s = CountingStreamer()
+            let (_, host, connect) = try await setUp(s, grace: sent)
+            let (client, control) = try await connect()
+            XCTAssertEqual(s.grace, expected)
+            control.cancel(); client.close(); host.stop()
+        }
+        let old = CountingStreamer()
+        let (_, host, connect) = try await setUp(old, grace: nil)
+        let (client, control) = try await connect()
+        XCTAssertEqual(old.grace, 600, "an older viewer: 10 minutes")
+        control.cancel(); client.close(); host.stop()
     }
 
     func testADroppedConnectionSuspends() async throws {

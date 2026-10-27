@@ -16,6 +16,13 @@ enum ViewerSettings {
     static let keyAccessoryKey = "keyboardAccessoryRow"
     /// Mac: ⌘-shortcuts typed over the picture go to the remote Mac (on, the default) or to this app's menus first.
     static let captureShortcutsKey = "captureKeyboardShortcuts"
+    /// "Lock After Suspending" (DESIGN §3.12): how long a host keeps the curtain up for this device's suspended session before
+    /// it locks; sent in the Hello. 600 s unless chosen.
+    static let lockAfterSuspendKey = "lockAfterSuspendSeconds"
+    static func lockAfterSuspend(_ d: UserDefaults = .standard) -> Int { (d.object(forKey: lockAfterSuspendKey) as? Int).map(SuspendGrace.clamp) ?? SuspendGrace.defaultSeconds }
+    static func suspendChoiceTitle(_ s: Int) -> String {
+        switch s { case 0: return "Immediately"; case 60: return "After 1 Minute"; case 3600: return "After 1 Hour"; default: return "After \(s / 60) Minutes" }
+    }
     /// Hosts connected to, most recent first (the connect window's Recent list).
     static let recentHostsKey = "recentHosts"
     /// The settings' schema (`migrate`).

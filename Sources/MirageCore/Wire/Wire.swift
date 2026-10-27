@@ -340,8 +340,13 @@ public enum ControlMessage: Codable, Equatable {
         public var features: [String]?
         /// The `HostIcon.hash` of the icon this viewer holds for the host (with `Feature.hostIcon`). nil: none.
         public var hostIconHash: String?
+        /// How long a suspended session keeps the curtain up before the host locks the Mac (DESIGN §3.12: other remote tools
+        /// then reach a normal lock screen): the viewer's "Lock After Suspending". nil from older viewers: 600 s.
+        public var suspendGraceSeconds: Int?
         public init(protocolVersion: Int, deviceID: String, deviceName: String, clientNonce: Data, resumeToken: Data? = nil, deviceModel: String? = nil,
-                    viewerVersion: MirageVersion? = nil, minProtocolVersion: Int? = nil, features: [String]? = nil, hostIconHash: String? = nil) {
+                    viewerVersion: MirageVersion? = nil, minProtocolVersion: Int? = nil, features: [String]? = nil, hostIconHash: String? = nil,
+                    suspendGraceSeconds: Int? = nil) {
+            self.suspendGraceSeconds = suspendGraceSeconds
             self.protocolVersion = protocolVersion; self.deviceID = deviceID
             self.deviceName = deviceName; self.clientNonce = clientNonce; self.resumeToken = resumeToken; self.deviceModel = deviceModel
             self.viewerVersion = viewerVersion; self.minProtocolVersion = minProtocolVersion; self.features = features
@@ -502,6 +507,8 @@ public enum ControlMessage: Codable, Equatable {
     // MARK: Streaming
 
     public struct StreamRequest: Codable, Equatable {
+        /// Host-side: the suspend grace of the connection's viewer (its Hello's, clamped), for the curtain. Not sent by viewers.
+        public var suspendGraceSeconds: Int?
         /// Requested stream size in pixels; the host fits the display's aspect ratio inside it.
         public var width: Int
         public var height: Int

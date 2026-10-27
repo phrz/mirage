@@ -45,11 +45,11 @@ public final class Curtain: @unchecked Sendable {
     /// `curtain`: the host's Curtain setting (and the tunable); `lockWhenFinished`: lock the Mac when the last session ends.
     /// Sessions are tracked either way (the lock and who signed in matter for both), never in a test instance.
     /// A resumed session keeps the settings it began with; a new one takes these.
-    public func sessionBegan(_ id: String, curtain: Bool, lockWhenFinished: Bool) {
+    public func sessionBegan(_ id: String, curtain: Bool, lockWhenFinished: Bool, suspendGraceSeconds: Int = SuspendGrace.defaultSeconds) {
         DispatchQueue.main.async {
             guard Self.allowed else { return }
             self.acked[id] = 0
-            self.machine.sessionBegan(id, .init(curtain: curtain, lockWhenFinished: lockWhenFinished), now: Clock.nowNanos())
+            self.machine.sessionBegan(id, .init(curtain: curtain, lockWhenFinished: lockWhenFinished, suspendGraceSeconds: suspendGraceSeconds), now: Clock.nowNanos())
             self.startWatchingLock()
             self.update(reason: "session \(id) streaming")
             // A session joining a curtain already up: invisible until it, too, has acknowledged.
@@ -589,6 +589,11 @@ public final class Curtain: @unchecked Sendable {
     private func stopWatchingLock() { lockTimer?.cancel(); lockTimer = nil }
     private func lockTick() {
         let locked = InputInjector.consoleLocked()
+        // A suspended session's grace ran out: lock (the curtain goes; other remote tools reach a normal lock screen).
+        if let g = machine.graceLockDue(now: Clock.nowNanos()) {
+            if g.lock, !InputInjector.consoleLocked() { log("curtain: a suspended session's grace (\(g.graceSeconds) s) ran out: locking this Mac (any remote tool reaches the normal lock screen)"); lockNow() }
+            else { log("curtain: a suspended session's grace (\(g.graceSeconds) s) ran out; not locking (already locked, someone signed in at the Mac, another session streams, or the curtain cannot lock)") }
+        }
         if locked != machine.locked {
             if !locked {
                 let typing = LockScreenUnlocker.lastTypingNanos != 0 && Clock.elapsed(since: LockScreenUnlocker.lastTypingNanos, now: Clock.nowNanos()) < 15_000_000_000

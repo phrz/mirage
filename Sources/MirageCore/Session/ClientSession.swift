@@ -56,7 +56,7 @@ public struct ClientSession {
     /// Mutual Ed25519 authentication, channel-bound to the TLS leaf fingerprint. `resumeToken` (from an
     /// earlier Welcome) asks the host to resume that session once this connection is authenticated.
     /// `probe`: a status probe (U7): the record learns the host's state and when it was seen, but not "connected".
-    public func authenticate(resumeToken: Data? = nil, features: [String]? = nil, probe: Bool = false) async throws -> ControlMessage.Welcome {
+    public func authenticate(resumeToken: Data? = nil, features: [String]? = nil, probe: Bool = false, suspendGraceSeconds: Int? = nil) async throws -> ControlMessage.Welcome {
         guard let known = try store.knownHosts()[alias] else {
             throw MirageError.authenticationFailed("not paired with \(alias); run `mirage connect \(alias) --pair CODE`")
         }
@@ -65,7 +65,7 @@ public struct ClientSession {
         let features = (features ?? []).contains(ControlMessage.Feature.hostIcon) ? features : (features ?? []) + [ControlMessage.Feature.hostIcon]
         try await stream.send(.hello(.init(protocolVersion: Mirage.protocolVersion, deviceID: identity.id, deviceName: identity.name, clientNonce: clientNonce, resumeToken: resumeToken, deviceModel: DeviceModel.current,
                                            viewerVersion: .current, minProtocolVersion: Mirage.minProtocolVersion, features: features,
-                                           hostIconHash: store.hostIcon(hostID: known.hostID)?.hash)))
+                                           hostIconHash: store.hostIcon(hostID: known.hostID)?.hash, suspendGraceSeconds: suspendGraceSeconds)))
         // A version refusal comes in place of the challenge: remember which side to update (the device list says so).
         let first = try await stream.receive()
         if case .reject(let r) = first {

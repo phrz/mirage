@@ -400,7 +400,7 @@ final class ViewerSession: @unchecked Sendable {
             }
             log("connect timing: control stream open at \(since())")
             let knownID = (try? store.knownHosts())?[host]?.hostID
-            let welcome = try await session.authenticate(resumeToken: resumeToken, features: [ControlMessage.Feature.updateStatus, ControlMessage.Feature.agentSession] + UnlockController.helloFeatures(hostID: knownID))   // U4 hook: notices
+            let welcome = try await session.authenticate(resumeToken: resumeToken, features: [ControlMessage.Feature.updateStatus, ControlMessage.Feature.agentSession] + UnlockController.helloFeatures(hostID: knownID), suspendGraceSeconds: ViewerSettings.lockAfterSuspend())   // U4 hook: notices
             unlock.connected(hostID: knownID, welcome: welcome)
             log("connect timing: authenticated at \(since())")
             let resumed = welcome.resumed == true

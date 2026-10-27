@@ -181,6 +181,7 @@ public enum HostSession {
                 let probe = (hello.features ?? []).contains(ControlMessage.Feature.probe)
                 if probe { ctx.probes.mark(conn.id) }
                 authenticated = try await authenticate(hello, stream, conn: conn, remote: remote, ctx: ctx, quiet: probe)
+                conn.suspendGraceSeconds = hello.suspendGraceSeconds
                 if !probe, (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) {
                     await ctx.updateListeners.add(conn.id, sendUpdate)
                 }
@@ -239,7 +240,8 @@ public enum HostSession {
                 // Automatic bitrate (BitratePolicy): 0, or an older viewer's unchosen 800, becomes the host's ceiling and the
                 // controller probes up to it; the streamer sees the resolved request. The throttle shapes this connection.
                 let hostMax = Int(Tunables.load(from: Tunables.hostFileURL(ctx.store)).tunables[.autoMaxKbps])
-                let req = BitratePolicy.resolved(asked, hostMaxKbps: hostMax)
+                var req = BitratePolicy.resolved(asked, hostMaxKbps: hostMax)
+                req.suspendGraceSeconds = SuspendGrace.clamp(conn.suspendGraceSeconds)
                 let bitrate = BitratePolicy.describe(asked, hostMaxKbps: hostMax)
                 if let line = conn.setThrottle(asked.throttle) { ctx.log("[\(remote)] \(line)") }
                 conn.lastRequest = req
