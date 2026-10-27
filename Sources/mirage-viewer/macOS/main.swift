@@ -134,6 +134,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             m.onConnectWindow = { [weak self] in MainActor.assumeIsolated { self?.openViewer() } }
             m.onQuit = { [weak self] in self?.requestQuit() }
             hostMenu = m
+            // The update card reads this Mac's own channel too (its host's, as it reports it).
+            MainActor.assumeIsolated { ViewerFeedCenter.shared.ownChannels = { LocalHostUpdate.shared.channel.map { [$0] } ?? [] } }
             // Removing a paired Mac ends the session to it first.
             MainActor.assumeIsolated {
                 HostRemovalCenter.shared.endSession = { [weak self] alias in
@@ -857,6 +859,37 @@ if CommandLine.arguments.contains("--headless") {
         exit(failed ? 1 : 0)
     }
     RunLoop.main.run()
+} else if let i = CommandLine.arguments.firstIndex(of: "--render-update-card"), i + 1 < CommandLine.arguments.count {
+    // The device list with this Mac's update card, sample data, drawn offscreen to a PNG: `--render-update-card PATH`.
+    let app = NSApplication.shared
+    _ = app.setActivationPolicy(.accessory)
+    let path = CommandLine.arguments[i + 1]
+    let ok = MainActor.assumeIsolated { () -> Bool in
+        let m = LocalHostUpdate.shared
+        let suite = "mirage-render-\(UUID().uuidString)"
+        m.memory = OwnUpdateCard.Memory(defaults: UserDefaults(suiteName: suite)!)
+        m.store = { nil }
+        m.running = MirageVersion(version: "0.1", build: 498, commit: "a", channel: .nightly)
+        m.reported = MirageVersion(version: "0.1", build: 499, commit: "b", channel: .nightly)
+        m.policy = .ask; m.canUpdate = true
+        let ago = Date().addingTimeInterval(-3 * 3600)
+        let hosts = [PairedHost(alias: "mac-daddy", name: "mac-daddy", model: "Mac15,14", lastSeen: ago),
+                     PairedHost(alias: "green-machine", name: "green-machine", model: "iMac21,1", lastSeen: Date().addingTimeInterval(-120)),
+                     PairedHost(alias: "big-mac", name: "big-mac", model: "Mac16,10", unreachable: true)]
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 340), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        w.title = "Mirage"
+        w.contentViewController = NSHostingController(rootView: ConnectView(hosts: hosts, lastHost: "mac-daddy") { _, _ in })
+        w.setContentSize(NSSize(width: 420, height: 340))
+        w.layoutIfNeeded(); w.displayIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        w.displayIfNeeded()
+        guard let frame = w.contentView?.superview, let rep = frame.bitmapImageRepForCachingDisplay(in: frame.bounds) else { return false }
+        frame.cacheDisplay(in: frame.bounds, to: rep)
+        UserDefaults.standard.removePersistentDomain(forName: suite)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return false }
+        return (try? png.write(to: URL(fileURLWithPath: path))) != nil
+    }
+    exit(ok ? 0 : 1)
 } else if let i = CommandLine.arguments.firstIndex(of: "--render-permissions"), i + 1 < CommandLine.arguments.count {
     // The permissions window in a sample state, drawn to a PNG (no screen capture): `--render-permissions PATH
     // screenRecording=1 accessibility=0`.

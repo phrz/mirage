@@ -217,7 +217,10 @@ public final class LocalControlServer: @unchecked Sendable {
                 s.hostSettings = HostSettings.load(from: self.ctx.store.url(HostSettings.fileName))
                 s.lockFailedAt = HostLockStatus.lastFailure
                 s.hostVersion = .current
-                s.latestAvailable = self.ctx.updateInfo?().latestAvailable
+                let info = self.ctx.updateInfo?()
+                s.latestAvailable = info?.latestAvailable
+                s.updatePolicy = info?.permission?.policy
+                s.updateChannel = info?.channel
                 s.canUpdate = self.ctx.updateHandler != nil
                 let last = self.ctx.updateInfo?().lastResult
                 s.updating = last.flatMap { $0.isFinal || $0.phase == .unknown ? nil : $0 }

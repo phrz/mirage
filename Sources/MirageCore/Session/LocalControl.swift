@@ -101,6 +101,10 @@ public enum LocalControl {
         public var hostVersion: MirageVersion?
         public var latestAvailable: MirageVersion?
         public var canUpdate: Bool?
+        /// This Mac's update policy and the channel it follows (its settings), for the viewer's update card. nil from older
+        /// hosts.
+        public var updatePolicy: UpdatePolicy?
+        public var updateChannel: UpdateChannel?
         /// An update in progress on the host (Automatic, or a trigger from anywhere): the menu and bar say "updating".
         public var updating: ControlMessage.UpdateStatus?
         /// The last update's outcome when it ended within the last minutes (a rollback the bar shows after the restart).

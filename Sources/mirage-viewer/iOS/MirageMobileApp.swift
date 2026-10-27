@@ -168,6 +168,8 @@ struct ConnectScreen: View {
                     }
                 }
             }
+            // No update card for this app on iOS (TODO in DESIGN §3.10): its build number is TestFlight's upload time, not a
+            // feed build, and TestFlight notifies by itself.
             .navigationTitle("Mirage")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {

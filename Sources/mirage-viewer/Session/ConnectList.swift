@@ -922,6 +922,8 @@ final class ViewerFeedCenter: ObservableObject {
     static func channels(_ known: [String: Store.KnownHost]) -> Set<UpdateChannel> {
         Set(known.values.compactMap { $0.hostChannel })
     }
+    /// This device's own channel too (the Mac's own host, set by the Mac app), for the update card. None on iOS.
+    var ownChannels: () -> Set<UpdateChannel> = { [] }
 
     /// Whether a channel last read at `checked` is read again now.
     nonisolated static func due(_ checked: Date?, now: Date, freshFor: TimeInterval = freshFor()) -> Bool {
@@ -935,7 +937,7 @@ final class ViewerFeedCenter: ObservableObject {
         let feed = self.feed
         var failed = false, changed = false
         let read = store.viewerFeed()
-        for ch in Self.channels((try? store.knownHosts()) ?? [:]).sorted(by: { $0.rawValue < $1.rawValue }) {
+        for ch in Self.channels((try? store.knownHosts()) ?? [:]).union(ownChannels()).sorted(by: { $0.rawValue < $1.rawValue }) {
             if !Self.due(read[ch]?.checked, now: now) { continue }
             do {
                 let (_, _, m, s) = try await feed.checkWithBytes(ch, trust: ManifestTrust(), now: now)
@@ -947,5 +949,90 @@ final class ViewerFeedCenter: ObservableObject {
         }
         backoff = failed ? min(Self.every, max(300, backoff * 2)) : 0
         if changed { revision += 1 }
+    }
+}
+
+// MARK: - This device's own update, as a card at the top of the device list (phrz, 2026-10-27)
+
+/// The card's rules: this Mac's own Mirage (its host's report, with the viewer's verified feed for the channel it follows),
+/// installed by its updater from the card. Remote hosts keep their row badges; no card for them. Not on iOS (DESIGN
+/// §3.10 TODO): the app's build number there is TestFlight's upload time, so there is no feed build to compare.
+enum OwnUpdateCard {
+    /// How long Automatic gets to find a quiet moment before the card asks.
+    static let automaticGrace: TimeInterval = 24 * 3600
+
+    /// The build to offer: the newer of the host's report and the viewer's verified head for the channel, when newer than
+    /// what runs, and (from the feed) when its macOS meets the build's minimum. `os`: nil skips that check (iOS).
+    static func offered(running: MirageVersion?, reported: MirageVersion?, feed: Manifest?, os: OperatingSystemVersion? = ProcessInfo.processInfo.operatingSystemVersion) -> MirageVersion? {
+        guard let running else { return nil }
+        var best = reported.flatMap { $0.build > running.build ? $0 : nil }
+        if let m = feed, m.build > running.build, m.build > (best?.build ?? 0) {
+            let okOS = os.map { o in ViewerFeed.atLeast([o.majorVersion, o.minorVersion, o.patchVersion], ViewerFeed.parseOS(m.minOS) ?? [0]) } ?? true
+            if okOS { best = m.mirageVersion }
+        }
+        return best
+    }
+
+    /// Shown: an offered build not dismissed, and under Automatic only once it has had 24 h (from when this device first saw
+    /// the build) without installing it. Ask, or no policy known (iOS): at once.
+    static func shouldShow(offered: MirageVersion?, policy: UpdatePolicy?, firstSeen: Date?, dismissedBuild: Int?, now: Date = Date()) -> Bool {
+        guard let o = offered, dismissedBuild != o.build else { return false }
+        if policy == .automatic { return firstSeen.map { now.timeIntervalSince($0) >= automaticGrace } ?? false }
+        return true
+    }
+
+    /// What this device remembers: when it first saw each build, and the build whose card was closed.
+    struct Memory {
+        var defaults: UserDefaults = .standard
+        static let seenKey = "ownUpdate.firstSeen", dismissedKey = "ownUpdate.dismissedBuild"
+        /// When this build was first seen (now, the first time).
+        func firstSeen(_ build: Int, now: Date = Date()) -> Date {
+            var seen = (defaults.dictionary(forKey: Self.seenKey) as? [String: Double]) ?? [:]
+            if let t = seen[String(build)] { return Date(timeIntervalSince1970: t) }
+            seen = seen.filter { (Int($0.key) ?? 0) >= build - 50 }   // old builds go
+            seen[String(build)] = now.timeIntervalSince1970
+            defaults.set(seen, forKey: Self.seenKey)
+            return now
+        }
+        var dismissedBuild: Int? { defaults.object(forKey: Self.dismissedKey) as? Int }
+        /// Closed: until the next build.
+        func dismiss(_ build: Int) { defaults.set(build, forKey: Self.dismissedKey) }
+    }
+}
+
+/// The card: a subtle yellow tint (the update badge's yellow), rounded, at the top of the list. "Mirage 0.1 (499) is
+/// available" with the action and a small close; while an update runs, its step; a failure, with the host's reason.
+struct UpdateCardView: View {
+    var title: String
+    var action: String?
+    var progress: String? = nil
+    var failure: String? = nil
+    var onAction: () -> Void = {}
+    var onClose: () -> Void = {}
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "arrow.up.circle.fill").symbolRenderingMode(.palette).foregroundStyle(.black, .yellow)
+                .font(.system(size: 22))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).fontWeight(.medium)
+                if let p = progress { Text(p).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+                if let f = failure { Text(f).font(.caption).foregroundStyle(.secondary).lineLimit(3) }
+            }
+            Spacer(minLength: 8)
+            if progress != nil {
+                ProgressView().controlSize(.small)
+            } else if let a = action {
+                Button(a, action: onAction).buttonStyle(.borderedProminent).tint(.accentColor).controlSize(.small)
+            }
+            if progress == nil {
+                Button(action: onClose) { Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)) }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .accessibilityLabel("Close")
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.yellow.opacity(0.14)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.yellow.opacity(0.45)))
     }
 }

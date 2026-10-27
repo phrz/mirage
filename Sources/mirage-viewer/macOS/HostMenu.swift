@@ -184,6 +184,11 @@ final class HostMenu: NSObject, NSMenuDelegate {
             let status = self.status
             model.apply(event: step, updating: status?.updating, lastUpdate: status?.lastUpdate)
             model.updateNow = { [weak self] in self?.updateNow() }
+            if let s = status {
+                model.running = s.hostVersion; model.reported = s.latestAvailable
+                model.policy = s.updatePolicy; model.channel = s.updateChannel ?? s.hostVersion?.channel
+                model.refreshFeed()
+            }
         }
     }
 
@@ -556,6 +561,28 @@ final class LocalHostUpdate: ObservableObject {
     /// Later: hidden until another build comes out.
     @Published var dismissed: String?
     var updateNow: (() -> Void)?
+    /// The update card (OwnUpdateCard): what this Mac's host runs and reported, its policy and channel, and the viewer's
+    /// verified head for that channel.
+    @Published var running: MirageVersion?
+    @Published var reported: MirageVersion?
+    @Published var policy: UpdatePolicy?
+    @Published var channel: UpdateChannel?
+    @Published private(set) var feedHead: Manifest?
+    var memory = OwnUpdateCard.Memory()
+    var store: () -> Store? = { try? Store() }
+
+    /// The viewer's verified head for this Mac's channel, read again (after a feed check, or a new status).
+    func refreshFeed(now: Date = Date()) {
+        guard let ch = channel ?? running?.channel, let s = store() else { feedHead = nil; return }
+        feedHead = ViewerFeed.verified(s.viewerFeed(), now: now)[ch]
+    }
+    var offered: MirageVersion? { OwnUpdateCard.offered(running: running, reported: reported, feed: feedHead) }
+    /// The card shows (Ask, or Automatic after 24 h without a quiet moment; not closed for this build).
+    func cardVisible(now: Date = Date()) -> Bool {
+        guard let o = offered else { return false }
+        return OwnUpdateCard.shouldShow(offered: o, policy: policy, firstSeen: memory.firstSeen(o.build, now: now), dismissedBuild: memory.dismissedBuild, now: now)
+    }
+    func closeCard() { if let o = offered { memory.dismiss(o.build); objectWillChange.send() } }
     /// The step came from the host's status (an update running there), not from this app's own events.
     private(set) var stepFromStatus = false
     /// The outcome already shown (or dismissed), so a status does not bring it back.
@@ -583,44 +610,34 @@ final class LocalHostUpdate: ObservableObject {
     func dismissStep() { if let at = step?.at { shownOutcome = at }; step = nil; stepFromStatus = false }
 }
 
-/// "Mirage host mac-daddy is out of date: 0.1 (448) → 0.1 (449)" with Update and Later, across the top of the window.
+/// This Mac's own update, as a card at the top of the device list (phrz, 2026-10-27): "Mirage 0.1 (499) is available"
+/// with Update Now (this Mac's updater, through the local control socket, shared or not) and a close that hides it until
+/// the next build; while it runs, its step; a failure or rollback with the host's reason until closed; done passes.
 struct LocalUpdateBar: View {
     @ObservedObject var model: LocalHostUpdate
+    @ObservedObject private var feedChecks = ViewerFeedCenter.shared
 
     var body: some View {
-        if let step = model.step {
-            bar {
-                if !step.isFinal { ProgressView().controlSize(.small) }
-                Text(step.phase == .failed ? "Update failed: \(step.message)" : step.phase == .rolledBack ? "Update rolled back: \(step.message)" : step.message)
-                    .lineLimit(2)
-                Spacer()
-                if step.isFinal { Button("Dismiss") { model.dismissStep() } }
-            }
-            // Done needs no acknowledging: it passes after a few seconds (a failure or rollback waits for Dismiss).
-            .task(id: step) {
-                guard step.phase == .done else { return }
-                try? await Task.sleep(for: ListNotices.shared.lifetime)
-                if !Task.isCancelled, model.step == step { model.dismissStep() }
-            }
-        } else if let line = model.line, model.dismissed != line {
-            bar {
-                Image(systemName: "arrow.up.circle.fill").symbolRenderingMode(.palette).foregroundStyle(.black, .yellow)
-                Text("Mirage host \(model.hostName ?? "on this Mac") is out of date: \(line)").lineLimit(2)
-                Spacer()
-                Button("Later") { model.dismissed = line }
-                if model.canUpdate { Button("Update") { model.updateNow?() }.keyboardShortcut(.defaultAction) }
+        Group {
+            if let step = model.step {
+                let failed = step.phase == .failed || step.phase == .rolledBack
+                UpdateCardView(title: failed ? (step.phase == .rolledBack ? "The update was rolled back" : "The update didn't finish")
+                                             : step.phase == .done ? "Mirage is up to date" : "Updating Mirage",
+                               action: nil, progress: step.isFinal ? nil : step.message, failure: failed ? step.message : nil,
+                               onClose: { model.dismissStep() })
+                // Done needs no acknowledging: it passes after a few seconds (a failure or rollback waits for the close).
+                .task(id: step) {
+                    guard step.phase == .done else { return }
+                    try? await Task.sleep(for: ListNotices.shared.lifetime)
+                    if !Task.isCancelled, model.step == step { model.dismissStep() }
+                }
+            } else if model.cardVisible(), let o = model.offered {
+                UpdateCardView(title: "Mirage \(o.display) is available", action: model.canUpdate ? "Update Now" : nil,
+                               onAction: { model.updateNow?() }, onClose: { model.closeCard() })
             }
         }
-    }
-
-    private func bar<C: View>(@ViewBuilder _ content: () -> C) -> some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8, content: content)
-                .font(.callout)
-                .padding(.horizontal, 12).padding(.vertical, 8)
-                .background(Color.yellow.opacity(0.18))
-            Divider()
-        }
+        .padding(.horizontal, 12).padding(.top, 10)
+        .onChange(of: feedChecks.revision) { model.refreshFeed() }
     }
 }
 

@@ -498,6 +498,52 @@ final class ViewerSettingsTests: XCTestCase {
         for line in m.grants.flatMap({ [$0.title, $0.why] }) + [m.headline] { XCTAssertFalse(line.contains("·"), line) }
     }
 
+    /// This device's own update card (phrz, 2026-10-27): the newer of the host's report and the verified feed; Ask at once,
+    /// Automatic only after 24 h without a quiet moment; closed until the next build.
+    func testOwnUpdateCardRules() throws {
+        func v(_ b: Int) -> MirageVersion { MirageVersion(version: "0.1", build: b, commit: "c", channel: .nightly) }
+        func m(_ b: Int, minOS: String = "15.0") -> Manifest {
+            Manifest(channel: .nightly, version: "0.1", build: b, commit: "c", minProtocol: 5, protocolVersion: 6, minOS: minOS, zipURL: "z",
+                     zipSHA256: "", zipSize: 1, notes: "", published: Date(), expires: Date().addingTimeInterval(3600))
+        }
+        let os15 = OperatingSystemVersion(majorVersion: 15, minorVersion: 1, patchVersion: 0)
+        XCTAssertEqual(OwnUpdateCard.offered(running: v(498), reported: v(499), feed: nil, os: os15)?.build, 499)
+        XCTAssertEqual(OwnUpdateCard.offered(running: v(498), reported: v(499), feed: m(501), os: os15)?.build, 501, "the feed is newer")
+        XCTAssertEqual(OwnUpdateCard.offered(running: v(498), reported: v(499), feed: m(501, minOS: "27.0"), os: os15)?.build, 499, "this macOS is too old for it")
+        XCTAssertNil(OwnUpdateCard.offered(running: v(501), reported: v(499), feed: m(501), os: os15), "it runs that build")
+        let now = Date()
+        XCTAssertTrue(OwnUpdateCard.shouldShow(offered: v(499), policy: .ask, firstSeen: now, dismissedBuild: nil, now: now))
+        XCTAssertTrue(OwnUpdateCard.shouldShow(offered: v(499), policy: nil, firstSeen: nil, dismissedBuild: nil, now: now), "iOS: no policy")
+        XCTAssertFalse(OwnUpdateCard.shouldShow(offered: v(499), policy: .automatic, firstSeen: now.addingTimeInterval(-3600), dismissedBuild: nil, now: now),
+                       "Automatic: its quiet moment may still come")
+        XCTAssertTrue(OwnUpdateCard.shouldShow(offered: v(499), policy: .automatic, firstSeen: now.addingTimeInterval(-25 * 3600), dismissedBuild: nil, now: now))
+        XCTAssertFalse(OwnUpdateCard.shouldShow(offered: v(499), policy: .ask, firstSeen: now, dismissedBuild: 499, now: now), "closed")
+        XCTAssertTrue(OwnUpdateCard.shouldShow(offered: v(500), policy: .ask, firstSeen: now, dismissedBuild: 499, now: now), "until the next build")
+        XCTAssertFalse(OwnUpdateCard.shouldShow(offered: nil, policy: .ask, firstSeen: now, dismissedBuild: nil, now: now))
+
+        let memory = OwnUpdateCard.Memory(defaults: defaults)
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(memory.firstSeen(499, now: t0), t0)
+        XCTAssertEqual(memory.firstSeen(499, now: t0.addingTimeInterval(500)), t0, "first seen stays")
+        XCTAssertNil(memory.dismissedBuild)
+        memory.dismiss(499)
+        XCTAssertEqual(memory.dismissedBuild, 499)
+
+        // The Mac's model: this Mac's host report, its policy, closed until the next build.
+        let model = LocalHostUpdate()
+        model.memory = OwnUpdateCard.Memory(defaults: defaults)
+        model.store = { nil }
+        model.running = v(498); model.reported = v(500); model.policy = .ask
+        XCTAssertTrue(model.cardVisible())
+        model.closeCard()
+        XCTAssertFalse(model.cardVisible())
+        model.reported = v(501)
+        XCTAssertTrue(model.cardVisible(), "a newer build brings it back")
+        model.policy = .automatic
+        XCTAssertFalse(model.cardVisible(now: Date()), "Automatic: not within 24 h of first seeing 501")
+        XCTAssertTrue(model.cardVisible(now: Date().addingTimeInterval(25 * 3600)))
+    }
+
     /// Get Info on the Mac: one small window per Mac, "<host> Info", not resizable, brought forward when asked again.
     func testGetInfoWindow() {
         var h = PairedHost(alias: "green.local", name: "green-machine", model: "Mac15,4")

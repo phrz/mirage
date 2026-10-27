@@ -45,11 +45,11 @@ public enum ViewerFeed {
     }
 
     public static func osString(_ v: OperatingSystemVersion) -> String { "\(v.majorVersion).\(v.minorVersion)" + (v.patchVersion > 0 ? ".\(v.patchVersion)" : "") }
-    static func parseOS(_ s: String) -> [Int]? {
+    public static func parseOS(_ s: String) -> [Int]? {
         let p = s.split(separator: ".").compactMap { Int($0) }
         return p.isEmpty ? nil : p
     }
-    static func atLeast(_ a: [Int], _ b: [Int]) -> Bool {
+    public static func atLeast(_ a: [Int], _ b: [Int]) -> Bool {
         for i in 0..<max(a.count, b.count) {
             let x = i < a.count ? a[i] : 0, y = i < b.count ? b[i] : 0
             if x != y { return x > y }

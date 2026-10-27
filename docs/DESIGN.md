@@ -1284,6 +1284,11 @@ A bad build rolls itself back.
     learned keys in `updates.json`. From then on, releases are signed by both keys for one cycle, then by the new key
     alone. The release after that drops the old key from the compiled list. The old key is thereby retired: hosts on that
     build no longer trust it, and nobody had to reinstall.
+  - **This device's own update card (2026-10-27).** On the Mac, a card at the top of the device list offers this Mac's
+    own newer build (Ask at once; Automatic after 24 h without a quiet moment; closed until the next build) and runs its
+    updater. TODO (iOS): no card. testflight.sh sets the iOS CFBundleVersion to the upload time (`date -u +%Y%m%d%H%M`),
+    not a feed build, so there is no trustworthy "newer iOS build" signal without App Store Connect, and TestFlight
+    notifies by itself. `OwnUpdateCard` takes `os: nil` and `policy: nil` for when that signal exists.
   - **Viewers trust only the compiled keys.** A viewer's own feed check (the update badge's freshness, `ViewerFeed`)
     verifies with the keys compiled into the viewer and never learns `nextKey`. After a rotation, until the viewer runs
     a build that compiles the new key, a manifest signed by the new key alone does not count on that viewer: its rows
