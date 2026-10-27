@@ -63,6 +63,8 @@ public struct HostUpdateInfo: Sendable {
     public var lastResult: ControlMessage.UpdateStatus?
     /// The channel the host follows (its settings), which can differ from the running build's after a switch.
     public var channel: UpdateChannel?
+    /// The installed bundle's build (it can be newer than the running agent's until the agent restarts).
+    public var installed: MirageVersion?
     public init(latestAvailable: MirageVersion?, permission: UpdatePermission?, lastResult: ControlMessage.UpdateStatus? = nil, channel: UpdateChannel? = nil) {
         self.latestAvailable = latestAvailable; self.permission = permission; self.lastResult = lastResult; self.channel = channel
     }

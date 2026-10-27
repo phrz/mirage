@@ -105,6 +105,14 @@ public enum LocalControl {
         /// hosts.
         public var updatePolicy: UpdatePolicy?
         public var updateChannel: UpdateChannel?
+        /// The installed bundle's build, when the host knows it (newer than `hostVersion` until the agent restarts).
+        public var installedVersion: MirageVersion?
+        /// What this Mac has: the newer of the running build and the installed one.
+        public var currentVersion: MirageVersion? {
+            guard let h = hostVersion else { return installedVersion }
+            guard let i = installedVersion, i.build > h.build else { return h }
+            return i
+        }
         /// An update in progress on the host (Automatic, or a trigger from anywhere): the menu and bar say "updating".
         public var updating: ControlMessage.UpdateStatus?
         /// The last update's outcome when it ended within the last minutes (a rollback the bar shows after the restart).

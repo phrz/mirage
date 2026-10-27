@@ -35,9 +35,19 @@ public final class Updater: @unchecked Sendable {
 
     /// What the Welcome says about updates: the newest build found, the trigger permission, and the last update's
     /// outcome when it ended within `recent` (so the viewer that triggered it hears how it ended after the restart).
+    /// The newest build found, when it is an update for this Mac: newer than what runs and than what is installed.
+    public static func offer(latest: MirageVersion?, running: MirageVersion, installed: MirageVersion?) -> MirageVersion? {
+        guard let l = latest, l.build > running.build, l.build > (installed?.build ?? 0) else { return nil }
+        return l
+    }
+
     public static func hostUpdateInfo(paths: InstallPaths, running: MirageVersion = .current, now: Date = Date(), recent: TimeInterval = 15 * 60) -> HostUpdateInfo {
         var info = UpdateSettings.load(paths.settings).hostUpdateInfo
         let installer = Installer(paths: paths)
+        // An update only when newer than both the running build and the installed bundle (phrz-mbp-m4, 2026-10-27: the dot
+        // lit while Update found nothing: the agent ran an older build than the bundle the updater compares with).
+        info.installed = Installer.version(of: paths.app)
+        info.latestAvailable = Self.offer(latest: info.latestAvailable, running: running, installed: info.installed)
         if let p = installer.readPending(), p.to.build == running.build {
             // On trial: the viewer that triggered it waits for the commit.
             info.lastResult = .init(phase: .trial, message: "start \(p.attempts), not yet healthy" + (p.waitingFor.map { ": waiting for \($0)" } ?? ""),

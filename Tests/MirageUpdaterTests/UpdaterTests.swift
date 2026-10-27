@@ -151,6 +151,16 @@ final class UpdateHealthTests: XCTestCase {
         XCTAssertEqual(st.hostUpdateInfo.latestAvailable?.build, 470)
     }
 
+    /// An update is offered only when newer than the running build and the installed bundle (the agent can run an older
+    /// build than the bundle until it restarts).
+    func testTheOfferIsNewerThanRunningAndInstalled() {
+        XCTAssertNil(Updater.offer(latest: ver(529), running: ver(525), installed: ver(529)), "the bundle has it already")
+        XCTAssertEqual(Updater.offer(latest: ver(530), running: ver(525), installed: ver(529))?.build, 530)
+        XCTAssertEqual(Updater.offer(latest: ver(530), running: ver(529), installed: nil)?.build, 530)
+        XCTAssertNil(Updater.offer(latest: ver(529), running: ver(529), installed: nil))
+        XCTAssertNil(Updater.offer(latest: nil, running: ver(529), installed: nil))
+    }
+
     func testHealthyNeedsAllThree() {
         var c = UpdateHealth.Checks()
         XCTAssertFalse(c.healthy)

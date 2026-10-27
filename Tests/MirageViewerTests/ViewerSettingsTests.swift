@@ -607,6 +607,33 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertEqual(hits.saved, 1)
     }
 
+    /// phrz-mbp-m4, 2026-10-27: the dot lit, Update found nothing. The dot is the card's condition, from what this Mac has
+    /// (the newer of the running agent and the installed bundle); an Update the person pressed that finds nothing says so.
+    func testTheDotMeansThisMacHasAnUpdate() {
+        func v(_ b: Int) -> MirageVersion { MirageVersion(version: "0.1", build: b, commit: "c", channel: .nightly) }
+        var s = LocalControl.Status(hostName: "phrz-mbp-m4", pairedDevices: 0, pairingOpen: false)
+        s.hostVersion = v(525); s.installedVersion = v(529)
+        XCTAssertEqual(s.currentVersion?.build, 529, "the agent runs an older build than the bundle")
+        s.installedVersion = nil
+        XCTAssertEqual(s.currentVersion?.build, 525)
+        let model = LocalHostUpdate()
+        model.memory = OwnUpdateCard.Memory(defaults: defaults)
+        model.store = { nil }
+        model.policy = .ask
+        model.running = v(529); model.reported = v(529)
+        XCTAssertFalse(model.cardVisible(), "up to date: no card, no dot")
+        model.reported = v(530)
+        XCTAssertTrue(model.cardVisible())
+        model.running = nil; model.reported = nil
+        XCTAssertFalse(model.cardVisible(), "no host status: no dot")
+
+        let done = ControlMessage.UpdateStatus(phase: .done, message: "Up to date: 0.1 (529) (nightly)", yours: true)
+        XCTAssertEqual(ManualUpdateAnswer.alert(for: done, running: v(529))?.title, "You're up to date")
+        XCTAssertEqual(ManualUpdateAnswer.alert(for: done, running: v(529))?.message, "Mirage 0.1 (529) is the newest version available.")
+        XCTAssertNil(ManualUpdateAnswer.alert(for: .init(phase: .failed, message: "x"), running: v(529)), "a failure shows in the card")
+        XCTAssertNil(ManualUpdateAnswer.alert(for: .init(phase: .downloading, message: "x"), running: v(529)))
+    }
+
     /// Get Info on the Mac: one small window per Mac, "<host> Info", not resizable, brought forward when asked again.
     func testGetInfoWindow() {
         var h = PairedHost(alias: "green.local", name: "green-machine", model: "Mac15,4")

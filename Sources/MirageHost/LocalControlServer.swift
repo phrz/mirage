@@ -221,6 +221,7 @@ public final class LocalControlServer: @unchecked Sendable {
                 s.latestAvailable = info?.latestAvailable
                 s.updatePolicy = info?.permission?.policy
                 s.updateChannel = info?.channel
+                s.installedVersion = info?.installed
                 s.canUpdate = self.ctx.updateHandler != nil
                 let last = self.ctx.updateInfo?().lastResult
                 s.updating = last.flatMap { $0.isFinal || $0.phase == .unknown ? nil : $0 }

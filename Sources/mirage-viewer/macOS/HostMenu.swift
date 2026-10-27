@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import CoreImage
 import ServiceManagement
@@ -51,6 +52,11 @@ final class HostMenu: NSObject, NSMenuDelegate {
             // Later: the window comes back only when someone tries to share this Mac, or a grant is revoked.
             permissions.onLater = { [weak self] in self?.snoozePermissions(true) }
             HostShareState.shared.set = { [weak self] on in self?.setSharing(on) }
+            // The dot follows the card: a feed check, a close.
+            dotWatch.append(ViewerFeedCenter.shared.$revision.receive(on: DispatchQueue.main).sink { [weak self] _ in
+                MainActor.assumeIsolated { LocalHostUpdate.shared.refreshFeed() }; self?.refreshDot() })
+            dotWatch.append(LocalHostUpdate.shared.objectWillChange.receive(on: DispatchQueue.main).sink { [weak self] _ in
+                DispatchQueue.main.async { self?.refreshDot() } })
         }
         connect()
         // Test knob MIRAGE_TEST_OPEN_PAIRING: the pairing window opens at launch (screenshots without clicking the menu bar).
@@ -105,6 +111,16 @@ final class HostMenu: NSObject, NSMenuDelegate {
             AppLog.write("update: \(u.phase.rawValue) \(u.message)")
             updateIndicators(u)
             if u.isFinal { try? client?.send(.status) }
+            // The person asked: nothing to install is said ("You're up to date"), as Check for Updates… says it.
+            if u.isFinal, manualUpdate {
+                manualUpdate = false
+                if let a = ManualUpdateAnswer.alert(for: u, running: status?.currentVersion) {
+                    let alert = NSAlert(); alert.messageText = a.title; alert.informativeText = a.message
+                    for b in a.buttons { alert.addButton(withTitle: b) }
+                    NSApp.activate(ignoringOtherApps: true)
+                    alert.runModal()
+                }
+            }
         }
     }
 
@@ -177,7 +193,6 @@ final class HostMenu: NSObject, NSMenuDelegate {
     /// The yellow dot over the menu-bar icon, and the connect window's bar, from the host's status.
     private func updateIndicators(_ step: ControlMessage.UpdateStatus? = nil) {
         let line = isConnected ? status?.updateLine : nil
-        setUpdateDot(line != nil)
         let name = status?.hostName ?? hostName, can = status?.canUpdate ?? false
         MainActor.assumeIsolated {   // events arrive on the main queue
             let model = LocalHostUpdate.shared
@@ -188,12 +203,22 @@ final class HostMenu: NSObject, NSMenuDelegate {
             model.apply(event: step, updating: status?.updating, lastUpdate: status?.lastUpdate)
             model.updateNow = { [weak self] in self?.updateNow() }
             if let s = status {
-                model.running = s.hostVersion; model.reported = s.latestAvailable
+                model.running = s.currentVersion; model.reported = s.latestAvailable
                 model.policy = s.updatePolicy; model.channel = s.updateChannel ?? s.hostVersion?.channel
                 model.refreshFeed()
+            } else {
+                model.running = nil; model.reported = nil
             }
         }
+        refreshDot()
     }
+
+    /// The dot means exactly what the card means: this Mac's own Mirage has an update to offer (the same rule).
+    private var dotOn: Bool { isConnected && MainActor.assumeIsolated { LocalHostUpdate.shared.cardVisible() } }
+    private func refreshDot() { setUpdateDot(dotOn) }
+    private var dotWatch: [AnyCancellable] = []
+    /// An Update Now from the menu or the card: the answer comes even when there is nothing to install.
+    private var manualUpdate = false
 
     /// Waiting for the next status (Check for Updates…).
     private var statusWaiters: [(LocalControl.Status?) -> Void] = []
@@ -212,7 +237,7 @@ final class HostMenu: NSObject, NSMenuDelegate {
 
     /// Check for Updates…: the host's status and the viewer's feed for this Mac's channel, both fresh. No install.
     func checkForUpdates() async -> UpdateCheckOutcome {
-        guard let s = await freshStatus(), let running = s.hostVersion else { return .noHost }
+        guard let s = await freshStatus(), let running = s.currentVersion else { return .noHost }
         var head: Manifest?, failure: String?
         if let ch = s.updateChannel ?? running.channel {
             do { head = try await MainActor.run { ViewerFeedCenter.shared }.checkNow(ch) } catch { failure = "\(error)" }
@@ -227,6 +252,7 @@ final class HostMenu: NSObject, NSMenuDelegate {
     func updateNowFromCheck() { updateNow() }
 
     @objc private func updateNow() {
+        manualUpdate = true
         do { try client?.send(.updateNow) } catch { AppLog.write("update now: \(error)") }
         MainActor.assumeIsolated { LocalHostUpdate.shared.apply(event: .init(phase: .checking, message: "Checking for the update…", yours: true), updating: nil, lastUpdate: nil) }
     }
@@ -278,8 +304,9 @@ final class HostMenu: NSObject, NSMenuDelegate {
         default: break
         }
         if isConnected, (updateStatus ?? status?.updating) != nil { label("Updating this Mac…") }
-        else if isConnected, let line = status?.updateLine {
-            label("Update available: \(line)")
+        else if dotOn, let o = MainActor.assumeIsolated({ LocalHostUpdate.shared.offered }) {
+            // Only with the dot, and for the same build the card offers.
+            label("Mirage \(o.display) is available")
             if status?.canUpdate == true { _ = item("Update Now", #selector(updateNow)) }
         }
         if isConnected, let s = status, s.restarting == true { label("Applying permissions…") }
@@ -715,5 +742,13 @@ enum MenuBarGlyph {
         dot.borderColor = NSColor.black.withAlphaComponent(0.35).cgColor
         dot.borderWidth = 0.5
         return dot
+    }
+}
+
+/// What an Update Now the person pressed comes to, when there was nothing to install: said, as Check for Updates… says it.
+enum ManualUpdateAnswer {
+    static func alert(for end: ControlMessage.UpdateStatus, running: MirageVersion?) -> UpdateCheckOutcome.Alert? {
+        guard end.isFinal, end.phase == .done, end.notPublished != true, let running else { return nil }
+        return UpdateCheckOutcome.upToDate(running).alert
     }
 }
