@@ -66,7 +66,7 @@ public enum UpdatePhase: String, Codable, Sendable {
 
 /// What a trigger asks the host for.
 public enum UpdateCommand: Equatable, Sendable {
-    /// Install the feed's newest; `targetBuild` (from a viewer) must be the build the feed lists now.
+    /// Install the feed's newest; `targetBuild` (from a viewer, or the Automatic policy): at least this build.
     case update(targetBuild: Int?)
     case rollback
 }

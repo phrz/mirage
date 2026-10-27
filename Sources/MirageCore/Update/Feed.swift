@@ -156,12 +156,14 @@ public enum UpdateError: Error, CustomStringConvertible, Equatable {
     case busy
     /// Not now (the Automatic policy's quiet moment ended): nothing was replaced; try again later.
     case deferred(String)
+    /// A trigger asked for at least `build`, and the feed's newest is older: not published yet (or not yet visible here).
+    case notPublished(build: Int, newest: Int, channel: UpdateChannel)
 
     /// A failure that says nothing about the build (the network, another update running, a moment that was not quiet):
     /// it does not use up the build's one automatic try.
     public var isTransient: Bool {
         switch self {
-        case .feed, .download, .busy, .deferred: return true
+        case .feed, .download, .busy, .deferred, .notPublished: return true
         case .manifest, .refused, .verification, .install: return false
         }
     }
@@ -176,6 +178,7 @@ public enum UpdateError: Error, CustomStringConvertible, Equatable {
         case .install(let s): return "install: \(s)"
         case .busy: return "another update is in progress"
         case .deferred(let s): return "deferred: \(s)"
+        case .notPublished(let b, let n, let c): return "build \(b) is not published on \(c.rawValue) yet (its newest is \(n))"
         }
     }
 }

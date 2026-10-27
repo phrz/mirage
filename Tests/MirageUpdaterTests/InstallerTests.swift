@@ -160,11 +160,29 @@ final class InstallerTests: XCTestCase {
         XCTAssertEqual(installed(), 412)
     }
 
-    func testATriggerNamesOnlyTheBuildTheFeedLists() async throws {
+    /// A trigger asks for at least a build (phrz, 2026-10-27): newer than the feed is "not published yet" (transient, not
+    /// an error); the feed's newest installs when it is at or above it.
+    func testATriggerAsksForAtLeastABuild() async throws {
         try publish(ver(420))
         do { _ = try await updater().install(targetBuild: 999); XCTFail("refused") }
-        catch { XCTAssertEqual(error as? UpdateError, .refused("the feed lists build 420, not 999")) }
+        catch {
+            XCTAssertEqual(error as? UpdateError, .notPublished(build: 999, newest: 420, channel: .nightly))
+            XCTAssertTrue((error as? UpdateError)?.isTransient ?? false)
+            XCTAssertEqual("\(error)", "build 999 is not published on nightly yet (its newest is 420)")
+        }
+        XCTAssertEqual(installed(), 412)
         if case .swapped = try await updater().install(targetBuild: 420) {} else { XCTFail() }
+    }
+
+    /// green-machine, 2026-10-27: its record said 479 (the viewer showed that), the feed already listed 483. The request is
+    /// "at least 479": 483 installs, read fresh from the feed.
+    func testTheGreenMachineRace() async throws {
+        try publish(ver(483))
+        var s = UpdateSettings.load(paths.settings); s.latest = ver(479); try s.save(paths.settings)   // the stale record
+        guard case .swapped(let p, _) = try await updater(running: ver(475)).install(targetBuild: 479) else { return XCTFail("installs") }
+        XCTAssertEqual(p.to.build, 483)
+        XCTAssertEqual(installed(), 483)
+        XCTAssertEqual(UpdateSettings.load(paths.settings).latest?.build, 483, "the record follows the fresh read")
     }
 
     func testManualRollbackAndOneUpdateAtATime() async throws {

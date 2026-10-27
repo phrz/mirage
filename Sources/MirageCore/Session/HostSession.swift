@@ -164,7 +164,7 @@ public enum HostSession {
                 }
             case .updateHost(let u):
                 guard let device = authenticated else { throw MirageError.protocolViolation("updateHost before auth") }
-                trigger(.update(targetBuild: u.targetBuild), device: device, connection: conn.id, reply: { sendUpdate(.updateStatus($0)) }, remote: remote, ctx: ctx)
+                trigger(.update(targetBuild: u.atLeast), device: device, connection: conn.id, reply: { sendUpdate(.updateStatus($0)) }, remote: remote, ctx: ctx)
             case .unpairDevice:
                 // Only the authenticated device itself: the message names nobody, so no device can remove another.
                 guard let device = authenticated else { throw MirageError.protocolViolation("unpairDevice before auth") }

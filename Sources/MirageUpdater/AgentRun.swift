@@ -129,6 +129,11 @@ public struct AgentUpdater: Sendable {
             replyTo(.init(phase: now?.phase ?? .checking, message: "\(hostName) is already updating\(now.map { ": \($0.message)" } ?? "")",
                           from: now?.from, to: now?.to, yours: false))
             return .busy
+        } catch let UpdateError.notPublished(build, newest, channel) {
+            // Asked before this Mac's feed shows the build: nothing failed, nothing is recorded.
+            log("update asked by \(requester.name): build \(build) is not on \(channel.rawValue) yet (newest \(newest))")
+            r.reply(.init(phase: .failed, message: "build \(build) is not published yet", from: running, yours: true, notPublished: true))
+            return .failed(transient: true)
         } catch UpdateError.deferred(let why) {
             log("update deferred before the swap: \(why)")
             r.reply(.init(phase: .failed, message: "deferred: \(why)", yours: true))

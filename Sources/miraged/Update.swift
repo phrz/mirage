@@ -26,7 +26,7 @@ struct Update: AsyncParsableCommand {
     @Option(name: .customLong("set"), help: "Change a setting (key=value; repeatable).") var assignments: [String] = []
     @Option(help: "Another feed: a directory or URL holding channel-<name>/manifest.json (tests; it must still be signed).") var feed: String?
     @Option(help: ArgumentHelp("The installed bundle to update (default: the one this miraged runs from, else /Applications/Mirage.app).", visibility: .hidden)) var app: String?
-    @Option(help: ArgumentHelp("Install only if the feed's newest is this build (what a remote trigger names).", visibility: .hidden)) var targetBuild: Int?
+    @Option(help: ArgumentHelp("Install only if the feed's newest is at least this build (what a remote trigger names).", visibility: .hidden)) var targetBuild: Int?
     @Flag(help: "Swap only: do not restart the host agent or wait for its commit.") var noRestart = false
     @Flag(help: "Install even a build signed with another identity (Apple Development ↔ Developer ID): the agent is registered again, and a person must give the Screen Recording and Device Control (Accessibility) grants again.") var allowIdentityChange = false
     @Flag(help: ArgumentHelp("Print what a person must do at this Mac after a signing identity change (deploy-host.sh).", visibility: .hidden)) var grantSteps = false

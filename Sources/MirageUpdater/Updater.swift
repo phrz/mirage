@@ -91,8 +91,9 @@ public final class Updater: @unchecked Sendable {
         case nothing(UpdateDecision)
     }
 
-    /// Checks, then installs the channel's newest when it is an update. `targetBuild`: the build the trigger named, which
-    /// must be the one the feed lists now (a viewer never names code, only a build the signed feed already offers).
+    /// Checks (a fresh read of the feed, never the recorded one), then installs the channel's newest when it is an update.
+    /// `targetBuild`: at least this build (what a trigger named): the newest verified build at or above it installs; an
+    /// older newest is `notPublished`. A viewer never names code, only a build the signed feed offers.
     /// `gate`: asked again right before the swap (the download can take minutes); a reason defers the update (nothing
     /// replaced, the staging removed: `UpdateError.deferred`).
     public func install(channel: UpdateChannel? = nil, targetBuild: Int? = nil, allowIdentityChange: Bool = false, now: Date = Date(),
@@ -102,7 +103,7 @@ public final class Updater: @unchecked Sendable {
         report(.checking, "checking \(channel?.rawValue ?? settings().channel.rawValue)")
         let c = try await check(channel: channel, now: now)
         let m = c.manifest.manifest
-        if let t = targetBuild, t != m.build { throw UpdateError.refused("the feed lists build \(m.build), not \(t)") }
+        if let t = targetBuild, m.build < t { throw UpdateError.notPublished(build: t, newest: m.build, channel: c.channel) }
         guard case .available(let from, let to) = c.decision else { return .nothing(c.decision) }
         learnedTarget(to)
 

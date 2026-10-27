@@ -30,7 +30,9 @@ public enum HostUpdateTrigger {
                 return final(.init(phase: .failed, message: why ?? "\(w.hostName) does not take update triggers", from: from, yours: true))
             }
             switch command {
-            case .update(let t): try await s.stream.send(.updateHost(.init(targetBuild: t ?? (w.latestAvailable?.build ?? 0))))
+            case .update(let t):
+                let n = t ?? (w.latestAvailable?.build ?? 0)
+                try await s.stream.send(.updateHost(.init(targetBuild: n, minimumBuild: n)))   // older hosts read targetBuild
             case .rollback: try await s.stream.send(.rollbackHost)
             }
             onStatus(.init(phase: .checking, message: "asking \(hostName) to \(command == .rollback ? "roll back" : "update")", from: from, yours: true))
@@ -86,14 +88,15 @@ public enum HostUpdateTrigger {
         let r = w.updateResult
         func isThisUpdate(_ r: ControlMessage.UpdateStatus) -> Bool {
             if let f = from, let rf = r.from, rf.build != f.build { return false }
-            if case .update(let t?) = command, r.to?.build != t { return false }   // an earlier update's record
+            if case .update(let t?) = command, (r.to?.build ?? 0) < t { return false }   // an earlier update's record
             return true
         }
         if let r, [.rolledBack, .failed].contains(r.phase), isThisUpdate(r) { return r }
         guard let now = w.hostVersion, let was = from else { return nil }
         let arrived: Bool
         switch command {
-        case .update(let target): arrived = target.map { now.build == $0 } ?? (now.build > was.build)
+        // At least the build asked for: exactly it, or a newer one that replaced the build running before.
+        case .update(let target): arrived = target.map { now.build == $0 || (now.build > $0 && now.build > was.build) } ?? (now.build > was.build)
         case .rollback: arrived = now.build != was.build
         }
         guard arrived else { return nil }

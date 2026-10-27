@@ -294,6 +294,10 @@ final class HostUpdateCenter: ObservableObject {
     func finish(_ alias: String, name: String, _ end: ControlMessage.UpdateStatus) {
         status[alias] = nil
         revision += 1
+        if end.notPublished == true {
+            ListNotices.shared.flash("\(name) doesn't see that build yet. Try again in a few minutes.")
+            return
+        }
         switch end.phase {
         case .done: ListNotices.shared.flash("Updated \(name): \(end.message)")
         case .failed: ListNotices.shared.alert(ListAlert(title: "\(name) did not update", message: end.message))

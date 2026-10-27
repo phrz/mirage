@@ -66,6 +66,19 @@ final class UpdateTriggerTests: XCTestCase {
         XCTAssertNil(try JSONDecoder().decode(ControlMessage.Hello.self, from: try JSONEncoder().encode(ControlMessage.Hello(protocolVersion: 6, deviceID: "d", deviceName: "n", clientNonce: Data()))).features)
     }
 
+    /// "At least build N" keeps older peers working: an older host reads only `targetBuild` (N, installed exactly, as
+    /// before); an older viewer sends only `targetBuild`, which a newer host reads as the minimum.
+    func testAtLeastIsCompatibleBothWays() throws {
+        struct OldUpdateHost: Codable { var targetBuild: Int }   // a host from before minimumBuild
+        let sent = ControlMessage.UpdateHost(targetBuild: 479, minimumBuild: 479)
+        XCTAssertEqual(try JSONDecoder().decode(OldUpdateHost.self, from: try JSONEncoder().encode(sent)).targetBuild, 479)
+        let fromOldViewer = try JSONDecoder().decode(ControlMessage.UpdateHost.self, from: Data(#"{"targetBuild":479}"#.utf8))
+        XCTAssertNil(fromOldViewer.minimumBuild)
+        XCTAssertEqual(fromOldViewer.atLeast, 479)
+        let st = try JSONDecoder().decode(ControlMessage.UpdateStatus.self, from: Data(#"{"phase":"failed","message":"m"}"#.utf8))
+        XCTAssertNil(st.notPublished, "an older host's failure is a failure")
+    }
+
     /// Allowed: the host runs the updater, the viewer hears each step, and after the restart the host answers with the
     /// target build: done.
     func testATriggeredUpdateEndsDone() async throws {
@@ -175,6 +188,9 @@ final class UpdateTriggerTests: XCTestCase {
         let rb = ControlMessage.UpdateStatus(phase: .rolledBack, message: "x", from: was, to: now)
         XCTAssertEqual(HostUpdateTrigger.outcome(welcome: w(was, result: rb), command: .update(targetBuild: 449), from: was)?.phase, .rolledBack)
         XCTAssertNil(HostUpdateTrigger.outcome(welcome: w(was, result: rb), command: .update(targetBuild: 450), from: was), "an earlier update's rollback")
+        // At least the build asked for: a newer one arriving is this update done.
+        XCTAssertEqual(HostUpdateTrigger.outcome(welcome: w(now), command: .update(targetBuild: was.build + 1), from: was)?.phase, .done)
+        XCTAssertNil(HostUpdateTrigger.outcome(welcome: w(now), command: .update(targetBuild: now.build + 1), from: was), "older than asked: not yet")
         XCTAssertEqual(HostUpdateTrigger.outcome(welcome: w(was), command: .rollback, from: now)?.phase, .done)
     }
 

@@ -178,7 +178,8 @@ public enum ControlMessage: Codable, Equatable {
     // Host updates (DESIGN §3.10, U4). Sent only to a peer that says it knows them: a viewer whose Hello lists
     // `Feature.updateStatus`, a host whose Welcome lists `Feature.updateTrigger` (protocol 6 hosts and viewers from before
     // U4 decode neither).
-    /// Viewer → host: install the build the host's feed lists now (`targetBuild`, what the viewer showed the person).
+    /// Viewer → host: install the newest verified build the host's feed lists now, at least the one the viewer showed the
+    /// person (phrz, 2026-10-27: a host record a few builds behind the feed made an exact match fail).
     case updateHost(UpdateHost)
     /// Viewer → host: put the kept previous build back.
     case rollbackHost
@@ -208,8 +209,14 @@ public enum ControlMessage: Codable, Equatable {
     }
 
     public struct UpdateHost: Codable, Equatable {
+        /// The build the viewer showed. Hosts from before `minimumBuild` install only exactly this one; newer hosts read it
+        /// as a minimum too (so an older viewer's request no longer fails when the feed has moved on).
         public var targetBuild: Int
-        public init(targetBuild: Int) { self.targetBuild = targetBuild }
+        /// "At least this build": the feed's newest verified build at or above it is installed.
+        public var minimumBuild: Int?
+        public init(targetBuild: Int, minimumBuild: Int? = nil) { self.targetBuild = targetBuild; self.minimumBuild = minimumBuild }
+        /// What a host installs at least.
+        public var atLeast: Int { minimumBuild ?? targetBuild }
     }
     public struct UpdateStatus: Codable, Equatable, Sendable {
         public var phase: UpdatePhase
@@ -222,8 +229,13 @@ public enum ControlMessage: Codable, Equatable {
         public var at: Date?
         /// False: a notice about an update someone else triggered.
         public var yours: Bool?
-        public init(phase: UpdatePhase, progress: Double? = nil, message: String, from: MirageVersion? = nil, to: MirageVersion? = nil, at: Date? = nil, yours: Bool? = nil) {
+        /// A failed update that only asked too early: the build the viewer showed is not on the host's feed yet. Not an
+        /// error to the person ("not published yet"). nil from older hosts.
+        public var notPublished: Bool?
+        public init(phase: UpdatePhase, progress: Double? = nil, message: String, from: MirageVersion? = nil, to: MirageVersion? = nil, at: Date? = nil, yours: Bool? = nil,
+                    notPublished: Bool? = nil) {
             self.phase = phase; self.progress = progress; self.message = message; self.from = from; self.to = to; self.at = at; self.yours = yours
+            self.notPublished = notPublished
         }
         public var isFinal: Bool { [.done, .failed, .rolledBack].contains(phase) }
     }
