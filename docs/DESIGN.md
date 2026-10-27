@@ -1250,6 +1250,12 @@ A bad build rolls itself back.
     learned keys in `updates.json`. From then on, releases are signed by both keys for one cycle, then by the new key
     alone. The release after that drops the old key from the compiled list. The old key is thereby retired: hosts on that
     build no longer trust it, and nobody had to reinstall.
+  - **Viewers trust only the compiled keys.** A viewer's own feed check (the update badge's freshness, `ViewerFeed`)
+    verifies with the keys compiled into the viewer and never learns `nextKey`. After a rotation, until the viewer runs
+    a build that compiles the new key, a manifest signed by the new key alone does not count on that viewer: its rows
+    fall back to what each host reports (the host learned the key and verifies the feed itself). Nothing is trusted that
+    should not be; the badge is only as fresh as the hosts' own checks. Keep both keys signing for at least one viewer
+    release cycle (TestFlight and the Mac app) to avoid that gap.
   - **Compromise procedure:** if the current key leaks:
     1. Promote `next` (whose private half was never online) to current, and generate a new `next`.
     2. Ship a build signed by both the new and the old key (old hosts trust only the old one) whose compiled list drops
