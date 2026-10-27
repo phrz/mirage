@@ -20,7 +20,8 @@ struct SessionBanners: View {
                 banner(model.status.prefix(1).uppercased() + model.status.dropFirst(), color: .gray)
             }
             if let n = model.hostNotice { banner(n, color: .indigo) }   // U4: the host restarts into an update
-            if model.hostStatus?.consoleLocked == true {
+            // The lock screen speaks for itself in Desktop mode; Unified mode shows no desktop, so it says so there.
+            if model.hostStatus?.consoleLocked == true, model.unified || model.unlockReady {
                 if model.unlockReady, let b = model.unlockBiometry {
                     // Unlock with biometry (DESIGN §3.13): the system's own name and symbol for this device's biometry.
                     HStack {

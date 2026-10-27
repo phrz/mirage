@@ -168,7 +168,10 @@ the shield): on 505 it carried 9.5 MB of the lock screen with its black made tra
 tiles in 5 s, and phrz saw a mosaic. The switch itself is a fresh picture (`screenLock` / `screenUnlock`): the display's old
 frame is dropped, and its first frame after the switch goes out as one coherent still presented at once, ahead of every
 budget and pacing gate (on 510 the still waited behind the changed tiles of a lock screen that keeps changing, the clock
-and the blur, and never went: 60 % of the picture unfilled), no placeholders. Before this, the compositor model's desktop capture went on
+and the blur, and never went: 60 % of the picture unfilled), no placeholders. No window list while locked (the windows' titles and frames
+are the desktop's); the viewer's "screen is locked" chip shows only where no desktop is (Unified mode) or with Unlock.
+Verified on mac-daddy (test copy, 2026-10-27): at full size, 1.2 % of 576 cells differ from the host's own frame at 0.5 s
+(the lossy first still), none from 1.0 s (MIRAGE_TEST_LOCK_REFERENCE logs the host's cell means for the comparison). Before this, the compositor model's desktop capture went on
 showing the wallpaper and Finder's desktop icons behind mac-daddy's lock screen, and gray where nothing was captured.
 
 ### 3.0 M-FIVE: The first five seconds (milestone, phrz 2026-10-21; supersedes the connect sequence elsewhere)

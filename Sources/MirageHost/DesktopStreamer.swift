@@ -1498,6 +1498,30 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// level, and the whole display already shows it); it carried most of the bytes, its black made transparent, over a
     /// display layer that got 251 of its tiles in 5 s (phrz's mosaic on mac-daddy, 505). The display layer's old frame is
     /// dropped so the fresh picture (a coherent still, presented at once) is read from the first frame after the switch.
+    /// Test knob MIRAGE_TEST_LOCK_REFERENCE=1: at a lock switch, the share of flat dark cells (32×18 grid, std dev < 1,
+    /// mean < 90) in the host's own frame and each cell's mean luminance, the reference for a viewer-side coverage check
+    /// (numbers only).
+    static let testLockReference = ProcessInfo.processInfo.environment["MIRAGE_TEST_LOCK_REFERENCE"] == "1"
+    static func flatDarkShare(_ pb: CVPixelBuffer) -> String {
+        CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return "no pixels" }
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb), stride = CVPixelBufferGetBytesPerRow(pb)
+        let p = base.assumingMemoryBound(to: UInt8.self)
+        let cw = w / 32, ch = h / 18
+        var flat = 0
+        var means = ""
+        for cy in 0..<18 { for cx in 0..<32 {
+            var s = 0.0, sq = 0.0, n = 0.0
+            for y in Swift.stride(from: cy * ch, to: (cy + 1) * ch, by: 2) { for x in Swift.stride(from: cx * cw, to: (cx + 1) * cw, by: 2) {
+                let o = y * stride + x * 4
+                let l = 0.114 * Double(p[o]) + 0.587 * Double(p[o + 1]) + 0.299 * Double(p[o + 2]); s += l; sq += l * l; n += 1
+            } }
+            let m = s / n, sd = max(0, sq / n - m * m).squareRoot()
+            if sd < 1 && m < 90 { flat += 1 }
+            means += String(format: "%02x", min(255, Int(m.rounded())))
+        } }
+        return String(format: "%dx%d, flat dark %.1f%% of 576 cells; cell means ", w, h, 100 * Double(flat) / 576) + means
+    }
     /// The display's still is owed for a lock switch: sent at the next refine with a frame, before any gate (refine).
     private var lockStillDue = false
     private func lockSwitch(_ locked: Bool) {
@@ -3627,6 +3651,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// The current window list as the client should see it: `layered` is true for windows whose layer
     /// the viewer holds (announced and with its still sent).
     private func currentList() -> [ControlMessage.WindowInfo] {
+        // Locked: no windows (their titles and frames are the desktop's, beneath the lock screen), only the display.
+        if screenLocked { return [] }
         guard let s = windows?.current else { return publishedWindows }
         let displayArea = display?.bounds.area ?? 1
         if compositor {
@@ -4132,6 +4158,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             lockStillDue = false
             freshStep(d, now: now, stage1: true, force: true)
             log("lock switch: the display's whole still sent")
+            if Self.testLockReference, let f = d.lastFrame { log("lock switch: TEST reference: \(Self.flatDarkShare(f))") }
         }
         crispCheck(now: now)
         sharpReference(now: now)
