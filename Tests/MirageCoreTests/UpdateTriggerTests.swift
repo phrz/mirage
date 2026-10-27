@@ -343,8 +343,14 @@ final class UpdateTriggerTests: XCTestCase {
         let ok = await HostProbe.probe(connect: { throw MirageError.transport("connect timed out after 3 s") }, store: store, alias: "gone")
         XCTAssertFalse(ok)
         let since = try XCTUnwrap(store.knownHosts()["gone"]?.unreachableSince)
+        XCTAssertFalse(try XCTUnwrap(store.knownHosts()["gone"]).isUnreachable, "one lost probe does not grey the row")
         _ = await HostProbe.probe(connect: { throw MirageError.transport("again") }, store: store, alias: "gone")
         XCTAssertEqual(try store.knownHosts()["gone"]?.unreachableSince, since, "since the first failure")
+        XCTAssertTrue(try XCTUnwrap(store.knownHosts()["gone"]).isUnreachable, "two probes without an answer: Not reachable")
+        // It answers again and refuses this device: seen (not unreachable), with its words.
+        _ = await HostProbe.probe(connect: { throw MirageError.authenticationFailed("host rejected: unknown device") }, store: store, alias: "gone")
+        let k = try XCTUnwrap(store.knownHosts()["gone"])
+        XCTAssertFalse(k.isUnreachable); XCTAssertNil(k.failedProbes); XCTAssertEqual(k.refusal, "unknown device")
     }
 
     /// A probe is never a stream (the Automatic gate counts streams), never a listener for notices, and is logged once

@@ -248,7 +248,12 @@ final class ViewerSettingsTests: XCTestCase {
         h.streamingElsewhere = true
         XCTAssertEqual(h.detail(now: now, locale: en), "In use by another device")
         h.unreachable = true
-        XCTAssertEqual(h.detail(now: now, locale: en), "Unreachable")
+        XCTAssertEqual(h.detail(now: now, locale: en), "Not reachable")
+        XCTAssertTrue(h.dimmed)
+        h.unreachable = false; h.refusal = "unknown device"
+        XCTAssertEqual(h.detail(now: now, locale: en), "Not accepting this device", "refusing is not unreachable")
+        XCTAssertTrue(h.dimmed)
+        h.refusal = nil; h.unreachable = true
         XCTAssertFalse(h.detail(now: now, locale: en)!.contains("·"))
     }
 
@@ -267,7 +272,8 @@ final class ViewerSettingsTests: XCTestCase {
                                                       R(label: "Last seen", value: "2 minutes ago"), R(label: "Address", value: "green.local")])
         h.policy = .ask; h.unreachable = true
         XCTAssertTrue(h.info(now: now, locale: en).contains(R(label: "Updates", value: "When asked")))
-        XCTAssertTrue(h.info(now: now, locale: en).contains(R(label: "Status", value: "Not answering")))
+        XCTAssertTrue(h.info(now: now, locale: en).contains(R(label: "Status", value: "Not reachable")))
+        XCTAssertTrue(h.info(now: now, locale: en).contains(R(label: "Last seen", value: "2 minutes ago")), "when it was last seen")
         XCTAssertEqual(PairedHost(alias: "m", name: "m").info(), [], "nothing known: nothing shown")
         h.hostSettings = HostSettings(curtain: true, lockWhenFinished: false)
         let rows = h.info(now: now, locale: en)

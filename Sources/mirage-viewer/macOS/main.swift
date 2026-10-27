@@ -618,7 +618,7 @@ struct ConnectView: View {
                         Button("Remove \(h.title)…") { removing = h }
                     }
                     // Right-click → Update, straight away (the arrow asks first).
-                    if let a = items.first, let h = hosts.first(where: { $0.alias == a }), case .updateAvailable = h.update, UpdatePrompt.state(h) == .canUpdate, !updates.isRunning(a) {
+                    if let a = items.first, let h = hosts.first(where: { $0.alias == a }), !h.dimmed, case .updateAvailable = h.update, UpdatePrompt.state(h) == .canUpdate, !updates.isRunning(a) {
                         Button("Update \(h.title)") { updates.update(h) }
                     }
                 } primaryAction: { items in
@@ -645,8 +645,9 @@ struct ConnectView: View {
     private func row(_ h: PairedHost) -> some View {
         HStack(spacing: 10) {
             DeviceIconView(model: h.model, family: h.family, size: 36, png: h.icon)
+                .opacity(h.dimmed ? 0.45 : 1)
             VStack(alignment: .leading, spacing: 1) {
-                Text(h.title).fontWeight(.medium)
+                Text(h.title).fontWeight(.medium).foregroundStyle(h.dimmed ? .secondary : .primary)
                 if let d = updates.line(h.alias) ?? h.detail() { Text(d).font(.caption).foregroundStyle(.secondary) }
             }
             Spacer(minLength: 0)

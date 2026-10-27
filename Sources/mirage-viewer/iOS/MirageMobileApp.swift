@@ -157,7 +157,7 @@ struct ConnectScreen: View {
                                         Button { onConnect(h.alias, nil) } label: { Label("Connect", systemImage: "play.display") }
                                         Button { infoHost = h } label: { Label("Get Info", systemImage: "info.circle") }
                                     }
-                                    if case .updateAvailable = h.update, UpdatePrompt.state(h) == .canUpdate, !updates.isRunning(h.alias) {
+                                    if !h.dimmed, case .updateAvailable = h.update, UpdatePrompt.state(h) == .canUpdate, !updates.isRunning(h.alias) {
                                         Button { updates.update(h) } label: { Label("Update", systemImage: "arrow.up.circle") }
                                     }
                                 }
@@ -221,8 +221,9 @@ struct ConnectScreen: View {
         HStack(spacing: 12) {
             DeviceIconView(model: h.model, family: h.family, size: 34, png: h.icon)
                 .foregroundStyle(.secondary)
+                .opacity(h.dimmed ? 0.45 : 1)
             VStack(alignment: .leading, spacing: 2) {
-                Text(h.title).foregroundStyle(.primary)
+                Text(h.title).foregroundStyle(h.dimmed ? .secondary : .primary)
                 if let d = updates.line(h.alias) ?? h.detail() { Text(d).font(.caption).foregroundStyle(.secondary) }
             }
             Spacer(minLength: 0)

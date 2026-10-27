@@ -25,6 +25,10 @@ struct PairedHost: Identifiable, Equatable {
     /// device streams from it.
     var lastSeen: Date?
     var unreachable = false
+    /// It answered and refused this device (not for its version), in its words.
+    var refusal: String?
+    /// Shown greyed (phrz, 2026-10-27): nothing to do with it until it answers again, or accepts this device.
+    var dimmed: Bool { unreachable || refusal != nil }
     var triggerFeature: Bool?
     var viewerMayTrigger: Bool?
     var streamingElsewhere = false
@@ -64,7 +68,8 @@ struct PairedHost: Identifiable, Equatable {
         case .hostTooOld, .viewerTooOld, .updating: return update.note(hostName: title)
         case .current, .updateAvailable: break
         }
-        if unreachable { return "Unreachable" }
+        if unreachable { return "Not reachable" }
+        if refusal != nil { return "Not accepting this device" }
         if lastSeen != nil, streamingElsewhere { return "In use by another device" }
         if let t = lastSeen { return "Seen \(Self.ago(t, now: now, locale: locale))" }
         if let t = lastConnected { return "Connected \(Self.ago(t, now: now, locale: locale))" }
@@ -95,7 +100,8 @@ struct PairedHost: Identifiable, Equatable {
         if let m = model, !m.isEmpty { rows.append(.init(label: "Model", value: m)) }
         if let t = lastSeen { rows.append(.init(label: "Last seen", value: Self.ago(t, now: now, locale: locale))) }
         else if let t = lastConnected { rows.append(.init(label: "Last connected", value: Self.ago(t, now: now, locale: locale))) }
-        if unreachable { rows.append(.init(label: "Status", value: "Not answering")) }
+        if unreachable { rows.append(.init(label: "Status", value: "Not reachable")) }
+        else if let r = refusal { rows.append(.init(label: "Status", value: "Refuses this device: \(r)")) }
         else if streamingElsewhere { rows.append(.init(label: "Status", value: "In use by another device")) }
         if addressDiffers || name.isEmpty { rows.append(.init(label: "Address", value: alias)) }
         return rows
@@ -117,7 +123,7 @@ enum ConnectList {
         return (recentPaired + rest).map { alias in
             let h = known[alias]!
             return PairedHost(alias: alias, name: h.hostName, model: h.model, family: h.deviceFamily, lastConnected: h.lastConnected, update: h.updateState,
-                              canTrigger: h.updateTrigger ?? false, lastSeen: h.lastSeen, unreachable: h.unreachableSince != nil,
+                              canTrigger: h.updateTrigger ?? false, lastSeen: h.lastSeen, unreachable: h.isUnreachable, refusal: h.refusal,
                               triggerFeature: h.triggerFeature, viewerMayTrigger: h.hostPolicy?.viewerMayTrigger, streamingElsewhere: h.hostStreaming ?? false,
                               hostVersion: h.hostVersion, policy: h.hostPolicy?.policy, hostSettings: h.hostSettings, lockFailedAt: h.hostLockFailedAt)
         }
@@ -455,7 +461,10 @@ struct HostUpdateBadge: View {
         } else if case .updateAvailable = host.update {
             Button { center.ask(host) } label: { UpdateArrow(selected: prominence == .increased) }
             .buttonStyle(.borderless)
-            .help("Update available")
+            // Not reachable: the update waits until it answers (greyed, no prompt).
+            .disabled(host.dimmed)
+            .opacity(host.dimmed ? 0.35 : 1)
+            .help(host.dimmed ? "Update available when \(host.title) is reachable" : "Update available")
             .accessibilityLabel("Update \(host.title)")
         }
     }

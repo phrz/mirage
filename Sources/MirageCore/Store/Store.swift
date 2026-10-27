@@ -170,6 +170,14 @@ public final class Store: @unchecked Sendable {
         /// and the protocol range it speaks.
         public var lastSeen: Date?
         public var unreachableSince: Date?
+        /// Status probes in a row that got no answer (phrz, 2026-10-27: the list shows "Not reachable" only after
+        /// `HostProbe.unreachableAfter` of them, so one lost packet never greys a row). nil: none since the last answer.
+        public var failedProbes: Int?
+        /// The host answered and refused this device (not for its version): its words ("unknown device"). nil otherwise.
+        public var refusal: String?
+        /// The device list's "Not reachable": no answer since `unreachableSince`, to enough probes in a row. A record from
+        /// before the count was kept counts as unreachable.
+        public var isUnreachable: Bool { unreachableSince != nil && (failedProbes ?? HostProbe.unreachableAfter) >= HostProbe.unreachableAfter }
         public var triggerFeature: Bool?
         public var hostPolicy: UpdatePermission?
         /// DESIGN §3.12: the host's Curtain and Lock when finished settings, from its last Welcome.

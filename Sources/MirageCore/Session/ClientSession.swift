@@ -100,7 +100,7 @@ public struct ClientSession {
             h.updateTrigger = welcome.acceptsUpdateTrigger
             h.updating = welcome.updateResult.flatMap { $0.isFinal ? nil : $0 }
             h.incompatibility = tooOld?.rawValue
-            h.lastSeen = Date(); h.unreachableSince = nil
+            h.lastSeen = Date(); h.unreachableSince = nil; h.failedProbes = nil; h.refusal = nil
             h.triggerFeature = (welcome.features ?? []).contains(ControlMessage.Feature.updateTrigger)
             h.hostPolicy = welcome.updatePolicy
             h.hostSettings = welcome.hostSettings; h.hostLockFailedAt = welcome.lockFailedAt   // (nil from an older host: unknown)

@@ -66,6 +66,10 @@ public final class ProbeRegistry: @unchecked Sendable {
 /// elsewhere, the protocol range, when it was seen). A host that cannot be reached is marked unreachable since then; one
 /// that answers (even refusing this viewer's version) is seen.
 public enum HostProbe {
+    /// Probes in a row without an answer before the list says "Not reachable" (asleep, off, or off the network: a probe
+    /// cannot tell these apart). The first answer clears it, quietly.
+    public static let unreachableAfter = 2
+
     @discardableResult
     public static func probe(connect: HostUpdateTrigger.Connect, store: Store, alias: String, now: Date = Date()) async -> Bool {
         do {
@@ -74,11 +78,22 @@ public enum HostProbe {
             _ = try await s.authenticate(features: [ControlMessage.Feature.updateStatus, ControlMessage.Feature.probe], probe: true)
             return true
         } catch MirageError.transport {
-            try? store.updateKnownHost(alias) { h in if h.unreachableSince == nil { h.unreachableSince = now } }
+            try? store.updateKnownHost(alias) { h in
+                if h.unreachableSince == nil { h.unreachableSince = now }
+                h.failedProbes = (h.failedProbes ?? 0) + 1
+            }
             return false
         } catch {
-            // It answered, with a refusal or a protocol it does not share: seen, and the refusal is in the record.
-            try? store.updateKnownHost(alias) { h in h.lastSeen = now; h.unreachableSince = nil }
+            // It answered, with a refusal or a protocol it does not share: seen, and the refusal is in the record (a version
+            // refusal as `incompatibility`, anything else as `refusal`).
+            let words: String? = {
+                guard case MirageError.authenticationFailed(let s) = error, s.hasPrefix("host rejected: ") else { return nil }
+                return String(s.dropFirst("host rejected: ".count))
+            }()
+            try? store.updateKnownHost(alias) { h in
+                h.lastSeen = now; h.unreachableSince = nil; h.failedProbes = nil
+                h.refusal = h.incompatibility == nil ? words : nil
+            }
             return true
         }
     }
