@@ -204,7 +204,7 @@ public final class HostHealth: @unchecked Sendable {
 
     /// What to do at start. Returns false when this process must exit now (it rolled back: launchd starts the old host).
     public func launch(now: Date = Date()) -> Bool {
-        let action = UpdateHealth.onLaunch(installer.readPending(), running: running, appPath: paths.app.path, now: now)
+        let action = UpdateHealth.onLaunch(installer.readPending(), running: running, appPath: paths.app.path, now: now, installed: Installer.version(of: paths.app))
         switch action {
         case .none: return true
         case .trial(let p):
@@ -216,7 +216,17 @@ public final class HostHealth: @unchecked Sendable {
         case .rollBack(let p, let reason):
             rollBack(p, reason: reason)
             return false
+        case .restartIntoInstalled(let p):
+            try? installer.writePending(p)
+            log("update \(p.from.display) → \(p.to.display): \(p.from.display) started, but \(p.to.display) is installed; restarting into it (\(p.oldBuildStarts ?? 1) of \(UpdateHealth.maxOldBuildStarts))")
+            return false
         case .rolledBackOutside(let p):
+            // The installed build is never skipped: only a build that is no longer installed was undone.
+            if Installer.version(of: paths.app)?.build == p.to.build {
+                log("update \(p.from.display) → \(p.to.display): \(p.to.display) is installed but \(p.from.display) keeps starting; leaving the update to a restart of the agent (not skipped)")
+                installer.clearPending()
+                return true
+            }
             log("update \(p.from.display) → \(p.to.display) was undone outside the updater; \(p.to.display) is skipped")
             finish(p, outcome: .rolledBack, message: "undone outside the updater (rollback-host.sh)", skip: true)
             return true

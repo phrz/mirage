@@ -158,6 +158,24 @@ final class InstallerTests: XCTestCase {
         XCTAssertNil(Installer(paths: paths).readPending(), "not written again after the rollback")
     }
 
+    /// The race on phrz-mbp-m4 (2026-10-27): after the swap to 420, the old agent binary (412) starts again. It exits so
+    /// launchd starts the installed 420, which then commits; 420 is never skipped, and no "undone outside" is recorded.
+    func testTheOldAgentAfterTheSwapHandsOverToTheInstalledBuild() async throws {
+        let m = try publish(ver(420))
+        guard case .swapped = try await updater().install() else { return XCTFail("expected a swap") }
+        XCTAssertEqual(installed(), 420)
+        let old = HostHealth(paths: paths, running: ver(412), logFile: nil, log: { _ in })
+        XCTAssertFalse(old.launch(), "the old binary exits: launchd starts the installed one")
+        XCTAssertEqual(Installer(paths: paths).readPending()?.oldBuildStarts, 1, "the update stays pending")
+        XCTAssertNil(Installer(paths: paths).readResult(), "not recorded as undone")
+        XCTAssertFalse(UpdateSettings.load(paths.settings).skippedBuilds.contains(420), "never skipped")
+        let new = HostHealth(paths: paths, running: m.mirageVersion, logFile: nil, log: { _ in })
+        XCTAssertTrue(new.launch())
+        new.passed(.listener); new.passed(.control); new.passed(.capture("frame"))
+        XCTAssertEqual(Installer(paths: paths).readResult()?.outcome, .committed)
+        XCTAssertEqual(installed(), 420)
+    }
+
     /// The broken-build test as pure files: a build that exits in main is started three times, the third start swaps the
     /// previous bundle back, and the build is skipped from then on.
     func testABuildThatNeverCommitsRollsBackOnItsThirdStart() async throws {

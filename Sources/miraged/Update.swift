@@ -96,6 +96,11 @@ struct Update: AsyncParsableCommand {
             restartAgent(paths: paths)
             return
         }
+        if now, !allowIdentityChange, channel == nil, targetBuild == nil, !noRestart, let outcome = await handToAgent(store: store) {
+            // One updater at a time (phrz-mbp-m4, 2026-10-27): with the agent running, it installs, restarts and commits.
+            if !outcome { throw ExitCode(1) }
+            return
+        }
         if now {
             do {
                 switch try await updater.install(channel: channel, targetBuild: targetBuild, allowIdentityChange: allowIdentityChange) {
@@ -313,4 +318,61 @@ func uplinkIsMetered() async -> Bool {
         }
         m.start(queue: DispatchQueue(label: "mirage.update.path"))
     }
+}
+
+/// `miraged update --now` with the host agent running: the agent installs (one updater at a time; a CLI install beside it
+/// raced its restart and left the old build running). Prints its steps; after its restart, waits for its status to say
+/// how it went. nil: no agent answers (the CLI installs itself).
+func handToAgent(store: Store, timeout: TimeInterval = 8 * 60) async -> Bool? {
+    final class Box: @unchecked Sendable {
+        let lock = NSLock(); var hello = false; var final: ControlMessage.UpdateStatus?; var closed = false; var status: LocalControl.Status?
+    }
+    let box = Box()
+    let client = LocalControlClient(store: store)
+    client.onEvent = { e in
+        box.lock.lock(); defer { box.lock.unlock() }
+        switch e {
+        case .hello: box.hello = true
+        case .status(let s): box.status = s
+        case .updateStatus(let u):
+            print("[\(u.phase.rawValue)] \(u.message)")
+            if u.isFinal { box.final = u }
+        default: break
+        }
+    }
+    client.onClose = { box.lock.lock(); box.closed = true; box.lock.unlock() }
+    guard (try? client.connect(client: "miraged update --now")) != nil else { return nil }
+    for _ in 0..<20 where !box.lock.withLock({ box.hello }) { try? await Task.sleep(for: .milliseconds(100)) }
+    guard box.lock.withLock({ box.hello }) else { client.disconnect(); return nil }
+    let before = box.lock.withLock { box.status?.currentVersion }
+    print("the host agent is running: it installs the update")
+    try? client.send(.updateNow)
+    let end = Date().addingTimeInterval(timeout)
+    while Date() < end {
+        try? await Task.sleep(for: .milliseconds(250))
+        let (f, closed) = box.lock.withLock { (box.final, box.closed) }
+        if let f { client.disconnect(); return UpdateCLIOutcome.ok(f) }
+        if closed { break }   // the agent restarts into the new build
+    }
+    client.disconnect()
+    // After the restart: the new agent's status says how it went (committed, or still on trial, or rolled back).
+    while Date() < end {
+        try? await Task.sleep(for: .seconds(2))
+        let c = LocalControlClient(store: store)
+        let b = Box()
+        c.onEvent = { e in b.lock.lock(); if case .status(let s) = e { b.status = s }; b.lock.unlock() }
+        guard (try? c.connect(client: "miraged update --now")) != nil else { continue }
+        try? c.send(.status)
+        for _ in 0..<20 where b.lock.withLock({ b.status == nil }) { try? await Task.sleep(for: .milliseconds(100)) }
+        c.disconnect()
+        guard let s = b.lock.withLock({ b.status }) else { continue }
+        if let r = s.lastUpdate, r.isFinal { print("[\(r.phase.rawValue)] \(r.message)"); return UpdateCLIOutcome.ok(r) }
+        if s.updating == nil, let now = s.currentVersion, now.build != before?.build { print("[done] now \(now.display)"); return true }
+    }
+    print("[failed] the host agent did not say how the update went within \(Int(timeout / 60)) min")
+    return false
+}
+
+enum UpdateCLIOutcome {
+    static func ok(_ s: ControlMessage.UpdateStatus) -> Bool { s.phase == .done }
 }

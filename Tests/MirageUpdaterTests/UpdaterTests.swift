@@ -161,6 +161,28 @@ final class UpdateHealthTests: XCTestCase {
         XCTAssertNil(Updater.offer(latest: nil, running: ver(529), installed: nil))
     }
 
+    /// phrz-mbp-m4, 2026-10-27: a CLI `update --now` raced the agent; the old binary (525) restarted after the swap to 529.
+    /// That is a successful update: restart into the installed build (counted, bounded), never "undone outside", never
+    /// skipped. Only an old build with the old bundle installed was really undone.
+    func testTheOldBinaryAfterTheSwapRestartsIntoTheInstalledBuild() {
+        let t0 = Date()
+        let p = PendingUpdate(from: ver(525), to: ver(529), deadline: t0.addingTimeInterval(300), appPath: "/Applications/Mirage.app", started: t0)
+        guard case .restartIntoInstalled(let a) = UpdateHealth.onLaunch(p, running: ver(525), appPath: "/Applications/Mirage.app", now: t0, installed: ver(529)) else {
+            return XCTFail("restart into 529")
+        }
+        XCTAssertEqual(a.oldBuildStarts, 1)
+        var q = a
+        for n in 2...UpdateHealth.maxOldBuildStarts {
+            guard case .restartIntoInstalled(let b) = UpdateHealth.onLaunch(q, running: ver(525), appPath: "/Applications/Mirage.app", now: t0, installed: ver(529)) else { return XCTFail() }
+            XCTAssertEqual(b.oldBuildStarts, n); q = b
+        }
+        XCTAssertEqual(UpdateHealth.onLaunch(q, running: ver(525), appPath: "/Applications/Mirage.app", now: t0, installed: ver(529)), .rolledBackOutside(q),
+                       "bounded: no restart loop")
+        XCTAssertEqual(UpdateHealth.onLaunch(p, running: ver(525), appPath: "/Applications/Mirage.app", now: t0, installed: ver(525)), .rolledBackOutside(p),
+                       "the old bundle installed: really undone")
+        guard case .trial = UpdateHealth.onLaunch(a, running: ver(529), appPath: "/Applications/Mirage.app", now: t0, installed: ver(529)) else { return XCTFail("then the new build's trial") }
+    }
+
     func testHealthyNeedsAllThree() {
         var c = UpdateHealth.Checks()
         XCTAssertFalse(c.healthy)

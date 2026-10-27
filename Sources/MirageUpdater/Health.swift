@@ -15,6 +15,9 @@ public struct PendingUpdate: Codable, Equatable, Sendable {
     /// The agent was registered again for the new build's signature (launchd refused to spawn it under the old one): a
     /// rollback must register it again for the old build's, or launchd refuses that one in turn.
     public var reregistered: Bool?
+    /// Starts of the replaced build after the swap (the old binary restarted before the new one ran): each exits so launchd
+    /// starts the installed one.
+    public var oldBuildStarts: Int?
     /// What the trial still waits for ("a screen capture: …"), for the viewer that triggered it.
     public var waitingFor: String?
 
@@ -79,11 +82,18 @@ public enum UpdateHealth {
         /// The old build runs while the file is still there: the swap was undone outside the updater
         /// (`rollback-host.sh`) or a rollback stopped half way. Record it as rolled back.
         case rolledBackOutside(PendingUpdate)
+        /// The old build runs, but the installed bundle IS the new one (phrz-mbp-m4, 2026-10-27: a CLI `update --now` raced
+        /// the agent, and the old binary restarted after the swap). A successful update: exit, so launchd starts the
+        /// installed build, which counts its trial and commits. Never skipped.
+        case restartIntoInstalled(PendingUpdate)
         /// Neither build runs (a manual reinstall): the file is stale.
         case discard(PendingUpdate)
     }
 
-    public static func onLaunch(_ pending: PendingUpdate?, running: MirageVersion, appPath: String, now: Date) -> LaunchAction {
+    /// How many times the replaced build may start after the swap before the update is left alone (no loop).
+    public static let maxOldBuildStarts = 3
+
+    public static func onLaunch(_ pending: PendingUpdate?, running: MirageVersion, appPath: String, now: Date, installed: MirageVersion? = nil) -> LaunchAction {
         guard let p = pending else { return .none }
         guard standardized(p.appPath) == standardized(appPath) else { return .none }
         if running.build == p.to.build {
@@ -93,7 +103,14 @@ public enum UpdateHealth {
             if next.attempts >= maxAttempts { return .rollBack(next, reason: "started \(next.attempts) times without becoming healthy") }
             return .trial(next)
         }
-        if running.build == p.from.build { return .rolledBackOutside(p) }
+        if running.build == p.from.build {
+            if installed?.build == p.to.build, (p.oldBuildStarts ?? 0) < maxOldBuildStarts {
+                var next = p
+                next.oldBuildStarts = (p.oldBuildStarts ?? 0) + 1
+                return .restartIntoInstalled(next)
+            }
+            return .rolledBackOutside(p)
+        }
         return .discard(p)
     }
 
