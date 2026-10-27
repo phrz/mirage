@@ -283,6 +283,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: options.window.0, height: options.window.1),
                          styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = host
+        // Held by `window` and dropped in windowWillClose: AppKit's own release on close would release it a second time
+        // (a crash in the autorelease pool when a session window closes while the app stays open).
+        w.isReleasedWhenClosed = false
         w.contentView = NSHostingView(rootView: content)
         w.contentMinSize = NSSize(width: 480, height: 270)
         w.collectionBehavior.insert(.fullScreenPrimary)
