@@ -1494,9 +1494,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// overlay is not shown. The display layer goes out whole: a keyframe after a full diff, so the viewer presents one full
     /// frame of the lock screen, never a mix with the desktop it held; on unlock the same, back to the desktop and layers.
     /// Frames captured during the switch are dropped (ScreenCapturer.setLocked).
+    /// The overlay is not captured into the stream while locked (its frames are ignored: the shield is above the normal
+    /// level, and the whole display already shows it); it carried most of the bytes, its black made transparent, over a
+    /// display layer that got 251 of its tiles in 5 s (phrz's mosaic on mac-daddy, 505). The display layer's old frame is
+    /// dropped so the fresh picture (a coherent still, presented at once) is read from the first frame after the switch.
     private func lockSwitch(_ locked: Bool) {
-        for cap in [capturer, overlay, fallbackCapture].compactMap({ $0 }) { cap.setLocked(locked, log: log) }
-        if let d = display { d.forceFullDiff = true; d.wantKeyframe = true }
+        for cap in [capturer, fallbackCapture].compactMap({ $0 }) { cap.setLocked(locked, log: log) }
+        if let d = display { d.lastFrame = nil; d.forceFullDiff = true; d.wantKeyframe = true }
+        beginFreshPicture(locked ? .screenLock : .screenUnlock)
     }
 
     /// Creates, resizes, stops and reprioritises window layers after a window-list sample; computes
@@ -2444,6 +2449,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// (window layers: the whole frame is a candidate; the diff decides).
     private func captured(_ pbIn: CVPixelBuffer, _ nanos: UInt64, dirtyRects: [PixelRect], layerID: UInt32, provisionalFrame: Bool = false, fromBand: Bool = false) {
         guard request != nil, output != nil, let windows, let layer = layers[layerID] else { return }
+        // Locked: the overlay is not part of the picture (lockSwitch).
+        if screenLocked, layerID == ControlMessage.WindowInfo.overlayID { return }
         // The desktop's real first frame after a provisional one (the warm snapshot): it replaces it without a diff; the
         // fresh picture's lossless blocks are read from it from now on.
         if layer.isDisplay, layer.provisional, !provisionalFrame {
@@ -3312,7 +3319,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // Both models: the probe train follows the first picture (compositor: stage 1 presented; seam: the display's base
             // keyframe acked), at the latest 1.5 s after the start.
             if hostTunables[.connectProbe] >= 1 { probeAfterStage1 = true; probeDeadline = Clock.nowNanos() + 1_500_000_000 }   // kill switch: tunables.json {"connectProbe": 0}
-            if hostTunables[.placeholders] >= 1 { sendPlaceholders() }   // M-FIVE stage 0, both models
+            // (Not while locked: placeholders are for windows, and the picture is the lock screen alone.)
+            if hostTunables[.placeholders] >= 1, !InputInjector.consoleLocked() { sendPlaceholders() }   // M-FIVE stage 0, both models
         }
         if compositor {
             // M-FIVE: the desktop's first picture is a still like every window's (no tiny keyframe and ladder climb: the

@@ -10,9 +10,12 @@ public enum FreshPictureTrigger: String, Equatable {
     case streamStart = "stream start", resize, tierChange = "tier change", regionChange = "region change", recoveryKeyframe = "recovery keyframe"
     /// A resumed session whose viewer holds no picture (an app relaunched with its saved resume token).
     case viewerEmpty = "viewer holds no picture"
+    /// The host's screen locked or unlocked: the picture changes from the desktop and its windows to the lock screen (or back)
+    /// as a whole, presented at once, never tile by tile over the old one.
+    case screenLock = "screen locked", screenUnlock = "screen unlocked"
     public var restartsWholePicture: Bool {
         switch self {
-        case .streamStart, .resize, .tierChange, .viewerEmpty: return true
+        case .streamStart, .resize, .tierChange, .viewerEmpty, .screenLock, .screenUnlock: return true
         case .regionChange, .recoveryKeyframe: return false
         }
     }
