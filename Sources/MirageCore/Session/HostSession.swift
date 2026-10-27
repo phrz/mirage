@@ -41,8 +41,10 @@ public struct HostUpdateInfo: Sendable {
     public var permission: UpdatePermission?
     /// The last update's outcome, when recent (Welcome.updateResult).
     public var lastResult: ControlMessage.UpdateStatus?
-    public init(latestAvailable: MirageVersion?, permission: UpdatePermission?, lastResult: ControlMessage.UpdateStatus? = nil) {
-        self.latestAvailable = latestAvailable; self.permission = permission; self.lastResult = lastResult
+    /// The channel the host follows (its settings), which can differ from the running build's after a switch.
+    public var channel: UpdateChannel?
+    public init(latestAvailable: MirageVersion?, permission: UpdatePermission?, lastResult: ControlMessage.UpdateStatus? = nil, channel: UpdateChannel? = nil) {
+        self.latestAvailable = latestAvailable; self.permission = permission; self.lastResult = lastResult; self.channel = channel
     }
 }
 
@@ -348,7 +350,8 @@ public enum HostSession {
                                              hostStreaming: streamingElsewhere, minProtocolVersion: Mirage.minProtocolVersion,
                                              hostIcon: HostIcon.forViewer(features: hello.features, cachedHash: hello.hostIconHash, icon: ctx.hostIcon),
                                              hostSettings: HostSettings.load(from: ctx.store.url(HostSettings.fileName)),
-                                             lockFailedAt: HostLockStatus.lastFailure, hostOS: ViewerFeed.osString(ProcessInfo.processInfo.operatingSystemVersion))))
+                                             lockFailedAt: HostLockStatus.lastFailure, hostOS: ViewerFeed.osString(ProcessInfo.processInfo.operatingSystemVersion),
+                                             updateChannel: updates?.channel)))
         ctx.welcomed?()
         if quiet {
             // A status probe: one line per device every 10 min at most, no timings.

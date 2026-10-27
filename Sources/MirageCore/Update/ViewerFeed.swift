@@ -5,7 +5,8 @@ import Foundation
 /// and keeps the signed bytes; every use verifies them again, so an expired manifest stops counting by itself.
 ///
 /// What a host's row offers is the newer of what the host reported and what the viewer verified, and the viewer's only
-/// when it applies to that host: same channel, the host takes triggers from this device, its macOS meets the build's
+/// when it applies to that host: the channel the host follows (its settings, from the Welcome; not the running build's,
+/// which differs after a switch; unknown from an older host: no offer), the host takes triggers from this device, its macOS meets the build's
 /// minOS (unknown: not offered), and the build still speaks the host's protocol.
 public enum ViewerFeed {
     /// One channel head as read: the manifest and its signatures, byte for byte, and when.
@@ -28,7 +29,7 @@ public enum ViewerFeed {
     /// The build a host's row offers: the newer of the host's report and the viewer's verified feed, when it applies.
     public static func latest(for h: Store.KnownHost, feed: [UpdateChannel: Manifest]) -> MirageVersion? {
         let reported = h.latestAvailable
-        guard let running = h.hostVersion, let ch = running.channel, let m = feed[ch], h.updateTrigger == true,
+        guard let running = h.hostVersion, let ch = h.hostChannel, let m = feed[ch], h.updateTrigger == true,
               let os = h.hostOS.flatMap(parseOS), let need = parseOS(m.minOS), atLeast(os, need),
               m.minProtocol <= (h.hostProtocol ?? Mirage.protocolVersion),
               m.build > running.build else { return reported }

@@ -54,7 +54,9 @@ public struct UpdateSettings: Codable, Equatable, Sendable {
 
     /// What the Welcome says (U1's update fields): the newest build found, and what a viewer may do.
     public var hostUpdateInfo: HostUpdateInfo {
-        HostUpdateInfo(latestAvailable: latest, permission: UpdatePermission(policy: policy, viewerMayTrigger: trigger == .anyDevice))
+        // A newest found on another channel (before a switch) is not this channel's offer.
+        HostUpdateInfo(latestAvailable: latest.flatMap { $0.channel == nil || $0.channel == channel ? $0 : nil },
+                       permission: UpdatePermission(policy: policy, viewerMayTrigger: trigger == .anyDevice), channel: channel)
     }
 
     /// `miraged update --set key=value`: channel=stable|beta|nightly, policy=ask|automatic, trigger=any-device|this-mac.

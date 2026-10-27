@@ -907,7 +907,7 @@ final class ViewerFeedCenter: ObservableObject {
 
     /// The channels the paired hosts follow.
     static func channels(_ known: [String: Store.KnownHost]) -> Set<UpdateChannel> {
-        Set(known.values.compactMap { $0.hostVersion?.channel })
+        Set(known.values.compactMap { $0.hostChannel })
     }
 
     func checkAll(now: Date = Date()) async {

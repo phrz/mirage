@@ -30,7 +30,7 @@ final class ViewerFeedTests: XCTestCase {
         var h = Store.KnownHost(hostID: "g", hostName: "green-machine", publicKey: Data(), endpoint: "g", pairedAt: Date())
         h.hostVersion = MirageVersion(version: "0.1", build: running, commit: "a", channel: channel)
         h.latestAvailable = reported.map { MirageVersion(version: "0.1", build: $0, commit: "b", channel: channel) }
-        h.updateTrigger = trigger; h.hostOS = os; h.hostProtocol = 6
+        h.updateTrigger = trigger; h.hostOS = os; h.hostProtocol = 6; h.hostChannel = channel
         return h
     }
 
@@ -44,6 +44,11 @@ final class ViewerFeedTests: XCTestCase {
         XCTAssertEqual(ViewerFeed.latest(for: host(os: "14.6"), feed: feed)?.build, 479, "its macOS is older than the build's minOS (15.0)")
         XCTAssertEqual(ViewerFeed.latest(for: host(os: nil), feed: feed)?.build, 479, "an older host does not say its macOS: not offered")
         XCTAssertNil(ViewerFeed.latest(for: host(running: 483, reported: nil), feed: feed), "it runs that build already")
+        // It runs a nightly build but now follows stable (review, 2026-10-27): nightly is not its offer.
+        var switched = host(reported: nil); switched.hostChannel = .stable
+        XCTAssertNil(ViewerFeed.latest(for: switched, feed: feed))
+        var older = host(); older.hostChannel = nil
+        XCTAssertEqual(ViewerFeed.latest(for: older, feed: feed)?.build, 479, "an older host does not say its channel: its own word")
         XCTAssertEqual(ViewerFeed.applying(feed, to: host()).updateState(now: Date()),
                        .updateAvailable(from: host().hostVersion!, to: ViewerFeed.verified([.nightly: try entry(483)], trust: trust)[.nightly]!.mirageVersion))
     }

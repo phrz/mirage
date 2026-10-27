@@ -139,6 +139,18 @@ final class UpdateHealthTests: XCTestCase {
         guard case .trial = UpdateHealth.onLaunch(pending, running: ver(420), appPath: "/Applications/./Mirage.app", now: t0) else { return XCTFail("the same path, spelled differently") }
     }
 
+    /// The Welcome says the channel the host follows, and only that channel's newest (review, 2026-10-27: a viewer kept
+    /// offering nightly after a switch to stable).
+    func testTheWelcomeSaysTheChannelFollowed() throws {
+        var st = UpdateSettings()
+        st.channel = .stable
+        st.latest = MirageVersion(version: "0.1", build: 483, commit: "a", channel: .nightly)   // found before the switch
+        XCTAssertEqual(st.hostUpdateInfo.channel, .stable)
+        XCTAssertNil(st.hostUpdateInfo.latestAvailable, "a nightly newest is not stable's offer")
+        st.latest = MirageVersion(version: "0.1", build: 470, commit: "b", channel: .stable)
+        XCTAssertEqual(st.hostUpdateInfo.latestAvailable?.build, 470)
+    }
+
     func testHealthyNeedsAllThree() {
         var c = UpdateHealth.Checks()
         XCTAssertFalse(c.healthy)

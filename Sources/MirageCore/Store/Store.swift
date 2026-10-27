@@ -185,6 +185,8 @@ public final class Store: @unchecked Sendable {
         public var hostLockFailedAt: Date?
         /// Its macOS version from its last Welcome ("26.1"), for a build's minOS. nil from older hosts.
         public var hostOS: String?
+        /// The channel it follows, from its last Welcome. nil from older hosts.
+        public var hostChannel: UpdateChannel?
         public var hostStreaming: Bool?
         public var hostProtocol: Int?
         public var hostMinProtocol: Int?
