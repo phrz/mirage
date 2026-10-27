@@ -1,11 +1,11 @@
 import Foundation
 import MirageCore
 
-/// Unlock with biometry in a session (DESIGN §3.13): offers it while the host's screen is locked and a password is saved,
-/// prompts once on connect (the setting), sends the password after approval, offers to save what the person typed at the
+/// Unlock with biometry in a session (DESIGN §3.13): offers it while the host's screen is locked and a password is saved
+/// (a click; the prompt comes by itself only for a host set to Always), sends the password after approval, offers to save what the person typed at the
 /// lock screen when it unlocked the Mac, and answers agents' requests. Never retries a password that failed.
 final class UnlockController: @unchecked Sendable {
-    enum Offer: Equatable { case save, update }
+    typealias Offer = UnlockLogic.SaveOffer
 
     private weak var session: ViewerSession?
     private let model: ViewerModel
@@ -24,8 +24,10 @@ final class UnlockController: @unchecked Sendable {
     /// The host as the person named it (the alias they connected to).
     private var hostName: String { session?.host ?? "the host" }
 
-    static let autoPromptKey = "unlockAutoPrompt"
-    static func autoPrompt(_ d: UserDefaults = .standard) -> Bool { d.object(forKey: autoPromptKey) as? Bool ?? true }
+    /// Per host: this device raises the prompt by itself on connecting to it while it is locked (the offer's Always, Get Info).
+    static func alwaysKey(_ hostID: String) -> String { "unlockAlways." + hostID }
+    static func always(hostID: String?, _ d: UserDefaults = .standard) -> Bool { hostID.map { d.bool(forKey: alwaysKey($0)) } ?? false }
+    static func setAlways(_ on: Bool, hostID: String, _ d: UserDefaults = .standard) { d.set(on, forKey: alwaysKey(hostID)) }
 
     /// The Hello's features for `hostID`: this viewer answers that host's requests only where it can (biometry, and a
     /// password saved for it), so a request is never settled by a device that has nothing to send.
@@ -41,6 +43,7 @@ final class UnlockController: @unchecked Sendable {
         hostOffers = (welcome.features ?? []).contains(ControlMessage.Feature.unlock)
         promptedThisConnection = false; locked = false
         lock.unlock()
+        Task { @MainActor in model.unlockDismissed = false }
         refresh()
     }
 
@@ -52,13 +55,14 @@ final class UnlockController: @unchecked Sendable {
         var offer: Offer?
         if was, !nowLocked, let pw = capture.hostLocked(false) {
             let saved = hostID.map { UnlockStore.has(hostID: $0) } ?? false
-            if UnlockStore.biometry != nil, hostID != nil, !saved || savedFailed {
+            if hostID != nil, let o = UnlockLogic.saveOffer(biometry: UnlockStore.biometry != nil, saved: saved, savedFailed: savedFailed) {
                 var d = pw
-                offered = SecretBytes(taking: &d); offer = saved ? .update : .save
+                offered = SecretBytes(taking: &d); offer = o
             }
         } else if nowLocked { _ = capture.hostLocked(true) }   // (drops a candidate whose window passed)
         if !nowLocked { savedFailed = false }
-        let prompt = nowLocked && !was && !promptedThisConnection && !savedFailed && Self.autoPrompt() && ready()
+        let prompt = UnlockLogic.autoPrompt(nowLocked: nowLocked, wasLocked: was, alreadyPrompted: promptedThisConnection, savedFailed: savedFailed,
+                                            always: Self.always(hostID: hostID), ready: ready())
         if prompt { promptedThisConnection = true }
         lock.unlock()
         if was != nowLocked { refresh() }   // (a file check: on changes only, not every status)
@@ -99,6 +103,12 @@ final class UnlockController: @unchecked Sendable {
                 }
             }
         }
+    }
+    /// The offer's Always: from now on this device prompts by itself on connecting to this host while it is locked; and now.
+    func always() {
+        lock.lock(); let id = hostID; lock.unlock()
+        if let id { Self.setAlways(true, hostID: id) }
+        unlock()
     }
     func decline(_ requestID: String) {
         session?.sendControl(.unlockDecline(.init(requestID: requestID)))

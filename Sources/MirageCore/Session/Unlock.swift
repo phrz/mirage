@@ -92,6 +92,20 @@ public enum UnlockLogic {
         private mutating func reset() { typed.removeAll(keepingCapacity: false); spoiled = false }
     }
 
+    /// The save offer after a typed password unlocked the host: Save when none is saved for it, Update when the saved one
+    /// failed this time, nothing otherwise (or without biometry).
+    public enum SaveOffer: Equatable, Sendable { case save, update }
+    public static func saveOffer(biometry: Bool, saved: Bool, savedFailed: Bool) -> SaveOffer? {
+        guard biometry else { return nil }
+        if !saved { return .save }
+        return savedFailed ? .update : nil
+    }
+    /// Whether to raise the biometric prompt by itself: only for a host this device was told to (Always), once per connection,
+    /// when the session first sees it locked, and never after the saved password failed. Otherwise the offer waits for a click.
+    public static func autoPrompt(nowLocked: Bool, wasLocked: Bool, alreadyPrompted: Bool, savedFailed: Bool, always: Bool, ready: Bool) -> Bool {
+        nowLocked && !wasLocked && !alreadyPrompted && !savedFailed && always && ready
+    }
+
     /// What an agent's request came to (`miraged unlock`, the local control's `requestUnlock`).
     public enum RequestOutcome: String, Codable, Sendable {
         case unlocked, stillLocked, notLocked, interrupted, declined, refused, noViewer, timedOut

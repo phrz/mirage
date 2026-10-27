@@ -56,6 +56,15 @@ public enum CurtainLogic {
         return n > 0 ? sum / Double(n) : 0.5
     }
 
+    /// What unlocked the Mac, for the host log (phrz, 2026-10-27: mac-daddy unlocked during an iPhone session and neither the
+    /// log nor he could say how): Unlock with biometry typing it, a person typing through a viewer (key-downs injected while
+    /// locked), or something at the Mac (a person, Touch ID, an Apple Watch: no remote input while locked).
+    public static func unlockCause(remoteDownsWhileLocked n: Int, biometryTypingRecently: Bool) -> String {
+        if biometryTypingRecently { return "Unlock with biometry (its password typed by the host)" }
+        if n > 0 { return "typed through a Mirage viewer (\(n) key-downs while locked)" }
+        return "at the Mac or another way (no remote input while locked: a person, Touch ID, an Apple Watch)"
+    }
+
     /// Whose lock is it, and should the curtain show: sessions, the lock, and who unlocked (DESIGN §3.12). Pure: Curtain feeds
     /// it events (with the time, in nanos) and does what it says.
     public struct Machine: Equatable {

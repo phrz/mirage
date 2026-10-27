@@ -52,6 +52,8 @@ final class ViewerModel: ObservableObject {
     /// has biometry), its name and symbol, an attempt under way, a password to offer for saving, a result to show, and an
     /// agent's request waiting for the person.
     @Published var unlockReady = false
+    /// The person closed the offer for this connection (they type at the lock screen instead).
+    @Published var unlockDismissed = false
     @Published var unlockBiometry: UnlockStore.Biometry?
     @Published var unlockBusy = false
     @Published var unlockOffer: UnlockController.Offer?

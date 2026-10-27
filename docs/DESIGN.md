@@ -2017,8 +2017,13 @@ this device:
 
 **Use.**
 - The host reports its lock state (`HostStatus.consoleLocked`). While it is locked, a password is saved for it and its
-  Welcome lists `Feature.unlock`, the locked banner carries "Unlock with Face ID". With "Ask on Connect to a Locked Mac"
-  (on by default) the viewer prompts once per connection when the session shows the host locked.
+  Welcome lists `Feature.unlock`, a corner offer shows "Unlock with Face ID", "Always" and a close button (phrz,
+  2026-10-27). The biometric prompt never comes by itself unless this device was told to for that host: Always stores it
+  per host (and unlocks now); Get Info's "Unlock with Face ID automatically" changes it. Closing the offer, or typing at the
+  lock screen, leaves the person typing with nothing over the picture.
+- The host logs what unlocked it, on every unlock it sees during a session (`CurtainLogic.unlockCause`): Unlock with
+  biometry, typed through a Mirage viewer (with the injected key-downs while locked), or at the Mac or another way (a
+  person, Touch ID, an Apple Watch).
 - After biometric approval ("Unlock <host>" in the system prompt) the viewer sends `ControlMessage.unlock` with the
   password as UTF-8 `Data` (printing as "N bytes"; `Unlock`'s description is redacted too), never as key events.
 - **The host** (`HostSession.unlock`, `LockScreenUnlocker`):

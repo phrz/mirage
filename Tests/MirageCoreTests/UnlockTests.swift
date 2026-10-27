@@ -240,3 +240,27 @@ private final class Flag: @unchecked Sendable {
     init(_ v: Bool) { self.v = v }
     var value: Bool { get { lock.lock(); defer { lock.unlock() }; return v } set { lock.lock(); v = newValue; lock.unlock() } }
 }
+
+/// The unlock offer (phrz, 2026-10-27: Touch ID came up by itself on connecting, so he could not test typing): a click, or
+/// Always per host; the save offer after a typed unlock; what unlocked the Mac, for the log.
+final class UnlockOfferTests: XCTestCase {
+    func testNoPromptUnlessAlways() {
+        XCTAssertFalse(UnlockLogic.autoPrompt(nowLocked: true, wasLocked: false, alreadyPrompted: false, savedFailed: false, always: false, ready: true), "by default: the offer, never the prompt")
+        XCTAssertTrue(UnlockLogic.autoPrompt(nowLocked: true, wasLocked: false, alreadyPrompted: false, savedFailed: false, always: true, ready: true), "Always")
+        XCTAssertFalse(UnlockLogic.autoPrompt(nowLocked: true, wasLocked: false, alreadyPrompted: true, savedFailed: false, always: true, ready: true), "once per connection")
+        XCTAssertFalse(UnlockLogic.autoPrompt(nowLocked: true, wasLocked: false, alreadyPrompted: false, savedFailed: true, always: true, ready: true), "never after a failure")
+        XCTAssertFalse(UnlockLogic.autoPrompt(nowLocked: true, wasLocked: true, alreadyPrompted: false, savedFailed: false, always: true, ready: true), "only when it first shows locked")
+        XCTAssertFalse(UnlockLogic.autoPrompt(nowLocked: true, wasLocked: false, alreadyPrompted: false, savedFailed: false, always: true, ready: false), "nothing saved, or no biometry")
+    }
+    func testSaveOffer() {
+        XCTAssertEqual(UnlockLogic.saveOffer(biometry: true, saved: false, savedFailed: false), .save, "none saved: offered")
+        XCTAssertNil(UnlockLogic.saveOffer(biometry: true, saved: true, savedFailed: false), "one saved (and it works): not offered")
+        XCTAssertEqual(UnlockLogic.saveOffer(biometry: true, saved: true, savedFailed: true), .update, "the saved one failed: update")
+        XCTAssertNil(UnlockLogic.saveOffer(biometry: false, saved: false, savedFailed: false), "no biometry")
+    }
+    func testUnlockCause() {
+        XCTAssertTrue(CurtainLogic.unlockCause(remoteDownsWhileLocked: 14, biometryTypingRecently: true).hasPrefix("Unlock with biometry"))
+        XCTAssertEqual(CurtainLogic.unlockCause(remoteDownsWhileLocked: 9, biometryTypingRecently: false), "typed through a Mirage viewer (9 key-downs while locked)")
+        XCTAssertTrue(CurtainLogic.unlockCause(remoteDownsWhileLocked: 0, biometryTypingRecently: false).hasPrefix("at the Mac or another way"))
+    }
+}

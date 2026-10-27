@@ -21,13 +21,15 @@ struct SessionBanners: View {
             }
             if let n = model.hostNotice { banner(n, color: .indigo) }   // U4: the host restarts into an update
             // The lock screen speaks for itself in Desktop mode; Unified mode shows no desktop, so it says so there.
-            if model.hostStatus?.consoleLocked == true, model.unified || model.unlockReady {
-                if model.unlockReady, let b = model.unlockBiometry {
-                    // Unlock with biometry (DESIGN §3.13): the system's own name and symbol for this device's biometry.
+            if model.hostStatus?.consoleLocked == true, model.unified || model.unlockReady && !model.unlockDismissed {
+                if model.unlockReady, !model.unlockDismissed, let b = model.unlockBiometry {
+                    // Unlock with biometry (DESIGN §3.13): the system's own name and symbol; never a prompt until clicked, unless
+                    // this host is set to Always.
                     HStack {
-                        Text("\(model.hostName)'s screen is locked.")
                         Button { session.unlock.unlock() } label: { Label("Unlock with \(b.name)", systemImage: b.symbol) }
                             .buttonStyle(.borderedProminent).disabled(model.unlockBusy)
+                        Button("Always") { session.unlock.always() }.buttonStyle(.bordered).disabled(model.unlockBusy)
+                        Button { model.unlockDismissed = true } label: { Image(systemName: "xmark") }.buttonStyle(.borderless)
                     }
                     .font(.footnote.weight(.medium)).foregroundStyle(.white).padding(10)
                     .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 8))

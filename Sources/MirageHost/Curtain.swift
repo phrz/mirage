@@ -590,6 +590,10 @@ public final class Curtain: @unchecked Sendable {
     private func lockTick() {
         let locked = InputInjector.consoleLocked()
         if locked != machine.locked {
+            if !locked {
+                let typing = LockScreenUnlocker.lastTypingNanos != 0 && Clock.elapsed(since: LockScreenUnlocker.lastTypingNanos, now: Clock.nowNanos()) < 15_000_000_000
+                log("unlocked: \(CurtainLogic.unlockCause(remoteDownsWhileLocked: machine.remoteDownsWhileLocked, biometryTypingRecently: typing))")
+            }
             machine.lockChanged(locked)
             if locked { Self.swallowUntil = 0; Self.lockArmed = false; Self.presenceNotedAt.store(0, ordering: .relaxed); hide(reason: "Mac locked (the lock screen covers it, and is what the remote person unlocks)") }
             else if machine.ownedLocally { hide(reason: "unlocked at the Mac: off until a remote unlock or the session's end") }

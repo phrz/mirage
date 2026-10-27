@@ -62,8 +62,11 @@ public enum LockScreenUnlocker {
 
     /// The handler miraged gives HostContext.
     public static func unlock(_ password: SecretBytes) async -> ControlMessage.UnlockResult.Outcome {
-        await unlock(password, locked: { StrictLock.current() }, post: { postTagged($0) }, wake: .milliseconds(600), settle: .seconds(6))
+        lastTypingNanos = Clock.nowNanos()
+        return await unlock(password, locked: { StrictLock.current() }, post: { postTagged($0) }, wake: .milliseconds(600), settle: .seconds(6))
     }
+    /// When Unlock with biometry last began typing (the curtain's log of what unlocked the Mac).
+    nonisolated(unsafe) public static var lastTypingNanos: UInt64 = 0
     /// `locked` and `post` injectable for tests.
     static func unlock(_ password: SecretBytes, locked: @escaping @Sendable () -> Bool, post: @escaping @Sendable (Stroke) -> Void,
                        wake: Duration, settle: Duration) async -> ControlMessage.UnlockResult.Outcome {

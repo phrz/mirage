@@ -10,6 +10,7 @@ struct UnlockInfoSection: View {
     @State private var entering = false
     @State private var password = ""
     @State private var error: String?
+    @State private var always = false
 
     var body: some View {
         if let b = UnlockStore.biometry, host.unlockFeature, let id = host.hostID {
@@ -34,11 +35,12 @@ struct UnlockInfoSection: View {
                         if saved { Button("Forget", role: .destructive) { UnlockStore.delete(hostID: id); saved = false } }
                     }
                 }
+                if saved {
+                    Toggle("Unlock with \(b.name) automatically", isOn: Binding(get: { always }, set: { always = $0; UnlockController.setAlways($0, hostID: id) }))
+                }
                 if let error { Text(error).font(.caption).foregroundStyle(.red) }
-                Text("Kept only on this device, behind \(b.name), and typed only at \(host.title)'s lock screen.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
-            .onAppear { saved = UnlockStore.has(hostID: id) }
+            .onAppear { saved = UnlockStore.has(hostID: id); always = UnlockController.always(hostID: id) }
         }
     }
 
@@ -49,22 +51,5 @@ struct UnlockInfoSection: View {
         do { try UnlockStore.save(secret, hostID: id); error = nil; entering = false } catch { self.error = "Not saved: \(error)." }
         secret.wipe()
         saved = UnlockStore.has(hostID: id)
-    }
-}
-
-/// Settings (the Mac's Settings window, iOS's settings sheet): whether a locked host prompts for Unlock with biometry as soon
-/// as the session shows it (on by default). Only on a device with biometry.
-struct UnlockSettingsSection: View {
-    @AppStorage(UnlockController.autoPromptKey) private var autoPrompt = true
-    var body: some View {
-        if let b = UnlockStore.biometry {
-            Section {
-                Toggle("Ask on Connect to a Locked Mac", isOn: $autoPrompt)
-            } header: {
-                Text("Unlock with \(b.name)")
-            } footer: {
-                Text("Set up per Mac in its Get Info, or save the password the first time you type it at its lock screen through Mirage. It stays on this device, behind \(b.name).")
-            }
-        }
     }
 }
