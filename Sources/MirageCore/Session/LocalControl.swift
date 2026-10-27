@@ -23,6 +23,9 @@ public enum LocalControl {
         /// Install the newest build now (DESIGN §3.10, U4: the menu bar's Update Now and the window bar's Update); the host
         /// answers with `updateStatus` events. An older host ignores it.
         case updateNow
+        /// The host's own settings (DESIGN §3.12: Curtain, Lock when finished); the host saves them and answers with `status`.
+        /// An older host ignores it.
+        case setHostSettings(HostSettings)
     }
 
     /// The host's events.
@@ -68,6 +71,10 @@ public enum LocalControl {
         public var accessibility: Bool?
         /// The host is restarting itself to apply newly granted permissions.
         public var restarting: Bool?
+        /// The host's own settings (Curtain, Lock when finished); nil from older hosts.
+        public var hostSettings: HostSettings?
+        /// When "Lock when finished" last failed to lock this Mac (`HostLockStatus`); nil when it has not, and from older hosts.
+        public var lockFailedAt: Date?
         /// DESIGN §3.10 (U4): the build the host runs and the newest its feed check found (newer: the yellow dot and bar),
         /// and whether it can update itself on `updateNow`. nil from older hosts.
         public var hostVersion: MirageVersion?

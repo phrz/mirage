@@ -269,6 +269,21 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertTrue(h.info(now: now, locale: en).contains(R(label: "Updates", value: "When asked")))
         XCTAssertTrue(h.info(now: now, locale: en).contains(R(label: "Status", value: "Not answering")))
         XCTAssertEqual(PairedHost(alias: "m", name: "m").info(), [], "nothing known: nothing shown")
+        h.hostSettings = HostSettings(curtain: true, lockWhenFinished: false)
+        let rows = h.info(now: now, locale: en)
+        XCTAssertTrue(rows.contains(R(label: "Curtain", value: "On")))
+        XCTAssertTrue(rows.contains(R(label: "Lock when finished", value: "Off")))
+        XCTAssertTrue(rows.contains(R(label: "Stay reachable", value: "On")))
+        h.hostSettings?.lockWhenFinished = true; h.lockFailedAt = now.addingTimeInterval(-7200)
+        XCTAssertTrue(h.info(now: now, locale: en).contains(R(label: "Lock when finished", value: "On, but couldn't lock it 2 hours ago")))
+    }
+
+    /// DESIGN §3.12: the host's two settings travel in its Welcome (absent from older hosts).
+    func testWelcomeCarriesTheHostSettings() throws {
+        let w = ControlMessage.Welcome(hostName: "h", sessionID: "s", hostSettings: HostSettings(curtain: false, lockWhenFinished: true))
+        let back = try JSONDecoder().decode(ControlMessage.Welcome.self, from: JSONEncoder().encode(w))
+        XCTAssertEqual(back.hostSettings, HostSettings(curtain: false, lockWhenFinished: true))
+        XCTAssertNil(try JSONDecoder().decode(ControlMessage.Welcome.self, from: Data(#"{"hostName":"h","sessionID":"s"}"#.utf8)).hostSettings)
     }
 
     /// The list uses the Mac's own icon when it sent one (the store keeps it per host), else the generic one.

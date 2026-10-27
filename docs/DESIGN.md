@@ -1780,7 +1780,11 @@ desk. The curtain blocks nothing.
     an app.
   - With Input Monitoring alone it only listens.
   - It never prompts: without either grant there's no tap and no curtain, since "Click to log in" would be a lie.
-- **No curtain, no lock:** local input locks only while the curtain is visible.
+- **Wanted is enough:** local input locks whenever the curtain is wanted (Curtain on, a session streaming, starting or
+  suspended, the Mac unlocked, nobody at it signed in), opaque or not: while it is still invisible for the sessions'
+  filters (up to 10 s, then hidden and retried in 30 s, the tap kept), after a resume until that session acknowledges,
+  and after a rebuild. No curtain wanted, no lock. A curtain that cannot show (no event tap) is not wanted
+  (`curtainUnavailable`), so it is not retried, or logged, on every update.
 - **The swallow is armed once per lock attempt**, never re-armed by the swallowed input. If neither ⌃⌘Q nor display sleep
   locks the Mac (the shortcut remapped or grabbed by a VM or remote-desktop app, no password after sleep), swallowing stops
   and the curtain stays off until every session has ended: a curtain that can't lock would only stand in the way of the
@@ -1803,23 +1807,104 @@ desk. The curtain blocks nothing.
   passive test run never curtains or locks the Mac someone is using.
 
 **Lifecycle** (`CurtainLogic.Machine`, pure and unit-tested):
-- The curtain is wanted while a session streams, the Mac is unlocked, and no person at the Mac has signed in since.
+- The curtain is wanted while a session streams or is suspended (phrz, 2026-10-27), the Mac is unlocked, and no person at
+  the Mac has signed in since.
+- **Suspended sessions** (a backgrounded phone, a roam, a dropped or crashed viewer, within the resume window): the curtain
+  stays up exactly as while streaming, so a local click, key or scroll locks the Mac at once and the trigger is swallowed;
+  pointer motion alone does nothing (it reveals nothing under the curtain). A suspend is not an end: no lock on time
+  alone, so a mosh-like resume hours later finds the session as it was. With every session suspended nothing captures,
+  so the curtain goes opaque without waiting for acknowledgements (layer 2's frame gating and a resuming session's own
+  acknowledgement still cover captures).
+- **The display while nothing streams:** the display-sleep assertion belongs to the display captures
+  (`ScreenCapturer`, "Mirage viewer connected"), and a suspend stops them, releasing it first; the warm pool's captures
+  hold none. So with every session suspended the display sleeps per the Mac's own Energy settings (no burn-in of the
+  curtain's message), the curtain stays logically up and shows again when the display wakes, and macOS's own lock after
+  display sleep applies if it is on (a resume then finds the lock screen). A resume's captures take the assertion again.
+  `Machine.allSuspended` names the state, logged once.
 - **While locked** the curtain is down: the lock screen covers everything and is what the remote person unlocks through
   Mirage. A session that starts while the Mac is locked waits.
 - **An unlock** with injected key-downs or clicks while locked (the remote person typing the password) is remote: the curtain
   returns, and any earlier local ownership is cleared (the owner signed in, left and locked; the remote person must not get
   an uncurtained Mac).
 - **An unlock without them** is a person at the Mac: the curtain hides and stays off. That ownership survives a suspend and
-  resume (a backgrounded phone, a Wi-Fi roam) and is cleared when every session has stopped.
-- **Screens** added or rearranged rebuild the curtain (checked once a second).
+  resume (a backgrounded phone, a Wi-Fi roam) and is cleared when the end of the sessions is decided.
+- **Screens** added or rearranged rebuild the curtain (checked once a second). The old windows stay opaque, and in every
+  capture's exclusion (the new generation's filters leave out both), until the new ones are opaque: an external display
+  that dropped out while the display slept must not leave the desktop uncovered at the wake.
 - **Power:** the windows assert nothing, so they never keep the display awake or block sleep.
 - (Swift's async main drains through CFRunLoopRun, so miraged's main run loop does run; the tap has its own thread anyway.)
 
+**Settings** (phrz, 2026-10-27), all on by default, in `host-settings.json` in the host's store (`HostSettings`, mode
+0600; a missing or unreadable file, or a missing key, means on):
+- **Curtain** (`curtain`): the curtain above. Off, a session never curtains the Mac (the `curtain` host tunable, kept for
+  tests, also turns it off). Sessions are still tracked, so Lock when finished works without it.
+- **Lock when finished** (`lockWhenFinished`): when the sessions end the Mac locks if it is unlocked then and nobody at it
+  signed in during them (the local ownership that hides the curtain). In short: a clean end (the viewer disconnects)
+  locks about 5 s later; a suspended session locks when its streamer is stopped for good (the 24 h resume window, budget
+  eviction, another device's claim), if no other session is live; decided with the settings of the session that ended
+  last.
+  - Snapshots: each session takes both settings when it begins and keeps them through a suspend and resume; the session
+    whose end it is decides with its own. So a change applies from the next session, whatever another session began with.
+  - **The end** (`CurtainLogic.Machine`, pure): only a session that streamed counts (a connect that fails before its
+    stream starts never locks). When the last session that streamed is stopped, a 5 s debounce starts. A session that
+    begins meanwhile holds the decision: once it streams the end is off; if it fails (a stream stopped to start over that
+    never streams), the end goes on its course, and with nothing pending and no session left the sessions are over
+    (nothing stale carries into the next session). A begin holds the end 30 s at most (a hung start or resume); it stays
+    tracked, so its curtain follows if it ever streams. A resume of a session that streamed before is that session, not
+    a new begin: the end waits for its outcome (it streams, or fails back into suspension).
+  - An expiring suspended session needs no presence check where the curtain protected the Mac the whole time: a person
+    at it would have locked it with their first click, so nobody legitimate can be mid-use.
+  - The lock and local input stay watched (once a second) from the first session until the end is decided, suspends
+    included.
+  - **The lock:** the tagged ⌃⌘Q, verified 2 s later, then `pmset displaysleepnow`, both given up if a session begins
+    meanwhile. If the Mac is still unlocked it is logged and kept in memory (`HostLockStatus`, cleared by a later end lock
+    that lands): the host menu shows "Couldn't lock this Mac when the last connection ended", the Welcome carries
+    `lockFailedAt`, and the viewer's Get Info shows "On, but couldn't lock it <when>".
+- **Stay Reachable** (`stayReachable`, phrz 2026-10-27): while on, miraged holds a `PreventUserIdleSystemSleep`
+  assertion ("Mirage: stay reachable for viewers", `StayReachable`) so the Mac never idles into sleep and a viewer can
+  always connect. Never a display assertion: the display still sleeps per the Energy settings (and the Mac locks after
+  it, if set to). Closing a laptop's lid still sleeps it (an idle assertion does not stop clamshell sleep). On a Mac with
+  a battery it is held only while the power adapter provides power (`IOPSGetProvidingPowerSourceType` is AC Power,
+  watched through an IOPS notification: released on battery or UPS power, taken again on the adapter), as macOS's own
+  "Prevent automatic sleeping on power adapter when the display is off". A Mac reporting no power source (a desktop)
+  holds it always. Unlike the other two, a change from the menu applies at once; a hand edit of the file, when a session
+  next begins or ends (and at the host's start). The login-item host only, never a test instance.
+- **Someone at the Mac** (presence): only where the curtain is not protecting it, that is Curtain off for the session, or
+  the curtain could not show (no event tap) or could not lock (`lockUnavailable`), with Lock when finished on. There a
+  tap watches for hardware input (pid 0, untagged, the curtain's test). After a clean stop, input within the 60 s before
+  the decision means someone is at the Mac (one stray click long before doesn't count); when a suspended session expires,
+  any input since its suspend does (someone reading for an hour). Either way the end leaves the Mac unlocked (logged once
+  per watch). Wherever the curtain is wanted, local input locks instead and is never presence.
+  - The tap never swallows and never locks: listen-only with Input Monitoring; with Accessibility alone, an active tap that
+    passes every event (a listen-only one could prompt for Input Monitoring). It passes input to the main queue at most
+    every 5 s; the hand-off is atomic between the tap's thread and the main queue (the last-noted time, an atomic).
+  - Forgotten when the Mac locks (they left and locked it, so a remote unlock afterwards ends in a lock again) and when
+    the end is decided. Input at the lock screen doesn't count.
+  - Without Accessibility or Input Monitoring there is no tap, which is logged, and the end locks as before.
+- Set from Mirage.app's host menu ("Curtain While Connected", "Lock When Finished", "Stay Reachable") through the local control socket
+  (`setHostSettings`; `Status.hostSettings` and `Status.lockFailedAt` carry the current state), or by editing the file.
+- The host sends them in its Welcome (`hostSettings`); the viewer keeps them with the known host (cleared when a host's
+  Welcome lacks them) and Get Info shows them.
+
 **Tests:**
+- `swift test` (CurtainRenderTests): an offscreen render of `CurtainView` draws the blurred picture, not the gray; in a
+  window, `apply` leaves nothing waiting for a display cycle; MIRAGE_CURTAIN_PREVIEW=<png> writes a preview over a stock
+  wallpaper. Neither reads the window server's pixels: that is the test shot on the host, which waits until a real picture
+  has been applied and drawn (logged with its delay after the curtain showed) and is skipped, logged, when the first
+  screen has none.
+- `swift test` (CurtainSettingsTests): a stop locks after the debounce; stop then restart and a failed connect never lock;
+  suspended: the curtain stays and a local click locks, no lock on time alone, expiry locks (without a presence check),
+  resume doesn't lock, a local sign-in while suspended keeps it unlocked, the display may idle only while every session is
+  suspended, a stop while another is suspended is not the end; a begin that fails during the debounce still ends (and
+  locks) and one that fails while another is suspended changes nothing, leaving nothing stale; a failed resume stays
+  suspended; presence only where the curtain doesn't protect (Curtain off, no tap, a failed lock), within 60 s of a clean
+  stop's decision or any since a suspend, none where the curtain is wanted; a hung begin holds the end 30 s at most;
+  ownership, already locked, the setting off, the curtain off; each session's own snapshot (and a resume keeping its);
+  presence forgotten on a lock, not at the lock screen; the settings file's defaults and tolerance.
 - `swift test` (CurtainTests): the injector's tagged source (keys, modifiers, scrolls, clicks), hardware against tagged
   and program-posted events, the text colour, luminance-rect orientation, and the state machine (a local unlock then a
   remote one, a session starting while locked, suspend and resume after a local sign-in, pointer motion only, no curtain
-  no lock, two sessions).
+  wanted no lock, two sessions, a failed lock, local input locking whenever the curtain is wanted, opaque or not).
 - The live check on the host: the curtain absent from a captured frame, a local click locking the Mac, unlocking through
   the viewer bringing it back. It runs only when phrz isn't connected and isn't at the Mac.
 

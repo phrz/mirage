@@ -172,6 +172,9 @@ public final class Store: @unchecked Sendable {
         public var unreachableSince: Date?
         public var triggerFeature: Bool?
         public var hostPolicy: UpdatePermission?
+        /// DESIGN §3.12: the host's Curtain and Lock when finished settings, from its last Welcome.
+        public var hostSettings: HostSettings?
+        public var hostLockFailedAt: Date?
         public var hostStreaming: Bool?
         public var hostProtocol: Int?
         public var hostMinProtocol: Int?

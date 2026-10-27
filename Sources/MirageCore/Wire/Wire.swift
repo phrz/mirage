@@ -315,19 +315,23 @@ public enum ControlMessage: Codable, Equatable {
         public init(hostName: String, sessionID: String, resumeToken: Data? = nil, resumed: Bool? = nil, hostBuild: String? = nil, hostModel: String? = nil, hostFamily: String? = nil,
                     hostVersion: MirageVersion? = nil, latestAvailable: MirageVersion? = nil, updatePolicy: UpdatePermission? = nil, protocolVersion: Int? = nil,
                     features: [String]? = nil, updateResult: UpdateStatus? = nil, hostStreaming: Bool? = nil, minProtocolVersion: Int? = nil,
-                    hostIcon: HostIcon? = nil) {
+                    hostIcon: HostIcon? = nil, hostSettings: HostSettings? = nil, lockFailedAt: Date? = nil) {
             self.hostName = hostName; self.sessionID = sessionID; self.resumeToken = resumeToken; self.resumed = resumed; self.hostBuild = hostBuild
             self.hostModel = hostModel; self.hostFamily = hostFamily
             self.hostVersion = hostVersion; self.latestAvailable = latestAvailable; self.updatePolicy = updatePolicy; self.protocolVersion = protocolVersion
             self.features = features; self.updateResult = updateResult
             self.hostStreaming = hostStreaming; self.minProtocolVersion = minProtocolVersion
-            self.hostIcon = hostIcon
+            self.hostIcon = hostIcon; self.hostSettings = hostSettings; self.lockFailedAt = lockFailedAt
         }
         /// U7: the host streams to another device right now; the oldest protocol it speaks. nil from older hosts.
         public var hostStreaming: Bool?
         public var minProtocolVersion: Int?
         /// The host's own icon, to a viewer that asked for it and holds another (or none). nil otherwise, and from older hosts.
         public var hostIcon: HostIcon?
+        /// DESIGN §3.12: the host's Curtain and Lock when finished settings, for Get Info. nil from older hosts.
+        public var hostSettings: HostSettings?
+        /// When "Lock when finished" last failed to lock the host; nil when it has not, and from older hosts.
+        public var lockFailedAt: Date?
         /// The host accepts update triggers from this viewer.
         public var acceptsUpdateTrigger: Bool { (features ?? []).contains(Feature.updateTrigger) && (updatePolicy?.viewerMayTrigger ?? false) }
     }

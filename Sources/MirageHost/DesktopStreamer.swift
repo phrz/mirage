@@ -409,7 +409,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     public func start(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         queue.sync { holdWarm(true) }
         beginCurtain()   // before any capture exists: every filter built from here on leaves the curtain out
-        do { return try await startStream(req, output: output) } catch { queue.sync { holdWarm(false) }; endCurtain(stopped: true); throw error }
+        do { let info = try await startStream(req, output: output); Curtain.shared.sessionStreamed(curtainID); return info }
+        catch { queue.sync { holdWarm(false) }; endCurtain(stopped: true); throw error }
     }
     private func startStream(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         // Connect setup, concurrent where it can be (they ran one after the other: 1.26 s of a 20 Mbps connect on mac-daddy):
@@ -608,11 +609,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
         }
         loadHostTunables()
-        Curtain.shared.sessionBegan(curtainID, enabled: hostTunables[.curtain] >= 0.5)
+        // The host's settings (host-settings.json: Curtain, Lock when finished) and the curtain tunable (an off switch for tests).
+        let settings = HostSettings.load(from: (try? Store())?.url(HostSettings.fileName) ?? URL(fileURLWithPath: "/nonexistent"))
+        StayReachable.shared.set(settings.stayReachable)   // (a hand edit of the file, picked up here)
+        Curtain.shared.sessionBegan(curtainID, curtain: settings.curtain && hostTunables[.curtain] >= 0.5, lockWhenFinished: settings.lockWhenFinished)
     }
     /// `stopped`: the session is over (stop), not suspended (local ownership of the Mac is kept across a suspend).
     private func endCurtain(stopped: Bool) {
         Curtain.shared.sessionEnded(curtainID, stopped: stopped)
+        if let url = (try? Store())?.url(HostSettings.fileName) { StayReachable.shared.set(HostSettings.load(from: url).stayReachable) }
         if let o = curtainObserver { NotificationCenter.default.removeObserver(o); curtainObserver = nil }
     }
     /// On `queue`: every capture this streamer owns re-applies its filter with the curtain's current windows left out (the
@@ -1362,7 +1367,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if capturer != nil { await suspend() }
         queue.sync { holdWarm(true) }
         beginCurtain()
-        do { return try await resumeStream(req, output: output) } catch { queue.sync { holdWarm(false) }; endCurtain(stopped: false); throw error }
+        do { let info = try await resumeStream(req, output: output); Curtain.shared.sessionStreamed(curtainID); return info }
+        catch { queue.sync { holdWarm(false) }; endCurtain(stopped: false); throw error }
     }
     private func resumeStream(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         await catalog.refreshNow()

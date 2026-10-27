@@ -33,6 +33,9 @@ struct PairedHost: Identifiable, Equatable {
     /// For Get Info (phrz, 2026-10-26: shown on request, never in the row): its build and channel, and its update policy.
     var hostVersion: MirageVersion?
     var policy: UpdatePolicy?
+    /// DESIGN §3.12: its Curtain and Lock when finished settings, as of its last Welcome.
+    var hostSettings: HostSettings?
+    var lockFailedAt: Date?
     /// The Mac's own icon (PNG, its model and colour), when it sent one.
     var icon: Data?
     var id: String { alias }
@@ -83,6 +86,12 @@ struct PairedHost: Identifiable, Equatable {
         case .ask?: rows.append(.init(label: "Updates", value: "When asked"))
         case nil: break
         }
+        if let hs = hostSettings {
+            rows.append(.init(label: "Curtain", value: hs.curtain ? "On" : "Off"))
+            let failed = lockFailedAt.map { ", but couldn't lock it \(Self.ago($0, now: now, locale: locale))" } ?? ""
+            rows.append(.init(label: "Lock when finished", value: hs.lockWhenFinished ? "On\(failed)" : "Off"))
+            rows.append(.init(label: "Stay reachable", value: hs.stayReachable ? "On" : "Off"))
+        }
         if let m = model, !m.isEmpty { rows.append(.init(label: "Model", value: m)) }
         if let t = lastSeen { rows.append(.init(label: "Last seen", value: Self.ago(t, now: now, locale: locale))) }
         else if let t = lastConnected { rows.append(.init(label: "Last connected", value: Self.ago(t, now: now, locale: locale))) }
@@ -110,7 +119,7 @@ enum ConnectList {
             return PairedHost(alias: alias, name: h.hostName, model: h.model, family: h.deviceFamily, lastConnected: h.lastConnected, update: h.updateState,
                               canTrigger: h.updateTrigger ?? false, lastSeen: h.lastSeen, unreachable: h.unreachableSince != nil,
                               triggerFeature: h.triggerFeature, viewerMayTrigger: h.hostPolicy?.viewerMayTrigger, streamingElsewhere: h.hostStreaming ?? false,
-                              hostVersion: h.hostVersion, policy: h.hostPolicy?.policy)
+                              hostVersion: h.hostVersion, policy: h.hostPolicy?.policy, hostSettings: h.hostSettings, lockFailedAt: h.hostLockFailedAt)
         }
     }
 

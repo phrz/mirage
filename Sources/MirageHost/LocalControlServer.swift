@@ -114,6 +114,13 @@ public final class LocalControlServer: @unchecked Sendable {
             }
             log("update now, from the Mirage app")
             Task { await handler(.update(targetBuild: nil), .thisMac, { [weak self] st in self?.queue.async { self?.broadcast(.updateStatus(st)) } }) }
+        case .setHostSettings(let new):
+            do {
+                try new.save(to: ctx.store.url(HostSettings.fileName))
+                log("host settings from the Mirage app: curtain \(new.curtain ? "on" : "off"), lock when finished \(new.lockWhenFinished ? "on" : "off") (from the next session), stay reachable \(new.stayReachable ? "on" : "off")")
+                StayReachable.shared.set(new.stayReachable)
+            } catch { log("host settings not saved: \(error)") }
+            sendStatus(to: c)
         case .revoke(let id):
             // Future connections and resumes are refused (both authenticate against the store); a stream in progress ends
             // with its connection.
@@ -135,6 +142,8 @@ public final class LocalControlServer: @unchecked Sendable {
             self.queue.async {
                 var s = base
                 s.restarting = self.restarting ? true : nil
+                s.hostSettings = HostSettings.load(from: self.ctx.store.url(HostSettings.fileName))
+                s.lockFailedAt = HostLockStatus.lastFailure
                 s.hostVersion = .current
                 s.latestAvailable = self.ctx.updateInfo?().latestAvailable
                 s.canUpdate = self.ctx.updateHandler != nil

@@ -110,6 +110,7 @@ struct Serve: AsyncParsableCommand {
         if noLocalControl { log("test instance: curtain \(Curtain.allowed ? "on (MIRAGE_TEST_CURTAIN=1)" : "off")") }
         else {
             do { try control.start(); health?.passed(.control) } catch { log("local control unavailable: \(error)") }
+            StayReachable.shared.start(enabled: HostSettings.load(from: ctx.store.url(HostSettings.fileName)).stayReachable, log: { log($0) })
             if !(screen && ax) { watchPermissions(screen: screen, ax: ax, control: control) }
             if let health, health.onTrial { probeCaptureForHealth(screen: screen, ax: ax, health: health) }
             scheduleUpdateChecks(paths: paths, ctx: ctx, log: { log($0) })

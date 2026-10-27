@@ -346,7 +346,9 @@ public enum HostSession {
                                              // Only to a viewer that decodes update statuses (one from before U4 never sees it).
                                              updateResult: (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) ? updates?.lastResult : nil,
                                              hostStreaming: streamingElsewhere, minProtocolVersion: Mirage.minProtocolVersion,
-                                             hostIcon: HostIcon.forViewer(features: hello.features, cachedHash: hello.hostIconHash, icon: ctx.hostIcon))))
+                                             hostIcon: HostIcon.forViewer(features: hello.features, cachedHash: hello.hostIconHash, icon: ctx.hostIcon),
+                                             hostSettings: HostSettings.load(from: ctx.store.url(HostSettings.fileName)),
+                                             lockFailedAt: HostLockStatus.lastFailure)))
         ctx.welcomed?()
         if quiet {
             // A status probe: one line per device every 10 min at most, no timings.

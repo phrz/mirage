@@ -164,6 +164,17 @@ final class HostMenu: NSObject, NSMenuDelegate {
             if s.accessibility == false { _ = item("⚠︎ Mirage needs \(PrivacyPane.accessibility()) — Open Settings…", #selector(openAccessibility)) }
             if let c = s.connected, !c.isEmpty { label("Connected: \(c.joined(separator: ", "))") }
         }
+        // The host's own settings (DESIGN §3.12), both on by default; shown once the host reports them (older hosts do not).
+        if isConnected, let hs = status?.hostSettings {
+            menu.addItem(.separator())
+            let curtain = item("Curtain While Connected", #selector(toggleCurtain)); curtain.state = hs.curtain ? .on : .off
+            curtain.toolTip = "While someone is connected, this Mac's screen looks locked and is left out of what they see; touching it locks the Mac."
+            let lock = item("Lock When Finished", #selector(toggleLockWhenFinished)); lock.state = hs.lockWhenFinished ? .on : .off
+            lock.toolTip = "When the last connection ends, lock this Mac (unless someone is using it)."
+            if hs.lockWhenFinished, status?.lockFailedAt != nil { label("Couldn't lock this Mac when the last connection ended") }
+            let awake = item("Stay Reachable", #selector(toggleStayReachable)); awake.state = hs.stayReachable ? .on : .off
+            awake.toolTip = "Keep this Mac from sleeping on its own so devices can connect (on the power adapter); the display still sleeps."
+        }
         menu.addItem(.separator())
         _ = item("Pair a Device…", isConnected ? #selector(pairDevice) : nil)
         if isConnected, let devices = status?.devices, !devices.isEmpty {
@@ -188,6 +199,13 @@ final class HostMenu: NSObject, NSMenuDelegate {
         _ = item("Quit Mirage…", #selector(quit))
     }
     @objc private func connectWindow() { onConnectWindow?() }
+    @objc private func toggleCurtain() { guard var hs = status?.hostSettings else { return }; hs.curtain.toggle(); setHostSettings(hs) }
+    @objc private func toggleStayReachable() { guard var hs = status?.hostSettings else { return }; hs.stayReachable.toggle(); setHostSettings(hs) }
+    @objc private func toggleLockWhenFinished() { guard var hs = status?.hostSettings else { return }; hs.lockWhenFinished.toggle(); setHostSettings(hs) }
+    private func setHostSettings(_ hs: HostSettings) {
+        status?.hostSettings = hs   // (the menu shows it at once; the host's status confirms)
+        do { try client?.send(.setHostSettings(hs)) } catch { AppLog.write("host settings: \(error)") }
+    }
     @objc private func quit() { onQuit?() }
 
     @objc private func toggleAllow() {
