@@ -101,6 +101,39 @@ final class FeedAPITests: XCTestCase {
         } catch { XCTAssertTrue(error is ManifestError, "\(error)") }
     }
 
+    /// A 403 that is not a rate limit (a redirect target refusing) falls back without pausing the API.
+    func testAPlain403IsNotARateLimit() async throws {
+        final class Forbidden: @unchecked Sendable {
+            var cdn: (Data, Data)
+            init(_ c: (Data, Data)) { cdn = c }
+        }
+        let f = Forbidden(try Self.manifest(481))
+        let t: Feed.Transport = { r in
+            let u = r.url!.absoluteString
+            if u.hasPrefix("https://api.github.com") {
+                return (Data(), HTTPURLResponse(url: r.url!, statusCode: 403, httpVersion: nil, headerFields: ["X-RateLimit-Remaining": "41"])!)
+            }
+            return (u.hasSuffix("sigs.json") ? f.cdn.1 : f.cdn.0, HTTPURLResponse(url: r.url!, statusCode: 200, httpVersion: nil, headerFields: [:])!)
+        }
+        let api = ReleaseAPI()
+        let (v, _) = try await Feed(base: Feed.github, transport: t, api: api).check(.nightly, trust: Self.trust)
+        XCTAssertEqual(v.manifest.build, 481)
+        let paused = await api.pausedUntil
+        XCTAssertNil(paused)
+    }
+
+    /// The ETags, assets and pause are kept in a file: a short-lived process starts where the last one left off.
+    func testTheCacheOutlivesTheProcess() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("mirage-releaseapi-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let gh = FakeGitHub(api: try Self.manifest(483), cdn: try Self.manifest(483))
+        _ = try await Feed(base: Feed.github, transport: gh.transport, api: ReleaseAPI(cacheFile: file)).check(.nightly, trust: Self.trust)
+        XCTAssertEqual(gh.count, 3)
+        let (v, _) = try await Feed(base: Feed.github, transport: gh.transport, api: ReleaseAPI(cacheFile: file)).check(.nightly, trust: Self.trust)
+        XCTAssertEqual(v.manifest.build, 483)
+        XCTAssertEqual(gh.count, 4, "the next process sends the ETag and reuses the assets")
+    }
+
     /// A local or test feed never calls GitHub.
     func testALocalFeedHasNoAPI() {
         XCTAssertNil(Feed(base: URL(fileURLWithPath: "/tmp/feed", isDirectory: true)).api)

@@ -873,9 +873,9 @@ enum UpdateOutcomeNotice: Equatable {
 }
 
 /// The viewer's own feed checks (`ViewerFeed`): each channel its paired hosts follow, on launch and when a list appears or
-/// the app comes forward (at most every 10 min), and hourly; a failure is quiet and backs off (5 min doubling to an
-/// hour, with jitter). GitHub's unauthenticated API allows 60 requests an hour per address, and an unchanged head costs
-/// none (its ETag), so this cadence leaves the hosts theirs.
+/// the app comes forward, and hourly; a channel read in the last 30-60 min (jittered) is not read again, and a failure is
+/// quiet and backs off (5 min doubling to an hour). GitHub's unauthenticated API allows 60 requests an hour per address,
+/// shared with the hosts there.
 @MainActor
 final class ViewerFeedCenter: ObservableObject {
     static let shared = ViewerFeedCenter()
@@ -884,7 +884,8 @@ final class ViewerFeedCenter: ObservableObject {
     var store: () -> Store? = { try? Store() }
     var feed = Feed()
     static let every: TimeInterval = 3600
-    static let atMostEvery: TimeInterval = 600
+    /// A channel is read again only after this (30-60 min, drawn per check).
+    nonisolated static func freshFor() -> TimeInterval { TimeInterval.random(in: 1800...3600) }
     private var lastRun: Date?
     private var backoff: TimeInterval = 0
     private var loop: Task<Void, Never>?
@@ -901,7 +902,7 @@ final class ViewerFeedCenter: ObservableObject {
             }
             return
         }
-        if let l = lastRun, now.timeIntervalSince(l) < max(Self.atMostEvery, backoff) { return }
+        if let l = lastRun, now.timeIntervalSince(l) < backoff { return }
         Task { await checkAll() }
     }
 
@@ -910,12 +911,20 @@ final class ViewerFeedCenter: ObservableObject {
         Set(known.values.compactMap { $0.hostChannel })
     }
 
+    /// Whether a channel last read at `checked` is read again now.
+    nonisolated static func due(_ checked: Date?, now: Date, freshFor: TimeInterval = freshFor()) -> Bool {
+        guard let c = checked else { return true }
+        return now.timeIntervalSince(c) >= freshFor || now < c
+    }
+
     func checkAll(now: Date = Date()) async {
         lastRun = now
         guard let store = store() else { return }
         let feed = self.feed
         var failed = false, changed = false
+        let read = store.viewerFeed()
         for ch in Self.channels((try? store.knownHosts()) ?? [:]).sorted(by: { $0.rawValue < $1.rawValue }) {
+            if !Self.due(read[ch]?.checked, now: now) { continue }
             do {
                 let (_, _, m, s) = try await feed.checkWithBytes(ch, trust: ManifestTrust(), now: now)
                 if store.viewerFeed()[ch]?.manifest != m { changed = true }

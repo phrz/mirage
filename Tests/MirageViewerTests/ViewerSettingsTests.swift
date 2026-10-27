@@ -437,6 +437,16 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertTrue(trial.message.contains("waiting for a screen capture"))
     }
 
+    /// The viewer reads a channel again only after 30-60 min (review, 2026-10-27: the API's 60 an hour are shared).
+    func testViewerFeedChecksAreThrottledPerChannel() {
+        let now = Date()
+        XCTAssertTrue(ViewerFeedCenter.due(nil, now: now), "never read")
+        XCTAssertFalse(ViewerFeedCenter.due(now.addingTimeInterval(-25 * 60), now: now), "read 25 min ago")
+        XCTAssertTrue(ViewerFeedCenter.due(now.addingTimeInterval(-61 * 60), now: now))
+        XCTAssertTrue(ViewerFeedCenter.due(now.addingTimeInterval(600), now: now), "a clock that moved back")
+        for _ in 0..<50 { let f = ViewerFeedCenter.freshFor(); XCTAssertTrue((1800...3600).contains(f)) }
+    }
+
     /// Get Info on the Mac: one small window per Mac, "<host> Info", not resizable, brought forward when asked again.
     func testGetInfoWindow() {
         var h = PairedHost(alias: "green.local", name: "green-machine", model: "Mac15,4")

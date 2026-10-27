@@ -82,15 +82,23 @@ public struct Feed: Sendable {
 /// API URL with `Accept: application/octet-stream`. Fresh where the download URL can lag behind a publish.
 ///
 /// Unauthenticated API calls are limited to 60 an hour per IP address, shared by every Mac and viewer behind it, so: the
-/// release is asked for with its last ETag (a 304 costs nothing and reuses the assets already read, which never change
-/// under an asset id); a rate-limit answer stops API use until GitHub's reset time plus a jitter; any failure falls back to
-/// the download URL, the path hosts used before.
+/// release is asked for with its last ETag (an unchanged head is a 304, and the assets already read are reused: they never
+/// change under an asset id); callers keep an hourly cadence (a 304 is not counted on to be free); a rate-limit answer
+/// stops API use until GitHub's reset time plus a jitter; any failure falls back to the download URL, the path hosts used
+/// before. The ETags, assets and pause are kept in a file, so short-lived processes (`miraged update`, the supervisor)
+/// share them with the agent instead of starting cold.
 public actor ReleaseAPI {
-    public static let shared = ReleaseAPI()
+    public static let shared = ReleaseAPI(cacheFile: (try? Store())?.root.appendingPathComponent("release-api-cache.json"))
     public static let base = URL(string: "https://api.github.com/repos/phrz/mirage/releases/tags/")!
 
-    struct Asset: Decodable { var id: Int; var name: String; var url: String; var size: Int? }
+    struct Asset: Codable { var id: Int; var name: String; var url: String; var size: Int? }
     struct Release: Decodable { var assets: [Asset] }
+    struct Cache: Codable {
+        var etags: [String: String] = [:]
+        var assets: [String: [Asset]] = [:]
+        var bytes: [String: Data] = [:]
+        var pausedUntil: Date?
+    }
     private var etags: [UpdateChannel: String] = [:]
     private var assets: [UpdateChannel: [Asset]] = [:]
     private var bytes: [Int: Data] = [:]
@@ -98,10 +106,36 @@ public actor ReleaseAPI {
     public private(set) var pausedUntil: Date?
     /// API requests actually made (tests).
     public private(set) var requests = 0
+    let cacheFile: URL?
+    private var loaded = false
 
-    public init() {}
+    public init(cacheFile: URL? = nil) { self.cacheFile = cacheFile }
+
+    private func load() {
+        guard !loaded else { return }
+        loaded = true
+        guard let f = cacheFile, let d = try? Data(contentsOf: f), let c = try? JSONDecoder().decode(Cache.self, from: d) else { return }
+        for (k, v) in c.etags { if let ch = UpdateChannel(rawValue: k) { etags[ch] = v } }
+        for (k, v) in c.assets { if let ch = UpdateChannel(rawValue: k) { assets[ch] = v } }
+        for (k, v) in c.bytes { if let id = Int(k) { bytes[id] = v } }
+        pausedUntil = c.pausedUntil
+    }
+
+    private func save() {
+        guard let f = cacheFile else { return }
+        var c = Cache()
+        for (k, v) in etags { c.etags[k.rawValue] = v }
+        for (k, v) in assets { c.assets[k.rawValue] = v }
+        for (k, v) in bytes { c.bytes[String(k)] = v }
+        c.pausedUntil = pausedUntil
+        guard let d = try? JSONEncoder().encode(c) else { return }
+        try? d.write(to: f, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: f.path)
+    }
 
     public func files(channel: UpdateChannel, names: [String], transport: Feed.Transport, now: Date = Date()) async throws -> [String: Data] {
+        load()
+        defer { save() }
         if let p = pausedUntil, now < p { throw UpdateError.feed("GitHub API rate limit: paused until \(ISO8601DateFormatter().string(from: p))") }
         var req = Self.request(Self.base.appendingPathComponent("channel-\(channel.rawValue)"), accept: "application/vnd.github+json")
         if let e = etags[channel], assets[channel] != nil { req.setValue(e, forHTTPHeaderField: "If-None-Match") }
@@ -134,9 +168,11 @@ public actor ReleaseAPI {
         return out
     }
 
+    /// A rate limit is a 429, or a response saying none are left (`X-RateLimit-Remaining: 0`). Any other 403 (an asset's
+    /// redirect target refusing, say) is an ordinary failure: the download URL is tried, and the API is not paused.
     private func checkLimit(_ h: HTTPURLResponse, now: Date) throws {
         let remaining = h.value(forHTTPHeaderField: "X-RateLimit-Remaining").flatMap(Int.init)
-        guard h.statusCode == 403 || h.statusCode == 429 || remaining == 0 else { return }
+        guard h.statusCode == 429 || remaining == 0 else { return }
         let reset = h.value(forHTTPHeaderField: "X-RateLimit-Reset").flatMap(TimeInterval.init).map(Date.init(timeIntervalSince1970:))
             ?? now.addingTimeInterval(3600)
         pausedUntil = max(reset, now).addingTimeInterval(TimeInterval.random(in: 30...300))
