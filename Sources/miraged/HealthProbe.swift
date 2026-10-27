@@ -10,34 +10,40 @@ import MirageUpdater
 /// did); without Screen Recording it reports instead of capturing. A capture that fails with the grant present is
 /// retried every 10 s: no commit until it works, so a build that cannot capture rolls back at its deadline.
 ///
-/// Every display asleep (or none listed): nothing to capture. The check is deferred ("capture check deferred: display
-/// asleep"), health is listener and control, and the probe waits, looking every 30 s without waking anything (no
-/// IOPMAssertionDeclareUserActivity here), for a display to wake; its result then goes into the update's record.
+/// Every display asleep, as CoreGraphics says (no online display, or all asleep): nothing to capture. The check is deferred
+/// ("capture check deferred: display asleep"), health is listener and control, and the probe waits, looking every 30 s
+/// without waking anything (no IOPMAssertionDeclareUserActivity here), for a display to wake; then it tries up to
+/// `UpdateHealth.AfterWake.attempts` times and its result goes into the update's record. With a display awake,
+/// ScreenCaptureKit listing none is a failure, not a reason to defer.
 func probeCaptureForHealth(screen: Bool, ax: Bool, health: HostHealth) {
     let axNote = ax ? "accessibility granted" : "accessibility missing (\(PrivacyPane.accessibility()))"
     guard screen else { health.passed(.capture("Screen Recording missing (\(PrivacyPane.screenRecording), no frame), \(axNote)")); return }
     Task.detached {
         var deferred = false
+        var afterWake = UpdateHealth.AfterWake()
         while true {
-            if deferred, allDisplaysAsleep() { try? await Task.sleep(for: .seconds(30)); continue }
+            if deferred, allDisplaysAsleep() { afterWake.asleepAgain(); try? await Task.sleep(for: .seconds(30)); continue }
             do {
                 let detail = try await captureOnce(axNote: axNote)
                 if deferred { health.capturedAfterWake(detail, ok: true) } else { health.passed(.capture(detail)) }
                 return
             } catch {
-                switch UpdateHealth.onCaptureFailure(noDisplay: (error as? ProbeError) == .noDisplay, allDisplaysAsleep: allDisplaysAsleep()) {
+                switch UpdateHealth.onCaptureFailure(displaysAsleep: allDisplaysAsleep()) {
                 case .deferAsleep:
                     if !deferred {
                         log("update health: capture check deferred: display asleep (\(error))")
                         health.passed(.captureDeferred("display asleep"))
                         deferred = true
                     }
+                    afterWake.asleepAgain()
                     try? await Task.sleep(for: .seconds(30))
                 case .retry:
                     if deferred {
-                        // Awake now, and it fails: reported in the update's record; a committed build stays.
-                        health.capturedAfterWake("\(error)", ok: false)
-                        return
+                        // Awake, and it fails: a few tries, then recorded (a committed build stays; a viewer may roll it back).
+                        if afterWake.failed() { health.capturedAfterWake("\(error)", ok: false); return }
+                        log("update health: capture after wake failed (\(error)); try \(afterWake.failures + 1) of \(UpdateHealth.AfterWake.attempts) in 10 s")
+                        try? await Task.sleep(for: .seconds(10))
+                        continue
                     }
                     log("update health: capture probe failed (\(error)); retrying in 10 s")
                     health.waiting(for: "a screen capture (\(error))")

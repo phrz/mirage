@@ -116,8 +116,16 @@ final class InstallerTests: XCTestCase {
         XCTAssertTrue(r?.message.contains("capture check deferred: display asleep") ?? false, r?.message ?? "")
         h.checkDeadline(p, now: p.deadline.addingTimeInterval(1))
         XCTAssertEqual(exits.n, 0, "not rolled back")
-        h.capturedAfterWake("Screen Recording stopped working", ok: false)
-        XCTAssertTrue(Installer(paths: paths).readResult()?.message.contains("capture FAILED after wake") ?? false)
+        let committedAt = try XCTUnwrap(Installer(paths: paths).readResult()?.at)
+        // Later (the commit's rollback window long gone), the display wakes and the capture fails.
+        let later = committedAt.addingTimeInterval(3600)
+        XCTAssertNotNil(RemoteRollback.refusal(pending: nil, lastResult: Installer(paths: paths).readResult(), running: m.mirageVersion, now: later, identityChange: nil))
+        h.capturedAfterWake("Screen Recording stopped working", ok: false, now: later)
+        let failed = try XCTUnwrap(Installer(paths: paths).readResult())
+        XCTAssertTrue(failed.message.contains("capture FAILED after wake"))
+        XCTAssertEqual(failed.at, later, "the record's time moves: the Welcome reports it again")
+        XCTAssertNil(RemoteRollback.refusal(pending: nil, lastResult: failed, running: m.mirageVersion, now: later.addingTimeInterval(60), identityChange: nil),
+                     "a paired viewer may roll it back from now")
         XCTAssertEqual(installed(), 483, "a committed build stays")
 
         // A display awake, the capture never works: no commit, rolled back at the deadline.
@@ -131,6 +139,23 @@ final class InstallerTests: XCTestCase {
         XCTAssertEqual(exits.n, 1)
         XCTAssertEqual(Installer(paths: paths).readResult()?.outcome, .rolledBack)
         XCTAssertEqual(installed(), 483)
+    }
+
+    /// What the trial waits for is written under the health lock, and never once a rollback has begun (review, 2026-10-27:
+    /// a write in between resurrected pending-update.json).
+    func testWaitingIsWrittenOnlyOnTrial() async throws {
+        let m = try publish(ver(483))
+        guard case .swapped(let p, _) = try await updater().install() else { return XCTFail("expected a swap") }
+        let exits = Exits()
+        let h = HostHealth(paths: paths, running: m.mirageVersion, logFile: nil, log: { _ in }, exitProcess: { exits.n += 1 })
+        XCTAssertTrue(h.launch())
+        h.waiting(for: "a screen capture (noDisplay)")
+        XCTAssertEqual(Installer(paths: paths).readPending()?.waitingFor, "a screen capture (noDisplay)")
+        XCTAssertTrue(Updater.hostUpdateInfo(paths: paths, running: m.mirageVersion).lastResult?.message.hasSuffix("waiting for a screen capture (noDisplay)") ?? false)
+        h.checkDeadline(p, now: p.deadline.addingTimeInterval(1))
+        XCTAssertEqual(exits.n, 1)
+        h.waiting(for: "something else")
+        XCTAssertNil(Installer(paths: paths).readPending(), "not written again after the rollback")
     }
 
     /// The broken-build test as pure files: a build that exits in main is started three times, the third start swaps the

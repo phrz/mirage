@@ -168,6 +168,8 @@ public final class HostHealth: @unchecked Sendable {
     private var checks = UpdateHealth.Checks()
     private var pending: PendingUpdate?
     private var committed = false
+    /// Set before a rollback touches anything: nothing rewrites pending-update.json after it.
+    private var rollingBack = false
 
     /// Asks the app to register the agent again (tests: a stand-in).
     let reregisterAgent: @Sendable () -> HostAgent.Registration?
@@ -242,21 +244,27 @@ public final class HostHealth: @unchecked Sendable {
     }
 
     /// A check still failing on trial: said in the trial status (the viewer that triggered the update shows it).
+    /// Under the lock, and only while on trial (not committed, not rolling back): a rollback in between must not find the
+    /// file written again (the next start would report it "undone outside the updater").
     public func waiting(for why: String) {
-        lock.lock(); let p = pending; let done = committed; lock.unlock()
-        guard var p, !done, var onDisk = installer.readPending(), onDisk.to.build == p.to.build, onDisk.waitingFor != why else { return }
+        lock.lock(); defer { lock.unlock() }
+        guard var p = pending, !committed, !rollingBack, var onDisk = installer.readPending(), onDisk.to.build == p.to.build,
+              onDisk.waitingFor != why else { return }
         onDisk.waitingFor = why; p.waitingFor = why
         try? installer.writePending(onDisk)
-        lock.lock(); pending = p; lock.unlock()
+        pending = p
     }
 
     /// The deferred capture probe ran (the display woke, or a session started): its result goes into the update's record,
     /// which the Welcome reports. A committed build is never rolled back for it.
-    public func capturedAfterWake(_ detail: String, ok: Bool) {
+    /// A failure moves the record's time to now: the Welcome reports it (records show for 15 min from their time), and a
+    /// paired viewer may roll the build back for the next 5 min, as right after a commit.
+    public func capturedAfterWake(_ detail: String, ok: Bool, now: Date = Date()) {
         log("update health: capture check after wake \(ok ? "passed" : "FAILED"): \(detail)")
         let installer = self.installer
         guard var r = installer.readResult(), r.outcome == .committed, r.to.build == running.build else { return }
         r.message += ok ? "; capture after wake: \(detail)" : "; capture FAILED after wake: \(detail)"
+        if !ok { r.at = now }
         try? installer.writeResult(r)
     }
 
@@ -278,6 +286,7 @@ public final class HostHealth: @unchecked Sendable {
     /// Swaps the previous bundle back, records why with this build's last log lines, skips this build, and leaves the exit
     /// to the caller.
     func rollBack(_ p: PendingUpdate, reason: String) {
+        lock.lock(); rollingBack = true; lock.unlock()
         log("update \(p.from.display) → \(p.to.display) failed: \(reason); rolling back")
         do { try installer.rollBack(keepReplaced: false) }
         catch { log("rollback failed: \(error); scripts/rollback-host.sh is the last resort") }

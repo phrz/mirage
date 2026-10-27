@@ -118,11 +118,24 @@ public enum UpdateHealth {
         public var healthy: Bool { listener && control && (capture != nil || captureDeferred != nil) }
     }
 
-    /// What the capture probe does after a failed attempt: retry while a display is awake (the capture is mandatory then),
-    /// defer while none is (nothing to capture; never wake one for the check).
+    /// What the capture probe does after a failed attempt. Only CoreGraphics decides "asleep" (no online display, or every
+    /// online one asleep): then the check is deferred (nothing to capture; never wake one for it). With a display awake the
+    /// capture is mandatory, whatever ScreenCaptureKit says: its "no display" then is a failure like any other (review,
+    /// 2026-10-27: an SCK or TCC fault that lists no display must not commit a broken build).
     public enum CaptureFailure: Equatable, Sendable { case retry, deferAsleep }
-    public static func onCaptureFailure(noDisplay: Bool, allDisplaysAsleep: Bool) -> CaptureFailure {
-        noDisplay || allDisplaysAsleep ? .deferAsleep : .retry
+    public static func onCaptureFailure(displaysAsleep: Bool) -> CaptureFailure {
+        displaysAsleep ? .deferAsleep : .retry
+    }
+
+    /// After a deferred check, once a display is awake: a few tries before a failure is recorded (the first captures after
+    /// a wake can fail while the display comes up). Asleep again resets the count.
+    public struct AfterWake: Equatable, Sendable {
+        public static let attempts = 3
+        public private(set) var failures = 0
+        public init() {}
+        /// One failed try with a display awake: true when it is the last one (record the failure).
+        public mutating func failed() -> Bool { failures += 1; return failures >= Self.attempts }
+        public mutating func asleepAgain() { failures = 0 }
     }
 
     static func standardized(_ p: String) -> String { URL(fileURLWithPath: p).standardizedFileURL.resolvingSymlinksInPath().path }

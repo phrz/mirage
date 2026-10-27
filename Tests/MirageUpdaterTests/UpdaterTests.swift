@@ -149,9 +149,14 @@ final class UpdateHealthTests: XCTestCase {
         var asleep = UpdateHealth.Checks()
         asleep.listener = true; asleep.control = true; asleep.captureDeferred = "display asleep"
         XCTAssertTrue(asleep.healthy, "every display asleep: listener and control decide")
-        XCTAssertEqual(UpdateHealth.onCaptureFailure(noDisplay: true, allDisplaysAsleep: false), .deferAsleep, "green-machine's noDisplay")
-        XCTAssertEqual(UpdateHealth.onCaptureFailure(noDisplay: false, allDisplaysAsleep: true), .deferAsleep)
-        XCTAssertEqual(UpdateHealth.onCaptureFailure(noDisplay: false, allDisplaysAsleep: false), .retry, "a display awake: the capture is mandatory")
+        XCTAssertEqual(UpdateHealth.onCaptureFailure(displaysAsleep: true), .deferAsleep, "CoreGraphics: every display asleep")
+        XCTAssertEqual(UpdateHealth.onCaptureFailure(displaysAsleep: false), .retry,
+                       "a display awake: the capture is mandatory, even when ScreenCaptureKit lists no display")
+        var w = UpdateHealth.AfterWake()
+        XCTAssertFalse(w.failed()); XCTAssertFalse(w.failed())
+        w.asleepAgain()
+        XCTAssertFalse(w.failed()); XCTAssertFalse(w.failed())
+        XCTAssertTrue(w.failed(), "the third try in a row after a wake records the failure")
     }
 }
 
