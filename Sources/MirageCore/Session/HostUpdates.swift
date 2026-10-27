@@ -69,6 +69,16 @@ public enum HostProbe {
     /// Probes in a row without an answer before the list says "Not reachable" (asleep, off, or off the network: a probe
     /// cannot tell these apart). The first answer clears it, quietly.
     public static let unreachableAfter = 2
+    /// Failures closer together than this are one round (a list appearing and the app becoming active both probe).
+    public static let roundGap: TimeInterval = 30
+    /// And no answer for at least this long.
+    public static let unreachableFor: TimeInterval = 60
+    /// The refusals that are about this device itself (it is not, or no longer, paired there): only these grey a row.
+    /// Anything else (a transient refusal, a bad moment) is not kept.
+    public static func deviceRefusal(_ reason: String) -> String? {
+        let r = reason.lowercased()
+        return ["device not paired", "unknown device", "removed", "revoked"].contains(where: { r.contains($0) }) ? reason : nil
+    }
 
     @discardableResult
     public static func probe(connect: HostUpdateTrigger.Connect, store: Store, alias: String, now: Date = Date()) async -> Bool {
@@ -80,18 +90,21 @@ public enum HostProbe {
         } catch MirageError.transport {
             try? store.updateKnownHost(alias) { h in
                 if h.unreachableSince == nil { h.unreachableSince = now }
-                h.failedProbes = (h.failedProbes ?? 0) + 1
+                if h.lastProbeFailure.map({ now.timeIntervalSince($0) >= roundGap || now < $0 }) ?? true {
+                    h.failedProbes = (h.failedProbes ?? 0) + 1
+                    h.lastProbeFailure = now
+                }
             }
             return false
         } catch {
             // It answered, with a refusal or a protocol it does not share: seen, and the refusal is in the record (a version
-            // refusal as `incompatibility`, anything else as `refusal`).
+            // refusal as `incompatibility`, one about this device as `refusal`; any other is not kept).
             let words: String? = {
                 guard case MirageError.authenticationFailed(let s) = error, s.hasPrefix("host rejected: ") else { return nil }
-                return String(s.dropFirst("host rejected: ".count))
+                return deviceRefusal(String(s.dropFirst("host rejected: ".count)))
             }()
             try? store.updateKnownHost(alias) { h in
-                h.lastSeen = now; h.unreachableSince = nil; h.failedProbes = nil
+                h.lastSeen = now; h.unreachableSince = nil; h.failedProbes = nil; h.lastProbeFailure = nil
                 h.refusal = h.incompatibility == nil ? words : nil
             }
             return true

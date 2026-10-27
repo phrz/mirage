@@ -170,14 +170,20 @@ public final class Store: @unchecked Sendable {
         /// and the protocol range it speaks.
         public var lastSeen: Date?
         public var unreachableSince: Date?
-        /// Status probes in a row that got no answer (phrz, 2026-10-27: the list shows "Not reachable" only after
-        /// `HostProbe.unreachableAfter` of them, so one lost packet never greys a row). nil: none since the last answer.
+        /// Probe rounds in a row that got no answer (phrz, 2026-10-27: the list shows "Not reachable" only after
+        /// `HostProbe.unreachableAfter` of them, so one lost packet never greys a row). Failures within
+        /// `HostProbe.roundGap` of the last count once (two probes of one blip). nil: none since the last answer.
         public var failedProbes: Int?
+        public var lastProbeFailure: Date?
         /// The host answered and refused this device (not for its version): its words ("unknown device"). nil otherwise.
         public var refusal: String?
-        /// The device list's "Not reachable": no answer since `unreachableSince`, to enough probes in a row. A record from
-        /// before the count was kept counts as unreachable.
-        public var isUnreachable: Bool { unreachableSince != nil && (failedProbes ?? HostProbe.unreachableAfter) >= HostProbe.unreachableAfter }
+        /// The device list's "Not reachable": no answer to enough probe rounds in a row, and none for at least
+        /// `HostProbe.unreachableFor`. A record from before the count was kept counts its rounds as enough.
+        public var isUnreachable: Bool { isUnreachable(now: Date()) }
+        public func isUnreachable(now: Date) -> Bool {
+            guard let since = unreachableSince else { return false }
+            return (failedProbes ?? HostProbe.unreachableAfter) >= HostProbe.unreachableAfter && now.timeIntervalSince(since) >= HostProbe.unreachableFor
+        }
         public var triggerFeature: Bool?
         public var hostPolicy: UpdatePermission?
         /// DESIGN §3.12: the host's Curtain and Lock when finished settings, from its last Welcome.

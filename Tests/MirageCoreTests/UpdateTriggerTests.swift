@@ -340,17 +340,27 @@ final class UpdateTriggerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tmp) }
         let store = try Store(root: tmp)
         try store.remember(host: .init(hostID: "h", hostName: "gone", publicKey: Data(), endpoint: "gone", pairedAt: Date()), as: "gone")
-        let ok = await HostProbe.probe(connect: { throw MirageError.transport("connect timed out after 3 s") }, store: store, alias: "gone")
+        let t0 = Date()
+        let ok = await HostProbe.probe(connect: { throw MirageError.transport("connect timed out after 3 s") }, store: store, alias: "gone", now: t0)
         XCTAssertFalse(ok)
         let since = try XCTUnwrap(store.knownHosts()["gone"]?.unreachableSince)
-        XCTAssertFalse(try XCTUnwrap(store.knownHosts()["gone"]).isUnreachable, "one lost probe does not grey the row")
-        _ = await HostProbe.probe(connect: { throw MirageError.transport("again") }, store: store, alias: "gone")
+        XCTAssertFalse(try XCTUnwrap(store.knownHosts()["gone"]).isUnreachable(now: t0), "one lost probe does not grey the row")
+        // iOS cold launch: the list appearing and the app becoming active probe twice within a second: one round.
+        _ = await HostProbe.probe(connect: { throw MirageError.transport("again") }, store: store, alias: "gone", now: t0.addingTimeInterval(1))
+        XCTAssertEqual(try store.knownHosts()["gone"]?.failedProbes, 1)
+        XCTAssertFalse(try XCTUnwrap(store.knownHosts()["gone"]).isUnreachable(now: t0.addingTimeInterval(90)), "one round, however late")
+        _ = await HostProbe.probe(connect: { throw MirageError.transport("again") }, store: store, alias: "gone", now: t0.addingTimeInterval(45))
         XCTAssertEqual(try store.knownHosts()["gone"]?.unreachableSince, since, "since the first failure")
-        XCTAssertTrue(try XCTUnwrap(store.knownHosts()["gone"]).isUnreachable, "two probes without an answer: Not reachable")
+        let k0 = try XCTUnwrap(store.knownHosts()["gone"])
+        XCTAssertFalse(k0.isUnreachable(now: t0.addingTimeInterval(45)), "two rounds, but not yet a minute")
+        XCTAssertTrue(k0.isUnreachable(now: t0.addingTimeInterval(61)), "two rounds and a minute without an answer: Not reachable")
         // It answers again and refuses this device: seen (not unreachable), with its words.
-        _ = await HostProbe.probe(connect: { throw MirageError.authenticationFailed("host rejected: unknown device") }, store: store, alias: "gone")
+        _ = await HostProbe.probe(connect: { throw MirageError.authenticationFailed("host rejected: device not paired") }, store: store, alias: "gone")
         let k = try XCTUnwrap(store.knownHosts()["gone"])
-        XCTAssertFalse(k.isUnreachable); XCTAssertNil(k.failedProbes); XCTAssertEqual(k.refusal, "unknown device")
+        XCTAssertFalse(k.isUnreachable); XCTAssertNil(k.failedProbes); XCTAssertEqual(k.refusal, "device not paired")
+        // A refusal that is not about this device (review, 2026-10-27) is not kept: the row is not greyed for it.
+        _ = await HostProbe.probe(connect: { throw MirageError.authenticationFailed("host rejected: bad signature") }, store: store, alias: "gone")
+        XCTAssertNil(try store.knownHosts()["gone"]?.refusal)
     }
 
     /// A probe is never a stream (the Automatic gate counts streams), never a listener for notices, and is logged once
