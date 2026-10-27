@@ -177,9 +177,10 @@ public struct AgentUpdater: Sendable {
 
     /// Tells the other listening viewers, then the one that asked, and hands the restart over.
     func restart(_ h: HandOff, verb: String, requester: UpdateRequester, reply: (ControlMessage.UpdateStatus) -> Void) async {
-        await listeners.broadcast(.init(phase: .restarting, message: "\(hostName) is restarting into \(h.into) (\(verb) by \(requester.name))",
+        // What viewers show: the update going on, never a restart (CLAUDE.md: wording that never alarms). The log says more.
+        await listeners.broadcast(.init(phase: .restarting, message: verb == "a rollback" ? "Updating \(hostName) to \(h.into)…" : "Updating \(hostName)…",
                                         from: h.from, to: h.to, yours: false), except: requester.connectionID)
-        reply(.init(phase: .restarting, message: "\(hostName) is restarting into \(h.into)", from: h.from, to: h.to, yours: true))
+        reply(.init(phase: .restarting, message: "Updating \(hostName)…", from: h.from, to: h.to, yours: true))
         await handOff(h)
     }
 }

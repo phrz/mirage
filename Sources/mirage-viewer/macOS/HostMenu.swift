@@ -277,12 +277,12 @@ final class HostMenu: NSObject, NSMenuDelegate {
         case .notFound: label("The host is missing from this copy of Mirage")
         default: break
         }
-        if isConnected, let u = updateStatus ?? status?.updating { label("Updating: \(u.message)") }
+        if isConnected, (updateStatus ?? status?.updating) != nil { label("Updating this Mac…") }
         else if isConnected, let line = status?.updateLine {
             label("Update available: \(line)")
             if status?.canUpdate == true { _ = item("Update Now", #selector(updateNow)) }
         }
-        if isConnected, let s = status, s.restarting == true { label("Restarting to apply permissions…") }
+        if isConnected, let s = status, s.restarting == true { label("Applying permissions…") }
         else if isConnected, let s = status, s.hostSettings?.shareThisMac != false {
             if s.screenRecording == false || s.accessibility == false { _ = item("Allow Permissions…", #selector(showPermissions)) }
             if let c = s.connected, !c.isEmpty { label("Connected: \(c.joined(separator: ", "))") }
@@ -655,15 +655,15 @@ struct LocalUpdateBar: View {
         Group {
             if let step = model.step {
                 let failed = step.phase == .failed || step.phase == .rolledBack
-                UpdateCardView(title: failed ? (step.phase == .rolledBack ? "The update was rolled back" : "The update didn't finish")
-                                             : step.phase == .done ? "Mirage is up to date" : "Updating Mirage",
-                               action: nil, progress: step.isFinal ? nil : step.message, failure: failed ? step.message : nil,
+                // In place: "Updating Mirage…" the whole way; a failure keeps the host's reason until closed; done goes.
+                UpdateCardView(title: failed ? (step.phase == .rolledBack ? "Mirage kept its previous version" : "Mirage didn't update")
+                                             : "Updating Mirage…",
+                               action: nil, progress: step.isFinal ? nil : "", failure: failed ? step.message : nil,
                                onClose: { model.dismissStep() })
                 // Done needs no acknowledging: it passes after a few seconds (a failure or rollback waits for the close).
                 .task(id: step) {
-                    guard step.phase == .done else { return }
-                    try? await Task.sleep(for: ListNotices.shared.lifetime)
-                    if !Task.isCancelled, model.step == step { model.dismissStep() }
+                    // Done says nothing: the card goes (the version changed).
+                    if step.phase == .done, model.step == step { model.dismissStep() }
                 }
             } else if model.cardVisible(), let o = model.offered {
                 UpdateCardView(title: "Mirage \(o.display) is available", action: model.canUpdate ? "Update Now" : nil,

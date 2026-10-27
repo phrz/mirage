@@ -297,7 +297,8 @@ final class HostUpdateCenter: ObservableObject {
     func update(_ h: PairedHost) {
         guard !isRunning(h.alias), case .updateAvailable(_, let to) = h.update else { return }
         let alias = h.alias, name = h.title
-        status[alias] = .init(phase: .checking, message: "Asking \(name) to update…", yours: true)
+        names[alias] = name
+        status[alias] = .init(phase: .checking, message: "Updating \(name)…", yours: true)
         let connect = HostConnector.connect(alias: alias, timeout: 10)
         Task.detached {
             let end = await HostUpdateTrigger.run(connect: connect, command: .update(targetBuild: to.build), hostName: name) { st in
@@ -314,10 +315,6 @@ final class HostUpdateCenter: ObservableObject {
     func finish(_ alias: String, name: String, _ end: ControlMessage.UpdateStatus) {
         status[alias] = nil
         revision += 1
-        if end.notPublished == true {
-            ListNotices.shared.flash("\(name) doesn't see that build yet. Try again in a few minutes.")
-            return
-        }
         switch UpdateOutcomeNotice.make(end, name: name) {
         case .quiet: break
         case .note(let s): ListNotices.shared.flash(s)
@@ -325,10 +322,12 @@ final class HostUpdateCenter: ObservableObject {
         }
     }
 
-    /// The row's line while an update runs (in place of its detail).
+    /// The Macs' names while their updates run.
+    private var names: [String: String] = [:]
+    /// The row's line while an update runs (in place of its detail): one line, the whole way through.
     func line(_ alias: String) -> String? {
         guard let s = status[alias], !s.isFinal else { return nil }
-        return s.message
+        return "Updating \(names[alias] ?? alias)…"
     }
 
     /// Opens the prompt for a row; a Mac whose trigger was never learned is probed first (the prompt says "Checking…").
@@ -630,7 +629,7 @@ enum PairingPhase: Equatable {
     var line: String? {
         switch self {
         case .pending(let n): return "Waiting for \(n) to accept…"
-        case .accepted(let n): return "Checking \(n)…"
+        case .accepted(let n): return "Waiting for \(n) to accept…"
         case .connectable, .refused: return nil
         }
     }
@@ -771,7 +770,7 @@ final class HostPairingCenter: ObservableObject {
         // How it ended: a passing note when it worked, an alert when it did not (phrz, 2026-10-26: nothing stays).
         switch next {
         case .connectable:
-            if let n = next.note { ListNotices.shared.flash(n) }
+            // No note (CLAUDE.md): the row becoming a normal one, selected, is the news.
             selectRequest = alias
             tasks[alias] = nil
         case .refused(let n, let why):
@@ -859,18 +858,21 @@ enum UpdateOutcomeNotice: Equatable {
     case alert(ListAlert)
 
     static func make(_ end: ControlMessage.UpdateStatus, name: String) -> UpdateOutcomeNotice {
+        // CLAUDE.md: an alert, or nothing. Success says nothing (the row's version changes, the badge goes).
         if end.unanswered == true { return .quiet }
-        if end.notPublished == true { return .note("\(name) doesn't see that build yet. Try again in a few minutes.") }
+        if end.notPublished == true {
+            return .alert(ListAlert(title: "\(name) can't get that build yet", message: "Try again in a few minutes."))
+        }
         switch end.phase {
         case .done:
             if end.message.contains("missing") {
-                return .alert(ListAlert(title: "\(name) updated, and needs a permission", message: end.message + ". Grant it on that Mac."))
+                return .alert(ListAlert(title: "\(name) needs a permission", message: "Allow it in the window Mirage shows on that Mac."))
             }
-            return .note("Updated \(name): \(end.message)")
-        case .failed: return .alert(ListAlert(title: "\(name) did not update", message: end.message))
-        case .rolledBack: return .alert(ListAlert(title: "\(name) rolled back its update", message: end.message))
+            return .quiet
+        case .failed: return .alert(ListAlert(title: "\(name) didn't update", message: end.message))
+        case .rolledBack: return .alert(ListAlert(title: "\(name) kept its previous version", message: end.message))
         case .unknown, .trial:
-            return .alert(ListAlert(title: "\(name) is still checking the update", message: end.message))
+            return .alert(ListAlert(title: "\(name) is finishing its update", message: end.message))
         default: return .quiet
         }
     }
@@ -1017,7 +1019,7 @@ struct UpdateCardView: View {
                 .font(.system(size: 22))
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).fontWeight(.medium)
-                if let p = progress { Text(p).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+                if let p = progress, !p.isEmpty { Text(p).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
                 if let f = failure { Text(f).font(.caption).foregroundStyle(.secondary).lineLimit(3) }
             }
             Spacer(minLength: 8)

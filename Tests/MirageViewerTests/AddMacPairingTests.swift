@@ -80,7 +80,7 @@ final class AddMacPairingTests: XCTestCase {
         rows = c.rows(existing)
         XCTAssertEqual(rows.map(\.alias), ["mac-daddy"], "a normal row now: the list shows it from known-hosts")
         XCTAssertEqual(c.takeSelection(), "studio.local", "selected again once ready")
-        XCTAssertEqual(ListNotices.shared.note, "Paired with studio.", "a passing note")
+        XCTAssertNil(ListNotices.shared.note, "no passing note (CLAUDE.md)")
         XCTAssertTrue(ListNotices.shared.alerts.isEmpty, "nothing to acknowledge")
         XCTAssertEqual(ViewerSettings.recentHosts(defaults).first, "studio.local", "first in the list")
     }
@@ -111,7 +111,7 @@ final class AddMacPairingTests: XCTestCase {
         c.check = { _ in { false } }
         await c.pair(alias: "studio.local", hostName: nil) { _ in DeviceRecord(id: "s", name: "studio", publicKey: Data(), pairedAt: Date()) }.value
         XCTAssertEqual(c.phases["studio.local"], .connectable(hostName: "studio", answered: false))
-        XCTAssertTrue(ListNotices.shared.note?.hasPrefix("Paired with studio.") ?? false, ListNotices.shared.note ?? "nil")
+        XCTAssertNil(ListNotices.shared.note, "no passing note (CLAUDE.md): the normal row is the news")
     }
 
     /// A Mac that is recorded already (pairing again from a link) keeps its row and carries the phase.

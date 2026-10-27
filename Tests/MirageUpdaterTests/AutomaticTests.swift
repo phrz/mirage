@@ -58,7 +58,7 @@ final class AutomaticTests: XCTestCase {
                        "not an Update offer while the host installs one")
         XCTAssertEqual(HostUpdateState.evaluate(hostVersion: ver(449), latestAvailable: ver(450), incompatibility: nil,
                                                 updating: .init(phase: .done, message: "")), .updateAvailable(from: ver(449), to: ver(450)))
-        XCTAssertEqual(HostUpdateState.updating(to: ver(450)).note(hostName: "m"), "Updating to 0.4.0 (450)…")
+        XCTAssertEqual(HostUpdateState.updating(to: ver(450)).note(hostName: "m"), "Updating m…")
     }
 
     /// release.sh's Homebrew step: version "VERSION,BUILD", the SHA-256 and the URL; stable and beta only.

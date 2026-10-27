@@ -730,9 +730,12 @@ final class ViewerSession: @unchecked Sendable {
                 // U4 hook: the host restarts into an update; the session reconnects by itself. The banner goes after a minute.
                 log("host update: \(u.message)")
                 Task { @MainActor in
-                    model.hostNotice = u.message
-                    try? await Task.sleep(for: .seconds(60))
-                    if model.hostNotice == u.message { model.hostNotice = nil }
+                    // While it runs: "Updating <host>…", in place; its end says nothing (an outcome while away neither).
+                    guard !u.isFinal, u.phase != .trial, u.phase != .unknown else { model.hostNotice = nil; return }
+                    let text = "Updating \(model.hostName)…"
+                    model.hostNotice = text
+                    try? await Task.sleep(for: .seconds(120))
+                    if model.hostNotice == text { model.hostNotice = nil }
                 }
             default:
                 log("unexpected control message: \(msg)")

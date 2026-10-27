@@ -413,16 +413,17 @@ final class ViewerSettingsTests: XCTestCase {
         XCTAssertNil(n.current)
     }
 
-    /// An update from here: the row line shows only while it runs; done is a passing note, a failure an alert.
+    /// An update from here: "Updating <host>…" on the row while it runs; done says nothing; a failure is an alert.
     func testUpdateOutcomesDoNotStayInTheList() {
         let n = ListNotices.shared, c = HostUpdateCenter.shared
         n.reset()
         defer { n.reset() }
         c.finish("mac-daddy", name: "mac-daddy", .init(phase: .done, message: "now 0.1 (480)"))
         XCTAssertNil(c.line("mac-daddy"), "the row has its own status again")
-        XCTAssertEqual(n.note, "Updated mac-daddy: now 0.1 (480)")
+        XCTAssertNil(n.note, "success says nothing")
+        XCTAssertNil(n.current)
         c.finish("mac-daddy", name: "mac-daddy", .init(phase: .rolledBack, message: "started 3 times"))
-        XCTAssertEqual(n.current?.title, "mac-daddy rolled back its update")
+        XCTAssertEqual(n.current?.title, "mac-daddy kept its previous version")
     }
 
     /// How an update's end reaches the person: the host's reason as an alert, a passing note when it simply worked, nothing
@@ -431,8 +432,15 @@ final class ViewerSettingsTests: XCTestCase {
         typealias S = ControlMessage.UpdateStatus
         XCTAssertEqual(UpdateOutcomeNotice.make(S(phase: .unknown, message: "green-machine has not answered", unanswered: true), name: "g"), .quiet)
         XCTAssertEqual(UpdateOutcomeNotice.make(S(phase: .failed, message: "x", notPublished: true), name: "g"),
-                       .note("g doesn't see that build yet. Try again in a few minutes."))
-        XCTAssertEqual(UpdateOutcomeNotice.make(S(phase: .done, message: "g runs 0.1 (483)"), name: "g"), .note("Updated g: g runs 0.1 (483)"))
+                       .alert(ListAlert(title: "g can't get that build yet", message: "Try again in a few minutes.")))
+        XCTAssertEqual(UpdateOutcomeNotice.make(S(phase: .done, message: "g runs 0.1 (483)"), name: "g"), .quiet, "success says nothing")
+        XCTAssertEqual(UpdateOutcomeNotice.make(S(phase: .done, message: "g runs 0.1 (483); capture check deferred: display asleep"), name: "g"), .quiet,
+                       "the host's own checks are never shown")
+        for words in ["restart", "Restart", "reboot"] {
+            for s in [S(phase: .failed, message: "x"), S(phase: .rolledBack, message: "x"), S(phase: .unknown, message: "x")] {
+                if case .alert(let a) = UpdateOutcomeNotice.make(s, name: "g") { XCTAssertFalse(a.title.contains(words), a.title) }
+            }
+        }
         guard case .alert(let grant) = UpdateOutcomeNotice.make(S(phase: .done, message: "g runs 0.1 (483); Screen Recording missing (System Settings)"), name: "g") else { return XCTFail() }
         XCTAssertTrue(grant.title.contains("needs a permission"))
         guard case .alert(let rb) = UpdateOutcomeNotice.make(S(phase: .rolledBack, message: "not healthy within 5 min"), name: "g") else { return XCTFail() }

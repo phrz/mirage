@@ -64,7 +64,7 @@ public enum HostUpdateTrigger {
     static func awaitRestart(connect: Connect, command: UpdateCommand, from: MirageVersion?, hostName: String, timing: Timing, lost: Bool,
                              onStatus: @escaping @Sendable (ControlMessage.UpdateStatus) -> Void) async -> ControlMessage.UpdateStatus {
         let end = Date().addingTimeInterval(timing.reconnectFor)
-        if !lost { onStatus(.init(phase: .restarting, message: "\(hostName) is restarting", from: from, yours: true)) }
+        if !lost { onStatus(.init(phase: .restarting, message: "Updating \(hostName)…", from: from, yours: true)) }
         var lastTrial: ControlMessage.UpdateStatus?
         while Date() < end {
             try? await Task.sleep(for: .seconds(timing.pollEvery))
@@ -112,9 +112,10 @@ public enum HostUpdateTrigger {
             return .init(phase: .trial, message: "\(w.hostName) runs \(now.display), checking its health\(waiting)", from: was, to: now, yours: true)
         }
         let verb = command == .rollback ? "rolled back to" : "runs"
-        // What the commit noted: a grant missing at the Mac, or the capture check deferred while the display slept.
+        // What the commit noted, only when it needs a person: a grant missing at the Mac. (A capture check deferred while the
+        // display slept is the host's own business: never shown.)
         let note = r.flatMap { $0.phase == .done && $0.to?.build == now.build ? $0.message.split(separator: ";", maxSplits: 1).dropFirst().first : nil }
-            .map { ";" + $0 } ?? ""
+            .flatMap { $0.contains("missing") ? ";" + $0 : nil } ?? ""
         return .init(phase: .done, message: "\(w.hostName) \(verb) \(now.display)\(note)", from: was, to: now, yours: true)
     }
 }

@@ -239,14 +239,17 @@ final class UpdateTriggerTests: XCTestCase {
         XCTAssertGreaterThan(HostUpdateTrigger.Timing().reconnectFor, 5 * 60)
     }
 
-    /// The commit's note travels: a grant missing at the Mac, or the capture deferred while the display slept.
+    /// The commit's note travels only when it needs a person (a grant missing at the Mac); a capture check deferred while
+    /// the display slept never reaches the person.
     func testTheCommitNoteIsInTheOutcome() {
         let was = MirageVersion(version: "0.1", build: 475, commit: "a", channel: .nightly)
         let now = MirageVersion(version: "0.1", build: 483, commit: "b", channel: .nightly)
         let r = ControlMessage.UpdateStatus(phase: .done, message: "committed 2.4 s after the swap; capture check deferred: display asleep", from: was, to: now, at: Date())
         let w = ControlMessage.Welcome(hostName: "green-machine", sessionID: "s", hostVersion: now, updateResult: r)
-        XCTAssertEqual(HostUpdateTrigger.outcome(welcome: w, command: .update(targetBuild: 479), from: was)?.message,
-                       "green-machine runs 0.1 (483); capture check deferred: display asleep")
+        XCTAssertEqual(HostUpdateTrigger.outcome(welcome: w, command: .update(targetBuild: 479), from: was)?.message, "green-machine runs 0.1 (483)")
+        var r2 = r; r2.message = "committed 2.4 s after the swap; Screen Recording missing (System Settings), accessibility granted"
+        let w2 = ControlMessage.Welcome(hostName: "green-machine", sessionID: "s", hostVersion: now, updateResult: r2)
+        XCTAssertTrue(HostUpdateTrigger.outcome(welcome: w2, command: .update(targetBuild: 479), from: was)?.message.contains("missing") ?? false)
     }
 
     /// The connection is lost before "restarting": the viewer does not claim a restart; the host's record (a failed

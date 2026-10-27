@@ -159,7 +159,7 @@ public enum HostUpdateState: Equatable, Sendable {
         case .updateAvailable(let from, let to): return "Update available: \(from.display) → \(to.display)"
         case .hostTooOld: return "Mirage on \(hostName) is too old for this device: update \(hostName)"
         case .viewerTooOld: return "This Mirage is too old for \(hostName): update this device"
-        case .updating(let to): return "Updating\(to.map { " to \($0.display)" } ?? "")…"
+        case .updating: return "Updating \(hostName)…"
         }
     }
 }
