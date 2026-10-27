@@ -53,7 +53,8 @@ struct DesktopScreen: View {
             }
             .padding(10)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .allowsHitTesting(model.inputHeld)
+            // Hit-testable (phrz, 2026-10-27): a tap on a banner's button is the banner's, never the host's; the empty
+            // area around them passes through to the picture.
         }
         .background(Color.black.ignoresSafeArea())
         .sheet(isPresented: $settingsShown, onDismiss: { showToolbar() }) {

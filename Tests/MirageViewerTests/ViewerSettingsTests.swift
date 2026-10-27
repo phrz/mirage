@@ -577,6 +577,28 @@ final class ViewerSettingsTests: XCTestCase {
         }
     }
 
+    /// Local overlays over the picture (phrz, 2026-10-27: "Save this password" could never be pressed): over one, the
+    /// pointer and presses stay local; Return and Escape act on its buttons; elsewhere input goes to the host.
+    func testOverlayInputRouting() {
+        final class Hits { var saved = 0, declined = 0 }
+        let hits = Hits()
+        let offer = LocalOverlay(id: "unlockOffer", rect: CGRect(x: 12, y: 500, width: 360, height: 40),
+                                 actions: OverlayActions(onDefault: { hits.saved += 1 }, onCancel: { hits.declined += 1 }))
+        let banner = LocalOverlay(id: "banner:Reconnecting", rect: CGRect(x: 12, y: 450, width: 200, height: 28), actions: nil)
+        let overlays = [banner, offer]
+        XCTAssertEqual(OverlayInput.pointer(at: CGPoint(x: 100, y: 520), overlays: overlays), .local, "on the offer: the viewer's")
+        XCTAssertEqual(OverlayInput.pointer(at: CGPoint(x: 100, y: 460), overlays: overlays), .local, "a plain banner too")
+        XCTAssertEqual(OverlayInput.pointer(at: CGPoint(x: 600, y: 200), overlays: overlays), .forward, "the picture: the host's")
+        XCTAssertEqual(OverlayInput.key(.returnKey, pointer: CGPoint(x: 100, y: 520), overlays: overlays), .overlayDefault)
+        XCTAssertEqual(OverlayInput.key(.escape, pointer: CGPoint(x: 100, y: 520), overlays: overlays), .overlayCancel)
+        XCTAssertEqual(OverlayInput.key(.other, pointer: CGPoint(x: 100, y: 520), overlays: overlays), .local, "nothing leaks to the host")
+        XCTAssertEqual(OverlayInput.key(.returnKey, pointer: CGPoint(x: 100, y: 460), overlays: overlays), .local, "a banner without buttons")
+        XCTAssertEqual(OverlayInput.key(.returnKey, pointer: CGPoint(x: 600, y: 200), overlays: overlays), .forward)
+        XCTAssertEqual(OverlayInput.key(.returnKey, pointer: nil, overlays: overlays), .forward)
+        OverlayInput.overlay(at: CGPoint(x: 100, y: 520), in: overlays)?.actions?.onDefault?()
+        XCTAssertEqual(hits.saved, 1)
+    }
+
     /// Get Info on the Mac: one small window per Mac, "<host> Info", not resizable, brought forward when asked again.
     func testGetInfoWindow() {
         var h = PairedHost(alias: "green.local", name: "green-machine", model: "Mac15,4")

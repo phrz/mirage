@@ -20,6 +20,12 @@ final class VideoNSView: NSView {
     private var aspect: CGFloat = 16.0 / 9.0
     private var resizeWork: DispatchWorkItem?
     private var pointerInside = false
+    /// The pointer is over a local overlay (a banner or prompt over the picture): it is the viewer's there.
+    private var overOverlay = false
+    private func overlays() -> [LocalOverlay] { MainActor.assumeIsolated { model?.localOverlays ?? [] } }
+    private func onOverlay(_ e: NSEvent) -> Bool {
+        OverlayInput.pointer(at: convert(e.locationInWindow, from: nil), overlays: overlays()) == .local
+    }
     private var localPointer: CGPoint = .zero
     private var lastRequested: (Int, Int) = (0, 0)
     private var displayLink: CADisplayLink?
@@ -181,7 +187,7 @@ final class VideoNSView: NSView {
         cursorLayer.frame = CGRect(x: pos.x - c.hotspot.x, y: pos.y - c.hotspot.y, width: c.size.width, height: c.size.height)
     }
 
-    override func cursorUpdate(with event: NSEvent) { blankCursor.set() }
+    override func cursorUpdate(with event: NSEvent) { if overOverlay { NSCursor.arrow.set() } else { blankCursor.set() } }
     override func mouseEntered(with event: NSEvent) { pointerInside = true; blankCursor.set(); updateCursorLayer() }
     override func mouseExited(with event: NSEvent) { pointerInside = false; NSCursor.arrow.set(); updateCursorLayer() }
 
@@ -192,6 +198,15 @@ final class VideoNSView: NSView {
     private var observeOnly: Bool { model?.observeOnly ?? false }
     private func moved(_ e: NSEvent) {
         localPointer = convert(e.locationInWindow, from: nil)
+        // Over a local overlay the pointer is the viewer's, as past the picture's edge: the system cursor, nothing sent,
+        // the remote cursor stays where it was. Leaving it, the picture takes the pointer back as when it enters.
+        if OverlayInput.pointer(at: localPointer, overlays: overlays()) == .local {
+            if !overOverlay { overOverlay = true; NSCursor.arrow.set() }
+            pointerInside = false
+            updateCursorLayer()
+            return
+        }
+        if overOverlay { overOverlay = false; blankCursor.set() }
         pointerInside = bounds.contains(localPointer)
         updateCursorLayer()
         guard !observeOnly else { return }
@@ -201,6 +216,7 @@ final class VideoNSView: NSView {
     override func mouseMoved(with event: NSEvent) { moved(event) }
     override func mouseDragged(with event: NSEvent) {
         if observeOnly { moved(event); return }
+        if layerDrag == nil, drag == nil, onOverlay(event) { moved(event); return }
         if var ld = layerDrag, let session, let p = streamPixel(event) {
             localPointer = convert(event.locationInWindow, from: nil); updateCursorLayer()
             let dx = p.0 - ld.start.0, dy = p.1 - ld.start.1
@@ -232,6 +248,7 @@ final class VideoNSView: NSView {
         return session?.send(.mouseButton(.init(button: b, down: down, x: x, y: y, clickCount: e.clickCount, modifiers: flags(e)))) ?? 0
     }
     override func mouseDown(with event: NSEvent) {
+        if onOverlay(event) { return }   // the overlay's own click (its buttons take it), never the host's
         window?.makeFirstResponder(self)
         session?.typeaheadInvalidateBeforeClick()
         if let d = drag { session?.endDrag(windowID: d.windowID) }
@@ -257,6 +274,7 @@ final class VideoNSView: NSView {
         }
     }
     override func mouseUp(with event: NSEvent) {
+        if layerDrag == nil, drag == nil, onOverlay(event) { return }
         if let ld = layerDrag {
             layerDrag = nil
             if session?.injectedDrags == true {
@@ -276,13 +294,13 @@ final class VideoNSView: NSView {
         }
         button(event, 0, down: false); if let d = drag { session?.endDrag(windowID: d.windowID) }; drag = nil
     }
-    override func rightMouseDown(with event: NSEvent) { button(event, 1, down: true) }
-    override func rightMouseUp(with event: NSEvent) { button(event, 1, down: false) }
-    override func otherMouseDown(with event: NSEvent) { button(event, max(2, event.buttonNumber), down: true) }
-    override func otherMouseUp(with event: NSEvent) { button(event, max(2, event.buttonNumber), down: false) }
+    override func rightMouseDown(with event: NSEvent) { if !onOverlay(event) { button(event, 1, down: true) } }
+    override func rightMouseUp(with event: NSEvent) { if !onOverlay(event) { button(event, 1, down: false) } }
+    override func otherMouseDown(with event: NSEvent) { if !onOverlay(event) { button(event, max(2, event.buttonNumber), down: true) } }
+    override func otherMouseUp(with event: NSEvent) { if !onOverlay(event) { button(event, max(2, event.buttonNumber), down: false) } }
 
     override func scrollWheel(with event: NSEvent) {
-        guard !observeOnly else { return }
+        guard !observeOnly, !onOverlay(event) else { return }
         let (x, y) = normalized(event)
         let precise = event.hasPreciseScrollingDeltas
         let dx = precise ? event.scrollingDeltaX : event.deltaX, dy = precise ? event.scrollingDeltaY : event.deltaY
@@ -300,19 +318,38 @@ final class VideoNSView: NSView {
 
     private func handleLocal(_ e: NSEvent) -> Bool { MainActor.assumeIsolated { LocalShortcuts.handle(e, session: session) } }
 
+    /// Keys the host has as down: their release still goes to it, wherever the pointer is then (no key left stuck).
+    private var keysDown: Set<UInt16> = []
     private func key(_ e: NSEvent, down: Bool) {
         guard !observeOnly, let session else { return }
+        if down { keysDown.insert(e.keyCode) } else { keysDown.remove(e.keyCode) }
         let seq = session.send(.key(.init(keyCode: e.keyCode, down: down, isRepeat: down && e.isARepeat, modifiers: flags(e),
                                           characters: down ? e.characters : nil)))
         if down { session.typeaheadKey(keyCode: e.keyCode, characters: e.characters, modifiers: e.modifierFlags, seq: seq) }
     }
-    override func keyDown(with event: NSEvent) { if !handleLocal(event) { key(event, down: true) } }
-    override func keyUp(with event: NSEvent) { if !observeOnly, event.modifierFlags.intersection([.control, .option, .command, .shift]) == [.control, .option, .command] { return }; key(event, down: false) }
+    /// A key while the pointer rests on a local overlay: Return and Escape act on it, nothing reaches the host.
+    private func overlayKey(_ e: NSEvent, down: Bool) -> Bool {
+        guard overOverlay else { return false }
+        if !down, keysDown.contains(e.keyCode) { return false }   // pressed before the overlay: its release goes as usual
+        let k: OverlayInput.Key = e.keyCode == 36 || e.keyCode == 76 ? .returnKey : e.keyCode == 53 ? .escape : .other
+        let o = overlays()
+        let route = OverlayInput.key(k, pointer: localPointer, overlays: o)
+        guard route != .forward else { return false }
+        if down, let target = OverlayInput.overlay(at: localPointer, in: o) {
+            if route == .overlayDefault { target.actions?.onDefault?() }
+            if route == .overlayCancel { target.actions?.onCancel?() }
+        }
+        return true
+    }
+    override func keyDown(with event: NSEvent) { if overlayKey(event, down: true) { return }; if !handleLocal(event) { key(event, down: true) } }
+    override func keyUp(with event: NSEvent) {
+        if overlayKey(event, down: false) { return }; if !observeOnly, event.modifierFlags.intersection([.control, .option, .command, .shift]) == [.control, .option, .command] { return }; key(event, down: false) }
     override func flagsChanged(with event: NSEvent) { if !observeOnly { session?.send(.modifiers(.init(keyCode: event.keyCode, modifiers: flags(event)))) } }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         // Swallow ⌘-shortcuts so the viewer's own menu does not eat them; forward to the host. With Send Keyboard Shortcuts
         // to Mac off, this app's menus get them first (⌘Q, ⌘W, ⌘,); what no menu item takes still goes to the host.
         guard window?.firstResponder === self else { return false }
+        if overOverlay, event.type == .keyDown || event.type == .keyUp { return overlayKey(event, down: event.type == .keyDown) || true }
         if handleLocal(event) { return true }
         let capture = MainActor.assumeIsolated { controls?.captureShortcuts ?? true }
         if !capture, event.type == .keyDown, event.modifierFlags.contains(.command), NSApp.mainMenu?.performKeyEquivalent(with: event) == true { return true }

@@ -12,6 +12,8 @@ import MirageCore
 /// Everything the viewer knows about one host connection, published for SwiftUI.
 @MainActor
 final class ViewerModel: ObservableObject {
+    /// The local overlays over the picture now (SessionBanners' banners and prompts), where the pointer is the viewer's.
+    var localOverlays: [LocalOverlay] = []
     @Published var status = "connecting…"
     @Published var error: String?
     @Published var stats = Stats()

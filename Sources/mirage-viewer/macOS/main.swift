@@ -826,11 +826,13 @@ struct ContentView: View {
             VideoView(session: session, model: model, controls: controls)
             if model.showStats { StatsOverlay(model: model).padding(8) }
             // The connection's state, as iOS shows it (`SessionBanners`); no numbers unless the stats overlay is on.
+            // Hit-testable (phrz, 2026-10-27): its buttons take clicks, and the picture's view leaves the pointer to them.
             VStack(alignment: .leading) { Spacer(); SessionBanners(session: session, model: model) }
                 .padding(12)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                .allowsHitTesting(model.inputHeld)
         }
+        .coordinateSpace(name: pictureSpace)
+        .onPreferenceChange(LocalOverlayKey.self) { model.localOverlays = $0 }
         .background(.black)
     }
 }
