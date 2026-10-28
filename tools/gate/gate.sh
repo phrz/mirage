@@ -10,6 +10,8 @@ set -u
 HOST=${1:?host}; PROFILES=${2:-LAN,cafe,4G,bus}; SCENARIOS=${3:-connect,typing,scroll,drag,video}
 ROOT=${0:A:h}/../..; V="$ROOT/.build/debug/mirage-viewer"; OUT=${GATE_OUT:-$ROOT/.build/gate}; mkdir -p "$OUT"
 [[ -x "$OUT/truth" ]] || swiftc -O "$ROOT/tools/gate/truth.swift" -o "$OUT/truth" || exit 1
+# Loopback (the host is this Mac): read its log here instead of over ssh.
+hostlog() { if [[ $HOST == (localhost|127.0.0.1|$(scutil --get LocalHostName)|$(scutil --get LocalHostName).local|$(hostname -s)) ]]; then zsh -c "$1"; else ssh -o BatchMode=yes "$HOST" "$1"; fi }
 throttle() { case $1 in LAN) ;; cafe) echo "--throttle 5000/1000/40/0.5" ;; 4G) echo "--throttle Fast 4G" ;; bus) echo "--throttle Japan bus 4G" ;; esac }
 scenario() { case $1 in connect) echo "--duration 12" ;; typing) echo "--duration 26 --scenario selecttype:20" ;; scroll) echo "--duration 26 --scenario scroll:20" ;;
     drag) echo "--duration 26 --scenario drag:20" ;; video) echo "--duration 20 --scenario idle:15" ;; esac }
@@ -18,21 +20,20 @@ for p in ${(s:,:)PROFILES}; do for c in ${(s:,:)SCENARIOS}; do
     tag="$p-$c"; F="$OUT/$tag"; rm -rf "${F:?}"; mkdir -p "$F"
     S=$(python3 -c 'import time;print(time.time())'); ST=$(date -u +%Y-%m-%dT%H:%M:%S)
     eval "MIRAGE_TEST_FRAMES='$F' MIRAGE_TEST_FRAMES_MS=33 '$V' $HOST --headless --truth --window 1600x900 --scale 2 $(scenario $c) $(throttle $p) --stats '$OUT/$tag.json'" > "$OUT/$tag.out" 2> "$OUT/$tag.err"
-    ssh -o BatchMode=yes "$HOST" "grep '^2026' ~/Library/Logs/mirage-host.log | awk -v t='$ST' '\$0 >= t'" > "$OUT/$tag.host"
+    hostlog "grep '^20' ~/Library/Logs/mirage-host.log | awk -v t='$ST' '\$0 >= t'" > "$OUT/$tag.host"
     grep 'truth reference' "$OUT/$tag.host" | sed -E 's/^([^ ]+) truth reference: ([0-9a-f]+).*/\1 \2/' > "$OUT/$tag.refs"
     "$OUT/truth" "$F" "$OUT/$tag.refs" $S > "$OUT/$tag.truth" 2>&1; rm -rf "${F:?}"
-    python3 - "$OUT/$tag.json" "$OUT/$tag.truth" "$p" "$c" "$OUT/$tag.host" >> "$OUT/table.md" <<'PY'
+    python3 - "$OUT/$tag.json" "$OUT/$tag.truth" "$p" "$c" >> "$OUT/table.md" <<'PY'
 import json, re, sys
 j = json.load(open(sys.argv[1])) if open(sys.argv[1]).read().strip() else {}
 t = open(sys.argv[2]).read()
 def g(k): return j.get(k)
 f = lambda v: "-" if v is None else (f"{v:.0f}" if isinstance(v, (int, float)) else str(v))
 mf = g("motionFps"); mfs = f"{sorted(mf)[len(mf)//2]:.0f}" if mf else "-"
-sd = re.search(r"streaming display \d+ \(\S+ pt, (\d+x\d+) px\) (\d+x\d+)", open(sys.argv[5]).read())
 part = re.search(r"partial (\d+) \(([\d.]+)%\)", t); cells = re.search(r"mean ([\d.]+); longest-wrong region: ([\d.]+) s", t); whole = re.search(r"first whole frame at (\S+) s", t)
 print(f"| {sys.argv[3]} | {sys.argv[4]} | {f(g('fpsMedian'))} | {mfs} | {f(g('videoGapP95Ms'))} | {f(g('keyLatencyMsMedian'))}/{f(g('keyLatencyMsMax'))} | {f(g('crispMsMedian'))}/{f(g('crispMsMax'))} | "
       f"{part.group(2)+'%' if part else '-'} | {cells.group(1) if cells else '-'} | {cells.group(2)+' s' if cells else '-'} | {whole.group(1)+' s' if whole else '-'} | "
-      f"{f(g('keyframes'))} | {f(g('idleKbpsMedian'))}/{f(g('activeKbpsMedian'))} | {sd.group(1)+' -> '+sd.group(2) if sd else '-'} |")
+      f"{f(g('keyframes'))} | {f(g('idleKbpsMedian'))}/{f(g('activeKbpsMedian'))} | {g('hostPixels') or '-'} -> {g('streamPixels') or '-'} |")
 PY
     sleep 3
 done; done
