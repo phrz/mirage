@@ -198,6 +198,8 @@ final class ViewerSession: @unchecked Sendable {
     /// When the watched window's direct changes were last shown: at the tile under TRUTH off, at the capture's frameEnd under
     /// TRUTH (applied tiles wait there), so key-to-pixel times what a person sees.
     private(set) var lastWatchedShownNanos: UInt64 = 0
+    private var keyframesReceived = 0
+    private var videoGapsMs: [Double] = []
     /// Last watched tile of at least 32×32 px: time-to-crisp ignores caret blinks and single glyphs.
     private(set) var lastWatchedLargeTileNanos: UInt64 = 0
     private(set) var watchedVideoFrames = 0, watchedCopyRects = 0
@@ -1267,6 +1269,7 @@ final class ViewerSession: @unchecked Sendable {
                     }
                     compositor.applyVideo(image, region: region, mask: mask, crossfade: frame.flags.contains(.progressive), captureSeq: frame.captureSeq, keys: keys)
                     if Self.debugPresent { log("\(Clock.nowNanos() / 1_000_000) present L\(v.id) video \(frame.seq) capture \(frame.captureSeq)\(frame.flags.contains(.keyframe) ? " key" : "")\(frame.flags.contains(.progressive) ? " progressive" : "") region \(region) tiles \(written.count)") }
+                    if frame.flags.contains(.keyframe) { keyframesReceived += 1 }
                     if frame.flags.contains(.keyframe), region.area * 10 >= compositor.width * compositor.height * 9 { v.step(frame.flags.contains(.progressive) ? "fade" : "key", now: now) }
                     if v.id == 0 { markDesktopClean(written) }
                     v.receivedBytes += frame.bytes; v.videoFrames += 1
@@ -1279,6 +1282,7 @@ final class ViewerSession: @unchecked Sendable {
                     if lastVideoNanos > 0, since > 0, now > since &+ steadyAfterNanos, now > lastVideoNanos {
                         let gap = Double(Clock.elapsed(since: lastVideoNanos, now: now)) / 1e6
                         if gap > maxVideoGapMs { maxVideoGapMs = gap }
+                        if videoGapsMs.count < 20_000 { videoGapsMs.append(gap) }   // (the gate's frame pacing: p95 of these)
                         if gap > 500 { videoGapsOver500.append(gap) }
                     }
                     lastVideoNanos = now
@@ -2012,6 +2016,9 @@ extension ViewerSession {
             var typeahead: TypeaheadStats? = nil
             /// Every byte from the host in the run (video, tiles, control) and the run's length when written.
             var totalBytes: Int? = nil, totalBytesAtSeconds: Double? = nil
+            /// The gate (docs/reset): keyframes received after connect (0 is the aim on a LAN), the p95 gap between video frames
+            /// once steady, and the median rate in seconds with video (active) and without (idle).
+            var keyframes: Int? = nil, videoGapP95Ms: Double? = nil, idleKbpsMedian: Double? = nil, activeKbpsMedian: Double? = nil
         }
         struct TypeaheadStats: Codable { var shown: Int, confirmed: Int, mismatched: Int, expired: Int; var accuracy: Double?; var visibleMsMedian: Double?, visibleMsMax: Double?, echoMsMedian: Double?, echoMsP95: Double?; var misses: [String]? }
         struct UnifiedStats: Codable {
@@ -2071,6 +2078,10 @@ extension ViewerSession {
                                            misses: typeaheadMisses().map { "'\($0.text)' predicted end \($0.predictedX),\($0.predictedY) host caret \($0.hostX),\($0.hostY) (glyph \($0.glyphWidth) px)" })
         }
         out.totalBytes = totalBytes(); out.totalBytesAtSeconds = Date().timeIntervalSince(startDate)
+        out.keyframes = keyframesReceived
+        let gaps = videoGapsMs.sorted(); out.videoGapP95Ms = gaps.isEmpty ? nil : gaps[min(gaps.count - 1, gaps.count * 95 / 100)]
+        let idle = samples.filter { $0.fps < 1 }.map { $0.kbps + $0.tileKbps }, active = samples.filter { $0.fps >= 1 }.map { $0.kbps + $0.tileKbps }
+        out.idleKbpsMedian = idle.isEmpty ? nil : idle.sorted()[idle.count / 2]; out.activeKbpsMedian = active.isEmpty ? nil : active.sorted()[active.count / 2]
         out.transientSamples = scenario?.transientSamples; out.transientGhosts = scenario?.transientGhosts; out.dockGhostMs = scenario?.dockGhostMs
         out.unified = MainActor.assumeIsolated { () -> UnifiedStats? in
             guard let u = unified else { return nil }
