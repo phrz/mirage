@@ -1951,7 +1951,24 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             do { let t0 = Clock.nowNanos(); while WindowCapturer.displayStartsPending.add(0) > 0, Clock.elapsed(since: t0, now: Clock.nowNanos()) < 1_500_000_000 { try? await Task.sleep(for: .milliseconds(10)) } }
             // In turn (SCKGate), front first: at once they only waited on each other inside ScreenCaptureKit (2.1, 2.9, 3.9 s after
             // an unlock on 537), and the display captures' filter updates timed out behind them.
-            do { try await SCKGate.shared.run { try await cap.start(excluding: others) { [weak self] pb, nanos in self?.queue.async { self?.ownFrame(pb, nanos, layer: l) } } } }
+            do {
+                try await SCKGate.shared.run { try await cap.start(excluding: others) { [weak self] pb, nanos in self?.queue.async { self?.ownFrame(pb, nanos, layer: l) } } }
+                // A static window's capture may deliver nothing at all (541 after an unlock: "0 passed, 0 unchanged" for 30 s,
+                // the layers never ready, the display whole for good; the unlock's own snapshots belonged to captures its
+                // zoom-in animation had replaced). With no frame soon after the start, a snapshot is its first.
+                let started = Clock.nowNanos()
+                try? await Task.sleep(for: .milliseconds(400))
+                guard let self, self.queue.sync(execute: { l.capturer === cap && l.lastCapturedNanos < started }) else { return }
+                let independent = self.queue.sync { self.hostTunables[.windowShotIndependent] >= 0.5 }
+                if let pb = await cap.snapshot(excluding: others, independent: independent) {
+                    self.queue.async {
+                        guard l.capturer === cap, l.lastCapturedNanos < started else { return }
+                        self.log("layer \(l.id): no frame since its capture started; a snapshot stands in")
+                        l.snapshotNanos = Clock.nowNanos()
+                        self.captured(pb, Clock.nowNanos(), dirtyRects: [], layerID: l.id)
+                    }
+                }
+            }
             catch { self?.queue.async { if l.capturer === cap { l.capturer = nil }; self?.log("layer \(l.id) capture failed: \(error)"); self?.useFallback(l, why: "its own capture failed") } }
         }
     }
@@ -4326,8 +4343,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // Locked: no lossless blocks after the still. The lock screen changes everywhere (an animated wallpaper: ~12,000
             // changed tiles a second on mac-daddy at 3200x1800), so blocks never finished, the display stayed in its fresh
             // picture, video never started, and the password dots and caret waited behind 1,450 queued tiles (phrz, 518: "no
-            // feedback when typing"). Done at once: the changing picture goes as video, like any motion.
-            if screenLocked { d.fresh = .done }
+            // feedback when typing"). Done at once: the changing picture goes as video, like any motion. The same for a
+            // whole-display fresh picture (phrz on 541 after an unlock: the lock screen's last frame "frozen" for a while,
+            // then a window drag "froze into big chunks": the display stayed in its fresh picture, its motion as tiles at
+            // 0-1.4 fps).
+            if wholeDisplay { d.fresh = .done }
             log("lock switch: the display's whole still sent")
             if lockReferenceOn, let f = d.lastFrame { log("lock switch: TEST reference: \(Self.flatDarkShare(f))") }
         }
