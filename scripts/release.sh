@@ -253,6 +253,10 @@ if [ -n "$PUBLISH" ]; then ZIPURL=https://github.com/$REPO/releases/download/$TA
 elif [ -n "$BROKEN" ]; then ZIPURL=../../$TAG/$ZIPNAME; HEAD_DIR=.build/release/broken/channel-$CHANNEL
 else ZIPURL=../$TAG/$ZIPNAME; HEAD_DIR=.build/release/channel-$CHANNEL; fi
 [ -n "$BROKEN" ] && NOTES="deliberately broken: exits in main (rollback test)"
+# The checkout must not have moved during the build (2026-10-28: a commit landed mid-release, so nightly 561's bundle
+# was 1b6a4ed while its manifest said a2cb029, and every Mac rightly refused it).
+[ "$(git rev-parse --short=7 HEAD)" = "$COMMIT" ] && [ -z "$(git status --porcelain)" ] ||
+    die "the checkout changed during the build (started at $COMMIT, now $(git rev-parse --short=7 HEAD)): nothing published; run it again"
 tool manifest --channel "$CHANNEL" --version "$VERSION" --build "$BUILD" --commit "$COMMIT" --zip "$OUT/$ZIPNAME" \
     --zip-url "$ZIPURL" --notes "${NOTES:-}" ${MIRAGE_NEXT_KEY:+--next-key "$MIRAGE_NEXT_KEY"} --out "$OUT/manifest.json"
 {
