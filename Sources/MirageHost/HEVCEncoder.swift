@@ -72,6 +72,15 @@ final class HEVCEncoder {
         let maxQP = Self.maxQP(bitrateKbps: bitrateKbps, width: width, height: height, fps: expectedFPS)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: maxQP as CFNumber)
     }
+    /// The sharpening pass (wholeDisplayOnly): the next frames at a low QP ceiling, the screen standing still; off at the next
+    /// change (the budget's ceiling again).
+    private(set) var sharpening = false
+    func setSharpening(_ on: Bool) {
+        guard on != sharpening else { return }
+        sharpening = on
+        if on { VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: Self.sharpenQP as CFNumber) } else { applyRate() }
+    }
+    static let sharpenQP = 20
     /// The highest QP a frame may use for a budget: bits per pixel per frame at the expected rate. Pure, for tests.
     static func maxQP(bitrateKbps: Int, width: Int, height: Int, fps: Int) -> Int {
         let bpp = Double(bitrateKbps) * 1000 / Double(max(1, width * height * max(1, fps)))

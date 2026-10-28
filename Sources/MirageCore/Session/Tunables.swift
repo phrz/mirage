@@ -84,6 +84,12 @@ public struct Tunables: Codable, Equatable, Sendable {
         // 1 = a fresh picture (connect, unlock, a viewer holding nothing) is the whole display first, the window layers taking
         // over invisibly once ready (DESIGN §3.0a); 0 = the layer-by-layer fresh picture (the A/B).
         case wholeFreshPicture
+        // Host only: 1 = the whole display as video (docs/reset): one whole-display capture (the curtain left out, no cursor),
+        // every change to the low-latency HEVC stream at the display's rate, and a sharpening pass once the screen stands still
+        // (a high-quality frame on a LAN; lossless tiles on that same layer on a slower link). No window layers, overlay, warm
+        // pool, stills, hand-over, copy-rects, fovea or small-animation tiles: lock, unlock and connect are the same path.
+        // 0 = the layered pipeline, as before.
+        case wholeDisplayOnly
         // Test knobs settable on the production agent (tunables.json), 1 = on: the composited display's cell means every second
         // ("truth reference"), and the lock frame's every 200 ms ("lock frame: TEST reference"), for viewer-side checks.
         case testTruthReference, testLockReference
@@ -131,6 +137,7 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .atomicCapture: return (1, 0, 1)
             case .curtain: return (1, 0, 1)
             case .wholeFreshPicture: return (1, 0, 1)
+            case .wholeDisplayOnly: return (0, 0, 1)
             case .testTruthReference, .testLockReference: return (0, 0, 1)
             }
         }

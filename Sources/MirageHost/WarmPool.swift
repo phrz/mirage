@@ -158,7 +158,7 @@ public final class WarmPool: @unchecked Sendable {
     private var tun = Tunables.defaults
     private func enabled() -> Bool {
         tun = Tunables.load(from: Tunables.hostFileURL(try? Store())).tunables
-        return tun[.warmCapture] >= 0.5
+        return tun[.warmCapture] >= 0.5 && tun[.wholeDisplayOnly] < 0.5   // (the whole display alone keeps nothing warm)
     }
 
     /// The pool's state, for the log line a stream start writes.

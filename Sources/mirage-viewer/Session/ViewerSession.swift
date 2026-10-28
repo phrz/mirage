@@ -1279,7 +1279,7 @@ final class ViewerSession: @unchecked Sendable {
                         if gap > 500 { videoGapsOver500.append(gap) }
                     }
                     lastVideoNanos = now
-                    if !watchRect.isEmpty, watchWindowID != 0 && isWatchedLayered() ? v.id == watchWindowID : displayRect(region, layer: v.id).intersects(watchRect) { lastWatchedVideoNanos = now; watchedVideoFrames += 1 }
+                    if !watchRect.isEmpty, watchWindowID != 0 && isWatchedLayered() ? v.id == watchWindowID : displayRect(region, layer: v.id).intersects(watchRect) { lastWatchedVideoNanos = now; lastWatchedShownNanos = now; watchedVideoFrames += 1 }   // (a video frame shows when decoded: the whole display as video has no tiles to time a key by)
                     predictorLock.lock(); predictor.hostUpdate(inputSeq: frame.inputSeq, rect: region, now: now); predictorLock.unlock()
                     onChange?()
                     statsLock.lock()

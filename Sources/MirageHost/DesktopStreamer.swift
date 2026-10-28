@@ -733,8 +733,37 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var desktopLevelIDs: Set<UInt32> = []
     static let compositorEnv = ProcessInfo.processInfo.environment["MIRAGE_COMPOSITOR"]
     static func compositorWanted() -> Bool {
+        let t = Tunables.load(from: Tunables.hostFileURL(try? Store())).tunables
+        if t[.wholeDisplayOnly] >= 0.5 { return false }   // (the whole display alone: no layers of any kind)
         if let e = compositorEnv { return e != "0" }
-        return Tunables.load(from: Tunables.hostFileURL(try? Store())).tunables[.compositorModel] >= 0.5
+        return t[.compositorModel] >= 0.5
+    }
+    /// The whole display as video (tunable wholeDisplayOnly, docs/reset): one capture, video for every change, a sharpening
+    /// pass when still. The layered pipeline's every other path is off.
+    private var wholeOnly: Bool { !compositor && hostTunables[.wholeDisplayOnly] >= 0.5 }
+    /// Pure, for tests: how one capture of the whole display goes out in wholeDisplayOnly: every changed tile in one video
+    /// frame (TRUTH: a presented frame is one capture, never part now and the rest as tiles later).
+    static func wholeOnlyRoute(dirty: [Int]) -> (video: [Int], tiles: [Int]) { (dirty, []) }
+    /// When the screen has stood still this long, the sharpening pass.
+    static let sharpenAfterNanos: UInt64 = 300_000_000
+    private var sharpenedAt: UInt64 = 0
+    /// wholeDisplayOnly, once the screen has stood still: on a LAN the last frame again at a low QP ceiling (a high-quality
+    /// frame, no tiles over the video); on a slower link the layer's lossless refinement does it (refine).
+    private func sharpenIfStill(now: UInt64) {
+        guard wholeOnly, let rc, rc.tier == .local, let d = display, let pb = d.lastFrame, let enc = d.encoder,
+              Clock.elapsed(since: d.contentChangedNanos, now: now) >= Self.sharpenAfterNanos, sharpenedAt < d.contentChangedNanos else { return }
+        sharpenedAt = now
+        enc.setSharpening(true)
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        let f = frameView(pb)
+        if let canvas = ensureCanvas(d) {
+            let all = Array(0..<d.tracker.tileCount)
+            copyToCanvas(canvas, tiles: all, from: f, tracker: d.tracker)
+            d.pendingVideoTiles.formUnion(all); d.pendingVideoRegion = d.bounds; d.pendingWholeFrame = true
+            tryEncode(d, now: now, latest: f)
+        }
+        CVPixelBufferUnlockBaseAddress(pb, .readOnly)
+        log("whole display: still for \(Self.sharpenAfterNanos / 1_000_000) ms; a sharpening frame (QP ≤ \(HEVCEncoder.sharpenQP))")
     }
     /// The windows the overlay leaves out: the desktop-level ones, every normal window on the display, and floating app
     /// windows (they are layers).
@@ -1476,6 +1505,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// within the count and pixel bounds. The rest (menus, the dock, the menu bar, overflow) stay in the
     /// display layer and the client draws them as cut-outs.
     private func plannedLayers(in list: [ControlMessage.WindowInfo], displayPixels: Int) -> [ControlMessage.WindowInfo] {
+        if wholeOnly { return [] }   // the whole display alone
         var out: [ControlMessage.WindowInfo] = []
         var pixels = 0
         // Compositor model: a window entirely covered by normal windows (or off the display) captures nothing until it shows,
@@ -1735,7 +1765,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // An unlock whose fresh picture is the whole display keeps the captures on it (beginWhole): switching them to their
         // own filter first put an update for the desktop alone in flight, which landed after (539: "the whole display" again
         // 4.6 s later, behind three window starts, while phrz typed into a dialog).
-        if locked || !wholeFreshApplies {
+        if !wholeOnly, locked || !wholeFreshApplies {   // (the whole display alone: its filter never changes)
             for cap in [capturer, fallbackCapture].compactMap({ $0 }) { cap.setLocked(locked, log: log) { [weak self] in self?.queue.async { self?.displaySourceChanged() } } }
         }
         if let d = display { d.lastFrame = nil; d.forceFullDiff = true; d.wantKeyframe = true }
@@ -2920,7 +2950,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         var copies: [(tiles: [Int], dx: Int, dy: Int)] = []
         let dirtyBeforeCopies = dirty.count
         var copyRectsThisCapture = 0
-        if let old, prev != nil {
+        if let old, prev != nil, !wholeOnly {
             if layer.isDisplay {
                 let moved = pendingMoved; pendingMoved = []
                 for d in moved where layers[d.id] == nil {
@@ -3048,6 +3078,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         capTally = layer.isDisplay || layer.id == ControlMessage.WindowInfo.overlayID ? nil : (layer.id, [])
         defer { tallyCapture(layer, dirty: dirty) }
         var plan = tracker.classify(dirty: dirty, now: now, copyGate: Clock.elapsed(since: layer.copyGateNanos, now: now) < 300_000_000 && layer.copyGateNanos > 0, smallRegions: inputQuiet)
+        if wholeOnly, layer.isDisplay, !dirty.isEmpty {
+            // The whole display as video: this capture's every changed tile in one video frame (wholeOnlyRoute), at the
+            // display's rate; the sharpening pass ends at the change. Checked again once the screen may stand still.
+            let route = Self.wholeOnlyRoute(dirty: dirty)
+            plan.video = route.video; plan.lossless = route.tiles; plan.flicker = []
+            plan.videoRegion = tracker.boundingRect(route.video); plan.wholeFrame = route.video.count * 2 >= tracker.tileCount
+            tracker.markVideo(route.video, now: now)
+            layer.encoder?.setSharpening(false)
+            queue.asyncAfter(deadline: .now() + .nanoseconds(Int(Self.sharpenAfterNanos) + 50_000_000)) { [weak self] in self?.refine(now: Clock.nowNanos()) }
+        }
         // TRUTH step 2: a window's changed tiles that classify's per-tile rate limit held back go with the rest of this capture.
         let atomic = atomicCapture && !layer.isDisplay && layer.id != ControlMessage.WindowInfo.overlayID
         if atomic {
@@ -3114,7 +3154,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // capture there was alpha 0 throughout). Its changes take the small-animation path (lossy WebP keeps alpha).
         let isOverlay = layer.id == ControlMessage.WindowInfo.overlayID
         if isOverlay { plan.wholeFrame = false }
-        let smallVideo = !plan.video.isEmpty && (isOverlay || !plan.wholeFrame && !MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount, screenTiles: display?.tracker.tileCount ?? 0))
+        let smallVideo = !wholeOnly && !plan.video.isEmpty && (isOverlay || !plan.wholeFrame && !MotionGate.counts(videoTiles: plan.video.count, layerTiles: tracker.tileCount, screenTiles: display?.tracker.tileCount ?? 0))
         if smallVideo || !plan.flicker.isEmpty {
             let small = ((smallVideo ? plan.video : []) + plan.flicker).filter { !layer.occludedTiles.contains($0) }
             if smallVideo { plan.video = []; plan.videoRegion = .zero }
@@ -3150,7 +3190,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let hint = injector?.motionHintNanos, hint > lastMotionNanos { lastMotionNanos = hint }
         let motion = motionSustained(now)
         if motion != wasMotion { wasMotion = motion; lastBudgetApply = 0; applyBudget(now: now) }
-        if let fov = fovea(layer), !(layer.isDisplay && wholeDisplay) {
+        if let fov = fovea(layer), !(layer.isDisplay && (wholeDisplay || wholeOnly)) {
             // Fovea: motion inside it is carried as native tiles while the tile budget holds; the base
             // layer (video) takes the rest. A fovea that moved refines its new ground first.
             if !plan.video.isEmpty, tileTokens > 0 {
@@ -3628,7 +3668,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             // keyframe acked), at the latest 1.5 s after the start.
             if hostTunables[.connectProbe] >= 1 { probeAfterStage1 = true; probeDeadline = Clock.nowNanos() + 1_500_000_000 }   // kill switch: tunables.json {"connectProbe": 0}
             // (Not while locked: placeholders are for windows, and the picture is the lock screen alone.)
-            if hostTunables[.placeholders] >= 1, !InputInjector.consoleLocked() { sendPlaceholders() }   // M-FIVE stage 0, both models
+            if hostTunables[.placeholders] >= 1, !wholeOnly, !InputInjector.consoleLocked() { sendPlaceholders() }   // M-FIVE stage 0, both models
         }
         if trigger == .streamStart { startTruthReference() }
         freshCompleteLogged = false
@@ -3641,6 +3681,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if trigger == .streamStart { traceUntil = Clock.nowNanos() + 8_000_000_000; traceNext = 0; traceBytes = statTileBytes; traceCapped = 0; streamStartNanos = Clock.nowNanos(); for l in layers.values { l.crispAt = 0; l.crispOnce = false } }
             log("fresh picture (\(trigger.rawValue)\(detail)): stage 1, one coherent still per visible layer, presented together")
             if trigger == .streamStart || trigger == .viewerEmpty || trigger == .screenUnlock { beginWhole(trigger) }
+            return
+        }
+        if wholeOnly {
+            // The whole display as video: its first frame is a keyframe of the whole picture, then video, then the sharpening.
+            display?.fresh = .done; display?.wantKeyframe = true; display?.forceFullDiff = true; sharpenedAt = 0
+            log("fresh picture (\(trigger.rawValue)\(detail)): the whole display as video (wholeDisplayOnly)")
             return
         }
         display?.fresh = .base(seq: 0)
@@ -4482,6 +4528,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let rc { self.rc?.noteInflight(bytes: tileInflightForCap, linkBusy: lastBudget.videoKbps > 0 && rc.recentVideoKbps * 2 >= lastBudget.videoKbps, now: now) }
         if now < probeHoldUntil { gate("probe-hold"); return }
         guard display != nil else { gate("no-display"); return }
+        // The whole display as video on a LAN: no tiles at all; a still screen gets its sharpening frame instead.
+        if wholeOnly, rc?.tier == .local { sharpenIfStill(now: now); return }
         if !stage1Queue.isEmpty { sendStage1Queue(now: now) }
         checkStage1(now: now)
         presentLevels(now: now)
