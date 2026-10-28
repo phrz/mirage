@@ -1566,7 +1566,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// frame captured since (and a new one its still), plus a margin for delivery, the windows are listed and the display
     /// goes back to the desktop alone, beneath them, in one step. phrz after an unlock on 522: "the windows still fade in one
     /// by one, no placeholders even, and patchy all over". `base`: the layers that existed when it began.
-    private var whole: (since: UInt64, deadline: UInt64, base: Set<UInt32>, readyAt: UInt64?, reason: String, lateLogged: Bool)?
+    private var whole: (since: UInt64, deadline: UInt64, base: Set<UInt32>, readyAt: UInt64?, reason: String, lateLogged: Bool, cut: Set<UInt32>)?
     /// Every capture is the whole display: while locked, and during a whole-display fresh picture.
     private var wholeDisplay: Bool { screenLocked || whole != nil }
     /// The knobs, from the environment (a test host) or the host's tunables.json (the production agent: no separate binary).
@@ -1622,7 +1622,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func beginWhole(_ trigger: FreshPictureTrigger) {
         guard wholeFreshApplies else { return }
         let now = Clock.nowNanos()
-        whole = (now, now + Self.wholeMaxNanos, Set(layers.keys), nil, trigger.rawValue, false)
+        whole = (now, now + Self.wholeMaxNanos, Set(layers.keys), nil, trigger.rawValue, false, [])
         for cap in [capturer, fallbackCapture].compactMap({ $0 }) { cap.setLocked(true, log: log) { [weak self] in self?.queue.async { self?.displaySourceChanged() } } }
         if let d = display, !d.provisional { d.lastFrame = nil; d.forceFullDiff = true; d.wantKeyframe = true }
         lockStillDue = true
@@ -1637,6 +1637,21 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             WholeHandover.LayerState(id: $0.id, visible: $0.visibleFraction, lastCaptured: max($0.lastCapturedNanos, $0.snapshotNanos), existedAtStart: w.base.contains($0.id), hasStill: $0.stillSent || $0.cutStill, capturing: $0.capturer != nil || fallbackLayers.contains($0.id))
         }
         let waiting = WholeHandover.waiting(states, since: w.since, displayChangedAt: display?.contentChangedNanos ?? 0, now: now, settle: Self.wholeMarginNanos)
+        // Once the picture has settled (the unlock's fade and zoom over), the windows still waiting take their stills from it:
+        // the whole display shows each one exactly as it is. Their own captures were the only way in (window-alone shots
+        // taken mid-zoom at another size, stream starts one at a time at ~1.2 s each on 550, frameless when static), and the
+        // display stayed whole past 8 s on every unlock today. Cut once per layer per fresh picture; windows in front left
+        // transparent (they cover those pixels anyway). Their own frames replace the cuts as they come.
+        let pendingWindows = waiting.filter { $0 != 0 && !(whole?.cut.contains($0) ?? true) }
+        if !pendingWindows.isEmpty, !waiting.contains(0), let d = display, let frame = d.lastFrame, Clock.elapsed(since: d.contentChangedNanos, now: now) >= Self.wholeMarginNanos {
+            whole?.cut.formUnion(pendingWindows)
+            CVPixelBufferLockBaseAddress(frame, .readOnly)
+            let src = frameView(frame)
+            let cuts = pendingWindows.compactMap { id in cutLayer(id, from: src).map { (id, $0) } }
+            CVPixelBufferUnlockBaseAddress(frame, .readOnly)
+            for (id, pb) in cuts { layers[id]?.snapshotNanos = now; captured(pb, now, dirtyRects: [], layerID: id) }
+            log("fresh picture (\(w.reason)): \(cuts.count) windows' stills cut from the settled whole display (\(pendingWindows.map(String.init).joined(separator: " ")))")
+        }
         if waiting.isEmpty, w.readyAt == nil { whole?.readyAt = now }
         if !waiting.isEmpty { whole?.readyAt = nil }
         let ready = waiting.isEmpty && Clock.elapsed(since: whole?.readyAt ?? now, now: now) >= Self.wholeMarginNanos
@@ -2557,26 +2572,39 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
             var out: CVPixelBuffer?
             guard let pool = fallbackPools[id]?.pool, CVPixelBufferPoolCreatePixelBuffer(nil, pool, &out) == kCVReturnSuccess, let out else { continue }
-            CVPixelBufferLockBaseAddress(out, [])
-            let dst = CVPixelBufferGetBaseAddress(out)!, ds = CVPixelBufferGetBytesPerRow(out)
-            memset(dst, 0, ds * h)   // transparent where the window is off the display
-            let r = PixelRect(x: l.frame.x, y: l.frame.y, width: w, height: h).intersection(screen)
-            if !r.isEmpty {
-                for y in 0..<r.height {
-                    memcpy(dst.advanced(by: (r.y - l.frame.y + y) * ds + (r.x - l.frame.x) * 4), src.base.advanced(by: (r.y + y) * src.stride + r.x * 4), r.width * 4)
-                }
-                // Where a window in front covers this one, the composited screen shows that window, not this one: those
-                // pixels are left transparent. Kept, they were the front window's picture inside this layer, a ghost of
-                // it once it moved away (a fallback-cut window's corner on the desktop during Show Desktop, mac-daddy).
-                for f in fallbackCovers(of: id, frame: l.frame) {
-                    let c = f.intersection(r)
-                    guard !c.isEmpty else { continue }
-                    for y in 0..<c.height { memset(dst.advanced(by: (c.y - l.frame.y + y) * ds + (c.x - l.frame.x) * 4), 0, c.width * 4) }
-                }
-            }
-            CVPixelBufferUnlockBaseAddress(out, [])
+            fillCut(out, layer: l, from: src, screen: screen)
             captured(out, nanos, dirtyRects: [], layerID: id)
         }
+    }
+    /// A layer's picture cut from a full-display frame (a new buffer of its size), or nil.
+    private func cutLayer(_ id: UInt32, from src: ShiftDetector.Frame) -> CVPixelBuffer? {
+        guard let l = layers[id], l.width > 0, l.height > 0 else { return nil }
+        var out: CVPixelBuffer?
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+        guard CVPixelBufferCreate(nil, l.width, l.height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &out) == kCVReturnSuccess, let out else { return nil }
+        fillCut(out, layer: l, from: src, screen: PixelRect(x: 0, y: 0, width: src.width, height: src.height))
+        return out
+    }
+    private func fillCut(_ out: CVPixelBuffer, layer l: Layer, from src: ShiftDetector.Frame, screen: PixelRect) {
+        let w = l.width, h = l.height, id = l.id
+        CVPixelBufferLockBaseAddress(out, [])
+        let dst = CVPixelBufferGetBaseAddress(out)!, ds = CVPixelBufferGetBytesPerRow(out)
+        memset(dst, 0, ds * h)   // transparent where the window is off the display
+        let r = PixelRect(x: l.frame.x, y: l.frame.y, width: w, height: h).intersection(screen)
+        if !r.isEmpty {
+            for y in 0..<r.height {
+                memcpy(dst.advanced(by: (r.y - l.frame.y + y) * ds + (r.x - l.frame.x) * 4), src.base.advanced(by: (r.y + y) * src.stride + r.x * 4), r.width * 4)
+            }
+            // Where a window in front covers this one, the composited screen shows that window, not this one: those
+            // pixels are left transparent. Kept, they were the front window's picture inside this layer, a ghost of
+            // it once it moved away (a fallback-cut window's corner on the desktop during Show Desktop, mac-daddy).
+            for f in fallbackCovers(of: id, frame: l.frame) {
+                let c = f.intersection(r)
+                guard !c.isEmpty else { continue }
+                for y in 0..<c.height { memset(dst.advanced(by: (c.y - l.frame.y + y) * ds + (c.x - l.frame.x) * 4), 0, c.width * 4) }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(out, [])
     }
 
     /// Host-side crop (DESIGN §3.0): a window layer's tiles wholly off the display are sent transparent once (one small solid
