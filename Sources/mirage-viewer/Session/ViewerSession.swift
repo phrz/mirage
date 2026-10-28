@@ -589,6 +589,8 @@ final class ViewerSession: @unchecked Sendable {
 
     // MARK: Stream control
 
+    /// The gate harness's run-scoped truth reference (MIRAGE_TEST_TRUTH=1 or --truth): the host logs it for this stream only.
+    nonisolated(unsafe) static var truthReference = ProcessInfo.processInfo.environment["MIRAGE_TEST_TRUTH"] == "1"
     func requestStream(width: Int, height: Int) {
         Task { @MainActor in
             var req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: max(0, model.bitrateKbps), maxFPS: 30, snapNative: Self.snapNative ? true : nil, tunablesVersion: Tunables.schemaVersion,
@@ -597,6 +599,7 @@ final class ViewerSession: @unchecked Sendable {
             req.alphaMask = true
             req.transactionalVersion = 1
             req.tileKeys = true
+            if Self.truthReference { req.truthReference = true }
             if req == lastRequest { return }
             guard let sender else { pendingRequest = req; log("stream request \(width)x\(height) queued until connected"); return }
             lastRequest = req; lastRequestSent = req

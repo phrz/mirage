@@ -564,6 +564,9 @@ public enum ControlMessage: Codable, Equatable {
         public var transactionalVersion: Int?
         /// The viewer orders tile writes by TileKey (per-tile keys on tiles and video). nil: older viewers, capture order.
         public var tileKeys: Bool?
+        /// Test runs (the gate harness): for this stream only, the host logs its truth reference (the composited display's
+        /// cell means every second). Never stored on the host: a run turns it on, and it ends with the stream.
+        public var truthReference: Bool?
         public init(width: Int, height: Int, bitrateKbps: Int = 0, maxFPS: Int = 30, displayID: UInt32? = nil, snapNative: Bool? = nil, holdsPicture: Bool? = nil, tunablesVersion: Int? = nil,
                     explicitBitrate: Bool? = nil, throttle: NetworkThrottle? = nil, networkFingerprint: String? = nil) {
             self.width = width; self.height = height; self.bitrateKbps = bitrateKbps; self.maxFPS = maxFPS; self.displayID = displayID; self.snapNative = snapNative

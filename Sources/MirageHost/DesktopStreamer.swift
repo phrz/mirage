@@ -410,7 +410,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     // MARK: DesktopStreamer
 
-    public func start(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
+    public func start(_ reqIn: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
+        // The whole display as video: the display's rate (60 on a LAN, the tier's cap below it), whatever the viewer asked.
+        var req = reqIn
+        if Self.wholeDisplayOnlyWanted() { req.maxFPS = max(req.maxFPS, 60) }
         queue.sync { holdWarm(true) }
         beginCurtain(req)   // before any capture exists: every filter built from here on leaves the curtain out
         do { let info = try await startStream(req, output: output); Curtain.shared.sessionStreamed(curtainID); return info }
@@ -732,6 +735,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var overlayExcludedIDs: Set<UInt32> = []
     private var desktopLevelIDs: Set<UInt32> = []
     static let compositorEnv = ProcessInfo.processInfo.environment["MIRAGE_COMPOSITOR"]
+    static func wholeDisplayOnlyWanted() -> Bool { Tunables.load(from: Tunables.hostFileURL(try? Store())).tunables[.wholeDisplayOnly] >= 0.5 }
     static func compositorWanted() -> Bool {
         let t = Tunables.load(from: Tunables.hostFileURL(try? Store())).tunables
         if t[.wholeDisplayOnly] >= 0.5 { return false }   // (the whole display alone: no layers of any kind)
@@ -745,7 +749,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// frame (TRUTH: a presented frame is one capture, never part now and the rest as tiles later).
     static func wholeOnlyRoute(dirty: [Int]) -> (video: [Int], tiles: [Int]) { (dirty, []) }
     /// When the screen has stood still this long, the sharpening pass.
-    static let sharpenAfterNanos: UInt64 = 300_000_000
+    static let sharpenAfterNanos: UInt64 = 150_000_000   // (the sharpening frame within ~200 ms of the screen going still)
     private var sharpenedAt: UInt64 = 0
     /// wholeDisplayOnly, once the screen has stood still: on a LAN the last frame again at a low QP ceiling (a high-quality
     /// frame, no tiles over the video); on a slower link the layer's lossless refinement does it (refine).
@@ -1325,7 +1329,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.statTimer?.cancel(); self.statTimer = nil
                 self.refineTimer?.cancel(); self.refineTimer = nil
                 self.rateTimer?.cancel(); self.rateTimer = nil
-                self.capturer = nil; self.output = nil; self.setLive(false)
+                self.capturer = nil; self.output = nil; self.setLive(false); self.truthTimer?.cancel(); self.truthTimer = nil
                 self.unacked = [:]; self.sentFrames = [:]; self.recentlyPurged = [:]; self.paceCursorNanos = 0
                 var resent = 0
                 for (_, v) in self.tileSent {
@@ -1487,7 +1491,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.statTimer?.cancel(); self.statTimer = nil
                 self.refineTimer?.cancel(); self.refineTimer = nil
                 self.rateTimer?.cancel(); self.rateTimer = nil
-                self.capturer = nil; self.output = nil; self.setLive(false)
+                self.capturer = nil; self.output = nil; self.setLive(false); self.truthTimer?.cancel(); self.truthTimer = nil
                 self.layers = [:]
                 self.chrome?.stop(); self.chrome = nil
                 self.caret?.stop(); self.caret = nil
@@ -1604,7 +1608,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var wholeDisplay: Bool { screenLocked || whole != nil }
     /// The knobs, from the environment (a test host) or the host's tunables.json (the production agent: no separate binary).
     private var wholeFreshEnabled: Bool { !Self.testNoCover && hostTunables[.wholeFreshPicture] >= 0.5 }
-    private var truthReferenceOn: Bool { Self.testTruthReference || hostTunables[.testTruthReference] >= 0.5 }
+    private var truthReferenceOn: Bool { Self.testTruthReference || hostTunables[.testTruthReference] >= 0.5 || request?.truthReference == true }
     private var lockReferenceOn: Bool { Self.testLockReference || hostTunables[.testLockReference] >= 0.5 }
     static let wholeMarginNanos: UInt64 = 300_000_000
     /// At the latest: window captures took up to 4 s to (re)start on a busy mac-daddy; the screen stays whole and live until then.

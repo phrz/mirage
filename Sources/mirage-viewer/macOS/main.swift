@@ -35,6 +35,7 @@ struct Options {
         if let v = value("--pair") { o.pair = v }
         if let v = value("--bitrate"), let b = Int(v) { o.bitrate = b }
         if let v = value("--throttle") { o.throttle = Self.throttle(v) }
+        if args.contains("--truth") { ViewerSession.truthReference = true }
         if let v = value("--scale"), let f = Double(v) { o.pixelFactor = f }
         if let v = value("--stats-log") { o.statsLog = v }
         if let v = value("--duration"), let d = Double(v) { o.duration = d }
