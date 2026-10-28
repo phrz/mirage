@@ -361,6 +361,7 @@ public enum HostSession {
             case .notLocked: answer(.notLocked, "\(ctx.identity.name)'s lock screen was not up: nothing was typed")
             case .interrupted: answer(.interrupted, "\(ctx.identity.name)'s lock screen went away while typing: Return was not pressed")
             case .refused: answer(.refused, "\(ctx.identity.name) did not type it")
+            case .passwordDialog: answer(.passwordDialog, "A password dialog on \(ctx.identity.name) has the keyboard; nothing was typed")
             }
         }
     }

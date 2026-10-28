@@ -58,6 +58,8 @@ final class ViewerModel: ObservableObject {
     @Published var unlockBusy = false
     @Published var unlockOffer: UnlockController.Offer?
     @Published var unlockMessage: String?
+    /// Unlock with biometry refused because another password field has the keyboard: an alert, with the screen offered.
+    @Published var unlockDialog: String?
     @Published var unlockRequest: ControlMessage.UnlockRequest?
     /// An agent session open on the host (the Mac unlocked for an agent, the curtain up): the banner says for whom, with End.
     @Published var agentSession: ControlMessage.AgentSessionInfo?

@@ -263,4 +263,35 @@ final class UnlockOfferTests: XCTestCase {
         XCTAssertEqual(CurtainLogic.unlockCause(remoteDownsWhileLocked: 9, biometryTypingRecently: false), "typed through a Mirage viewer (9 key-downs while locked)")
         XCTAssertTrue(CurtainLogic.unlockCause(remoteDownsWhileLocked: 0, biometryTypingRecently: false).hasPrefix("at the Mac or another way"))
     }
+
+    /// phrz on 541: mac-daddy locked with a Tailscale update's SecurityAgent dialog still open, holding Secure Event Input.
+    /// Keys typed then would fill that dialog (an app given an administrator's password), so nothing is typed, and the
+    /// viewer is told so, truthfully; loginwindow alone is the lock screen's field.
+    static let securityAgent = "/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/MacOS/SecurityAgent"
+    func testASecurityAgentDialogIsNotTheLockScreen() {
+        typealias S = LockScreenUnlocker.StrictLock
+        XCTAssertFalse(S.confirmed(sessionLocked: true, consoleLocked: true, secureInputHolder: Self.securityAgent))
+        XCTAssertTrue(S.passwordDialog(sessionLocked: true, consoleLocked: true, secureInputHolder: Self.securityAgent))
+        XCTAssertTrue(S.confirmed(sessionLocked: true, consoleLocked: true, secureInputHolder: S.loginwindow))
+        XCTAssertFalse(S.passwordDialog(sessionLocked: true, consoleLocked: true, secureInputHolder: S.loginwindow))
+        XCTAssertFalse(S.passwordDialog(sessionLocked: false, consoleLocked: false, secureInputHolder: Self.securityAgent), "unlocked: no lock to speak of")
+    }
+    func testThePasswordDialogRefusalTypesNothing() async {
+        final class Posted: @unchecked Sendable { var n = 0 }
+        let posted = Posted()
+        let r = await LockScreenUnlocker.unlock(SecretBytes(Array("pw".utf8)), locked: { false }, dialog: { true }, post: { _ in posted.n += 1 }, wake: .zero, settle: .milliseconds(10))
+        XCTAssertEqual(r, .passwordDialog); XCTAssertEqual(posted.n, 0)
+    }
+    /// On the wire as `refused` plus a flag: older viewers decode it and show the message; this one shows the alert.
+    func testThePasswordDialogOutcomeOnTheWire() throws {
+        let r = ControlMessage.UnlockResult(outcome: .passwordDialog, message: "A password dialog on mac-daddy has the keyboard; nothing was typed")
+        let data = try JSONEncoder().encode(r)
+        let raw = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(raw["outcome"] as? String, "refused"); XCTAssertEqual(raw["passwordDialog"] as? Bool, true)
+        XCTAssertEqual(try JSONDecoder().decode(ControlMessage.UnlockResult.self, from: data), r)
+        let old = try JSONDecoder().decode(ControlMessage.UnlockResult.self, from: Data(#"{"outcome":"notLocked","message":"m"}"#.utf8))
+        XCTAssertEqual(old.outcome, .notLocked)
+        let unknown = try JSONDecoder().decode(ControlMessage.UnlockResult.self, from: Data(#"{"outcome":"someday","message":"m"}"#.utf8))
+        XCTAssertEqual(unknown.outcome, .refused)
+    }
 }

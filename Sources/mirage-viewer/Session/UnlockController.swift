@@ -127,7 +127,9 @@ final class UnlockController: @unchecked Sendable {
         case .unlocked: nil
         case .stillLocked: "The saved password didn't unlock \(hostName). Type it at the lock screen; Mirage will offer to update the saved one."
         case .notLocked, .refused, .interrupted: r.message.prefix(1).uppercased() + r.message.dropFirst() + "."
+        case .passwordDialog: nil   // an alert (unlockDialog): the person has to act at the Mac's screen
         }
+        if r.outcome == .passwordDialog { Task { @MainActor in model.unlockDialog = r.message.prefix(1).uppercased() + r.message.dropFirst() + "." } }
         Task { @MainActor in
             model.unlockBusy = false
             if r.requestID != nil, model.unlockRequest?.id == r.requestID { model.unlockRequest = nil }

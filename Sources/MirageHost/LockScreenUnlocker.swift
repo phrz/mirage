@@ -37,6 +37,12 @@ public enum LockScreenUnlocker {
             sessionLocked == true && consoleLocked == true && (secureInputHolder == nil || secureInputHolder == loginwindow)
         }
         public static func current() -> Bool { let s = signals(); return confirmed(sessionLocked: s.session, consoleLocked: s.console, secureInputHolder: s.holder) }
+        /// Locked, but another process's password field holds Secure Event Input (a SecurityAgent dialog): typing would fill
+        /// it, so nothing is typed, and the person is told why. Pure, for tests.
+        public static func passwordDialog(sessionLocked: Bool?, consoleLocked: Bool?, secureInputHolder: String?) -> Bool {
+            sessionLocked == true && consoleLocked == true && secureInputHolder != nil && secureInputHolder != loginwindow
+        }
+        public static func passwordDialogNow() -> Bool { let s = signals(); return passwordDialog(sessionLocked: s.session, consoleLocked: s.console, secureInputHolder: s.holder) }
         /// The signals, for the host log at each attempt (they decide whether the feature works at a real lock screen).
         public static func describe() -> String {
             let s = signals()
@@ -63,21 +69,21 @@ public enum LockScreenUnlocker {
     /// The handler miraged gives HostContext.
     public static func unlock(_ password: SecretBytes) async -> ControlMessage.UnlockResult.Outcome {
         lastTypingNanos = Clock.nowNanos()
-        return await unlock(password, locked: { StrictLock.current() }, post: { postTagged($0) }, wake: .milliseconds(600), settle: .seconds(6))
+        return await unlock(password, locked: { StrictLock.current() }, dialog: { StrictLock.passwordDialogNow() }, post: { postTagged($0) }, wake: .milliseconds(600), settle: .seconds(6))
     }
     /// When Unlock with biometry last began typing (the curtain's log of what unlocked the Mac).
     nonisolated(unsafe) public static var lastTypingNanos: UInt64 = 0
     /// `locked` and `post` injectable for tests.
-    static func unlock(_ password: SecretBytes, locked: @escaping @Sendable () -> Bool, post: @escaping @Sendable (Stroke) -> Void,
-                       wake: Duration, settle: Duration) async -> ControlMessage.UnlockResult.Outcome {
+    static func unlock(_ password: SecretBytes, locked: @escaping @Sendable () -> Bool, dialog: @escaping @Sendable () -> Bool = { false },
+                       post: @escaping @Sendable (Stroke) -> Void, wake: Duration, settle: Duration) async -> ControlMessage.UnlockResult.Outcome {
         defer { password.wipe() }
-        guard locked() else { return .notLocked }
+        guard locked() else { return dialog() ? .passwordDialog : .notLocked }
         guard var strokes = strokes(for: password.bytes) else { return .refused }
         defer { for i in strokes.indices { strokes[i].utf16 = strokes[i].utf16.map { _ in 0 } } }
         // Wake the display and the lock screen's field (a modifier event changes nothing), then look again.
         post(Stroke(keyCode: 0x38, down: true, utf16: []))
         try? await Task.sleep(for: wake)
-        guard locked() else { return .notLocked }
+        guard locked() else { return dialog() ? .passwordDialog : .notLocked }
         for s in strokes {
             // Every keystroke, Return included, only while the lock screen is still confirmed: else stop, without Return.
             guard locked() else { return .interrupted }

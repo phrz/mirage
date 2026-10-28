@@ -9,6 +9,17 @@ struct SessionBanners: View {
     @ObservedObject var model: ViewerModel
 
     var body: some View {
+        content
+            .alert(model.unlockDialog ?? "", isPresented: Binding(get: { model.unlockDialog != nil }, set: { if !$0 { model.unlockDialog = nil } })) {
+                #if os(macOS)
+                // Unified mode shows no desktop: the screen, to see the dialog (and dismiss it) or type at the lock screen.
+                if model.unified { Button("Show Screen") { model.unlockDialog = nil; LocalShortcuts.toggleMode?() } }
+                #endif
+                Button("OK", role: .cancel) { model.unlockDialog = nil }
+            }
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let e = model.error {
                 banner(e, color: .red)

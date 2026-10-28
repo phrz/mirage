@@ -240,6 +240,11 @@ public enum ControlMessage: Codable, Equatable {
     }
     public struct UnlockResult: Codable, Equatable, Sendable {
         public enum Outcome: String, Codable, Sendable {
+            /// Refused before typing: the session is locked but another process's password field (a SecurityAgent dialog: an
+            /// app asking for an administrator's password) holds Secure Event Input, so the keys would go there (phrz on 541:
+            /// a Tailscale update's dialog left open). On the wire as `refused` with `passwordDialog` (older viewers show
+            /// the message).
+            case passwordDialog
             /// The Mac unlocked after the password was typed.
             case unlocked
             /// Typed, and the Mac is still locked: most likely the wrong password. No retry until the person types it.
@@ -255,6 +260,21 @@ public enum ControlMessage: Codable, Equatable {
         public var message: String
         public var requestID: String?
         public init(outcome: Outcome, message: String, requestID: String? = nil) { self.outcome = outcome; self.message = message; self.requestID = requestID }
+        enum CodingKeys: String, CodingKey { case outcome, message, requestID, passwordDialog }
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            let raw = try c.decode(String.self, forKey: .outcome)
+            outcome = try c.decodeIfPresent(Bool.self, forKey: .passwordDialog) == true ? .passwordDialog : Outcome(rawValue: raw) ?? .refused
+            message = try c.decode(String.self, forKey: .message)
+            requestID = try c.decodeIfPresent(String.self, forKey: .requestID)
+        }
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(outcome == .passwordDialog ? Outcome.refused.rawValue : outcome.rawValue, forKey: .outcome)
+            try c.encode(message, forKey: .message)
+            try c.encodeIfPresent(requestID, forKey: .requestID)
+            if outcome == .passwordDialog { try c.encode(true, forKey: .passwordDialog) }
+        }
     }
     public struct UnlockRequest: Codable, Equatable, Sendable {
         public var id: String
