@@ -64,6 +64,24 @@ final class WholeHandoverTests: XCTestCase {
         XCTAssertEqual(HEVCEncoder.maxQP(bitrateKbps: 10_000, width: 2914, height: 1640, fps: 30), 36)
         XCTAssertEqual(HEVCEncoder.maxQP(bitrateKbps: 1_000, width: 3200, height: 1800, fps: 30), 51)
     }
+    /// The first keyframe's QP floor never above the budget's ceiling: on loopback (564, a LAN budget) every frame failed
+    /// with -12902 and video never started.
+    func testTheFirstKeyframeEncodesOnALANBudget() throws {
+        XCTAssertLessThanOrEqual(HEVCEncoder.coarseMinQP(ceiling: 30), 30)
+        XCTAssertLessThanOrEqual(HEVCEncoder.coarseMinQP(ceiling: HEVCEncoder.sharpenQP), HEVCEncoder.sharpenQP)
+        XCTAssertEqual(HEVCEncoder.coarseMinQP(ceiling: 51), HEVCEncoder.keyframeMinQP)
+        let enc = try HEVCEncoder(width: 3200, height: 1800, bitrateKbps: 45_000, expectedFPS: 30)
+        var pb: CVPixelBuffer?
+        CVPixelBufferCreate(nil, 3200, 1800, kCVPixelFormatType_32BGRA, [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &pb)
+        let done = expectation(description: "encoded")
+        var failure: Error?
+        enc.encode(try XCTUnwrap(pb), captureNanos: 1, options: .init()) { result in
+            if case .failure(let e) = result { failure = e }
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 10)
+        XCTAssertNil(failure)
+    }
 
     /// TRUTH: where a layer has no pixels, the screen shows there. A window whose layer has no full content (a fallback layer)
     /// stays in the desktop picture; every other window at or above the normal level is left out.

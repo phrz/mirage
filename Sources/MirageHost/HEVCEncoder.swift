@@ -69,16 +69,23 @@ final class HEVCEncoder {
         // 7-10 Mbps of 45 at 3200x1800, 895 kbps in phrz's viewer: "super lossy way too long for this LAN"), and the lock
         // screen's animated wallpaper never stands still for lossless tiles, so the video is the picture. A QP ceiling from
         // the bits per pixel the budget allows; none on a slow link.
-        let maxQP = Self.maxQP(bitrateKbps: bitrateKbps, width: width, height: height, fps: expectedFPS)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: maxQP as CFNumber)
+        ceilingQP = Self.maxQP(bitrateKbps: bitrateKbps, width: width, height: height, fps: expectedFPS)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: ceilingQP as CFNumber)
+        if coarse { applyFloor() }
     }
+    /// The QP ceiling in force (MaxAllowedFrameQP): the budget's, or the sharpening pass's.
+    private var ceilingQP = 51
     /// The sharpening pass (wholeDisplayOnly): the next frames at a low QP ceiling, the screen standing still; off at the next
     /// change (the budget's ceiling again).
     private(set) var sharpening = false
     func setSharpening(_ on: Bool) {
         guard on != sharpening else { return }
         sharpening = on
-        if on { VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: Self.sharpenQP as CFNumber) } else { applyRate() }
+        if on {
+            ceilingQP = Self.sharpenQP
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: ceilingQP as CFNumber)
+            if coarse { applyFloor() }
+        } else { applyRate() }
     }
     static let sharpenQP = 20
     /// The highest QP a frame may use for a budget: bits per pixel per frame at the expected rate. Pure, for tests.
@@ -103,7 +110,14 @@ final class HEVCEncoder {
     func setCoarse(_ on: Bool) {
         guard on != coarse else { return }
         coarse = on
-        let r = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MinAllowedFrameQP, value: (on ? Self.keyframeMinQP : 0) as CFNumber)
+        applyFloor()
+    }
+    /// A floor above the ceiling fails every frame with kVTParameterErr (-12902), and keyframe recovery rebuilds the session
+    /// into the same floor: on a LAN budget (ceiling 30-36, since 548) video never started and tiles carried the picture.
+    static func coarseMinQP(ceiling: Int) -> Int { min(keyframeMinQP, ceiling) }
+    private func applyFloor() {
+        let r = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MinAllowedFrameQP,
+                                     value: (coarse ? Self.coarseMinQP(ceiling: ceilingQP) : 0) as CFNumber)
         if r != noErr { hostLog("encoder: MinAllowedFrameQP rejected (\(r))") }
     }
 
