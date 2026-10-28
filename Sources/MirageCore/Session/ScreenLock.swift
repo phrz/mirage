@@ -14,7 +14,9 @@ public enum ScreenLock {
         public init(sessionScreenIsLocked: Bool?, ioConsoleLocked: Bool?, shieldWindow: Bool) {
             self.sessionScreenIsLocked = sessionScreenIsLocked; self.ioConsoleLocked = ioConsoleLocked; self.shieldWindow = shieldWindow
         }
-        public var locked: Bool { (sessionScreenIsLocked ?? false) || (ioConsoleLocked ?? false) || shieldWindow }
+        public var locked: Bool { sessionLocked || shieldWindow }
+        /// The session's own lock state (no window heuristics): what switches the picture to the lock screen and back.
+        public var sessionLocked: Bool { (sessionScreenIsLocked ?? false) || (ioConsoleLocked ?? false) }
         public var description: String { "CGSSessionScreenIsLocked \(sessionScreenIsLocked.map { "\($0)" } ?? "absent"), IOConsoleLocked \(ioConsoleLocked.map { "\($0)" } ?? "absent"), shield window \(shieldWindow)" }
     }
 

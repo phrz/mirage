@@ -38,4 +38,11 @@ final class ScreenLockTests: XCTestCase {
         // Cut-out policy never draws the shields over layers.
         XCTAssertEqual(LayerScenePlan.plan([shield, bench], hasCanvas: { _ in false }, display: display).entries[0].kind, .displayOnly)
     }
+
+    /// 539: lock mode is the session's lock alone; a shield-like window (an authorization dialog) only guards input.
+    func testOnlyTheSessionSwitchesLockMode() {
+        XCTAssertFalse(ScreenLock.Signals(sessionScreenIsLocked: false, ioConsoleLocked: false, shieldWindow: true).sessionLocked)
+        XCTAssertTrue(ScreenLock.Signals(sessionScreenIsLocked: false, ioConsoleLocked: false, shieldWindow: true).locked, "input still refused")
+        XCTAssertTrue(ScreenLock.Signals(sessionScreenIsLocked: true, ioConsoleLocked: false, shieldWindow: false).sessionLocked)
+    }
 }

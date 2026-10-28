@@ -38,6 +38,16 @@ final class WholeHandoverTests: XCTestCase {
         XCTAssertFalse(MacDesktopStreamer.fullWindowStill(measuredKbps: 0))
         XCTAssertFalse(MacDesktopStreamer.fullWindowStill(measuredKbps: 1_200))
     }
+
+    /// 539: static windows deliver no frame after their capture restarts; the window-alone snapshot of the restart counts
+    /// (the streamer passes the later of the two), and the display's settling is waited for only during the fade.
+    func testASnapshotCountsAndLateActivityDoesNotHold() {
+        let since = 10 * s
+        let snapped = L(id: 7, visible: 0.5, lastCaptured: since + s / 5, existedAtStart: true, hasStill: false)
+        XCTAssertEqual(WholeHandover.waiting([snapped], since: since, displayChangedAt: 0, now: since + 2 * s, settle: settle), [])
+        XCTAssertEqual(WholeHandover.waiting([snapped], since: since, displayChangedAt: since + 2 * s, now: since + 2 * s, settle: settle), [0], "the fade")
+        XCTAssertEqual(WholeHandover.waiting([snapped], since: since, displayChangedAt: since + 5 * s, now: since + 5 * s, settle: settle), [], "typing, a caret")
+    }
 }
 
 /// ScreenCaptureKit operations in turn, first come first served, and a hung one never holds the rest.
@@ -64,5 +74,16 @@ final class SCKGateTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(t0), 1, "the next one ran once the hold ran out")
         XCTAssertEqual(order.events, ["next"])
         hung.cancel()
+    }
+
+    func testUrgentGoesFirst() async throws {
+        let gate = SCKGate(), order = Order()
+        let first = Task { _ = try? await gate.run { try await Task.sleep(for: .milliseconds(60)); order.add("running") } }
+        try await Task.sleep(for: .milliseconds(10))
+        let start = Task { _ = try? await gate.run { order.add("window start") } }
+        try await Task.sleep(for: .milliseconds(10))
+        let filter = Task { _ = try? await gate.run(urgent: true) { order.add("filter update") } }
+        _ = await (first.value, start.value, filter.value)
+        XCTAssertEqual(order.events, ["running", "filter update", "window start"])
     }
 }

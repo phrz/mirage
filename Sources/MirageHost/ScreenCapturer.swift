@@ -249,10 +249,20 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                     case .desktop: let (df, ex) = try await Self.desktopFilterAndExcluded(t.display); f = df; desktopEx = ex
                     case .displayExcludingLayers: f = try await Self.displayFilter(t.display, excluding: want)
                     }
+                    // The lock state moved on while the filter was built (the desktop's reads the catalog): not applied; the next
+                    // pass builds the one wanted now (539: an unlock's desktop filter landed after the whole display was wanted).
+                    self.filterLock.lock()
+                    if self.locked != locked {
+                        self.wantedApplied.insert(contentsOf: callbacks, at: 0); if self.wantedExcluded == nil { self.wantedExcluded = want }
+                        self.lockDone.insert(contentsOf: ld, at: 0); self.refreshDone.insert(contentsOf: rd, at: 0); self.filterDirty = true
+                        self.filterLock.unlock()
+                        continue
+                    }
+                    self.filterLock.unlock()
                     // Bounded: an update that never returns must not hold every later one back (applying stays true). The bound
                     // runs once ScreenCaptureKit is ours (SCKGate): queued behind window starts, updates timed out at 3 s without
                     // ever being tried (mac-daddy on 537: "not started after 3.0 s", the curtain's re-apply failing).
-                    try await SCKGate.shared.run { try await Self.bounded(seconds: 3, { try await stream.updateContentFilter(f) }, late: { _ in }) }
+                    try await SCKGate.shared.run(urgent: true) { try await Self.bounded(seconds: 3, { try await stream.updateContentFilter(f) }, late: { _ in }) }
                     self.failures = 0
                     self.appliedKey = key
                     switch plan {

@@ -104,6 +104,9 @@ final class Layer {
     var frames = 0
     /// When a capture of this layer last reached the streamer (the cover waits for one per visible layer since it began).
     var lastCapturedNanos: UInt64 = 0
+    /// When the window-alone snapshot of its (re)start came: a static window's capture may deliver nothing more, and the
+    /// snapshot is a true picture of it (a whole-display hand-over counts it; WholeHandover).
+    var snapshotNanos: UInt64 = 0
     var sentBytes = 0, sentRefine = 0, sentDirect = 0
     /// 30 s accounting by class (DESIGN §6 M3.1: what the steady traffic is): first-picture still, lossless blocks,
     /// per-tile refinement, direct changes, video, underlay (display only), and dirty tiles seen.
