@@ -249,4 +249,33 @@ final class DeliveryRateTests: XCTestCase {
         }
         XCTAssertGreaterThanOrEqual(rc.targetKbps, 2_000, "paced trains lowered the target to \(rc.targetKbps)")
     }
+
+    /// mac-daddy on 544 (phrz: "1 fps, pure patchiness"): careful resume seeded 8083 kbps, the LAN probe started at 50 Mbps,
+    /// and 0.5 s later the target was 10103 (1.25 x the seed): raw fragment loss read as stress turned the LAN ceiling off.
+    func testALANStartIsNotCappedByAResumedEstimate() {
+        var rc = RateController(initialKbps: 800, maxKbps: 50_000, nativePixels: 2914 * 1640)
+        rc.resume(fromKbps: 8083)
+        rc.seedLAN()
+        XCTAssertEqual(rc.targetKbps, 50_000)
+        XCTAssertEqual(rc.deliveryKbps, 0, "the seed is not delivery")
+        XCTAssertEqual(rc.deliveryCeilingKbps, 50_000)
+    }
+    func testRepairedLossIsNotStress() {
+        XCTAssertFalse(RateController.stressed(rttRising: false, frameLossPercent: 0), "raw loss that parity repairs")
+        XCTAssertTrue(RateController.stressed(rttRising: true, frameLossPercent: 0))
+        XCTAssertTrue(RateController.stressed(rttRising: false, frameLossPercent: 2.5))
+        // The raw rate still sizes parity: a repaired 8 % does not reach the stress test, which reads unrepaired frames only.
+        var rc = RateController(initialKbps: 800, maxKbps: 50_000, nativePixels: 2914 * 1640)
+        for _ in 0..<10 { rc.fragmentLoss(lost: 8, total: 100, now: 1_000_000_000) }
+        XCTAssertGreaterThan(rc.fragmentLossPercent, 5); XCTAssertEqual(rc.frameLossPercent, 0)
+    }
+    /// The stored estimate ratcheted down session after session (72 Mbps, then 6838, then 8083 kbps).
+    func testAStoredEstimateIsLoweredOnlyBySustainedStress() {
+        XCTAssertEqual(RateController.estimateToSave(prior: nil, measuredPeak: 9000, stressedWindows: 0, lanStart: false), 9000)
+        XCTAssertEqual(RateController.estimateToSave(prior: 8000, measuredPeak: 72_000, stressedWindows: 0, lanStart: true), 72_000)
+        XCTAssertNil(RateController.estimateToSave(prior: 72_000, measuredPeak: 8000, stressedWindows: 0, lanStart: false), "held down by something else")
+        XCTAssertNil(RateController.estimateToSave(prior: 72_000, measuredPeak: 8000, stressedWindows: 10, lanStart: true), "a LAN never lowers it")
+        XCTAssertEqual(RateController.estimateToSave(prior: 20_000, measuredPeak: 1500, stressedWindows: 3, lanStart: false), 1500, "a link that really got slower")
+        XCTAssertNil(RateController.estimateToSave(prior: 20_000, measuredPeak: 0, stressedWindows: 0, lanStart: false))
+    }
 }

@@ -401,6 +401,9 @@ public struct RateController {
     public mutating func seedLAN() {
         lanStart = true
         targetKbps = maxKbps
+        // A resumed estimate only seeded the start: on a probe-confirmed LAN it neither caps the ceiling nor stands as delivery
+        // (544: the stored 8083 kbps stayed "delivery" and capped every window at 1.1 x it). Measured afresh, in startup.
+        if resumedKbps > 0 { deliveryKbps = 0; deliverySamples = []; inStartup = true; resumedKbps = 0 }
         // The probe already measured the round trip: Local now, not at the first ack window (the in-flight cap and the
         // ceiling read the tier; at +0.63 s a LAN's cap was still 32 KB and its ceiling 11 Mbps, 2026-10-25 12:21Z).
         // Local outright (the caller's LAN test is classify's Local rule: min RTT under 20 ms, no throttle), even when a tier
@@ -480,6 +483,7 @@ public struct RateController {
     /// Careful resume (the IETF draft's idea): start from this pairing's last estimate on this network, then verify.
     public mutating func resume(fromKbps k: Int) {
         guard k > 0 else { return }
+        resumedKbps = k
         deliveryKbps = k
         targetKbps = min(maxKbps, max(tuning.minKbps, Int(Double(k) * 0.75)))
         inStartup = false   // the 1.1 × gain applies as soon as the first window of acks measures the link
@@ -507,6 +511,22 @@ public struct RateController {
     }
     /// The highest delivery estimate measured from acks this session (never a seed): what careful resume may start from.
     public private(set) var measuredPeakKbps = 0
+    /// The careful-resume seed, until a LAN start or delivery samples replace it.
+    private var resumedKbps = 0
+    /// Delivery windows in which the path showed stress (a rising round trip, unrepaired loss): what may lower a stored estimate.
+    public private(set) var stressedWindows = 0
+    /// Whether the path is stressed. Pure, for tests.
+    public static func stressed(rttRising: Bool, frameLossPercent: Double) -> Bool { rttRising || frameLossPercent > 1 }
+    /// What a session saves for the next connect's careful resume (nil: nothing, the stored one stands). A lower estimate
+    /// than the stored one only when the path was stressed for a while (sustained real loss or queueing): a session whose
+    /// rate was held down by anything else (its own ceiling, a fresh picture, a short visit) measured that, not the link,
+    /// and saving it ratcheted the estimate down session after session (mac-daddy on 544: 72 Mbps probed in the morning,
+    /// then 6838, then 8083 kbps). Pure, for tests.
+    public static func estimateToSave(prior: Int?, measuredPeak: Int, stressedWindows: Int, lanStart: Bool) -> Int? {
+        guard measuredPeak > 0 else { return nil }
+        guard let prior, measuredPeak < prior else { return measuredPeak }
+        return !lanStart && stressedWindows >= 3 ? measuredPeak : nil
+    }
     private var initialKbps = 800
     /// Stream data the host may keep unacked: 2 × the bandwidth-delay product (delivery rate × min RTT), 3 × in startup, at
     /// least 32 KB, and 64 KB until there is an estimate. (At 2 × in startup, a round trip the link's queue inflates allowed
@@ -632,8 +652,12 @@ public struct RateController {
         let kbps = Double(acked) * 8 / (Double(w) / 1e9) / 1000
         // App-limited: the host ran out of things to send during the window these acks answer (shifted by an RTT). Held
         // back by the in-flight cap is not app-limited: that is the link's rate.
-        let pathStressed = rttRising || lossPercent > 1
+        // Stress is a rising round trip or loss the recovery could not hide. Raw fragment loss that parity and NACKs repair,
+        // with no queue building, is the receiver's (bursts overflowing its socket on a 5 ms LAN: 4-8 % on 544), not the
+        // path's: read as stress it switched the LAN ceiling off and held phrz's unlock at 8.9 Mbps ("1 fps, pure patchiness").
+        let pathStressed = Self.stressed(rttRising: rttRising, frameLossPercent: frameLossPercent)
         pathStressedNow = pathStressed
+        if pathStressed { stressedWindows += 1 }
         // Little in flight for most of the window counts too, unless the path itself says the link is the limit.
         let appLimited = (lastIdleNanos > 0 && now &- lastIdleNanos < w + UInt64(srttNanos)) || (!pathStressed && underusedWindow(now: now))
         // Held back by its own budget (tokens spent, work queued) counts as app-limited too: on 20 Mbps the fresh picture's

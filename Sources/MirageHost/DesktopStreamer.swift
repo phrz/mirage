@@ -1275,7 +1275,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     public func suspend() async {
         endCurtain(stopped: false)
         queue.sync { holdWarm(false) }
-        queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.priorDeliveryNetwork) }   // the next connect starts there
+        queue.sync { Self.savePriorDelivery(self.rc, for: self.output?.peerID, network: self.priorDeliveryNetwork) }   // the next connect starts there
         // The session is cut loose first (output, timers, captures detached), then the captures are stopped, each within 3 s:
         // ScreenCaptureKit's stopCapture can fail to return, and awaiting it before the cut left a suspended streamer
         // capturing, refining and sending into the dead connection for good (mac-daddy 2026-10-21: a second streamer
@@ -1442,7 +1442,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     public func stop() async {
         endCurtain(stopped: true)
         queue.sync { holdWarm(false) }
-        queue.sync { Self.savePriorDelivery(self.rc?.measuredPeakKbps ?? 0, for: self.output?.peerID, network: self.priorDeliveryNetwork) }
+        queue.sync { Self.savePriorDelivery(self.rc, for: self.output?.peerID, network: self.priorDeliveryNetwork) }
         // Cut loose first, then stop the captures within 3 s each (suspend()).
         let (cap, caps): (ScreenCapturer?, [WindowCapturer]) = await withCheckedContinuation { c in
             queue.async {
@@ -3487,7 +3487,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
               Date().timeIntervalSince(e.at) < 24 * 3600, e.kbps > 0 else { return nil }
         return e.kbps
     }
-    static func savePriorDelivery(_ kbps: Int, for peer: String?, network: String?) {
+    static func savePriorDelivery(_ rc: RateController?, for peer: String?, network: String?) {
+        guard let rc, let kbps = RateController.estimateToSave(prior: priorDelivery(for: peer, network: network), measuredPeak: rc.measuredPeakKbps,
+                                                                stressedWindows: rc.stressedWindows, lanStart: rc.lanStart) else { return }
         guard let peer, let network, kbps > 0, let url = (try? Store())?.url("delivery.json") else { return }
         var m = (try? Data(contentsOf: url)).flatMap { try? JSONDecoder().decode([String: PriorDelivery].self, from: $0) } ?? [:]
         m[peer + "|" + network] = PriorDelivery(kbps: kbps, at: Date())
