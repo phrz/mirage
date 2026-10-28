@@ -198,6 +198,11 @@ final class ViewerSession: @unchecked Sendable {
     /// When the watched window's direct changes were last shown: at the tile under TRUTH off, at the capture's frameEnd under
     /// TRUTH (applied tiles wait there), so key-to-pixel times what a person sees.
     private(set) var lastWatchedShownNanos: UInt64 = 0
+    /// For the gate: keyframes and gaps between video frames once steady (after `steadyAfterNanos`), and seconds with nothing
+    /// from the host (no sample is written for them, but they count as idle).
+    private var keyframesReceived = 0
+    private var videoGapsMs: [Double] = []
+    private var quietSeconds = 0
     /// Last watched tile of at least 32×32 px: time-to-crisp ignores caret blinks and single glyphs.
     private(set) var lastWatchedLargeTileNanos: UInt64 = 0
     private(set) var watchedVideoFrames = 0, watchedCopyRects = 0
@@ -1279,6 +1284,8 @@ final class ViewerSession: @unchecked Sendable {
                     if lastVideoNanos > 0, since > 0, now > since &+ steadyAfterNanos, now > lastVideoNanos {
                         let gap = Double(Clock.elapsed(since: lastVideoNanos, now: now)) / 1e6
                         if gap > maxVideoGapMs { maxVideoGapMs = gap }
+                        if videoGapsMs.count < 20_000 { videoGapsMs.append(gap) }
+                        if frame.flags.contains(.keyframe) { keyframesReceived += 1 }
                         if gap > 500 { videoGapsOver500.append(gap) }
                     }
                     lastVideoNanos = now
@@ -1349,7 +1356,7 @@ final class ViewerSession: @unchecked Sendable {
                                           decodeMs: s.decodeMs, lost: lost, skipped: dropped, width: w, height: h,
                                           tileKbps: s.tileKbps, tileRects: tileRects, copyRects: copies, targetKbps: rate.targetKbps, capacityKbps: rate.capacityKbps,
                                           queueMs: rate.queueMs, rung: rate.rung, scale: rate.scale, tier: rate.tier?.name, totalBytes: self.totalBytes()))
-                }
+                } else { quietSeconds += 1 }
                 if let url = model.statsLog {
                     let line = String(format: "%@ rtt %.0f age %.0f fps %.1f kbps %.0f tiles %.0f target %d cap %d queue %.0f rung %d decode %.1f lost %d skipped %d size %dx%d\n",
                                       ISO8601DateFormatter().string(from: Date()), s.rttMs, s.frameAgeMs, s.fps, s.kbps, s.tileKbps, rate.targetKbps, rate.capacityKbps, rate.queueMs, rate.rung, s.decodeMs, lost, dropped, w, h)
@@ -2012,6 +2019,11 @@ extension ViewerSession {
             var typeahead: TypeaheadStats? = nil
             /// Every byte from the host in the run (video, tiles, control) and the run's length when written.
             var totalBytes: Int? = nil, totalBytesAtSeconds: Double? = nil
+            /// The gate (docs/reset): keyframes once steady (0 is the aim on a LAN), the p95 gap between video frames once steady,
+            /// the median rate in seconds with video (active) and without (idle, quiet seconds as 0), and the host display's pixels
+            /// against the stream's ("3024x1964 -> 1512x982" is a scaled stream).
+            var keyframes: Int? = nil, videoGapP95Ms: Double? = nil, idleKbpsMedian: Double? = nil, activeKbpsMedian: Double? = nil
+            var hostPixels: String? = nil, streamPixels: String? = nil
         }
         struct TypeaheadStats: Codable { var shown: Int, confirmed: Int, mismatched: Int, expired: Int; var accuracy: Double?; var visibleMsMedian: Double?, visibleMsMax: Double?, echoMsMedian: Double?, echoMsP95: Double?; var misses: [String]? }
         struct UnifiedStats: Codable {
@@ -2071,6 +2083,14 @@ extension ViewerSession {
                                            misses: typeaheadMisses().map { "'\($0.text)' predicted end \($0.predictedX),\($0.predictedY) host caret \($0.hostX),\($0.hostY) (glyph \($0.glyphWidth) px)" })
         }
         out.totalBytes = totalBytes(); out.totalBytesAtSeconds = Date().timeIntervalSince(startDate)
+        out.keyframes = keyframesReceived
+        let gaps = videoGapsMs.sorted(); out.videoGapP95Ms = gaps.isEmpty ? nil : gaps[min(gaps.count - 1, gaps.count * 95 / 100)]
+        let idle = samples.filter { $0.fps < 1 }.map { $0.kbps + $0.tileKbps } + Array(repeating: 0, count: quietSeconds), active = samples.filter { $0.fps >= 1 }.map { $0.kbps + $0.tileKbps }
+        out.idleKbpsMedian = idle.isEmpty ? nil : idle.sorted()[idle.count / 2]; out.activeKbpsMedian = active.isEmpty ? nil : active.sorted()[active.count / 2]
+        if let i = MainActor.assumeIsolated({ model.streamInfo }) {
+            out.hostPixels = "\(Int((Double(i.displayWidth) * i.displayScale).rounded()))x\(Int((Double(i.displayHeight) * i.displayScale).rounded()))"
+            out.streamPixels = "\(i.width)x\(i.height)"
+        }
         out.transientSamples = scenario?.transientSamples; out.transientGhosts = scenario?.transientGhosts; out.dockGhostMs = scenario?.dockGhostMs
         out.unified = MainActor.assumeIsolated { () -> UnifiedStats? in
             guard let u = unified else { return nil }
