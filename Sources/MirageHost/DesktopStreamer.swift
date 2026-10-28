@@ -3029,7 +3029,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // unlock's fade are motion of the picture itself, and go as video with everything else of the capture, as the lock
         // screen does (546, the end-to-end drag: 4.8 fps of video and 2 Mbps of tiles while a window was dragged, the drag
         // "froze into big chunks"). Small changes alone (a caret) keep their own path.
-        if layer.isDisplay, wholeDisplay, !plan.lossless.isEmpty, !plan.video.isEmpty || !inputQuiet || motionSustained(now), layer.encoder != nil || ensureEncoder(layer) {
+        // Motion is the capture's own size too, not only input to this session or classify's per-tile history: 550's drag
+        // check (the drag from a second session) went at 2.8 fps of video from ~41 captures a second, its changes as tiles.
+        let wholeMotion = !plan.video.isEmpty || !inputQuiet || motionSustained(now)
+            || MotionGate.counts(videoTiles: plan.lossless.count, layerTiles: tracker.tileCount, screenTiles: display?.tracker.tileCount ?? 0)
+        if layer.isDisplay, wholeDisplay, !plan.lossless.isEmpty || !plan.video.isEmpty, wholeMotion, layer.encoder != nil || ensureEncoder(layer) {
+            // The whole change in one frame: tiles classify's per-tile rate limit held back go too (a dragged window's trailing
+            // edge otherwise waited, a partial frame).
+            let inPlan = Set(plan.lossless).union(plan.video)
+            let held = dirty.filter { !inPlan.contains($0) && tracker.isDirectPending($0) && !layer.occludedTiles.contains($0) }
+            if !held.isEmpty { plan.lossless.append(contentsOf: held) }
             plan.video.append(contentsOf: plan.lossless)
             plan.videoRegion = plan.videoRegion.union(tracker.boundingRect(plan.lossless))
             tracker.markVideo(plan.lossless, now: now)
