@@ -1617,7 +1617,27 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// The display capture's filter changed (a lock switch, a whole-display fresh picture or its hand-over is in force): its
     /// next frame is presented whole, as a still, from the new source alone; nothing of the old one (diff state, refinement)
     /// carries over (539: "dots with a mess of caret artifacts left behind").
+    /// A whole-display picture with no frame 0.6 s after it began: a screenshot of the whole display stands in. A display
+    /// capture delivers frames only on change; when its first frame was dropped (a filter switching, a curtain generation
+    /// moving), a still screen sent nothing more, and that session had no picture for good (a second viewer beside phrz's
+    /// on 553: 198 of 198 frames partial, the next run whole at 1.45 s).
+    private func ensureWholeFrame() {
+        let asked = Clock.nowNanos()
+        queue.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self, self.wholeDisplay, let d = self.display, d.lastCapturedNanos < asked, let t = self.target else { return }
+            let (w, h) = (t.pixelWidth, t.pixelHeight)
+            Task { [weak self] in
+                guard let px = await Self.displayShot(t.display, width: w, height: h), let pb = Self.scaledFrame(px, width: w, height: h, toWidth: w, toHeight: h) else { return }
+                self?.queue.async {
+                    guard let self, self.wholeDisplay, let d = self.display, d.lastCapturedNanos < asked else { return }
+                    self.log("display: no frame 0.6 s into the whole picture; a screenshot stands in")
+                    self.captured(pb, Clock.nowNanos(), dirtyRects: [PixelRect(x: 0, y: 0, width: w, height: h)], layerID: 0)
+                }
+            }
+        }
+    }
     private func displaySourceChanged() {
+        if wholeDisplay { ensureWholeFrame() }
         guard let d = display, !d.provisional else { return }
         d.lastFrame = nil; d.diffRef = nil; d.forceFullDiff = true; d.wantKeyframe = true
         if compositor { d.fresh = .still; d.stillSent = false; lockStillDue = true; fullStillNext = true }
@@ -1632,6 +1652,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         lockStillDue = true
         stage1Active = false   // (the display is the only layer shown: its still is presented the moment it is in)
         log("fresh picture (\(trigger.rawValue)): the whole display first; windows listed once their layers are ready")
+        ensureWholeFrame()
     }
     /// Once every visible window layer has a frame captured since (a new one also its still) and the margin has passed, or at
     /// the latest after `wholeMaxNanos`: the windows are listed and the display goes back to the desktop alone.
@@ -2602,14 +2623,25 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             for y in 0..<r.height {
                 memcpy(dst.advanced(by: (r.y - l.frame.y + y) * ds + (r.x - l.frame.x) * 4), src.base.advanced(by: (r.y + y) * src.stride + r.x * 4), r.width * 4)
             }
-            // Where a window in front covers this one, the composited screen shows that window, not this one: those
-            // pixels are left transparent. Kept, they were the front window's picture inside this layer, a ghost of
-            // it once it moved away (a fallback-cut window's corner on the desktop during Show Desktop, mac-daddy).
+            // Where a window in front covers this one, the composited screen shows that window, not this one. Kept, they
+            // were the front window's picture inside this layer, a ghost of it once it moved away (a fallback-cut window's
+            // corner on the desktop during Show Desktop, mac-daddy). The layer's own last pixels there instead (a layer holds
+            // its whole content: transparent, they were a hole once the front window moved, phrz on 553); transparent only
+            // where it never had any.
+            let prev = l.lastFrame.flatMap { CVPixelBufferGetWidth($0) == w && CVPixelBufferGetHeight($0) == h ? $0 : nil }
+            if let prev { CVPixelBufferLockBaseAddress(prev, .readOnly) }
             for f in fallbackCovers(of: id, frame: l.frame) {
                 let c = f.intersection(r)
                 guard !c.isEmpty else { continue }
-                for y in 0..<c.height { memset(dst.advanced(by: (c.y - l.frame.y + y) * ds + (c.x - l.frame.x) * 4), 0, c.width * 4) }
+                for y in 0..<c.height {
+                    let o = (c.y - l.frame.y + y) * ds + (c.x - l.frame.x) * 4
+                    if let prev, let pbase = CVPixelBufferGetBaseAddress(prev) {
+                        let ps = CVPixelBufferGetBytesPerRow(prev)
+                        memcpy(dst.advanced(by: o), pbase.advanced(by: (c.y - l.frame.y + y) * ps + (c.x - l.frame.x) * 4), c.width * 4)
+                    } else { memset(dst.advanced(by: o), 0, c.width * 4) }
+                }
             }
+            if let prev { CVPixelBufferUnlockBaseAddress(prev, .readOnly) }
         }
         CVPixelBufferUnlockBaseAddress(out, [])
     }
