@@ -64,6 +64,14 @@ final class WholeHandoverTests: XCTestCase {
         XCTAssertEqual(HEVCEncoder.maxQP(bitrateKbps: 10_000, width: 2914, height: 1640, fps: 30), 36)
         XCTAssertEqual(HEVCEncoder.maxQP(bitrateKbps: 1_000, width: 3200, height: 1800, fps: 30), 51)
     }
+
+    /// TRUTH: where a layer has no pixels, the screen shows there. A window whose layer has no full content (a fallback layer)
+    /// stays in the desktop picture; every other window at or above the normal level is left out.
+    func testWindowsWithoutFullContentStayInTheDesktopPicture() {
+        let windows: [(id: UInt32, level: Int)] = [(1, -2147483624), (7, 0), (8, 0), (9, 25)]
+        XCTAssertEqual(ScreenCapturer.desktopExcludedIDs(windows, keep: []), [7, 8, 9])
+        XCTAssertEqual(ScreenCapturer.desktopExcludedIDs(windows, keep: [8]), [7, 9], "the fallback window's pixels show beneath its layer")
+    }
 }
 
 /// ScreenCaptureKit operations in turn, first come first served, and a hung one never holds the rest.

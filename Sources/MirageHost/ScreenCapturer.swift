@@ -225,7 +225,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                 self.wantedExcluded = nil
                 let callbacks = self.wantedApplied; self.wantedApplied = []
                 let (ld, rd) = (self.lockDone, self.refreshDone); self.lockDone = []; self.refreshDone = []
-                let locked = self.locked, force = self.forceRefresh; self.forceRefresh = false
+                let locked = self.locked, force = self.forceRefresh, keep = self.desktopKeep; self.forceRefresh = false
                 self.filterLock.unlock()
                 let ids = want.map(\.windowID).sorted()
                 let gen = CurtainExclusion.generation
@@ -246,7 +246,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
                     var desktopEx: Set<UInt32>?
                     switch plan {
                     case .wholeDisplay: f = try await Self.displayFilter(t.display, excluding: [])
-                    case .desktop: let (df, ex) = try await Self.desktopFilterAndExcluded(t.display); f = df; desktopEx = ex
+                    case .desktop: let (df, ex) = try await Self.desktopFilterAndExcluded(t.display, keep: keep); f = df; desktopEx = ex
                     case .displayExcludingLayers: f = try await Self.displayFilter(t.display, excluding: want)
                     }
                     // The lock state moved on while the filter was built (the desktop's reads the catalog): not applied; the next
@@ -390,13 +390,27 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// out (their window listed, captured empty: check 5, 2026-10-24, the top-right cells at 0.16-0.25 of the screen).
     /// MIRAGE_TEST_DESKTOP_INCLUDE=1: the include filter.
     static func desktopFilter(_ display: SCDisplay) async throws -> SCContentFilter { try await desktopFilterAndExcluded(display).0 }
-    static func desktopFilterAndExcluded(_ display: SCDisplay) async throws -> (SCContentFilter, Set<UInt32>) {
+    static func desktopFilterAndExcluded(_ display: SCDisplay, keep: Set<UInt32> = []) async throws -> (SCContentFilter, Set<UInt32>) {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let desk = content.windows.filter { ($0.windowLayer < 0 || testMenuBarInDesktop && $0.windowLayer == menuBarLevel) && $0.frame.intersects(display.frame) }
         guard !desk.isEmpty else { throw MirageError.transport("no desktop-level windows on display \(display.displayID)") }
         if testDesktopInclude { return (SCContentFilter(display: display, including: desk), []) }
-        let above = CurtainExclusion.adding(to: content.windows.filter { $0.windowLayer >= 0 })   // (the curtain is above 0 too; listed or not)
+        let ids = desktopExcludedIDs(content.windows.map { ($0.windowID, $0.windowLayer) }, keep: keep)
+        let above = CurtainExclusion.adding(to: content.windows.filter { ids.contains($0.windowID) })   // (the curtain is above 0 too; listed or not)
         return (SCContentFilter(display: display, excludingWindows: above), Set(above.map(\.windowID)))
+    }
+    /// The windows the desktop capture leaves out: every one at the normal level or above, except `keep`, windows whose layers
+    /// have no full content of their own (a fallback layer: its own capture failed). Those stay in the desktop picture, so
+    /// wherever their layer has no pixels the viewer shows the screen there, never a hole (phrz on 553). Pure, for tests.
+    static func desktopExcludedIDs(_ windows: [(id: UInt32, level: Int)], keep: Set<UInt32>) -> Set<UInt32> {
+        Set(windows.filter { $0.level >= 0 && !keep.contains($0.id) }.map(\.id))
+    }
+    /// Windows kept in the desktop picture (see `desktopExcludedIDs`); a change re-applies the filter.
+    private var desktopKeep: Set<UInt32> = []
+    func keepInDesktop(_ ids: Set<UInt32>, log: @escaping (String) -> Void) {
+        guard source == .desktop else { return }
+        filterLock.lock(); let changed = desktopKeep != ids; desktopKeep = ids; if changed { filterDirty = true; forceRefresh = true }; filterLock.unlock()
+        if changed { pumpFilter(log: log) }
     }
     /// Re-reads the desktop-level windows (a widget added or removed) and applies them; desktop sources only.
     func refreshDesktop(log: @escaping (String) -> Void, done: ((Bool) -> Void)? = nil) {

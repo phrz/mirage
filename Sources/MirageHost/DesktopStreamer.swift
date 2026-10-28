@@ -2063,7 +2063,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Layers whose own capture failed (or MIRAGE_TEST_FALLBACK names their app): their frames are cut at their frame from one
     /// full display capture (the composited screen, nothing left out), started while any layer needs it. Soft, and partly
     /// covered where a window is in front, but still a layer: never baked into the desktop.
-    private var fallbackLayers = Set<UInt32>()
+    private var fallbackLayers = Set<UInt32>() { didSet { if fallbackLayers != oldValue { capturer?.keepInDesktop(fallbackLayers, log: log) } } }
     // MARK: Placeholders (DESIGN §3.0b)
 
     private var placeholdersDone = false
@@ -2755,7 +2755,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // the window-list change); a window still not left out after 2 s (one ScreenCaptureKit cannot list) stops holding them.
         if compositor, layer.isDisplay, !provisionalFrame, let ex = capturer?.desktopExcluded, let s = windows.current {
             let now = Clock.nowNanos()
-            let missing = s.windows.filter { $0.windowLevel >= 0 && !ex.contains($0.id) && catalog.window($0.id) != nil && !$0.frame.intersection(layer.bounds).isEmpty }
+            let missing = s.windows.filter { $0.windowLevel >= 0 && !ex.contains($0.id) && !fallbackLayers.contains($0.id) && catalog.window($0.id) != nil && !$0.frame.intersection(layer.bounds).isEmpty }
             if missing.isEmpty { desktopHoldSince = 0 }
             else {
                 if desktopHoldSince == 0 { desktopHoldSince = now; capturer?.refreshDesktop(log: { [weak self] in self?.log($0) }) }
