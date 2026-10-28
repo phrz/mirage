@@ -125,6 +125,9 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await s.startCapture()
         stream = s
+        let plan = Self.filterPlan(source: source, locked: locked)
+        appliedLocked = locked
+        appliedKey = FilterKey(plan: plan, excluded: plan == .displayExcludingLayers ? excluding.map(\.windowID).sorted() : [], curtainGen: gen)
         curtainApplied(gen, ok: true)
         if keepsDisplayAwake { holdDisplayAwake() }
         return t
@@ -175,10 +178,12 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         return t
     }
 
-    /// Changes the set of windows left out of the display picture (layers started or stopped). Updates are
-    /// applied one at a time, latest wish wins: concurrent `updateContentFilter` calls can finish out of order,
-    /// leaving an older (empty) exclusion in force while the host believes the window is excluded (the
-    /// suspected cause of the M3.1 ghosts on mac-daddy).
+    /// Changes the set of windows left out of the display picture (layers started or stopped). Every filter change of this
+    /// capture (this, a lock switch, the curtain's re-apply, a desktop refresh) goes through one pump (`pumpFilter`): one
+    /// update at a time, built from the latest state when it is applied, so concurrent `updateContentFilter` calls can never
+    /// finish out of order (an older, empty exclusion in force while the host believes the window excluded: the M3.1 ghosts;
+    /// an unlock's desktop filter landing after the fresh picture's whole-display one: phrz on 537, "everything but desktop
+    /// faded out").
     /// Every caller's `applied` runs once a filter at least as new as its wish is in force (a call while the loop runs used to
     /// lose its closure: a layer's exclusion applied but never acknowledged, the layer later given up as unexcludable).
     func requestExcluded(_ windows: [SCWindow], log: @escaping (String) -> Void, applied: (([UInt32]) -> Void)? = nil) {
@@ -186,6 +191,21 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         wantedExcluded = windows
         lastRequested = windows
         if let applied { wantedApplied.append(applied) }
+        filterDirty = true
+        filterLock.unlock()
+        pumpFilter(log: log)
+    }
+    /// What a filter is built from (the latest state): skipped when the one in force was built from the same.
+    struct FilterKey: Equatable { var plan: FilterPlan; var excluded: [UInt32]; var curtainGen: Int }
+    private var appliedKey: FilterKey?
+    /// The lock state the filter in force was built for.
+    private var appliedLocked = false
+    private var filterDirty = false
+    private var forceRefresh = false
+    private var lockDone: [@Sendable () -> Void] = []
+    private var refreshDone: [(Bool) -> Void] = []
+    private func pumpFilter(log: @escaping (String) -> Void) {
+        filterLock.lock()
         let start = !applying
         applying = true
         filterLock.unlock()
@@ -193,29 +213,69 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         Task { [weak self] in
             while let self {
                 self.filterLock.lock()
-                guard let want = self.wantedExcluded else { self.applying = false; self.filterLock.unlock(); return }
+                guard self.filterDirty, let stream = self.stream, let t = self.target else {
+                    let (ld, rd) = (self.lockDone, self.refreshDone); self.lockDone = []; self.refreshDone = []
+                    if self.stream == nil { self.switchingLock = false }
+                    self.applying = false; self.filterLock.unlock()
+                    ld.forEach { $0() }; rd.forEach { $0(true) }
+                    return
+                }
+                self.filterDirty = false
+                let want = self.wantedExcluded ?? self.lastRequested ?? self.excluded
                 self.wantedExcluded = nil
                 let callbacks = self.wantedApplied; self.wantedApplied = []
+                let (ld, rd) = (self.lockDone, self.refreshDone); self.lockDone = []; self.refreshDone = []
+                let locked = self.locked, force = self.forceRefresh; self.forceRefresh = false
                 self.filterLock.unlock()
-                guard let stream = self.stream, let t = self.target else { continue }
                 let ids = want.map(\.windowID).sorted()
-                if Self.testNoExclude { log("TEST: display exclusion disabled (MIRAGE_TEST_NO_EXCLUDE); would exclude \(ids)"); self.excluded = []; callbacks.forEach { $0([]) }; continue }
                 let gen = CurtainExclusion.generation
+                let plan = Self.filterPlan(source: self.source, locked: locked)
+                let key = FilterKey(plan: plan, excluded: plan == .displayExcludingLayers ? ids : [], curtainGen: gen)
+                if plan == .displayExcludingLayers, Self.testNoExclude {
+                    log("TEST: display exclusion disabled (MIRAGE_TEST_NO_EXCLUDE); would exclude \(ids)"); self.excluded = []; callbacks.forEach { $0([]) }
+                    ld.forEach { $0() }; rd.forEach { $0(true) }; continue
+                }
+                if !force, key == self.appliedKey, locked == self.appliedLocked {
+                    if plan == .displayExcludingLayers { self.excluded = want }
+                    self.filterLock.lock(); self.switchingLock = false; self.filterLock.unlock()
+                    callbacks.forEach { $0(ids) }; self.curtainApplied(gen, ok: true); ld.forEach { $0() }; rd.forEach { $0(true) }
+                    continue
+                }
                 do {
-                    // Bounded: an update that never returns must not hold every later exclusion back (applying stays true).
-                    // Locked: the whole display whatever the wish (kept for the unlock).
-                    let f = try await Self.displayFilter(t.display, excluding: self.locked ? [] : want)
-                    try await Self.bounded(seconds: 3, { try await stream.updateContentFilter(f) }, late: { _ in })
+                    let f: SCContentFilter
+                    var desktopEx: Set<UInt32>?
+                    switch plan {
+                    case .wholeDisplay: f = try await Self.displayFilter(t.display, excluding: [])
+                    case .desktop: let (df, ex) = try await Self.desktopFilterAndExcluded(t.display); f = df; desktopEx = ex
+                    case .displayExcludingLayers: f = try await Self.displayFilter(t.display, excluding: want)
+                    }
+                    // Bounded: an update that never returns must not hold every later one back (applying stays true). The bound
+                    // runs once ScreenCaptureKit is ours (SCKGate): queued behind window starts, updates timed out at 3 s without
+                    // ever being tried (mac-daddy on 537: "not started after 3.0 s", the curtain's re-apply failing).
+                    try await SCKGate.shared.run { try await Self.bounded(seconds: 3, { try await stream.updateContentFilter(f) }, late: { _ in }) }
                     self.failures = 0
-                    self.excluded = want
-                    log("display filter applied: excluding windows \(ids)")
+                    self.appliedKey = key
+                    switch plan {
+                    case .wholeDisplay: self.clearDesktopExcluded()
+                    case .desktop: if let desktopEx { self.setDesktopExcluded(desktopEx) }
+                    case .displayExcludingLayers: self.excluded = want; log("display filter applied: excluding windows \(ids)")
+                    }
+                    if locked != self.appliedLocked {
+                        self.appliedLocked = locked
+                        log("\(self.source) capture: \(locked ? "screen locked: the whole display (the lock screen)" : "screen unlocked: its own filter again")")
+                        self.queue.async { self.forceNextFrame = true }
+                    }
+                    self.filterLock.lock(); if self.locked == self.appliedLocked { self.switchingLock = false }; self.filterLock.unlock()
                     callbacks.forEach { $0(ids) }
                     self.curtainApplied(gen, ok: true)
+                    ld.forEach { $0() }; rd.forEach { $0(true) }
                 } catch {
-                    log("display exclusion update failed: \(error)")
+                    log("\(self.source) filter update failed (\(plan)): \(error)")
                     // Kept for the next pass, which re-applies (a curtain waiter hears the failure and retries itself).
-                    self.filterLock.lock(); self.wantedApplied.insert(contentsOf: callbacks, at: 0); if self.wantedExcluded == nil { self.wantedExcluded = want }; self.filterLock.unlock()
+                    self.filterLock.lock(); self.wantedApplied.insert(contentsOf: callbacks, at: 0); if self.wantedExcluded == nil { self.wantedExcluded = want }
+                    self.filterDirty = true; self.lockDone.insert(contentsOf: ld, at: 0); self.filterLock.unlock()
                     self.curtainApplied(gen, ok: false)
+                    rd.forEach { $0(false) }
                     // Backing off: 0.2, 0.4 … 3.2 s between attempts, not a retry every 200 ms forever.
                     self.failures = min(self.failures + 1, 5)
                     try? await Task.sleep(for: .milliseconds(100 << self.failures))
@@ -302,26 +362,16 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// Switches to the whole display while locked, back to this source's own filter on unlock; the first frame after it is
     /// delivered whole (`forceNextFrame`). `done` once the filter is in force (or the switch failed).
     func setLocked(_ on: Bool, log: @escaping (String) -> Void, done: (@Sendable () -> Void)? = nil) {
-        filterLock.lock(); let changed = locked != on; locked = on; if changed { switchingLock = true }; filterLock.unlock()
-        guard changed, let stream, let t = target else { filterLock.lock(); switchingLock = false; filterLock.unlock(); done?(); return }
-        let src = source
-        Task {
-            do {
-                let f: SCContentFilter
-                switch Self.filterPlan(source: src, locked: on) {
-                case .wholeDisplay: f = try await Self.displayFilter(t.display, excluding: []); self.clearDesktopExcluded()
-                case .desktop: let (df, ex) = try await Self.desktopFilterAndExcluded(t.display); f = df; self.setDesktopExcluded(ex)
-                case .displayExcludingLayers:
-                    self.filterLock.lock(); let want = self.lastRequested ?? self.excluded; self.filterLock.unlock()
-                    f = try await Self.displayFilter(t.display, excluding: want)
-                }
-                try await Self.bounded(seconds: 3, { try await stream.updateContentFilter(f) }, late: { _ in })
-                log("\(src) capture: \(on ? "screen locked: the whole display (the lock screen)" : "screen unlocked: its own filter again")")
-            } catch { log("\(src) capture: the lock switch failed: \(error)") }
-            self.queue.async { self.forceNextFrame = true }
-            self.filterLock.lock(); self.switchingLock = false; self.filterLock.unlock()
-            done?()
-        }
+        filterLock.lock()
+        let changed = locked != on
+        locked = on
+        switchingLock = stream != nil && locked != appliedLocked
+        if changed { filterDirty = true }
+        if let done { if changed || applying { lockDone.append(done) } }
+        let now = !(changed || applying)
+        filterLock.unlock()
+        if now { done?() }
+        if changed { pumpFilter(log: log) }
     }
 
     /// The desktop alone: the display minus every window at the normal level or above, from one catalog sample (the window
@@ -340,21 +390,9 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     }
     /// Re-reads the desktop-level windows (a widget added or removed) and applies them; desktop sources only.
     func refreshDesktop(log: @escaping (String) -> Void, done: ((Bool) -> Void)? = nil) {
-        guard source == .desktop, let stream, let t = target else { done?(true); return }
-        Task {
-            let gen = CurtainExclusion.generation
-            do {
-                if self.locked {
-                    let f = try await Self.displayFilter(t.display, excluding: [])
-                    try await Self.bounded(seconds: 3, { try await stream.updateContentFilter(f) }, late: { _ in })
-                } else {
-                    let (f, ex) = try await Self.desktopFilterAndExcluded(t.display)
-                    try await Self.bounded(seconds: 3, { try await stream.updateContentFilter(f) }, late: { _ in })
-                    self.setDesktopExcluded(ex)
-                }
-                self.filterLock.lock(); self.curtainGen = max(self.curtainGen, gen); self.filterLock.unlock(); done?(true)
-            } catch { log("desktop filter update failed: \(error)"); done?(false) }
-        }
+        guard source == .desktop, stream != nil, target != nil else { done?(true); return }
+        filterLock.lock(); filterDirty = true; forceRefresh = true; if let done { refreshDone.append(done) }; filterLock.unlock()
+        pumpFilter(log: log)
     }
 
     /// The display picture's filter: the display minus `excluding` (window layers), or under MIRAGE_TEST_ONLY_APP that app only.

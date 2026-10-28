@@ -1535,7 +1535,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// frame captured since (and a new one its still), plus a margin for delivery, the windows are listed and the display
     /// goes back to the desktop alone, beneath them, in one step. phrz after an unlock on 522: "the windows still fade in one
     /// by one, no placeholders even, and patchy all over". `base`: the layers that existed when it began.
-    private var whole: (since: UInt64, deadline: UInt64, base: Set<UInt32>, readyAt: UInt64?, reason: String)?
+    private var whole: (since: UInt64, deadline: UInt64, base: Set<UInt32>, readyAt: UInt64?, reason: String, lateLogged: Bool)?
     /// Every capture is the whole display: while locked, and during a whole-display fresh picture.
     private var wholeDisplay: Bool { screenLocked || whole != nil }
     /// The knobs, from the environment (a test host) or the host's tunables.json (the production agent: no separate binary).
@@ -1581,7 +1581,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func beginWhole(_ trigger: FreshPictureTrigger) {
         guard compositor, !unifiedView, wholeFreshEnabled else { return }
         let now = Clock.nowNanos()
-        whole = (now, now + Self.wholeMaxNanos, Set(layers.keys), nil, trigger.rawValue)
+        whole = (now, now + Self.wholeMaxNanos, Set(layers.keys), nil, trigger.rawValue, false)
         for cap in [capturer, fallbackCapture].compactMap({ $0 }) { cap.setLocked(true, log: log) }
         if let d = display, !d.provisional { d.lastFrame = nil; d.forceFullDiff = true; d.wantKeyframe = true }
         lockStillDue = true
@@ -1593,24 +1593,47 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func wholeCheck(now: UInt64) {
         guard let w = whole, !screenLocked else { return }
         let states = layers.values.filter { !$0.isDisplay && $0.id != ControlMessage.WindowInfo.overlayID && plannedFrames[$0.id] != nil }.map {
-            WholeHandover.LayerState(id: $0.id, visible: $0.visibleFraction, lastCaptured: $0.lastCapturedNanos, existedAtStart: w.base.contains($0.id), hasStill: $0.stillSent || $0.cutStill)
+            WholeHandover.LayerState(id: $0.id, visible: $0.visibleFraction, lastCaptured: $0.lastCapturedNanos, existedAtStart: w.base.contains($0.id), hasStill: $0.stillSent || $0.cutStill, capturing: $0.capturer != nil || fallbackLayers.contains($0.id))
         }
         let waiting = WholeHandover.waiting(states, since: w.since, displayChangedAt: display?.contentChangedNanos ?? 0, now: now, settle: Self.wholeMarginNanos)
         if waiting.isEmpty, w.readyAt == nil { whole?.readyAt = now }
         if !waiting.isEmpty { whole?.readyAt = nil }
         let ready = waiting.isEmpty && Clock.elapsed(since: whole?.readyAt ?? now, now: now) >= Self.wholeMarginNanos
-        guard ready || now >= w.deadline else { return }
+        // Past the deadline the screen stays whole and live (never a hand-over to gaps: phrz on 537, windows coming back "in
+        // patches"), said once; a layer whose capture is gone (failed, stopped) is not waited for.
+        if !ready, now >= w.deadline, !w.lateLogged {
+            whole?.lateLogged = true
+            log("fresh picture (\(w.reason)): \(Self.wholeMaxNanos / 1_000_000_000) s and layers \(waiting) not ready; the display stays whole until they are")
+        }
+        guard ready else { return }
         whole = nil
         for cap in [capturer, fallbackCapture].compactMap({ $0 }) { cap.setLocked(false, log: log) }
-        log("fresh picture (\(w.reason)): windows listed after \(Clock.elapsed(since: w.since, now: now) / 1_000_000) ms (\(ready ? "every visible layer ready" : "time up; still waiting for layers \(waiting)"))")
+        log("fresh picture (\(w.reason)): windows listed after \(Clock.elapsed(since: w.since, now: now) / 1_000_000) ms (every visible layer ready)")
         publishWindows(now: now, full: true)
+        noteFreshComplete()
     }
 
+    /// Once per fresh picture, when it is complete.
+    private var freshCompleteLogged = false
+    private func noteFreshComplete() {
+        guard !freshCompleteLogged, whole == nil, freshPending.isEmpty else { return }
+        freshCompleteLogged = true
+        log("fresh picture: complete")
+    }
+    /// Visible layers whose fresh picture (still, middle level, lossless blocks) is not done yet.
+    private var freshPending: [UInt32] {
+        layers.values.filter { l in
+            if case .done = l.fresh { return false }
+            return l.isDisplay || l.id == ControlMessage.WindowInfo.overlayID || l.visibleFraction > 0.002
+        }.map(\.id)
+    }
     /// The display's still is owed for a lock switch: sent at the next refine with a frame, before any gate (refine).
     private var lockStillDue = false
     /// The next still is the whole-display one of a lock switch or a fresh picture (full size unless the link measured slow).
     private var fullStillNext = false
     static let fullStillMinKbps = 5_000
+    /// Whether a window layer's still goes at full resolution: on a link measured at `fullStillMinKbps` or more. Pure, for tests.
+    static func fullWindowStill(measuredKbps: Int) -> Bool { measuredKbps >= fullStillMinKbps }
     /// Locked: the lock still is presented (its commit sent); until then the window list stays as it was.
     private var lockPicturePresented = true
     private var lastLockRefNanos: UInt64 = 0
@@ -1907,7 +1930,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if shot { let t0 = Clock.nowNanos(); while WindowCapturer.shotsPending.add(0) > 0, Clock.elapsed(since: t0, now: Clock.nowNanos()) < 500_000_000 { try? await Task.sleep(for: .milliseconds(10)) } }
             // And for the display captures of an early stream start (the overlay carries the menu bar and the Dock), at most 1.5 s.
             do { let t0 = Clock.nowNanos(); while WindowCapturer.displayStartsPending.add(0) > 0, Clock.elapsed(since: t0, now: Clock.nowNanos()) < 1_500_000_000 { try? await Task.sleep(for: .milliseconds(10)) } }
-            do { try await cap.start(excluding: others) { [weak self] pb, nanos in self?.queue.async { self?.ownFrame(pb, nanos, layer: l) } } }
+            // In turn (SCKGate), front first: at once they only waited on each other inside ScreenCaptureKit (2.1, 2.9, 3.9 s after
+            // an unlock on 537), and the display captures' filter updates timed out behind them.
+            do { try await SCKGate.shared.run { try await cap.start(excluding: others) { [weak self] pb, nanos in self?.queue.async { self?.ownFrame(pb, nanos, layer: l) } } } }
             catch { self?.queue.async { if l.capturer === cap { l.capturer = nil }; self?.log("layer \(l.id) capture failed: \(error)"); self?.useFallback(l, why: "its own capture failed") } }
         }
     }
@@ -3449,6 +3474,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             if hostTunables[.placeholders] >= 1, !InputInjector.consoleLocked() { sendPlaceholders() }   // M-FIVE stage 0, both models
         }
         if trigger == .streamStart { startTruthReference() }
+        freshCompleteLogged = false
         if compositor {
             // M-FIVE: the desktop's first picture is a still like every window's (no tiny keyframe and ladder climb: the
             // "very noisy start"), presented with the others behind the stage-1 barrier.
@@ -3701,7 +3727,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             l.fresh = .blocks(remaining: planBlocks(l))
         case .blocks(var remaining):
             if l.provisional { return }   // lossless only from the real capture
-            guard !remaining.isEmpty else { l.fresh = .done; if l.isDisplay { log("fresh picture: complete") }; return }
+            guard !remaining.isEmpty else {
+                l.fresh = .done
+                // Complete when it is: the windows listed (no whole-display fresh picture pending) and every layer's lossless
+                // blocks done (537 logged it from the display's alone, 2.7 s before the windows had a frame).
+                noteFreshComplete()
+                return
+            }
             // The middle-level decision was made with the start rate (the still goes out before the probe answers): once the
             // link is known (the probe, or delivery), it is made again for a window none of whose blocks went out yet.
             // Only in the connect's first seconds (the trace window, 8 s): on Japan bus a window whose blocks waited behind
@@ -4105,7 +4137,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // measured slow (phrz, 522: "very lossy start, worse than workbench": a 596x335 still for 3200x1800, sized from the
         // connect's start estimate, not the link; latency is not bandwidth). A few hundred KB on a LAN.
         let measured = rc.map { max($0.deliveryKbps, $0.probeKbps) } ?? 0
-        let full = fullStillNext && layer.isDisplay && (measured == 0 || measured >= Self.fullStillMinKbps)
+        // A window's still too, once the link is known to be fast (phrz on 537 after an unlock: "patches of very lossy
+        // content", a 210x338 still for a 328x528 window on a LAN). Unknown, a window's still stays sized to the budget (the
+        // connect's start estimate on a slow link: Japan bus).
+        let full = layer.isDisplay ? fullStillNext && (measured == 0 || measured >= Self.fullStillMinKbps) : Self.fullWindowStill(measuredKbps: measured)
         let scale = full ? 1.0 : min(1.0, (targetBytes / 0.1 / area).squareRoot())
         let quality: Float = full ? 80 : 60
         let ow = max(32, Int(Double(rect.width) * scale)), oh = max(32, Int(Double(rect.height) * scale))
@@ -5207,12 +5242,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
 /// When a whole-display fresh picture hands over to the layers (DesktopStreamer.wholeCheck). Pure, for tests.
 enum WholeHandover {
-    struct LayerState { var id: UInt32; var visible: Double; var lastCaptured: UInt64; var existedAtStart: Bool; var hasStill: Bool }
+    struct LayerState { var id: UInt32; var visible: Double; var lastCaptured: UInt64; var existedAtStart: Bool; var hasStill: Bool; var capturing = true }
     /// The layers (0: the display) the hand-over still waits for: every visible window layer needs a frame captured since the
     /// fresh picture began (a static window delivers one when its capture starts) and, if it is new, its still; and the screen
     /// must have stood still for `settle` (never mid-animation: the unlock's fade streams whole, as video).
     static func waiting(_ layers: [LayerState], since: UInt64, displayChangedAt: UInt64, now: UInt64, settle: UInt64) -> [UInt32] {
-        var out = layers.filter { $0.visible > 0.002 && ($0.lastCaptured <= since || !$0.existedAtStart && !$0.hasStill) }.map(\.id)
+        var out = layers.filter { $0.visible > 0.002 && $0.capturing && ($0.lastCaptured <= since || !$0.existedAtStart && !$0.hasStill) }.map(\.id)
         if now &- displayChangedAt < settle { out.append(0) }
         return out
     }

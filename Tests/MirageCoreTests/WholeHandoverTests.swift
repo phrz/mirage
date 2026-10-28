@@ -21,4 +21,48 @@ final class WholeHandoverTests: XCTestCase {
         XCTAssertEqual(WholeHandover.waiting([], since: since, displayChangedAt: 12 * s - 100_000_000, now: 12 * s, settle: settle), [0])
         XCTAssertEqual(WholeHandover.waiting([], since: since, displayChangedAt: 12 * s - 400_000_000, now: 12 * s, settle: settle), [])
     }
+
+    /// phrz on 537: the 8 s cap listed the windows while Claude's layer had no frame ("the second window clipped itself").
+    /// The streamer no longer hands over at the cap; a layer whose capture is gone is the only one not waited for.
+    func testALayerWithoutACaptureIsNotWaitedFor() {
+        let since = 10 * s
+        let gone = L(id: 9, visible: 0.4, lastCaptured: 0, existedAtStart: true, hasStill: false, capturing: false)
+        let starting = L(id: 8, visible: 0.4, lastCaptured: 0, existedAtStart: true, hasStill: false)
+        XCTAssertEqual(WholeHandover.waiting([gone, starting], since: since, displayChangedAt: 0, now: 30 * s, settle: settle), [8])
+    }
+
+    /// A window's first still at full resolution once the link is known to be fast (537: 210x338 for a 328x528 window on a
+    /// LAN); unknown or slow, sized to the budget.
+    func testWindowStillsAreFullSizeOnAFastLink() {
+        XCTAssertTrue(MacDesktopStreamer.fullWindowStill(measuredKbps: 24_000))
+        XCTAssertFalse(MacDesktopStreamer.fullWindowStill(measuredKbps: 0))
+        XCTAssertFalse(MacDesktopStreamer.fullWindowStill(measuredKbps: 1_200))
+    }
+}
+
+/// ScreenCaptureKit operations in turn, first come first served, and a hung one never holds the rest.
+final class SCKGateTests: XCTestCase {
+    final class Order: @unchecked Sendable { let lock = NSLock(); var events: [String] = []
+        func add(_ e: String) { lock.lock(); events.append(e); lock.unlock() } }
+
+    func testOneAtATimeInOrder() async throws {
+        let gate = SCKGate(), order = Order()
+        await withTaskGroup(of: Void.self) { g in
+            for i in 0..<3 {
+                g.addTask { _ = try? await gate.run { order.add("start \(i)"); try await Task.sleep(for: .milliseconds(30)); order.add("end \(i)") } }
+                try? await Task.sleep(for: .milliseconds(5))   // (queued in this order)
+            }
+        }
+        XCTAssertEqual(order.events, ["start 0", "end 0", "start 1", "end 1", "start 2", "end 2"])
+    }
+    func testAHungOperationReleasesTheGate() async throws {
+        let gate = SCKGate(), order = Order()
+        let hung = Task { _ = try? await gate.run(holdAtMost: 0.1) { try await Task.sleep(for: .seconds(5)); order.add("hung done") } }
+        try await Task.sleep(for: .milliseconds(20))
+        let t0 = Date()
+        _ = try await gate.run { order.add("next") }
+        XCTAssertLessThan(Date().timeIntervalSince(t0), 1, "the next one ran once the hold ran out")
+        XCTAssertEqual(order.events, ["next"])
+        hung.cancel()
+    }
 }
