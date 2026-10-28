@@ -919,6 +919,37 @@ if CommandLine.arguments.contains("--headless") {
             }
         }
     }
+    // Test knob MIRAGE_TEST_DRAG="x0,y0,x1,y1,seconds,start" (display fractions; phrz's OK, his Mac unlocked and idle): from
+    // `start` s, a tagged (scripted) left-button drag from (x0,y0) to (x1,y1) and back over `seconds`, pointer moves at 120 Hz;
+    // logs the viewer's picture changes per second while it lasts (the end-to-end drag check: fps as the person sees it).
+    if let spec = ProcessInfo.processInfo.environment["MIRAGE_TEST_DRAG"]?.split(separator: ",").compactMap({ Double($0) }), spec.count == 6 {
+        let lock = NSLock()
+        nonisolated(unsafe) var changes: [UInt64] = []
+        let prev = session.onChange
+        session.onChange = { lock.lock(); changes.append(Clock.nowNanos()); lock.unlock(); prev?() }
+        Task {
+            let (x0, y0, x1, y1, secs) = (spec[0], spec[1], spec[2], spec[3], spec[4])
+            try? await Task.sleep(for: .milliseconds(Int(spec[5] * 1000)))
+            func at(_ t: Double) -> (Double, Double) { let f = t <= 0.5 ? t * 2 : (1 - t) * 2; return (x0 + (x1 - x0) * f, y0 + (y1 - y0) * f) }
+            session.send(.mouseMove(.init(x: x0, y: y0)), scripted: true)
+            try? await Task.sleep(for: .milliseconds(100))
+            let t0 = Clock.nowNanos()
+            session.send(.mouseButton(.init(button: 0, down: true, x: x0, y: y0, clickCount: 1, modifiers: 0)), scripted: true)
+            let steps = Int(secs * 120)
+            for i in 1...steps {
+                let (x, y) = at(Double(i) / Double(steps))
+                session.send(.mouseMove(.init(x: x, y: y)), scripted: true)
+                try? await Task.sleep(for: .microseconds(8333))
+            }
+            session.send(.mouseButton(.init(button: 0, down: false, x: x0, y: y0, clickCount: 1, modifiers: 0)), scripted: true)
+            let t1 = Clock.nowNanos()
+            lock.lock(); let during = changes.filter { $0 >= t0 && $0 <= t1 }; lock.unlock()
+            let gaps = zip(during.dropFirst(), during).map { Double($0 - $1) / 1e6 }.sorted()
+            let p95 = gaps.isEmpty ? 0 : gaps[min(gaps.count - 1, gaps.count * 95 / 100)]
+            FileHandle.standardError.write(Data(String(format: "TEST drag: %d picture changes in %.2f s (%.1f fps), worst gap p95 %.0f ms, max %.0f ms\n",
+                during.count, Double(t1 - t0) / 1e9, Double(during.count) / (Double(t1 - t0) / 1e9), p95, gaps.last ?? 0).utf8))
+        }
+    }
     if let (name, secs) = o.scenario {
         let runner = ScenarioRunner(session: session, name: name, seconds: secs)
         session.scenario = runner

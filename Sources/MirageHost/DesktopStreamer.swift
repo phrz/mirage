@@ -1507,6 +1507,37 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// mean < 90) in the host's own frame and each cell's mean luminance, the reference for a viewer-side coverage check
     /// (numbers only).
     static let testLockReference = ProcessInfo.processInfo.environment["MIRAGE_TEST_LOCK_REFERENCE"] == "1"
+    /// A window shot at the layer's size: the window-alone shot can be a pixel larger than the layer (1457x1501 for 1456x1500:
+    /// point rounding), and a frame of another size was dropped, so 546's unlock snapshots, in 0.3 s, never became the layers'
+    /// stills, and the hand-over waited for four serial stream starts (5 s). Within 4 px, cropped or padded (clear); else nil.
+    static func fitted(_ pb: CVPixelBuffer, width w: Int, height h: Int) -> CVPixelBuffer? {
+        let sw = CVPixelBufferGetWidth(pb), sh = CVPixelBufferGetHeight(pb)
+        if sw == w, sh == h { return pb }
+        guard abs(sw - w) <= 4, abs(sh - h) <= 4, w > 0, h > 0 else { return nil }
+        var out: CVPixelBuffer?
+        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
+        guard CVPixelBufferCreate(nil, w, h, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &out) == kCVReturnSuccess, let out else { return nil }
+        CVPixelBufferLockBaseAddress(pb, .readOnly); CVPixelBufferLockBaseAddress(out, [])
+        defer { CVPixelBufferUnlockBaseAddress(out, []); CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let s = CVPixelBufferGetBaseAddress(pb), let d = CVPixelBufferGetBaseAddress(out) else { return nil }
+        let ss = CVPixelBufferGetBytesPerRow(pb), ds = CVPixelBufferGetBytesPerRow(out)
+        memset(d, 0, ds * h)
+        for y in 0..<min(h, sh) { memcpy(d.advanced(by: y * ds), s.advanced(by: y * ss), min(w, sw) * 4) }
+        return out
+    }
+    /// Whether a frame is all but black (a display waking: its first frames). Pure on pixels, for tests.
+    static func nearlyBlack(_ pb: CVPixelBuffer) -> Bool {
+        CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return false }
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb), stride = CVPixelBufferGetBytesPerRow(pb)
+        let p = base.assumingMemoryBound(to: UInt8.self)
+        var bright = 0, n = 0
+        for y in Swift.stride(from: 0, to: h, by: max(1, h / 64)) { for x in Swift.stride(from: 0, to: w, by: max(1, w / 64)) {
+            let o = y * stride + x * 4; n += 1
+            if max(p[o], p[o + 1], p[o + 2]) > 8 { bright += 1 }
+        } }
+        return bright * 200 < n
+    }
     static func flatDarkShare(_ pb: CVPixelBuffer) -> String {
         CVPixelBufferLockBaseAddress(pb, .readOnly); defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(pb) else { return "no pixels" }
@@ -1638,7 +1669,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         }.map(\.id)
     }
     /// The display's still is owed for a lock switch: sent at the next refine with a frame, before any gate (refine).
-    private var lockStillDue = false
+    private var lockStillDue = false { didSet { if lockStillDue, !oldValue { lockStillAskedNanos = Clock.nowNanos() } } }
+    private var lockStillAskedNanos: UInt64 = 0
     /// The next still is the whole-display one of a lock switch or a fresh picture (full size unless the link measured slow).
     private var fullStillNext = false
     static let fullStillMinKbps = 5_000
@@ -1939,7 +1971,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     if let c = self.cutCheck.removeValue(forKey: l.id) { self.log("layer \(l.id): cut check: \(Self.cutDifference(c.px, w: c.w, h: c.h, pb))"); Self.dumpCutCheck(l.id, c.px, w: c.w, h: c.h, pb) }
                     guard l.capturer === cap else { return }
                     l.snapshotNanos = Clock.nowNanos()
-                    guard l.lastFrame == nil else { return }; l.snapshotFrame = pb; self.captured(pb, nanos, dirtyRects: [], layerID: l.id)
+                    guard l.lastFrame == nil, let fit = Self.fitted(pb, width: l.width, height: l.height) else { return }
+                    l.snapshotFrame = fit; self.captured(fit, nanos, dirtyRects: [], layerID: l.id)
                 }
             }
         }
@@ -1962,10 +1995,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let independent = self.queue.sync { self.hostTunables[.windowShotIndependent] >= 0.5 }
                 if let pb = await cap.snapshot(excluding: others, independent: independent) {
                     self.queue.async {
-                        guard l.capturer === cap, l.lastCapturedNanos < started else { return }
+                        guard l.capturer === cap, l.lastCapturedNanos < started, let fit = Self.fitted(pb, width: l.width, height: l.height) else { return }
                         self.log("layer \(l.id): no frame since its capture started; a snapshot stands in")
                         l.snapshotNanos = Clock.nowNanos()
-                        self.captured(pb, Clock.nowNanos(), dirtyRects: [], layerID: l.id)
+                        self.captured(fit, Clock.nowNanos(), dirtyRects: [], layerID: l.id)
                     }
                 }
             }
@@ -4337,7 +4370,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // A lock or unlock: the display's whole still first, from the first frame after the switch, ahead of every budget and
         // pacing gate. Changed tiles of a lock screen that keeps changing (the clock, the blur) used the tile budget and the
         // still never went: 60 % of mac-daddy's lock screen stayed unfilled on 510 (phrz, 2026-10-27).
-        if let d = display, lockStillDue, d.lastFrame != nil, case .still = d.fresh {
+        // A display waking shows black first (546's locked connect: the still was 10 KB of black, the lock screen came 0.4 s
+        // later as video, its first whole frame at 2.5 s): the still waits for a frame with something in it, up to 1.5 s.
+        if let d = display, lockStillDue, let f = d.lastFrame, Self.nearlyBlack(f), Clock.elapsed(since: lockStillAskedNanos, now: now) < 1_500_000_000 {
+            // (waiting)
+        } else if let d = display, lockStillDue, d.lastFrame != nil, case .still = d.fresh {
             lockStillDue = false
             fullStillNext = true
             freshStep(d, now: now, stage1: true, force: true)

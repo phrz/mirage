@@ -46,7 +46,6 @@ final class HEVCEncoder {
         set(kVTCompressionPropertyKey_MaxKeyFrameInterval, 1 << 20 as CFNumber)
         set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, 1 << 20 as CFNumber)
         set(kVTCompressionPropertyKey_EnableLTR, kCFBooleanTrue)
-        set(kVTCompressionPropertyKey_MaxAllowedFrameQP, 51 as CFNumber)
         applyRate()
         VTCompressionSessionPrepareToEncodeFrames(s)
     }
@@ -66,6 +65,22 @@ final class HEVCEncoder {
         let limits: [Any] = [bps / 8 * 3 / 2, 1.0]
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: expectedFPS as CFNumber)
+        // Quality the budget pays for: low-latency rate control stayed far under a LAN's budget (the locked mac-daddy on 546:
+        // 7-10 Mbps of 45 at 3200x1800, 895 kbps in phrz's viewer: "super lossy way too long for this LAN"), and the lock
+        // screen's animated wallpaper never stands still for lossless tiles, so the video is the picture. A QP ceiling from
+        // the bits per pixel the budget allows; none on a slow link.
+        let maxQP = Self.maxQP(bitrateKbps: bitrateKbps, width: width, height: height, fps: expectedFPS)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: maxQP as CFNumber)
+    }
+    /// The highest QP a frame may use for a budget: bits per pixel per frame at the expected rate. Pure, for tests.
+    static func maxQP(bitrateKbps: Int, width: Int, height: Int, fps: Int) -> Int {
+        let bpp = Double(bitrateKbps) * 1000 / Double(max(1, width * height * max(1, fps)))
+        switch bpp {
+        case 0.2...: return 30
+        case 0.1...: return 33
+        case 0.05...: return 36
+        default: return 51
+        }
     }
 
     /// Encodes one frame; `completion` runs on VideoToolbox's thread.

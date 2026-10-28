@@ -1,4 +1,5 @@
 import XCTest
+import CoreVideo
 @testable import MirageHost
 
 /// TRUTH for fresh pictures (phrz, 522: "windows pop in", "juddery"): the whole display shows until every visible window
@@ -47,6 +48,21 @@ final class WholeHandoverTests: XCTestCase {
         XCTAssertEqual(WholeHandover.waiting([snapped], since: since, displayChangedAt: 0, now: since + 2 * s, settle: settle), [])
         XCTAssertEqual(WholeHandover.waiting([snapped], since: since, displayChangedAt: since + 2 * s, now: since + 2 * s, settle: settle), [0], "the fade")
         XCTAssertEqual(WholeHandover.waiting([snapped], since: since, displayChangedAt: since + 5 * s, now: since + 5 * s, settle: settle), [], "typing, a caret")
+    }
+
+    /// 546: the window-alone shot is a pixel larger than the layer (1457x1501 for 1456x1500), and was dropped.
+    func testASnapshotIsFittedToItsLayer() throws {
+        var pb: CVPixelBuffer?
+        CVPixelBufferCreate(nil, 1457, 1501, kCVPixelFormatType_32BGRA, nil, &pb)
+        let f = try XCTUnwrap(MacDesktopStreamer.fitted(try XCTUnwrap(pb), width: 1456, height: 1500))
+        XCTAssertEqual(CVPixelBufferGetWidth(f), 1456); XCTAssertEqual(CVPixelBufferGetHeight(f), 1500)
+        XCTAssertNil(MacDesktopStreamer.fitted(pb!, width: 800, height: 600), "another window, not rounding")
+    }
+    /// The lock screen's video quality on a LAN: a QP ceiling when the budget pays for it, none on a slow link.
+    func testTheEncodersQualityFollowsTheBudget() {
+        XCTAssertEqual(HEVCEncoder.maxQP(bitrateKbps: 45_000, width: 3200, height: 1800, fps: 30), 30)
+        XCTAssertEqual(HEVCEncoder.maxQP(bitrateKbps: 10_000, width: 2914, height: 1640, fps: 30), 36)
+        XCTAssertEqual(HEVCEncoder.maxQP(bitrateKbps: 1_000, width: 3200, height: 1800, fps: 30), 51)
     }
 }
 
