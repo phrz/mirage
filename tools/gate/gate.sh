@@ -3,6 +3,7 @@
 # Usage: tools/gate/gate.sh HOST [profiles] [scenarios]
 #   profiles: comma list of LAN, cafe, 4G, bus (default all)
 #   scenarios: comma list of connect, typing, scroll, drag, video (default all)
+#   GATE_HOST_LOG=PATH: read the host log from this local copy instead of over ssh
 # Needs: the host unlocked and idle, nobody else connected, the "Mirage Test Bench" window open on it (experiments/testbench;
 # `video` wants it started with --plasma). Lock and unlock are run by hand (tools/gate/README.md). The truth reference is
 # turned on per run (--truth on the stream request), never in the host's tunables.json. Frames are deleted after each run.
@@ -10,8 +11,9 @@ set -u
 HOST=${1:?host}; PROFILES=${2:-LAN,cafe,4G,bus}; SCENARIOS=${3:-connect,typing,scroll,drag,video}
 ROOT=${0:A:h}/../..; V="$ROOT/.build/debug/mirage-viewer"; OUT=${GATE_OUT:-$ROOT/.build/gate}; mkdir -p "$OUT"
 [[ -x "$OUT/truth" ]] || swiftc -O "$ROOT/tools/gate/truth.swift" -o "$OUT/truth" || exit 1
-# Loopback (the host is this Mac): read its log here instead of over ssh.
-hostlog() { if [[ $HOST == (localhost|127.0.0.1|$(scutil --get LocalHostName)|$(scutil --get LocalHostName).local|$(hostname -s)) ]]; then zsh -c "$1"; else ssh -o BatchMode=yes "$HOST" "$1"; fi }
+# Loopback (the host is this Mac): read its log here instead of over ssh. GATE_HOST_LOG: a local copy of the host's log
+# kept current some other way (a VM guest without ssh mirroring it into a shared folder).
+hostlog() { if [[ -n ${GATE_HOST_LOG:-} ]]; then zsh -c "${1//\~\/Library\/Logs\/mirage-host.log/'$GATE_HOST_LOG'}"; elif [[ $HOST == (localhost|127.0.0.1|$(scutil --get LocalHostName)|$(scutil --get LocalHostName).local|$(hostname -s)) ]]; then zsh -c "$1"; else ssh -o BatchMode=yes "$HOST" "$1"; fi }
 throttle() { case $1 in LAN) ;; cafe) echo "--throttle 5000/1000/40/0.5" ;; 4G) echo "--throttle Fast 4G" ;; bus) echo "--throttle Japan bus 4G" ;; esac }
 scenario() { case $1 in connect) echo "--duration 12" ;; typing) echo "--duration 26 --scenario selecttype:20" ;; scroll) echo "--duration 26 --scenario scroll:20" ;;
     drag) echo "--duration 26 --scenario drag:20" ;; video) echo "--duration 20 --scenario idle:15" ;; esac }
