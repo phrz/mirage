@@ -2997,6 +2997,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 plan.lossless = []
             }
         }
+        // The whole display (locked, or a whole-display fresh picture) carries the windows as pixels: a drag, a scroll, the
+        // unlock's fade are motion of the picture itself, and go as video with everything else of the capture, as the lock
+        // screen does (546, the end-to-end drag: 4.8 fps of video and 2 Mbps of tiles while a window was dragged, the drag
+        // "froze into big chunks"). Small changes alone (a caret) keep their own path.
+        if layer.isDisplay, wholeDisplay, !plan.lossless.isEmpty, !plan.video.isEmpty || !inputQuiet || motionSustained(now), layer.encoder != nil || ensureEncoder(layer) {
+            plan.video.append(contentsOf: plan.lossless)
+            plan.videoRegion = plan.videoRegion.union(tracker.boundingRect(plan.lossless))
+            tracker.markVideo(plan.lossless, now: now)
+            plan.lossless = []
+        }
         var withCopy: [Int] = []
         if !copyRegion.isEmpty {
             // The scroll's new content: rate-limited ones (classify held them back) go now too.
@@ -3064,7 +3074,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if let hint = injector?.motionHintNanos, hint > lastMotionNanos { lastMotionNanos = hint }
         let motion = motionSustained(now)
         if motion != wasMotion { wasMotion = motion; lastBudgetApply = 0; applyBudget(now: now) }
-        if let fov = fovea(layer) {
+        if let fov = fovea(layer), !(layer.isDisplay && wholeDisplay) {
             // Fovea: motion inside it is carried as native tiles while the tile budget holds; the base
             // layer (video) takes the rest. A fovea that moved refines its new ground first.
             if !plan.video.isEmpty, tileTokens > 0 {
