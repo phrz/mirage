@@ -17,6 +17,10 @@ final class ScenarioRunner {
     /// login scenario: ms from each keystroke to the first changed pixels inside the field (9999 = none within 2 s).
     private(set) var keyLatencyMs: [Double] = []
     init(session: ViewerSession, name: String, seconds: Double) { self.session = session; self.name = name; self.seconds = seconds }
+    /// Set when the scenario has ended: the stop timer of a scripted run waits for it, because the wait for a quiet stream
+    /// before a scenario can outlast --duration, and a scenario's numbers are complete only at its end.
+    private(set) var finished = false
+    func runToEnd() async { await run(); finished = true }
 
     private var lastBench: ControlMessage.WindowInfo?
     /// The bench window, or the last one seen (a window-list update can momentarily drop it).
@@ -574,7 +578,7 @@ final class ScenarioRunner {
                         try? await Task.sleep(for: .milliseconds(5))
                         if session.lastWatchedShownNanos > before { got = Double(Clock.elapsed(since: t0, now: session.lastWatchedShownNanos)) / 1e6; break }
                     }
-                    if let got { latencies.append(got) }
+                    if let got { latencies.append(got); keyLatencyMs = latencies }
                     try? await Task.sleep(for: .milliseconds(max(0, 160 - Int(got ?? 160))))
                 } else {
                     key(ch == " " ? 49 : 0, String(ch))
@@ -1058,5 +1062,15 @@ final class ScenarioRunner {
             }
             dir = -dir
         }
+    }
+}
+
+/// Runs `done` once the scenario has ended (at once without one), or 120 s later at the latest so a stuck scenario still
+/// ends the run. The 3 s start delay, the quiet wait (up to 60 s) and the caption check (up to 10 s) come before its seconds.
+func afterScenario(_ runner: ScenarioRunner?, _ done: @escaping () -> Void) {
+    let limit = Date().addingTimeInterval(120)
+    Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { t in
+        guard runner?.finished ?? true || Date() > limit else { return }
+        t.invalidate(); done()
     }
 }

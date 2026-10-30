@@ -5,7 +5,7 @@
 #   scenarios: comma list of connect, typing, scroll, drag, video (default all)
 #   GATE_HOST_LOG=PATH: read the host log from this local copy instead of over ssh
 # Needs: the host unlocked and idle, nobody else connected, the "Mirage Test Bench" window open on it (experiments/testbench;
-# `video` wants it started with --plasma). Lock and unlock are run by hand (tools/gate/README.md). The truth reference is
+# `video` wants it started with --motion). Lock and unlock are run by hand (tools/gate/README.md). The truth reference is
 # turned on per run (--truth on the stream request), never in the host's tunables.json. Frames are deleted after each run.
 set -u
 HOST=${1:?host}; PROFILES=${2:-LAN,cafe,4G,bus}; SCENARIOS=${3:-connect,typing,scroll,drag,video}

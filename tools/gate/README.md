@@ -7,7 +7,7 @@ per frame, the longest a region stayed wrong, the first whole frame).
 - **Profiles:** LAN (no shaping), cafe (5 Mbit/s down, 1 up, 40 ms, 0.5 % loss), 4G (Fast 4G), bus (Japan bus 4G). The host
   shapes the stream (the request's throttle), so one machine pair covers all four.
 - **Cases:** connect (the first seconds), typing (`selecttype`: typing with select-all every 5 s), scroll, drag (the bench's
-  title bar), and video (the bench started with `--plasma`, measured idle).
+  title bar), and video (the bench started with `--motion`, measured idle).
 - **Gate before a run:** the host unlocked and idle, nobody else connected, the "Mirage Test Bench" window open
   (experiments/testbench; the scenarios abort if focus leaves it). The person's OK for each live run.
 - **Truth reference:** turned on for the run's own stream only (`--truth`: `truthReference` on the stream request), never in

@@ -322,16 +322,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if let (name, secs) = options.scenario {
             let runner = ScenarioRunner(session: session, name: name, seconds: secs)
             session.scenario = runner
-            Task { try? await Task.sleep(for: .seconds(3)); await runner.run() }
+            Task { try? await Task.sleep(for: .seconds(3)); await runner.runToEnd() }
             let s = session!
-            Timer.scheduledTimer(withTimeInterval: options.duration, repeats: false) { _ in
+            Timer.scheduledTimer(withTimeInterval: options.duration, repeats: false) { _ in afterScenario(runner) {
                 s.stop()
                 let json = s.statsJSON()
                 if let path = self.options.statsJSON { try? json.write(to: URL(fileURLWithPath: path)) }
                 FileHandle.standardOutput.write(json); FileHandle.standardOutput.write(Data("\n".utf8))
                 FrameRecorder.drain()
                 exit(0)
-            }
+            } }
         }
     }
 
@@ -954,16 +954,16 @@ if CommandLine.arguments.contains("--headless") {
     if let (name, secs) = o.scenario {
         let runner = ScenarioRunner(session: session, name: name, seconds: secs)
         session.scenario = runner
-        Task { try? await Task.sleep(for: .seconds(3)); await runner.run() }
+        Task { try? await Task.sleep(for: .seconds(3)); await runner.runToEnd() }
     }
-    Timer.scheduledTimer(withTimeInterval: o.duration, repeats: false) { _ in
+    Timer.scheduledTimer(withTimeInterval: o.duration, repeats: false) { _ in afterScenario(session.scenario) {
         session.stop()
         let json = session.statsJSON()
         if let path = o.statsJSON { try? json.write(to: URL(fileURLWithPath: path)) }
         FileHandle.standardOutput.write(json); FileHandle.standardOutput.write(Data("\n".utf8))
         let failed = MainActor.assumeIsolated { model.error != nil } && session.samples.isEmpty
         exit(failed ? 1 : 0)
-    }
+    } }
     RunLoop.main.run()
 } else if let i = CommandLine.arguments.firstIndex(of: "--render-update-card"), i + 1 < CommandLine.arguments.count {
     // The device list with this Mac's update card, sample data, drawn offscreen to a PNG: `--render-update-card PATH`.
