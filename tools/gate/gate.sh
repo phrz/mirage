@@ -26,10 +26,18 @@ for p in ${(s:,:)PROFILES}; do for c in ${(s:,:)SCENARIOS}; do
     hostlog "grep '^20' ~/Library/Logs/mirage-host.log | awk -v t='$ST' '\$0 >= t'" > "$OUT/$tag.host"
     grep 'truth reference' "$OUT/$tag.host" | sed -E 's/^([^ ]+) truth reference: ([0-9a-f]+).*/\1 \2/' > "$OUT/$tag.refs"
     "$OUT/truth" "$F" "$OUT/$tag.refs" $S > "$OUT/$tag.truth" 2>&1; [[ -n ${GATE_KEEP_FRAMES:-} ]] || rm -rf "${F:?}"
-    python3 - "$OUT/$tag.json" "$OUT/$tag.truth" "$p" "$c" >> "$OUT/table.md" <<'PY'
+    python3 - "$OUT/$tag.json" "$OUT/$tag.truth" "$p" "$c" "$OUT/$tag.host" >> "$OUT/table.md" <<'PY'
 import json, re, sys
+from datetime import datetime
 j = json.load(open(sys.argv[1])) if open(sys.argv[1]).read().strip() else {}
 t = open(sys.argv[2]).read()
+# wholeDisplayOnly sends no lossless tiles, so the viewer's crisp (its last tile) does not apply: crisp is the host's first
+# sharpening frame (QP <= 20, logged) after each burst's end, 9999 when none came within 5 s.
+h = open(sys.argv[5]).read()
+if "the whole display as video (wholeDisplayOnly)" in h and j.get("burstEndWall"):
+    sharp = [datetime.fromisoformat(l.split()[0].replace("Z", "+00:00")).timestamp() for l in h.splitlines() if "a sharpening frame" in l]
+    cm = [next(((s - b) * 1000 for s in sharp if b < s <= b + 5), 9999) for b in j["burstEndWall"]]
+    j["crispMsMedian"], j["crispMsMax"] = sorted(cm)[len(cm) // 2], max(cm)
 def g(k): return j.get(k)
 f = lambda v: "-" if v is None else (f"{v:.0f}" if isinstance(v, (int, float)) else str(v))
 mf = g("motionFps"); mfs = f"{sorted(mf)[len(mf)//2]:.0f}" if mf else "-"

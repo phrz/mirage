@@ -1999,7 +1999,7 @@ extension ViewerSession {
             var framesTotal: Int, lostTotal: Int, skippedTotal: Int, tileRectsTotal: Int, copyRectsTotal: Int
             var predictionsShown: Int, predictionsConfirmed: Int, predictionsMismatched: Int
             var nacksSent: Int?, recoveredByNack: Int?, recoveredByParity: Int?
-            var scenario: String?, crispMs: [Double]?, crispMsMedian: Double?, crispMsMax: Double?
+            var scenario: String?, crispMs: [Double]?, crispMsMedian: Double?, crispMsMax: Double?, burstEndWall: [Double]?
             var watchedTileBytes: Int?, watchedTileCount: Int?, watchedKbps: Double?, watchedDirectKbps: Double?
             var keyLatencyMs: [Double]?, keyLatencyMsMedian: Double?, keyLatencyMsMax: Double?
             var legibleUnderPointerMs: Double?
@@ -2057,7 +2057,7 @@ extension ViewerSession {
                       tileRectsTotal: samples.map(\.tileRects).reduce(0, +), copyRectsTotal: samples.map(\.copyRects).reduce(0, +),
                       predictionsShown: pstats.shown, predictionsConfirmed: pstats.confirmed, predictionsMismatched: pstats.mismatched,
                       nacksSent: MainActor.assumeIsolated { model.stats.nacks }, recoveredByNack: assembler.recoveredByNack, recoveredByParity: assembler.recoveredByParity,
-                      scenario: scenario?.name, crispMs: scenario?.crispMs, crispMsMedian: scenario.map { median($0.crispMs) }, crispMsMax: scenario?.crispMs.max(),
+                      scenario: scenario?.name, crispMs: scenario?.crispMs, crispMsMedian: scenario.map { median($0.crispMs) }, crispMsMax: scenario?.crispMs.max(), burstEndWall: scenario?.burstEndWall,
                       watchedTileBytes: scenario == nil ? nil : watchedTileBytes, watchedTileCount: scenario == nil ? nil : watchedTileCount,
                       watchedKbps: scenario.map { Double(watchedTileBytes) * 8 / 1000 / max(1, $0.activeSeconds) },
                       watchedDirectKbps: scenario.map { Double(watchedDirectBytes) * 8 / 1000 / max(1, $0.activeSeconds) },

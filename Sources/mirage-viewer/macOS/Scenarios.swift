@@ -11,6 +11,8 @@ final class ScenarioRunner {
     let name: String
     let seconds: Double
     private(set) var crispMs: [Double] = []
+    /// Wall-clock time (s since 1970) of each burst end: the gate finds the host's sharpening frame after it (wholeDisplayOnly).
+    private(set) var burstEndWall: [Double] = []
     private(set) var bursts = 0
     /// Seconds the scenario was actively driving input (for watched-rect kbps).
     private(set) var activeSeconds = 0.0
@@ -67,6 +69,7 @@ final class ScenarioRunner {
     /// Waits until the test window's rect stops receiving updates after a burst: time-to-crisp is the
     /// last lossless tile that touched it, provided no video frame touched it later (then it is not crisp yet).
     private func measureCrisp(burstEnd: UInt64) async {
+        burstEndWall.append(Date().timeIntervalSince1970 - Double(Clock.elapsed(since: burstEnd, now: Clock.nowNanos())) / 1e9)
         let deadline = burstEnd + 5_000_000_000
         var last: UInt64 = 0
         while Clock.nowNanos() < deadline {
