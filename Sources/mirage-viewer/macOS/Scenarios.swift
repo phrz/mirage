@@ -333,10 +333,11 @@ final class ScenarioRunner {
             activeSeconds = seconds
             return
         }
-        // Let the opening keyframe's full-screen lossless refinement finish first (up to 60 s): the
-        // measurements are about the interaction, not the first picture.
+        // Let the opening keyframe's full-screen lossless refinement finish first (up to 10 s): the
+        // measurements are about the interaction, not the first picture. A LAN picture is whole within ~2 s, and a
+        // whole-display stream never goes quiet (every caret blink is a frame), so a longer wait only made the gate slow.
         var quiet = 0
-        let maxWait = name == "transient" ? 4 : name == "drag" ? 20 : 60   // other windows on the host may never go quiet; the drag measures its own layer
+        let maxWait = name == "transient" ? 4 : 10
         for _ in 0..<maxWait {
             try? await Task.sleep(for: .seconds(1))
             if let last = session.samples.last, last.tileKbps + last.kbps < 60 { quiet += 1 } else { quiet = 0 }

@@ -16,8 +16,9 @@ ROOT=${0:A:h}/../..; V="$ROOT/.build/debug/mirage-viewer"; OUT=${GATE_OUT:-$ROOT
 # kept current some other way (a VM guest without ssh mirroring it into a shared folder).
 hostlog() { if [[ -n ${GATE_HOST_LOG:-} ]]; then zsh -c "${1//\~\/Library\/Logs\/mirage-host.log/'$GATE_HOST_LOG'}"; elif [[ $HOST == (localhost|127.0.0.1|$(scutil --get LocalHostName)|$(scutil --get LocalHostName).local|$(hostname -s)) ]]; then zsh -c "$1"; else ssh -o BatchMode=yes "$HOST" "$1"; fi }
 throttle() { case $1 in LAN) ;; cafe) echo "--throttle 5000/1000/40/0.5" ;; 4G) echo "--throttle Fast 4G" ;; bus) echo "--throttle Japan bus 4G" ;; esac }
-scenario() { case $1 in connect) echo "--duration 12" ;; typing) echo "--duration 26 --scenario selecttype:20" ;; scroll) echo "--duration 26 --scenario scroll:20" ;;
-    drag) echo "--duration 26 --scenario drag:20" ;; video) echo "--duration 20 --scenario idle:15" ;; esac }
+# (A scripted run lasts until its scenario ends: up to 10 s of waiting for a quiet stream, then the scenario's seconds.)
+scenario() { case $1 in connect) echo "--duration 12" ;; typing) echo "--duration 12 --scenario selecttype:10" ;; scroll) echo "--duration 12 --scenario scroll:10" ;;
+    drag) echo "--duration 12 --scenario drag:10" ;; video) echo "--duration 12 --scenario idle:8" ;; esac }
 printf "| profile | case | fps (median) | motion fps | frame gap p95 ms | key-to-pixel p50/max ms | crisp median/max ms | partial | cells wrong/frame | longest wrong | first whole | keyframes | kbps idle/active | host px -> stream px |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n" > "$OUT/table.md"
 for p in ${(s:,:)PROFILES}; do for c in ${(s:,:)SCENARIOS}; do
     tag="$p-$c"; F="$OUT/$tag"; rm -rf "${F:?}"; mkdir -p "$F"
