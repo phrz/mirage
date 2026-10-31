@@ -6,7 +6,8 @@
 #   GATE_HOST_LOG=PATH: read the host log from this local copy instead of over ssh
 # Needs: the host unlocked and idle, nobody else connected, the "Mirage Test Bench" window open on it (experiments/testbench;
 # `video` wants it started with --motion). Lock and unlock are run by hand (tools/gate/README.md). The truth reference is
-# turned on per run (--truth on the stream request), never in the host's tunables.json. Frames are deleted after each run.
+# turned on per run (--truth on the stream request), never in the host's tunables.json. Frames are deleted after each run
+# unless GATE_KEEP_FRAMES=1 (then `TRUTH_WHERE=1 .build/gate/truth DIR DIR.refs` maps the first wrong frame's cells).
 set -u
 HOST=${1:?host}; PROFILES=${2:-LAN,cafe,4G,bus}; SCENARIOS=${3:-connect,typing,scroll,drag,video}
 ROOT=${0:A:h}/../..; V="$ROOT/.build/debug/mirage-viewer"; OUT=${GATE_OUT:-$ROOT/.build/gate}; mkdir -p "$OUT"
@@ -24,7 +25,7 @@ for p in ${(s:,:)PROFILES}; do for c in ${(s:,:)SCENARIOS}; do
     eval "MIRAGE_TEST_FRAMES='$F' MIRAGE_TEST_FRAMES_MS=33 '$V' $HOST --headless --truth --window 1600x900 --scale 2 $(scenario $c) $(throttle $p) --stats '$OUT/$tag.json'" > "$OUT/$tag.out" 2> "$OUT/$tag.err"
     hostlog "grep '^20' ~/Library/Logs/mirage-host.log | awk -v t='$ST' '\$0 >= t'" > "$OUT/$tag.host"
     grep 'truth reference' "$OUT/$tag.host" | sed -E 's/^([^ ]+) truth reference: ([0-9a-f]+).*/\1 \2/' > "$OUT/$tag.refs"
-    "$OUT/truth" "$F" "$OUT/$tag.refs" $S > "$OUT/$tag.truth" 2>&1; rm -rf "${F:?}"
+    "$OUT/truth" "$F" "$OUT/$tag.refs" $S > "$OUT/$tag.truth" 2>&1; [[ -n ${GATE_KEEP_FRAMES:-} ]] || rm -rf "${F:?}"
     python3 - "$OUT/$tag.json" "$OUT/$tag.truth" "$p" "$c" >> "$OUT/table.md" <<'PY'
 import json, re, sys
 j = json.load(open(sys.argv[1])) if open(sys.argv[1]).read().strip() else {}
