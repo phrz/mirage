@@ -52,6 +52,30 @@ final class HEVCEncoder {
 
     deinit { VTCompressionSessionInvalidate(session) }
 
+    /// Session properties change only while no frame is in the hardware encoder: a VTSessionSetProperty during an encode
+    /// deadlocked the session (the mini's host on 569, 2026-10-31: the video queue waited in the property call on the encoder
+    /// service, which waited on the host for the in-flight frame's format description; every later stream start hung behind
+    /// it). Changes queue here and apply when the encoder is idle, at the latest just before the next frame.
+    private let idle = NSCondition()
+    private var inFlight = 0
+    private var pendingKeys: [CFString] = []
+    private var pending: [CFString: CFTypeRef] = [:]
+    private func set(_ key: CFString, _ value: CFTypeRef) {
+        idle.lock()
+        if pending[key] == nil { pendingKeys.append(key) }
+        pending[key] = value
+        if inFlight == 0 { applyPending() }
+        idle.unlock()
+    }
+    /// With `idle` held and nothing in flight.
+    private func applyPending() {
+        for k in pendingKeys {
+            let r = VTSessionSetProperty(session, key: k, value: pending[k]!)
+            if r != noErr { hostLog("encoder: \(k) rejected (\(r))") }
+        }
+        pendingKeys.removeAll(); pending.removeAll()
+    }
+
     func setRate(bitrateKbps: Int, expectedFPS: Int) {
         self.bitrateKbps = bitrateKbps; self.expectedFPS = expectedFPS
         applyRate()
@@ -59,18 +83,18 @@ final class HEVCEncoder {
 
     private func applyRate() {
         let bps = bitrateKbps * 1000
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
+        set(kVTCompressionPropertyKey_AverageBitRate, bps as CFNumber)
         // Hard cap: 1.5 s' worth of bytes per second. Low-latency mode has no CBR, so this is the ceiling;
         // motion frames are bursty against a steady lossless-tile trickle, so leave headroom.
         let limits: [Any] = [bps / 8 * 3 / 2, 1.0]
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits as CFArray)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: expectedFPS as CFNumber)
+        set(kVTCompressionPropertyKey_DataRateLimits, limits as CFArray)
+        set(kVTCompressionPropertyKey_ExpectedFrameRate, expectedFPS as CFNumber)
         // Quality the budget pays for: low-latency rate control stayed far under a LAN's budget (the locked mac-daddy on 546:
         // 7-10 Mbps of 45 at 3200x1800, 895 kbps in phrz's viewer: "super lossy way too long for this LAN"), and the lock
         // screen's animated wallpaper never stands still for lossless tiles, so the video is the picture. A QP ceiling from
         // the bits per pixel the budget allows; none on a slow link.
         ceilingQP = Self.maxQP(bitrateKbps: bitrateKbps, width: width, height: height, fps: expectedFPS)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: ceilingQP as CFNumber)
+        set(kVTCompressionPropertyKey_MaxAllowedFrameQP, ceilingQP as CFNumber)
         if coarse { applyFloor() }
     }
     /// The QP ceiling in force (MaxAllowedFrameQP): the budget's, or the sharpening pass's.
@@ -83,7 +107,7 @@ final class HEVCEncoder {
         sharpening = on
         if on {
             ceilingQP = Self.sharpenQP
-            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxAllowedFrameQP, value: ceilingQP as CFNumber)
+            set(kVTCompressionPropertyKey_MaxAllowedFrameQP, ceilingQP as CFNumber)
             if coarse { applyFloor() }
         } else { applyRate() }
     }
@@ -116,9 +140,7 @@ final class HEVCEncoder {
     /// into the same floor: on a LAN budget (ceiling 30-36, since 548) video never started and tiles carried the picture.
     static func coarseMinQP(ceiling: Int) -> Int { min(keyframeMinQP, ceiling) }
     private func applyFloor() {
-        let r = VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MinAllowedFrameQP,
-                                     value: (coarse ? Self.coarseMinQP(ceiling: ceilingQP) : 0) as CFNumber)
-        if r != noErr { hostLog("encoder: MinAllowedFrameQP rejected (\(r))") }
+        set(kVTCompressionPropertyKey_MinAllowedFrameQP, (coarse ? Self.coarseMinQP(ceiling: ceilingQP) : 0) as CFNumber)
     }
 
     func encode(_ pixelBuffer: CVPixelBuffer, captureNanos: UInt64, options: FrameOptions, completion: @escaping (Result<Encoded, Error>) -> Void) {
@@ -128,18 +150,29 @@ final class HEVCEncoder {
         if options.forceLTRRefresh { props[kVTEncodeFrameOptionKey_ForceLTRRefresh] = kCFBooleanTrue }
         if !options.acknowledgedLTRTokens.isEmpty { props[kVTEncodeFrameOptionKey_AcknowledgedLTRTokens] = options.acknowledgedLTRTokens as CFArray }
         let pts = CMTime(value: CMTimeValue(captureNanos), timescale: 1_000_000_000)
+        // Queued property changes first (a sharpening frame needs its ceiling): wait briefly for the encoder to be idle.
+        idle.lock()
+        if !pendingKeys.isEmpty {
+            let deadline = Date().addingTimeInterval(0.1)
+            while inFlight > 0, idle.wait(until: deadline) {}
+            if inFlight == 0 { applyPending() }
+        }
+        inFlight += 1
+        idle.unlock()
         let t0 = Clock.nowNanos()
         let st = VTCompressionSessionEncodeFrame(session, imageBuffer: pixelBuffer, presentationTimeStamp: pts, duration: .invalid,
                                                  frameProperties: props.isEmpty ? nil : props as CFDictionary, infoFlagsOut: nil) { [weak self] status, flags, sb in
             guard let self else { return }
+            self.frameLeft()
             if status != noErr { completion(.failure(MirageError.transport("encode failed: \(status)"))); return }
             if flags.contains(.frameDropped) { completion(.failure(MirageError.transport("encoder dropped frame"))); return }
             guard let sb else { completion(.failure(MirageError.transport("encoder produced nothing"))); return }
             do { completion(.success(try self.extract(sb, captureNanos: captureNanos, encodeNanos: Clock.elapsed(since: t0, now: Clock.nowNanos())))) }
             catch { completion(.failure(error)) }
         }
-        if st != noErr { completion(.failure(MirageError.transport("VTCompressionSessionEncodeFrame: \(st)"))) }
+        if st != noErr { frameLeft(); completion(.failure(MirageError.transport("VTCompressionSessionEncodeFrame: \(st)"))) }
     }
+    private func frameLeft() { idle.lock(); inFlight = max(0, inFlight - 1); idle.broadcast(); idle.unlock() }
 
     private func extract(_ sb: CMSampleBuffer, captureNanos: UInt64, encodeNanos: UInt64) throws -> Encoded {
         var keyframe = true
