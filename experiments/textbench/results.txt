@@ -1,0 +1,25 @@
+Main 4:2:0, no ceiling:
+   [key  406.1 KB] cells >15:   0, max  0.5, PSNR 51.02 dB, text mean |RGB err| 0.39
+   [P3    5.3 KB] cells >15:   0, max  0.6, PSNR 51.41 dB, text mean |RGB err| 0.33
+Main 4:2:0, QP<=30 (LAN budget):
+   [key  406.1 KB] cells >15:   0, max  0.5, PSNR 51.02 dB, text mean |RGB err| 0.39
+   [P3    5.3 KB] cells >15:   0, max  0.6, PSNR 51.41 dB, text mean |RGB err| 0.33
+Main 4:2:0, QP<=20 (sharpening):
+   [key  406.1 KB] cells >15:   0, max  0.5, PSNR 51.02 dB, text mean |RGB err| 0.39
+   [P3    4.8 KB] cells >15:   0, max  0.5, PSNR 51.43 dB, text mean |RGB err| 0.32
+Main 4:2:0, QP<=10:
+   [key  532.5 KB] cells >15:   0, max  0.5, PSNR 53.36 dB, text mean |RGB err| 0.15
+   [P2    3.6 KB] cells >15:   0, max  0.5, PSNR 53.40 dB, text mean |RGB err| 0.14
+Main 4:2:0, coarse IDR (QP>=40), then QP<=30:
+   [key  120.8 KB] cells >15:   0, max  1.8, PSNR 32.52 dB, text mean |RGB err| 4.27
+   [P1  121.8 KB] cells >15:   0, max  1.1, PSNR 40.31 dB, text mean |RGB err| 2.01
+   [P2   55.3 KB] cells >15:   0, max  1.0, PSNR 43.12 dB, text mean |RGB err| 1.43
+   [P3    5.1 KB] cells >15:   0, max  0.9, PSNR 43.70 dB, text mean |RGB err| 1.32
+   [P4   19.8 KB] cells >15:   0, max  0.8, PSNR 44.67 dB, text mean |RGB err| 1.15
+   [P5   80.1 KB] cells >15:   0, max  0.7, PSNR 47.97 dB, text mean |RGB err| 0.70
+Main 4:2:0, coarse IDR (QP>=40), then QP<=20:
+   [key  120.8 KB] cells >15:   0, max  1.8, PSNR 32.52 dB, text mean |RGB err| 4.27
+   [P1  307.7 KB] cells >15:   0, max  0.6, PSNR 48.26 dB, text mean |RGB err| 0.70
+   [P2    7.6 KB] cells >15:   0, max  0.6, PSNR 48.72 dB, text mean |RGB err| 0.62
+   [P3   16.0 KB] cells >15:   0, max  0.7, PSNR 49.27 dB, text mean |RGB err| 0.54
+   [P4   64.4 KB] cells >15:   0, max  0.6, PSNR 51.07 dB, text mean |RGB err| 0.37
