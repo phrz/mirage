@@ -292,7 +292,11 @@ gh release upload "channel-$CHANNEL" "$OUT/manifest.json" "$OUT/manifest.sigs.js
 # install-host.sh's floor for this channel follows the head: a replayed older manifest cannot install an older build.
 FLOORVAR=MIN_BUILD_$(echo "$CHANNEL" | tr 'a-z' 'A-Z')
 sed -i '' "s/^$FLOORVAR=[0-9]*$/$FLOORVAR=$BUILD/" scripts/install-host.sh
-echo "== scripts/install-host.sh: $FLOORVAR=$BUILD (commit it)"
+# Committed and pushed here, so no other checkout bumps it by hand and collides with this one's edit at the next pull.
+echo "== scripts/install-host.sh: $FLOORVAR=$BUILD, committed and pushed"
+git commit -q -m "install-host.sh: $CHANNEL floor $BUILD" scripts/install-host.sh
+git push -q origin HEAD:main HEAD:universal-app ||
+    echo "== the floor commit did not push (main moved on): git pull --rebase && git push origin main main:universal-app" >&2
 case "$CHANNEL" in stable|beta) cask_bump "$CHANNEL" "$VERSION" "$BUILD" "$(shasum -a 256 "$OUT/$ZIPNAME" | cut -d' ' -f1)" "$ZIPURL" ;; esac
 
 if [ "$CHANNEL" = nightly ]; then
