@@ -3700,6 +3700,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Called when a video frame is acked as decoded.
     private func freshAcked(_ l: Layer, seq: UInt32, now: UInt64) {
         guard let rc else { return }
+        // The whole display as video has no base stage: its first acked frame is the first picture. Without this the probe
+        // waited for its 1.5 s deadline, the link stayed unclassified, and the start's coarse text stood until the sharpening
+        // frame that only a local link gets (gate, 2026-11-01: bench text lines too light for the first 0.97 s).
+        if wholeOnly, l.isDisplay { sendDeferredProbe("first whole-display frame acked") }
         switch l.fresh {
         case .base(let s) where seq >= s && s != 0, .climb(let s) where seq >= s && s != 0:
             if l.isDisplay { sendDeferredProbe("base picture acked") }
