@@ -2,7 +2,8 @@
 
 `tools/gate/gate.sh HOST [profiles] [scenarios]` runs scripted sessions through a production host with the headless viewer
 and prints one table: fps, motion fps, key-to-pixel latency, time to crisp, and the truth metric (partial frames, cells wrong
-per frame, the longest a region stayed wrong, the first whole frame).
+per frame, the longest a region stayed wrong, the first whole frame). The host's references come once a second, so frames
+during a scroll or drag burst are not judged; settle is the time from each burst's end to the next whole frame.
 
 - **Profiles:** LAN (no shaping), cafe (5 Mbit/s down, 1 up, 40 ms, 0.5 % loss), 4G (Fast 4G), bus (Japan bus 4G). The host
   shapes the stream (the request's throttle), so one machine pair covers all four.

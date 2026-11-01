@@ -19,14 +19,16 @@ throttle() { case $1 in LAN) ;; cafe) echo "--throttle 5000/1000/40/0.5" ;; 4G) 
 # (A scripted run lasts until its scenario ends: up to 10 s of waiting for a quiet stream, then the scenario's seconds.)
 scenario() { case $1 in connect) echo "--duration 12" ;; typing) echo "--duration 12 --scenario selecttype:10" ;; scroll) echo "--duration 12 --scenario scroll:10" ;;
     drag) echo "--duration 12 --scenario drag:10" ;; video) echo "--duration 12 --scenario idle:8" ;; esac }
-printf "| profile | case | fps (median) | motion fps | frame gap p95 ms | key-to-pixel p50/max ms | crisp median/max ms | partial | cells wrong/frame | longest wrong | first whole | keyframes | kbps idle/active | host px -> stream px |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n" > "$OUT/table.md"
+printf "| profile | case | fps (median) | motion fps | frame gap p95 ms | key-to-pixel p50/max ms | crisp median/max ms | settle median/max ms | partial | cells wrong/frame | longest wrong | first whole | keyframes | kbps idle/active | host px -> stream px |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n" > "$OUT/table.md"
 for p in ${(s:,:)PROFILES}; do for c in ${(s:,:)SCENARIOS}; do
     tag="$p-$c"; F="$OUT/$tag"; rm -rf "${F:?}"; mkdir -p "$F"
     S=$(python3 -c 'import time;print(time.time())'); ST=$(date -u +%Y-%m-%dT%H:%M:%S)
     eval "MIRAGE_TEST_FRAMES='$F' MIRAGE_TEST_FRAMES_MS=33 '$V' $HOST --headless --truth --window 1600x900 --scale 2 $(scenario $c) $(throttle $p) --stats '$OUT/$tag.json'" > "$OUT/$tag.out" 2> "$OUT/$tag.err"
     hostlog "grep '^20' ~/Library/Logs/mirage-host.log | awk -v t='$ST' '\$0 >= t'" > "$OUT/$tag.host"
     grep 'truth reference' "$OUT/$tag.host" | sed -E 's/^([^ ]+) truth reference: ([0-9a-f]+).*/\1 \2/' > "$OUT/$tag.refs"
-    "$OUT/truth" "$F" "$OUT/$tag.refs" $S > "$OUT/$tag.truth" 2>&1; [[ -n ${GATE_KEEP_FRAMES:-} ]] || rm -rf "${F:?}"
+    # Each burst's first input and end (scenario runs): its frames are not judged until the picture settles.
+    python3 -c 'import json,sys; j=json.load(open(sys.argv[1])); print("\n".join(f"{a} {b}" for a, b in zip(j.get("burstStartWall") or [], j.get("burstEndWall") or [])))' "$OUT/$tag.json" > "$OUT/$tag.bursts" 2>/dev/null
+    "$OUT/truth" "$F" "$OUT/$tag.refs" $S "$OUT/$tag.bursts" > "$OUT/$tag.truth" 2>&1; [[ -n ${GATE_KEEP_FRAMES:-} ]] || rm -rf "${F:?}"
     python3 - "$OUT/$tag.json" "$OUT/$tag.truth" "$p" "$c" "$OUT/$tag.host" >> "$OUT/table.md" <<'PY'
 import json, re, sys
 from datetime import datetime
@@ -43,7 +45,8 @@ def g(k): return j.get(k)
 f = lambda v: "-" if v is None else (f"{v:.0f}" if isinstance(v, (int, float)) else str(v))
 mf = g("motionFps"); mfs = f"{sorted(mf)[len(mf)//2]:.0f}" if mf else "-"
 part = re.search(r"partial (\d+) \(([\d.]+)%\)", t); cells = re.search(r"mean ([\d.]+); longest-wrong region: ([\d.]+) s", t); whole = re.search(r"first whole frame at (\S+) s", t)
-print(f"| {sys.argv[3]} | {sys.argv[4]} | {f(g('fpsMedian'))} | {mfs} | {f(g('videoGapP95Ms'))} | {f(g('keyLatencyMsMedian'))}/{f(g('keyLatencyMsMax'))} | {f(g('crispMsMedian'))}/{f(g('crispMsMax'))} | "
+settle = re.search(r"settled after motion: median (\S+) ms, max (\S+) ms", t)
+print(f"| {sys.argv[3]} | {sys.argv[4]} | {f(g('fpsMedian'))} | {mfs} | {f(g('videoGapP95Ms'))} | {f(g('keyLatencyMsMedian'))}/{f(g('keyLatencyMsMax'))} | {f(g('crispMsMedian'))}/{f(g('crispMsMax'))} | {settle.group(1)+'/'+settle.group(2) if settle else '-/-'} | "
       f"{part.group(2)+'%' if part else '-'} | {cells.group(1) if cells else '-'} | {cells.group(2)+' s' if cells else '-'} | {whole.group(1)+' s' if whole else '-'} | "
       f"{f(g('keyframes'))} | {f(g('idleKbpsMedian'))}/{f(g('activeKbpsMedian'))} | {g('hostPixels') or '-'} -> {g('streamPixels') or '-'} |")
 PY

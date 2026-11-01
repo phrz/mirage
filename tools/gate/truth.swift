@@ -4,7 +4,9 @@ import ImageIO
 // Truth metric (numbers only): every viewer frame (frames.jsonl wall time) against the host's own screenshots ("truth
 // reference" log lines: ISO time + 576 hex cell means), the best match among host shots from 600 ms before to 100 ms after
 // the frame. A frame is partial when more than `tol` (default 1 %) of its 32×18 cells differ by over 15 levels from it.
-// Usage: truth <frames dir> <refs file: "ISO hex" lines> [start wall]
+// Frames from a burst's first input until the picture is whole again are not judged (a moving window has no host reference
+// at its moment: 1 Hz); the time from each burst's end to that whole frame is reported as settling instead.
+// Usage: truth <frames dir> <refs file: "ISO hex" lines> [start wall] [bursts file: "start end" wall lines]
 let dir = CommandLine.arguments[1], refsPath = CommandLine.arguments[2]
 let iso = ISO8601DateFormatter(); iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 var refs: [(Double, [Double])] = []
@@ -55,14 +57,26 @@ var count = [Int](repeating: 0, count: 576)
 // consecutive frames in which one cell differed, in seconds.)
 for (_, d) in perFrame { for c in d { count[c] += 1 } }
 let persistent = Set((0..<576).filter { perFrame.count > 3 && Double(count[$0]) >= 0.7 * Double(perFrame.count) })
-for (t, d) in perFrame {
+var motion = Set<Int>(), settle: [Double] = []
+if CommandLine.arguments.count > 4 {
+    for line in try String(contentsOfFile: CommandLine.arguments[4], encoding: .utf8).split(separator: "\n") {
+        let p = line.split(separator: " ").compactMap { Double($0) }; guard p.count == 2 else { continue }
+        let (b0, b1) = (p[0] - start, p[1] - start)
+        // Settled: the first whole frame after the burst's end, within 3 s; past that its frames count as partial again.
+        let s = perFrame.first { $0.0 >= b1 && $0.1.subtracting(persistent).count <= 5 }.map(\.0).flatMap { $0 - b1 <= 3 ? $0 : nil }
+        settle.append(s.map { $0 - b1 } ?? .infinity)
+        for (i, f) in perFrame.enumerated() where f.0 >= b0 && f.0 < (s ?? b1) { motion.insert(i) }
+    }
+}
+for (i, (t, d)) in perFrame.enumerated() where !motion.contains(i) {
     total += 1
     let extra = d.subtracting(persistent).count
     if extra > 5 { partial += 1; if report.count < 12 { report.append(String(format: "  %.2f s: %d cells differ (beyond the steady ones)", t, extra)) } }
     else if firstWhole == nil { firstWhole = t }
 }
 var runStart = [Double?](repeating: nil, count: 576), longest = 0.0, longestCell = -1, wrongSum = 0
-for (t, d) in perFrame {
+for (i, (t, d)) in perFrame.enumerated() {
+    if motion.contains(i) { for c in 0..<576 { runStart[c] = nil }; continue }
     let extra = d.subtracting(persistent); wrongSum += extra.count
     for c in 0..<576 {
         if extra.contains(c) { if runStart[c] == nil { runStart[c] = t } ; if t - runStart[c]! > longest { longest = t - runStart[c]!; longestCell = c } }
@@ -70,6 +84,10 @@ for (t, d) in perFrame {
     }
 }
 print("steady-state mismatch: \(persistent.count) cells differ in most frames")
-print(String(format: "cells wrong per frame (beyond steady): mean %.1f; longest-wrong region: %.2f s (cell %d,%d)", perFrame.isEmpty ? 0 : Double(wrongSum) / Double(perFrame.count), longest, longestCell >= 0 ? longestCell % 32 : -1, longestCell >= 0 ? longestCell / 32 : -1))
+print(String(format: "cells wrong per frame (beyond steady): mean %.1f; longest-wrong region: %.2f s (cell %d,%d)", total == 0 ? 0 : Double(wrongSum) / Double(total), longest, longestCell >= 0 ? longestCell % 32 : -1, longestCell >= 0 ? longestCell / 32 : -1))
 print(String(format: "frames compared %d, partial %d (%.1f%%), first whole frame at %@ s", total, partial, total > 0 ? 100 * Double(partial) / Double(total) : 0, firstWhole.map { String(format: "%.2f", $0) } ?? "never"))
+if !settle.isEmpty {
+    let ms = settle.sorted().map { $0.isFinite ? String(format: "%.0f", $0 * 1000) : "never" }
+    print("settled after motion: median \(ms[ms.count / 2]) ms, max \(ms.last!) ms (\(settle.count) bursts, \(motion.count) frames in motion not judged)")
+}
 report.forEach { print($0) }

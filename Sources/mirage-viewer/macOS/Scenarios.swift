@@ -13,6 +13,11 @@ final class ScenarioRunner {
     private(set) var crispMs: [Double] = []
     /// Wall-clock time (s since 1970) of each burst end: the gate finds the host's sharpening frame after it (wholeDisplayOnly).
     private(set) var burstEndWall: [Double] = []
+    /// Wall-clock time of each burst's first input, paired with burstEndWall: the gate does not judge frames from there until
+    /// the picture settles (a moving window has no host reference at its moment) and reports the settling time instead.
+    private(set) var burstStartWall: [Double] = []
+    private var burstStart: Double?
+    private func burstBegins() { burstStart = Date().timeIntervalSince1970 }
     private(set) var bursts = 0
     /// Seconds the scenario was actively driving input (for watched-rect kbps).
     private(set) var activeSeconds = 0.0
@@ -70,6 +75,7 @@ final class ScenarioRunner {
     /// last lossless tile that touched it, provided no video frame touched it later (then it is not crisp yet).
     private func measureCrisp(burstEnd: UInt64) async {
         burstEndWall.append(Date().timeIntervalSince1970 - Double(Clock.elapsed(since: burstEnd, now: Clock.nowNanos())) / 1e9)
+        burstStartWall.append(burstStart ?? burstEndWall.last!); burstStart = nil
         let deadline = burstEnd + 5_000_000_000
         var last: UInt64 = 0
         while Clock.nowNanos() < deadline {
@@ -600,6 +606,7 @@ final class ScenarioRunner {
             while Date() < end {
                 guard guardsStillHold() else { break }
                 let titleBar = Int(28 * ppp)
+                burstBegins()
                 for _ in 0..<40 {   // 1.3 s of wheel at 30 Hz, 30 pt per event
                     let dy = 30.0 * dir
                     guard let win = bench() else { break }
@@ -622,6 +629,7 @@ final class ScenarioRunner {
             while Date() < end {
                 guard guardsStillHold() else { break }
                 var v = 38.0
+                burstBegins()
                 for k in 0..<75 {   // 1.25 s: a flick and its momentum
                     let dy = v * dir, dx = (k % 3 == 0 ? 7.5 : 2.25) * (k % 2 == 0 ? 1 : -1)
                     guard let win = bench() else { break }
@@ -640,6 +648,7 @@ final class ScenarioRunner {
             while Date() < end {
                 guard guardsStillHold(), let win = bench() else { break }
                 let x0 = win.frame.x + win.frame.width / 2, y0 = win.frame.y + Int(12 * ppp)
+                burstBegins()
                 var (nx, ny) = normalized(x0, y0)
                 session.send(.mouseMove(.init(x: nx, y: ny)), scripted: true)
                 try? await Task.sleep(for: .milliseconds(50))
