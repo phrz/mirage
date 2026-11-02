@@ -22,39 +22,26 @@ write-ups `docs/reset/compare-2026-10-31.md` and `docs/reset/compare-2026-11-01.
   bench-like picture's cells move at most 1.8 levels (the gate's threshold is 15), even from the coarse first IDR.
   VideoToolbox has no HEVC 4:4:4; Main42210 gave output identical to Main.
 
-## Open: whole display shows wrong text cells (blocks making it the default)
+## Found: whole display showed wrong text cells (fix on main, awaiting a nightly)
 
-In a whole-display scroll run on 580 (scratch output `wm`, 2026-11-01 20:27Z), a still screen had 43–45 cells of
-the bench's text (rows 5, 7, 9, 11; cols 5–14; viewer lighter than the host) more than 15 levels off from 0.84 s until
-the first scroll at about 12 s. That was through a sharpening frame every second that, per the code, re-encodes the
-whole display (`sharpenIfStill` copies all of `d.lastFrame` to the canvas and marks every tile). Starts that also sent
-lossless refinement tiles were exact. So the viewer was showing something other than the host's screen.
+Still whole-display run on 580, 2026-11-02 20:12Z (scratch `st2`, bench crops full size, bench frontmost, nothing over
+it). The viewer's bench stayed a heavy blur, the 1/8-size start picture upscaled, for the whole 23 s; after 14 s only the
+caret's 64x42 px ever changed. Two faults, both host-side, both fixed in `DesktopStreamer.swift`:
 
-Leads, unexamined:
-- The viewer ignores or masks part of what arrives (tile mask, `tracker.isCrisp` filtering in the encode path,
-  viewer compositing).
-- The bench changed just after the stream started (that run's stream began as the bench opened) and the change never
-  reached the viewer.
-- The 1 Hz truth reference (`startTruthReference`, SCK display shot at 640 wide) differs from the stream's capture.
+1. **The video tile key ranked the controller's rung, not the encoded size.** The connect probe set rung 0 at 1.1 s,
+   but the encoder stayed 400x224, so each 1/8-size sharpening frame went out with the native rank (6). The real 3200x1800
+   keyframe at 13 s (viewer decoded 3200x1800 at 8–9 fps from then on) had the same content seq and rank, and the viewer's
+   "equal keys keep what is there" rule rejected it on every still tile. Now the rank comes from the encoder's own width
+   (`encodedRung`, tested).
+2. **The encoder stayed at the tiny rung for 13 s on a LAN start.** `applyBudget` waited for the layered pipeline's fresh
+   picture (`d.fresh == .done`), which whole display never finishes on a local link. It no longer waits in whole display.
 
-**Next run:** a still whole-display run with full-size bench crops from the viewer. The script is
-`/private/tmp/claude-501/-Users-phrz-Repos-mirage/4e9884c6-4479-4492-bbb3-9d5357ab6e98/scratchpad/still.sh`
-(scratch; it may be gone). It sets tunables `{"curtain": 0, "wholeDisplayOnly": 1}`, opens
-`.build/MirageTestBench.app`, runs `.build/debug/mirage-viewer localhost --headless --truth --window 1600x900
---scale 2 --duration 14 --scenario idle:10` with `MIRAGE_TEST_FRAMES` (quarter-size frames for the truth checker) and
-`MIRAGE_TEST_BENCH_SHOTS`/`MIRAGE_TEST_BENCH_FPS=2` (full-size crops of the bench window), then removes the tunables
-and closes the bench. To reproduce the bad case, start the stream right as the bench opens, as the gate's A/B script
-did.
-
-The first attempt (2026-11-01 23:12Z) was invalid: autonomous Chrome and ChatGPT Computer Use windows sat in front of
-the bench, so the run measured Chrome. **A bench crop shows whatever covers the bench:** before viewing one, check that
-the bench is the first layer-0 window and nothing overlaps it, and delete crops that caught other windows. A
-"… quit unexpectedly" crash dialog (UserNotificationCenter, flagged by the host at 22:08:26Z, not caused by a test)
-was up on the mini then; it is phrz's to dismiss. Waiting on phrz: the bench free to be in front.
+Earlier starts that sent lossless refinement tiles looked exact only because those tiles (rank 9) beat the stuck video.
+Not verified live yet (no test copies on hosts): needs a nightly, then the still run (`still.sh`) and the A/B again.
 
 ## Next steps, in order
 
-1. Find the wrong-text-cells bug above and fix it (through a nightly), then rerun the A/B comparison.
+1. After the next nightly: rerun the still whole-display run (sharp bench crops from ~1 s) and the A/B comparison.
 2. Make whole display the default.
 3. Workbench lessons where still needed: lossless tiles from the same capture for small changes (typing, caret) in the
    same frame transaction as the video; codec choice by content, never by RTT. (4:4:4 HEVC is not available.)

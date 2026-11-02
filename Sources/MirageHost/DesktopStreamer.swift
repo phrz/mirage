@@ -5139,10 +5139,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         l.encoderUseNanos = now
         let captureSeq = self.captureSeq, inputSeq = self.lastInputSeq
         let progressive = l.progressiveKeyframe
-        // TileKey: per masked tile (row-major), its content seq as the canvas was taken and the rung's video rank.
+        // TileKey: per masked tile (row-major), its content seq as the canvas was taken and the video rank of the size this
+        // encoder runs at. Never the controller's rung: the connect probe moved it to native while the encoder was still at
+        // the tiny start size, the 1/8 picture went out ranked native, and the native keyframe after it (same content, same
+        // rank) lost to it on every still tile (whole display, 2026-11-02: bench text blurred until it changed).
         var vkeys: [UInt64]? = nil
         if keysOn {
-            let rank = TileKey.video(rung: rc?.rung ?? 0), cols = l.tracker.cols
+            let rank = TileKey.video(rung: Self.encodedRung(encodedWidth: enc.width, layerWidth: l.width)), cols = l.tracker.cols
             var k: [UInt64] = []
             for row in 0..<grid.rows { for col in 0..<grid.cols where mask[col, row] { k.append(TileKey.make(contentSeq: l.tracker.contentSeq((r0 + row) * cols + c0 + col), rank: rank)) } }
             vkeys = k
@@ -5279,7 +5282,9 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let growing = live.contains { wantedWidth($0) > $0.encoder!.width }
         // Not during the desktop's fresh picture, unless motion holds it (sustained motion freezes refinement, so it never
         // finished, and video built at the tiny rung before a LAN start stayed at 400x224 for good: the LAN row, 2026-10-25).
-        let freshAllows = d.fresh == .done || motionSustained(now)
+        // The whole display alone has no base stage to wait for: on a LAN start the encoder stayed at the tiny size for
+        // 13 s while the probe had already chosen native, and every sharpening frame sharpened a 1/8 picture (2026-11-02).
+        let freshAllows = wholeOnly || d.fresh == .done || motionSustained(now)
         if rungChanged, freshAllows, Clock.elapsed(since: lastRebuildNanos, now: now) > 5_000_000_000, !(growing && rc.queueMs > 60) {
             lastBudget = b
             lastRebuildNanos = now
@@ -5289,6 +5294,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             lastBudget = b
             for l in layers.values { l.encoder?.setRate(bitrateKbps: b.videoKbps, expectedFPS: plannedFPS()) }
         }
+    }
+
+    /// Pure, for tests: the ladder rung an encoder `encodedWidth` wide runs at for a layer `layerWidth` wide (the rung whose
+    /// width it is, else the nearest scale at or below it).
+    static func encodedRung(encodedWidth: Int, layerWidth: Int) -> Int {
+        let scales = RateController.scales
+        if let i = scales.indices.first(where: { max(64, Int(Double(layerWidth) * scales[$0])) & ~1 == encodedWidth }) { return i }
+        let s = Double(encodedWidth) / Double(max(1, layerWidth))
+        return scales.indices.first { scales[$0] <= s + 1e-9 } ?? RateController.tinyRung
     }
 
     /// The rung changed: every live encoder is rebuilt at the new scale (each costs a keyframe).

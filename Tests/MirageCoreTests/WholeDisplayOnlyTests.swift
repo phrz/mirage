@@ -17,6 +17,18 @@ final class WholeDisplayOnlyTests: XCTestCase {
             XCTAssertEqual(r.video, dirty); XCTAssertTrue(r.tiles.isEmpty)
         }
     }
+    /// Video's tile key ranks the size the encoder ran at, never the controller's rung: a 400-wide frame of a 3200-wide
+    /// display is the tiny rung's rank even after the probe moved the rung to native, so the native frame after it wins.
+    func testVideoKeyRanksTheEncodedSize() {
+        XCTAssertEqual(MacDesktopStreamer.encodedRung(encodedWidth: 400, layerWidth: 3200), RateController.tinyRung)
+        XCTAssertEqual(MacDesktopStreamer.encodedRung(encodedWidth: 3200, layerWidth: 3200), 0)
+        XCTAssertEqual(MacDesktopStreamer.encodedRung(encodedWidth: 2400, layerWidth: 3200), 1)
+        XCTAssertEqual(MacDesktopStreamer.encodedRung(encodedWidth: 1600, layerWidth: 3200), 2)
+        XCTAssertEqual(MacDesktopStreamer.encodedRung(encodedWidth: 64, layerWidth: 300), RateController.tinyRung, "the 64-px floor")
+        let tiny = TileKey.make(contentSeq: 7, rank: TileKey.video(rung: MacDesktopStreamer.encodedRung(encodedWidth: 400, layerWidth: 3200)))
+        let native = TileKey.make(contentSeq: 7, rank: TileKey.video(rung: MacDesktopStreamer.encodedRung(encodedWidth: 3200, layerWidth: 3200)))
+        XCTAssertGreaterThan(native, tiny)
+    }
     /// The sharpening pass: a low QP ceiling while the screen stands still, the budget's ceiling again at the next change.
     func testSharpeningTogglesTheEncodersCeiling() throws {
         let enc = try HEVCEncoder(width: 256, height: 144, bitrateKbps: 20_000, expectedFPS: 30)
