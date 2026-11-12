@@ -743,8 +743,23 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         return t[.compositorModel] >= 0.5
     }
     /// The whole display as video (tunable wholeDisplayOnly, docs/reset): one capture, video for every change, a sharpening
-    /// pass when still. The layered pipeline's every other path is off.
-    private var wholeOnly: Bool { !compositor && hostTunables[.wholeDisplayOnly] >= 0.5 }
+    /// pass when still. The layered pipeline's every other path is off. Desktop mode only: Unified mode is built on window
+    /// layers and keeps the layered pipeline (phrz, 2026-11-12) until it becomes crops of the whole picture.
+    private var wholeOnly: Bool { !compositor && hostTunables[.wholeDisplayOnly] >= 0.5 && !unifiedView }
+    /// The viewer moved between Desktop mode (whole display) and Unified mode (window layers): the new pipeline starts from
+    /// a whole picture. Into the whole display, every display tile goes in its first keyframe (tiles the viewer holds
+    /// lossless keep them by their keys); into layers, the layered start from the tiny rung, as after a tier change.
+    private func switchPipeline(toWhole: Bool) {
+        let now = Clock.nowNanos()
+        if toWhole {
+            if let d = display { d.tracker.markVideo(Array(0..<d.tracker.tileCount), now: now) }
+        } else {
+            display?.encoder?.setSharpening(false)
+            rc?.dropToTinyRung(now: now); lastRebuildNanos = now
+            rebuildAllEncoders(keyframes: true)
+        }
+        beginFreshPicture(.viewMode, detail: toWhole ? " to the whole display" : " to window layers")
+    }
     /// Pure, for tests: how one capture of the whole display goes out in wholeDisplayOnly: every changed tile in one video
     /// frame (TRUTH: a presented frame is one capture, never part now and the rest as tiles later).
     static func wholeOnlyRoute(dirty: [Int]) -> (video: [Int], tiles: [Int]) { (dirty, []) }
@@ -1179,10 +1194,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         case .viewInterest(let v):
             queue.async {
                 guard v != self.interest else { return }
-                let was = self.unifiedView
+                let was = self.unifiedView, wasWhole = self.wholeOnly
                 self.interest = v
                 if was != v.unified { self.log(v.unified ? "viewer: Unified mode (window layers by the viewer's arrangement, display layer only where shown)" : "viewer: Desktop mode") }
                 if let s = self.windows?.current { self.reconcileLayers(s, now: Clock.nowNanos()) }
+                if wasWhole != self.wholeOnly { self.switchPipeline(toWhole: self.wholeOnly) }
             }
             return
         default: break

@@ -44,7 +44,9 @@ in `compare-2026-11-01.md`. Run scripts on the mini's SSD: `/Volumes/MirageWork/
 
 1. Whole-display drag: the band where the bench's bottom edge meets the Dock stays 6–15 levels off between drags; find
    which side differs (see compare-2026-11-01.md), then decide on the default.
-2. Make whole display the default.
+2. Whole display is the default in Desktop mode (on main 2026-11-12, `{"wholeDisplayOnly": 0}` turns it off). Unified mode
+   keeps window layers, and a mode change restarts the picture in the other pipeline. Verify on the next nightly: the gate
+   without tunables, and a Desktop → Unified → Desktop switch. The warm pool stays off with it (Unified's connects too).
 3. Workbench lessons where still needed: lossless tiles from the same capture for small changes (typing, caret) in the
    same frame transaction as the video; codec choice by content, never by RTT. (4:4:4 HEVC is not available.)
 4. Resolution matching (phrz: "Yes, try it"): an option where the host switches its display mode to the viewer's

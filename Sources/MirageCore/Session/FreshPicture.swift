@@ -13,9 +13,12 @@ public enum FreshPictureTrigger: String, Equatable {
     /// The host's screen locked or unlocked: the picture changes from the desktop and its windows to the lock screen (or back)
     /// as a whole, presented at once, never tile by tile over the old one.
     case screenLock = "screen locked", screenUnlock = "screen unlocked"
+    /// The viewer changed between Desktop and Unified mode, which changes the pipeline (whole display in Desktop mode,
+    /// window layers in Unified): the new one starts from a whole picture of its own.
+    case viewMode = "view mode change"
     public var restartsWholePicture: Bool {
         switch self {
-        case .streamStart, .resize, .tierChange, .viewerEmpty, .screenLock, .screenUnlock: return true
+        case .streamStart, .resize, .tierChange, .viewerEmpty, .screenLock, .screenUnlock, .viewMode: return true
         case .regionChange, .recoveryKeyframe: return false
         }
     }

@@ -137,7 +137,7 @@ public struct Tunables: Codable, Equatable, Sendable {
             case .atomicCapture: return (1, 0, 1)
             case .curtain: return (1, 0, 1)
             case .wholeFreshPicture: return (1, 0, 1)
-            case .wholeDisplayOnly: return (0, 0, 1)
+            case .wholeDisplayOnly: return (1, 0, 1)   // (on by default since 2026-11-12: Desktop mode; Unified keeps window layers)
             case .testTruthReference, .testLockReference: return (0, 0, 1)
             }
         }

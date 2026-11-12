@@ -2,10 +2,11 @@ import XCTest
 @testable import MirageHost
 @testable import MirageCore
 
-/// The whole display as video (tunable wholeDisplayOnly, docs/reset): off by default; one capture, one video frame.
+/// The whole display as video (tunable wholeDisplayOnly, docs/reset): on by default (Desktop mode); one capture, one video frame.
 final class WholeDisplayOnlyTests: XCTestCase {
-    func testOffByDefault() {
-        XCTAssertEqual(Tunables.defaults[.wholeDisplayOnly], 0)
+    func testOnByDefault() {
+        XCTAssertEqual(Tunables.defaults[.wholeDisplayOnly], 1)
+        XCTAssertEqual(Tunables.host(overrides: ["wholeDisplayOnly": 0])[.wholeDisplayOnly], 0, "the off switch")
         XCTAssertEqual(Tunables.host(overrides: ["wholeDisplayOnly": 1])[.wholeDisplayOnly], 1)
         XCTAssertEqual(Tunables.host(overrides: ["wholeDisplayOnly": 7])[.wholeDisplayOnly], 1, "clamped")
     }
@@ -28,6 +29,10 @@ final class WholeDisplayOnlyTests: XCTestCase {
         let tiny = TileKey.make(contentSeq: 7, rank: TileKey.video(rung: MacDesktopStreamer.encodedRung(encodedWidth: 400, layerWidth: 3200)))
         let native = TileKey.make(contentSeq: 7, rank: TileKey.video(rung: MacDesktopStreamer.encodedRung(encodedWidth: 3200, layerWidth: 3200)))
         XCTAssertGreaterThan(native, tiny)
+    }
+    /// A change between Desktop and Unified mode changes the pipeline, so it starts a whole picture.
+    func testViewModeChangeRestartsTheWholePicture() {
+        XCTAssertTrue(FreshPictureTrigger.viewMode.restartsWholePicture)
     }
     /// The sharpening pass: a low QP ceiling while the screen stands still, the budget's ceiling again at the next change.
     func testSharpeningTogglesTheEncodersCeiling() throws {
