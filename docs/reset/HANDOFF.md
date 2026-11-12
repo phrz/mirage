@@ -22,7 +22,7 @@ write-ups `docs/reset/compare-2026-10-31.md` and `docs/reset/compare-2026-11-01.
   bench-like picture's cells move at most 1.8 levels (the gate's threshold is 15), even from the coarse first IDR.
   VideoToolbox has no HEVC 4:4:4; Main42210 gave output identical to Main.
 
-## Found: whole display showed wrong text cells (fix on main, awaiting a nightly)
+## Fixed: whole display showed wrong text cells (verified on nightly 587, 2026-11-12)
 
 Still whole-display run on 580, 2026-11-02 20:12Z (scratch `st2`, bench crops full size, bench frontmost, nothing over
 it). The viewer's bench stayed a heavy blur, the 1/8-size start picture upscaled, for the whole 23 s; after 14 s only the
@@ -37,11 +37,13 @@ caret's 64x42 px ever changed. Two faults, both host-side, both fixed in `Deskto
    picture (`d.fresh == .done`), which whole display never finishes on a local link. It no longer waits in whole display.
 
 Earlier starts that sent lossless refinement tiles looked exact only because those tiles (rank 9) beat the stuck video.
-Not verified live yet (no test copies on hosts): needs a nightly, then the still run (`still.sh`) and the A/B again.
+Verified on 587: sharp bench from the first crops, no cell stuck. A/B and the drag residual (the bench's edge over the Dock)
+in `compare-2026-11-01.md`. Run scripts on the mini's SSD: `/Volumes/MirageWork/scratch/still/still.sh`, `/Volumes/MirageWork/scratch/ab587/ab.sh`.
 
 ## Next steps, in order
 
-1. After the next nightly: rerun the still whole-display run (sharp bench crops from ~1 s) and the A/B comparison.
+1. Whole-display drag: the band where the bench's bottom edge meets the Dock stays 6–15 levels off between drags; find
+   which side differs (see compare-2026-11-01.md), then decide on the default.
 2. Make whole display the default.
 3. Workbench lessons where still needed: lossless tiles from the same capture for small changes (typing, caret) in the
    same frame transaction as the video; codec choice by content, never by RTT. (4:4:4 HEVC is not available.)
