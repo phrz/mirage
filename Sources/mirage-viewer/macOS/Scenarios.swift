@@ -380,6 +380,20 @@ final class ScenarioRunner {
         case "idle":
             session.resetWatched()
             try? await Task.sleep(for: .seconds(seconds))
+        case "modeflip":
+            // The host's pipeline switch (whole display in Desktop mode, window layers in Unified): this viewer tells the host
+            // it went to Unified 2 s in and back to Desktop 4 s later, without native windows (headless). The Unified stretch
+            // is a burst (not judged); after it the picture must be whole again.
+            try? await Task.sleep(for: .seconds(2))
+            burstBegins()
+            session.setViewInterest(.init(unified: true, displayRects: []))
+            session.log("scenario modeflip: Unified")
+            try? await Task.sleep(for: .seconds(4))
+            session.setViewInterest(.init(unified: false))
+            session.log("scenario modeflip: Desktop")
+            await measureCrisp(burstEnd: Clock.nowNanos())
+            try? await Task.sleep(for: .seconds(max(0, seconds - 6 - 5)))
+            activeSeconds = 4
         case "zorder":
             // Cross-app z-order (phrz: a dragged window fell behind another app's window once it overlapped it). A Finder
             // window on the bench's own folder (/tmp/mtb2, opened by the run script) sits behind the bench; its title bar is

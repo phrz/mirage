@@ -2,7 +2,7 @@
 # The gate harness (docs/reset): scripted sessions through a production host with a headless viewer, numbers only.
 # Usage: tools/gate/gate.sh HOST [profiles] [scenarios]
 #   profiles: comma list of LAN, cafe, 4G, bus (default all)
-#   scenarios: comma list of connect, typing, scroll, drag, video (default all)
+#   scenarios: comma list of connect, typing, scroll, drag, video, modeflip (default all but modeflip)
 #   GATE_HOST_LOG=PATH: read the host log from this local copy instead of over ssh
 # Needs: the host unlocked and idle, nobody else connected, the "Mirage Test Bench" window open on it (experiments/testbench;
 # `video` wants it started with --motion). Lock and unlock are run by hand (tools/gate/README.md). The truth reference is
@@ -18,7 +18,8 @@ hostlog() { if [[ -n ${GATE_HOST_LOG:-} ]]; then zsh -c "${1//\~\/Library\/Logs\
 throttle() { case $1 in LAN) ;; cafe) echo "--throttle 5000/1000/40/0.5" ;; 4G) echo "--throttle Fast 4G" ;; bus) echo "--throttle Japan bus 4G" ;; esac }
 # (A scripted run lasts until its scenario ends: up to 10 s of waiting for a quiet stream, then the scenario's seconds.)
 scenario() { case $1 in connect) echo "--duration 12" ;; typing) echo "--duration 12 --scenario selecttype:10" ;; scroll) echo "--duration 12 --scenario scroll:10" ;;
-    drag) echo "--duration 12 --scenario drag:10" ;; video) echo "--duration 12 --scenario idle:8" ;; esac }
+    drag) echo "--duration 12 --scenario drag:10" ;; video) echo "--duration 12 --scenario idle:8" ;;
+    modeflip) echo "--duration 16 --scenario modeflip:14" ;; esac }
 printf "| profile | case | fps (median) | motion fps | frame gap p95 ms | key-to-pixel p50/max ms | crisp median/max ms | settle median/max ms | partial | cells wrong/frame | longest wrong | first whole | keyframes | kbps idle/active | host px -> stream px |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n" > "$OUT/table.md"
 for p in ${(s:,:)PROFILES}; do for c in ${(s:,:)SCENARIOS}; do
     tag="$p-$c"; F="$OUT/$tag"; rm -rf "${F:?}"; mkdir -p "$F"
