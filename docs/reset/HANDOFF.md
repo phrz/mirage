@@ -58,8 +58,9 @@ in `compare-2026-11-01.md`. Run scripts on the mini's SSD: `/Volumes/MirageWork/
    display capture (windows left out) as the first whole picture, and DisplayGuard held the former layers' tiles out of
    it for its 1 s history. Fixed after 590: no DisplayGuard in the whole display; after the switch, display frames wait
    (≤ 1 s) for the filter that leaves no window out, then the next capture is the keyframe (host log: "capture filter
-   leaves no window out after N ms"). Verify with `gate.sh localhost LAN modeflip` on the next nightly (target: settle
-   within a frame or two of the switch, no wallpaper where the bench is).
+   leaves no window out after N ms"). Verified on 595 (gate modeflip, 3 runs): filter in force 37–66 ms after the
+   switch, then one keyframe of all 1450 tiles; settle 5, 14, 10 ms (590: 1293 ms). Partial frames (3.3–6.9 %) are all
+   in the connect start (first whole 0.90–1.33 s); `TRUTH_ALL=1` lists every partial frame (run c: none after 0.88 s).
 3. Workbench lessons where still needed: lossless tiles from the same capture for small changes (typing, caret) in the
    same frame transaction as the video; codec choice by content, never by RTT. (4:4:4 HEVC is not available.)
 4. Resolution matching (phrz: "Yes, try it"): an option where the host switches its display mode to the viewer's

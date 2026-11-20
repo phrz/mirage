@@ -71,7 +71,7 @@ if CommandLine.arguments.count > 4 {
 for (i, (t, d)) in perFrame.enumerated() where !motion.contains(i) {
     total += 1
     let extra = d.subtracting(persistent).count
-    if extra > 5 { partial += 1; if report.count < 12 { report.append(String(format: "  %.2f s: %d cells differ (beyond the steady ones)", t, extra)) } }
+    if extra > 5 { partial += 1; if report.count < (ProcessInfo.processInfo.environment["TRUTH_ALL"] != nil ? Int.max : 12) { report.append(String(format: "  %.2f s: %d cells differ (beyond the steady ones)", t, extra)) } }
     else if firstWhole == nil { firstWhole = t }
 }
 var runStart = [Double?](repeating: nil, count: 576), longest = 0.0, longestCell = -1, wrongSum = 0

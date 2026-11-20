@@ -7,7 +7,8 @@
 # Needs: the host unlocked and idle, nobody else connected, the "Mirage Test Bench" window open on it (experiments/testbench;
 # `video` wants it started with --motion). Lock and unlock are run by hand (tools/gate/README.md). The truth reference is
 # turned on per run (--truth on the stream request), never in the host's tunables.json. Frames are deleted after each run
-# unless GATE_KEEP_FRAMES=1 (then `TRUTH_WHERE=1 .build/gate/truth DIR DIR.refs` maps the first wrong frame's cells).
+# unless GATE_KEEP_FRAMES=1 (then `TRUTH_WHERE=1 .build/gate/truth DIR DIR.refs` maps the first wrong frame's cells;
+# TRUTH_ALL=1 lists every partial frame, not the first 12).
 set -u
 HOST=${1:?host}; PROFILES=${2:-LAN,cafe,4G,bus}; SCENARIOS=${3:-connect,typing,scroll,drag,video}
 ROOT=${0:A:h}/../..; V="$ROOT/.build/debug/mirage-viewer"; OUT=${GATE_OUT:-$ROOT/.build/gate}; mkdir -p "$OUT"
