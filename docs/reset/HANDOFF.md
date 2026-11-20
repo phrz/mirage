@@ -54,6 +54,11 @@ in `compare-2026-11-01.md`. Run scripts on the mini's SSD: `/Volumes/MirageWork/
    skips AppKit's fit-to-screen unless the person is moving or resizing it here (a probe in the VM: a 1322 pt window
    stays 1322 pt with no resize event; without the override 808 pt and one resize). Retest on the next nightly with a
    viewer screen smaller than the host's, and only test windows open on the host (the run resizes real windows).
+   Verified on 595 (2026-11-20, same VM, `--scenario unified:40`): a 974 pt host window stays 974 pt on the 900 pt
+   screen, 8 window commands for 8 drags, no host window changed size; the host confirms each drag 226–351 ms after
+   release. Open: the local drag's worst step gap is 81–128 ms (target 16) with 12–18 redraws per drag, VM or viewer
+   still to tell apart. The VM stays paired (aaa92700b085) for autonomous runs; start it with VMPal's background start
+   so its own window is not on the host's screen (else the stream shows the VM inside itself).
    Unified → Desktop was whole only after 1.3 s (gate 590, modeflip): the sharpening pass sent the last Unified-era
    display capture (windows left out) as the first whole picture, and DisplayGuard held the former layers' tiles out of
    it for its 1 s history. Fixed after 590: no DisplayGuard in the whole display; after the switch, display frames wait
