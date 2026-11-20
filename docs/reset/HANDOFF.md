@@ -47,6 +47,13 @@ in `compare-2026-11-01.md`. Run scripts on the mini's SSD: `/Volumes/MirageWork/
 2. Whole display is the default in Desktop mode (on main 2026-11-12, `{"wholeDisplayOnly": 0}` turns it off). Unified mode
    keeps window layers, and a mode change restarts the picture in the other pipeline. Verify on the next nightly: the gate
    without tunables, and a Desktop → Unified → Desktop switch. The warm pool stays off with it (Unified's connects too).
+   Real Unified on 590 (2026-11-20, viewer in the VMPal VM "Mirage Test Mac", 1440×900 pt, paired with the mini): the
+   host side is right (view mode change to window layers, 6 layers crisp, display video idle). The viewer was not: AppKit
+   clamped each native window taller than the VM's screen, the clamp went to the host as a local resize, and the host's
+   windows shrank round after round to ~240 pt (phrz's own windows on the mini). Fixed after 590: `RemoteWindow`
+   skips AppKit's fit-to-screen unless the person is moving or resizing it here (a probe in the VM: a 1322 pt window
+   stays 1322 pt with no resize event; without the override 808 pt and one resize). Retest on the next nightly with a
+   viewer screen smaller than the host's, and only test windows open on the host (the run resizes real windows).
 3. Workbench lessons where still needed: lossless tiles from the same capture for small changes (typing, caret) in the
    same frame transaction as the video; codec choice by content, never by RTT. (4:4:4 HEVC is not available.)
 4. Resolution matching (phrz: "Yes, try it"): an option where the host switches its display mode to the viewer's

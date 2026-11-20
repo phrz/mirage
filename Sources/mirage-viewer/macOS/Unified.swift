@@ -318,6 +318,12 @@ final class RemoteWindow: NSWindow {
     /// The person is moving or resizing it (host frames are not applied meanwhile).
     var localInteraction: Bool { inLiveResize || Clock.elapsed(since: lastLocalInteraction, now: Clock.nowNanos()) < 500_000_000 }
     func noteLocalInteraction() { lastLocalInteraction = Clock.nowNanos() }
+    /// The host decides a remote window's frame: AppKit's fit-to-screen (a host window taller than this screen, or under
+    /// its menu bar) applies only while the person moves or resizes it here. Otherwise the clamp would read as a local
+    /// resize and resize the host's window, and the next sync would clamp it again: windows shrank round after round.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        localInteraction ? super.constrainFrameRect(frameRect, to: screen) : frameRect
+    }
 
     @MainActor init(entry e: UnifiedLayout.Entry, controller: UnifiedController) {
         remoteID = e.id; role = e.role
