@@ -308,6 +308,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private var displayGuard = DisplayGuard(historyNanos: 1_000_000_000, margin: 128)
     private func updateDisplayHidden(now: UInt64) {
         guard let d = display else { return }
+        // The whole display has no window layers: nothing to guard, nothing under a layer.
+        if wholeOnly { d.occludedTiles = []; d.underLayer = []; d.underlayEdge = []; return }
         var shown: [UInt32: PixelRect] = [:]
         if !screenLocked { for (id, f) in plannedFrames where (layers[id]?.exposed ?? false) && (compositor || excludedFrom[id] != nil) { shown[id] = f } }
         // (Compositor model: the desktop picture never holds a window, so every layer is verified and the guard keeps nothing.)
@@ -749,10 +751,23 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// The viewer moved between Desktop mode (whole display) and Unified mode (window layers): the new pipeline starts from
     /// a whole picture. Into the whole display, every display tile goes in its first keyframe (tiles the viewer holds
     /// lossless keep them by their keys); into layers, the layered start from the tiny rung, as after a tier change.
+    /// Since a switch to the whole display (nanos; 0 = not waiting): display frames are dropped until the capture filter that
+    /// leaves no window out is in force, at most `wholeFilterWaitNanos`.
+    private var wholeAwaitsFilter: UInt64 = 0
+    static let wholeFilterWaitNanos: UInt64 = 1_000_000_000
     private func switchPipeline(toWhole: Bool) {
         let now = Clock.nowNanos()
         if toWhole {
-            if let d = display { d.tracker.markVideo(Array(0..<d.tracker.tileCount), now: now) }
+            if let d = display {
+                d.tracker.markVideo(Array(0..<d.tracker.tileCount), now: now)
+                // No window layers in the whole display: nothing of it is held back for one (DisplayGuard kept the windows'
+                // tiles out for its 1 s history, and the picture was whole only 1.3 s after the switch, gate 590).
+                d.occludedTiles = []; d.underLayer = []
+                // The display capture still leaves out the windows that were layers until the new filter is in force: its
+                // last frame and the frames before then are the desktop without them (the sharpening pass sent that one
+                // as the first whole picture). The keyframe waits for a capture with every window in it.
+                if !excludedFrom.isEmpty { wholeAwaitsFilter = now; d.lastFrame = nil; d.diffRef = nil }
+            }
         } else {
             display?.encoder?.setSharpening(false)
             rc?.dropToTinyRung(now: now); lastRebuildNanos = now
@@ -1993,6 +2008,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                         let set = Set(ids)
                         for id in Array(self.excludedFrom.keys) where !set.contains(id) { self.excludedFrom[id] = nil }
                         for id in ids where self.excludedFrom[id] == nil { self.excludedFrom[id] = self.captureSeq &+ 1; self.excludedAtNanos[id] = Clock.nowNanos() }
+                        if ids.isEmpty, self.wholeAwaitsFilter != 0 {
+                            // Every window is in the display capture again: its next frame is the whole picture's keyframe.
+                            self.log("whole display: capture filter leaves no window out after \(Clock.elapsed(since: self.wholeAwaitsFilter, now: Clock.nowNanos()) / 1_000_000) ms; keyframe from the next capture")
+                            self.wholeAwaitsFilter = 0; self.capturer?.forceNextFrame = true
+                        }
                         self.updateDisplayHidden(now: Clock.nowNanos())
                         if let s = self.windows?.current { self.publishWindows(now: Clock.nowNanos(), full: false); _ = s }
                     }
@@ -2787,6 +2807,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // (Test knob: while locked, the host's own frame's cell means every 200 ms, the reference for a viewer that types.)
         if lockReferenceOn, screenLocked, layer.isDisplay, Clock.elapsed(since: lastLockRefNanos, now: nanos) > 200_000_000 {
             lastLockRefNanos = nanos; log("lock frame: TEST reference: \(Self.flatDarkShare(pbIn))")
+        }
+        // Just switched to the whole display: frames that still leave the former layers out are not the picture.
+        if wholeAwaitsFilter != 0, layer.isDisplay {
+            if Clock.elapsed(since: wholeAwaitsFilter, now: Clock.nowNanos()) < Self.wholeFilterWaitNanos { return }
+            log("whole display: capture filter not confirmed after \(Self.wholeFilterWaitNanos / 1_000_000) ms; using captures again")
+            wholeAwaitsFilter = 0; layer.forceFullDiff = true
         }
         // The desktop's real first frame after a provisional one (the warm snapshot): it replaces it without a diff; the
         // fresh picture's lossless blocks are read from it from now on.

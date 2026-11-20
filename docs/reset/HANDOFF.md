@@ -54,6 +54,12 @@ in `compare-2026-11-01.md`. Run scripts on the mini's SSD: `/Volumes/MirageWork/
    skips AppKit's fit-to-screen unless the person is moving or resizing it here (a probe in the VM: a 1322 pt window
    stays 1322 pt with no resize event; without the override 808 pt and one resize). Retest on the next nightly with a
    viewer screen smaller than the host's, and only test windows open on the host (the run resizes real windows).
+   Unified → Desktop was whole only after 1.3 s (gate 590, modeflip): the sharpening pass sent the last Unified-era
+   display capture (windows left out) as the first whole picture, and DisplayGuard held the former layers' tiles out of
+   it for its 1 s history. Fixed after 590: no DisplayGuard in the whole display; after the switch, display frames wait
+   (≤ 1 s) for the filter that leaves no window out, then the next capture is the keyframe (host log: "capture filter
+   leaves no window out after N ms"). Verify with `gate.sh localhost LAN modeflip` on the next nightly (target: settle
+   within a frame or two of the switch, no wallpaper where the bench is).
 3. Workbench lessons where still needed: lossless tiles from the same capture for small changes (typing, caret) in the
    same frame transaction as the video; codec choice by content, never by RTT. (4:4:4 HEVC is not available.)
 4. Resolution matching (phrz: "Yes, try it"): an option where the host switches its display mode to the viewer's
