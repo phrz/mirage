@@ -31,6 +31,12 @@ op_read() {
     command -v op >/dev/null 2>&1 || return 1
     op read "$1" 2>/dev/null && return 0
     for a in $(op account list --format json 2>/dev/null | python3 -c "import json,sys; print(' '.join(x.get('url','') for x in json.load(sys.stdin)))" 2>/dev/null); do
+        # Not signed in (the 1Password app's CLI integration is off, or does not answer): sign in here, once per account,
+        # when someone is at the terminal to type the account password.
+        if ! op whoami --account "$a" >/dev/null 2>&1 && [ -t 0 ] && [ -t 2 ]; then
+            echo "1Password: signing in to $a (for $1)" >&2
+            eval "$(op signin --account "$a")" || continue
+        fi
         op read --account "$a" "$1" 2>/dev/null && return 0
     done
     return 1
