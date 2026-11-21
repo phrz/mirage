@@ -48,7 +48,7 @@ build() {
     [ -z "$(git status --porcelain -- Sources linux)" ] || say "note: uncommitted changes in Sources/ or linux/ are not in the build (it is HEAD as committed)"
     arch=$(ssh -o BatchMode=yes "$BUILDER" uname -m) || die "cannot reach the builder $BUILDER over SSH"
     case "$arch" in x86_64|aarch64) ;; *) die "builder $BUILDER is $arch" ;; esac
-    say "building $n ($c) for $arch on $BUILDER…"
+    say "building $n ($c) for $arch on ${BUILDER}…"
     git archive --format=tar HEAD Sources linux |
         ssh -o BatchMode=yes "$BUILDER" "docker build -q -f linux/Dockerfile --build-arg BUILD=$n --build-arg COMMIT=$c -t mirage-host-build:$n -" >/dev/null ||
         die "the build failed on $BUILDER (run it again without -q there to see why)"
