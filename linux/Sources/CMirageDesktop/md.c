@@ -356,6 +356,21 @@ int md_session_ended(md_session *s) {
     return e;
 }
 
+// MARK: - Idle
+
+int md_inhibit_idle(const char *reason, char *err, size_t err_len) {
+    GError *e = NULL;
+    GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &e);   // the process's shared connection: kept
+    if (!bus) { snprintf(err, err_len, "no D-Bus session bus: %s", e ? e->message : ""); if (e) g_error_free(e); return -1; }
+    // Flag 8: idle. Held until this process's bus connection closes (it exits).
+    GVariant *r = g_dbus_connection_call_sync(bus, "org.gnome.SessionManager", "/org/gnome/SessionManager", "org.gnome.SessionManager",
+                                              "Inhibit", g_variant_new("(susu)", "mirage-host", 0u, reason, 8u), G_VARIANT_TYPE("(u)"),
+                                              G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &e);
+    if (!r) { snprintf(err, err_len, "%s", e ? e->message : "Inhibit failed"); if (e) g_error_free(e); return -1; }
+    g_variant_unref(r);
+    return 0;
+}
+
 // MARK: - Input
 
 void md_pointer_move(md_session *s, double x, double y) {

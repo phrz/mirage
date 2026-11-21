@@ -78,6 +78,26 @@ ssh HOST '~/.local/bin/miraged install'      # LaunchAgent, runs at login, logs 
 `miraged serve` runs in the foreground instead. The host generates its Ed25519 identity and a
 self-signed TLS certificate on first start under `~/Library/Application Support/Mirage/`.
 
+## Linux host (preview)
+
+`mirage-host` shares a GNOME desktop on Wayland (built and tested on Ubuntu 26.04 / GNOME 50, no GPU needed) with the
+Mac viewer. In a terminal on that desktop, as yourself:
+
+```sh
+curl -fsSL https://github.com/phrz/mirage/releases/download/linux-host/install.sh | sh
+```
+
+It installs `~/.local/bin/mirage-host` as a systemd user service that starts with the desktop session and prints a
+6-digit code: in Mirage on the Mac, click +, enter the address it shows and the code, then answer `y` in the terminal.
+`mirage-host pair` pairs another device; `journalctl --user -u mirage-host -f` shows the log.
+
+- The picture comes from Mutter's remote-desktop session (as gnome-remote-desktop's), encoded with x265 on the CPU; input
+  goes through the same session. Command is Ctrl (⌘C copies), Option is Alt, right Command is Super.
+- GNOME ends screen sharing when the screen locks and starts it again only once someone unlocks it at the computer, so
+  the host keeps the screen from idle-locking while it runs (`mirage-host serve --allow-lock` lets it lock).
+- Whole display only (no Unified mode, no lossless tiles), the primary monitor.
+- Built from `linux/` on Linux: msquic (static) in /usr/local, then `swift build -c release --static-swift-stdlib` there.
+
 ## Viewer app (GUI)
 
 Every Mac runs the same signed release, `/Applications/Mirage.app`, from the release feed:

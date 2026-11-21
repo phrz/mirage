@@ -1,6 +1,7 @@
 import Foundation
 import ArgumentParser
 import MirageCore
+import CMirageDesktop
 
 @main
 struct MirageHost: AsyncParsableCommand {
@@ -20,6 +21,7 @@ struct Serve: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Run the host (foreground; the installer runs it as a systemd user service).")
     @Option(name: .shortAndLong, help: "UDP port to listen on.") var port: UInt16 = Mirage.defaultPort
     @Option(help: "Host name shown to viewers (default: this computer's host name).") var name: String?
+    @Flag(help: "Let GNOME lock the screen when idle. GNOME ends screen sharing when it locks, so viewers then get no picture until someone unlocks it at the computer.") var allowLock = false
 
     func run() async throws {
         setvbuf(stdout, nil, _IOLBF, 0)
@@ -28,6 +30,14 @@ struct Serve: AsyncParsableCommand {
         let tls = try TLSIdentity.loadOrCreate(store: store)
         let ctx = HostContext(identity: identity, store: store, tlsFingerprint: tls.fingerprint, log: { log($0) },
                               makeStreamer: { LinuxStreamer(log: { log($0) }) })
+        if !allowLock {
+            var err = [CChar](repeating: 0, count: 256)
+            if md_inhibit_idle("Shared with Mirage: GNOME stops screen sharing when the screen locks", &err, err.count) == 0 {
+                log("the screen will not idle-lock while mirage-host runs (GNOME ends screen sharing when it locks); --allow-lock turns this off")
+            } else {
+                log("could not keep the screen from idle-locking: \(String(cString: err))")
+            }
+        }
         GnomeSession.shared.start(log: { log($0) })
         let host = QUICHost(port: port, tls: tls)
         host.log = { log($0) }

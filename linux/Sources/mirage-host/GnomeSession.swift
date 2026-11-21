@@ -3,10 +3,9 @@ import CMirageDesktop
 
 /// The one GNOME remote-desktop session the host keeps open, from start until GNOME ends it, then opened again.
 ///
-/// GNOME refuses to start a remote-desktop session while the screen is locked ("Session creation inhibited"), but one
-/// already running carries on through the lock screen (a viewer can type the password). So the host opens it as soon as
-/// it can, not when a viewer connects, and keeps it: a viewer who arrives later, with the screen locked, still gets a
-/// picture. While it is open GNOME shows its screen-sharing indicator in the top bar.
+/// GNOME ends remote-desktop sessions when the screen locks and refuses new ones until it is unlocked ("Session creation
+/// inhibited"); the host keeps the screen from idle-locking (md_inhibit_idle) and opens a session as soon as it can, so a
+/// viewer gets a picture at once. While it is open GNOME shows its screen-sharing indicator in the top bar.
 final class GnomeSession: @unchecked Sendable {
     static let shared = GnomeSession()
 
@@ -35,7 +34,7 @@ final class GnomeSession: @unchecked Sendable {
         guard current == nil else { return nil }
         guard let e = lastError else { return "GNOME's screen is not shared yet" }
         if e.contains("inhibited") {
-            return "the screen was locked when Mirage started, and GNOME only starts sharing an unlocked screen: unlock it at the computer once"
+            return "the screen is locked, and GNOME shares only an unlocked screen: unlock it at the computer"
         }
         return e
     }

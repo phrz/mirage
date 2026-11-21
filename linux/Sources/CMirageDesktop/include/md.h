@@ -21,6 +21,10 @@ void md_session_size(md_session *s, int *width, int *height);
 /// Nonzero once GNOME ended the session (someone stopped sharing, or the session closed).
 int md_session_ended(md_session *s);
 
+/// Keeps GNOME from going idle (and so from locking the screen, which ends remote-desktop sessions) while this process
+/// runs. 0 on success.
+int md_inhibit_idle(const char *reason, char *err, size_t err_len);
+
 // Input, in the stream's pixel coordinates. Buttons and keys are Linux evdev codes.
 void md_pointer_move(md_session *s, double x, double y);
 void md_pointer_button(md_session *s, int evdev_button, int pressed);

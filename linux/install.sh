@@ -79,7 +79,7 @@ say "mirage-host is running and starts with your desktop session."
 say "Logs: journalctl --user -u mirage-host -f"
 
 # Pairing reads the Allow answer from the terminal (the script itself may be on stdin).
-if [ -r /dev/tty ]; then
+if (: </dev/tty) 2>/dev/null; then
     "$BIN" pair </dev/tty
 else
     say "Pair a Mac: run  mirage-host pair"
