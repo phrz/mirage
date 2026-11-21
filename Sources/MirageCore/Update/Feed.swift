@@ -66,6 +66,25 @@ public struct Feed: Sendable {
         return (try ManifestVerifier.verify(manifest: md, signatures: sd, trust: trust, channel: channel, now: now), mu, md, sd)
     }
 
+    /// The channel head from the download URLs only (no API, so no rate limit; GitHub's CDN can serve the previous head for
+    /// a few minutes after a publish): what a viewer reads each time its device list opens.
+    public func checkDownload(_ channel: UpdateChannel, trust: ManifestTrust, now: Date = Date()) async throws -> (VerifiedManifest, Data, Data) {
+        async let m = Feed.fetch(manifestURL(channel), transport: transport)
+        async let s = Feed.fetch(signaturesURL(channel), transport: transport)
+        let (md, sd) = (try await m, try await s)
+        return (try ManifestVerifier.verify(manifest: md, signatures: sd, trust: trust, channel: channel, now: now), md, sd)
+    }
+
+    /// The Linux host's newest build (the `linux-host` release; every processor gets the same build number, so the x86_64
+    /// manifest stands for all), verified with the Linux key.
+    public func checkLinux(now: Date = Date()) async throws -> (VerifiedManifest, Data, Data) {
+        let dir = base.appendingPathComponent("linux-host", isDirectory: true)
+        async let m = Feed.fetch(dir.appendingPathComponent("linux-x86_64.manifest.json"), transport: transport)
+        async let s = Feed.fetch(dir.appendingPathComponent("linux-x86_64.manifest.sigs.json"), transport: transport)
+        let (md, sd) = (try await m, try await s)
+        return (try ManifestVerifier.verify(manifest: md, signatures: sd, trust: ViewerFeed.linuxTrust, channel: nil, now: now), md, sd)
+    }
+
     /// A small file over HTTPS (or file:// for a local feed). No cache: a check must see the current head.
     public static func fetch(_ url: URL, limit: Int = 1 << 20, transport: Transport = Feed.urlSession) async throws -> Data {
         if url.isFileURL { return try Data(contentsOf: url) }

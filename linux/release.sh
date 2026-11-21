@@ -37,7 +37,7 @@ publish)
     for a in x86_64 aarch64; do
         b="$DIR/mirage-host-linux-$a"
         [ -f "$b" ] || { echo "missing $b"; exit 1; }
-        "$REL" manifest --channel stable --version linux --build "$n" --commit "$c" --zip "$b" --zip-url "mirage-host-linux-$a" \
+        "$REL" manifest --channel stable --version Linux --build "$n" --commit "$c" --zip "$b" --zip-url "mirage-host-linux-$a" \
             --min-os ubuntu-26.04 --expires-days 365 --out "$DIR/linux-$a.manifest.json"
         python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['privateKey'])" "$KEY" |
             "$REL" sign --manifest "$DIR/linux-$a.manifest.json" --out "$DIR/linux-$a.manifest.sigs.json"

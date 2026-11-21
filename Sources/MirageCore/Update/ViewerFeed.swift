@@ -26,9 +26,27 @@ public enum ViewerFeed {
         return out
     }
 
+    /// Linux hosts (they report their version as "Linux"): their own builds only, never a Mac channel's.
+    public static func isLinux(_ h: Store.KnownHost) -> Bool { h.hostVersion?.version.lowercased() == "linux" }
+    public static let linuxTrust = ManifestTrust(compiled: TrustedKeys.linux, learned: [], revoked: [])
+
+    /// The Linux head as read, verified again (nil: none, or it no longer verifies).
+    public static func verifiedLinux(_ e: Entry?, now: Date = Date()) -> Manifest? {
+        guard let e else { return nil }
+        return try? ManifestVerifier.verify(manifest: e.manifest, signatures: e.signatures, trust: linuxTrust, channel: nil, now: now).manifest
+    }
+
+    /// How a Linux build shows: "Linux (607)", as the host reports itself.
+    public static func linuxVersion(_ m: Manifest) -> MirageVersion { MirageVersion(version: "Linux", build: m.build, commit: m.commit, channel: .stable) }
+
     /// The build a host's row offers: the newer of the host's report and the viewer's verified feed, when it applies.
-    public static func latest(for h: Store.KnownHost, feed: [UpdateChannel: Manifest]) -> MirageVersion? {
+    public static func latest(for h: Store.KnownHost, feed: [UpdateChannel: Manifest], linux: Manifest? = nil) -> MirageVersion? {
         let reported = h.latestAvailable
+        if isLinux(h) {
+            guard let running = h.hostVersion, let m = linux, h.updateTrigger == true, m.build > running.build else { return reported }
+            let mine = linuxVersion(m)
+            return (reported?.build ?? 0) >= mine.build ? reported : mine
+        }
         guard let running = h.hostVersion, let ch = h.hostChannel, let m = feed[ch], h.updateTrigger == true,
               let os = h.hostOS.flatMap(parseOS), let need = parseOS(m.minOS), atLeast(os, need),
               m.minProtocol <= (h.hostProtocol ?? Mirage.protocolVersion),
@@ -38,9 +56,9 @@ public enum ViewerFeed {
     }
 
     /// The record with `latestAvailable` as the row offers it.
-    public static func applying(_ feed: [UpdateChannel: Manifest], to h: Store.KnownHost) -> Store.KnownHost {
+    public static func applying(_ feed: [UpdateChannel: Manifest], linux: Manifest? = nil, to h: Store.KnownHost) -> Store.KnownHost {
         var h = h
-        h.latestAvailable = latest(for: h, feed: feed)
+        h.latestAvailable = latest(for: h, feed: feed, linux: linux)
         return h
     }
 
@@ -65,6 +83,11 @@ extension Store {
         ((try? read([String: ViewerFeed.Entry].self, Self.viewerFeedFile)) ?? nil)?
             .reduce(into: [:]) { out, kv in if let c = UpdateChannel(rawValue: kv.key) { out[c] = kv.value } } ?? [:]
     }
+    private static let viewerFeedLinuxFile = "viewer-feed-linux.json"
+    /// The Linux head this viewer read (verified again at each use).
+    public func viewerFeedLinux() -> ViewerFeed.Entry? { (try? read(ViewerFeed.Entry.self, Self.viewerFeedLinuxFile)) ?? nil }
+    public func saveViewerFeedLinux(_ entry: ViewerFeed.Entry) throws { try write(entry, Self.viewerFeedLinuxFile) }
+
     public func saveViewerFeed(_ entry: ViewerFeed.Entry, channel: UpdateChannel) throws {
         var all = ((try? read([String: ViewerFeed.Entry].self, Self.viewerFeedFile)) ?? nil) ?? [:]
         all[channel.rawValue] = entry

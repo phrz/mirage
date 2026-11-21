@@ -18,4 +18,10 @@ public enum TrustedKeys {
     ]
     public static let revoked: [String] = [
     ]
+
+    /// The Linux host's own manifest key (linux/release.sh signs with it; the private half is on phrz-mini-m4-pro):
+    /// Linux hosts trust only this one, and viewers verify Linux manifests with it before offering one.
+    public static let linux: [String] = [
+        "3ohXyygiIVEGtoFR2op04QMu/5HrpBvxINxuy8lQNq8=",   // 5572cdceee0190fb
+    ]
 }

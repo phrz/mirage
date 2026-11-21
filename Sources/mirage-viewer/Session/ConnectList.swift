@@ -145,7 +145,8 @@ enum ConnectList {
     /// and the newest build each one is offered (its own report, or this viewer's verified feed check: `ViewerFeed`).
     static func load(store: Store? = try? Store(), defaults: UserDefaults = .standard, now: Date = Date()) -> [PairedHost] {
         let feed = ViewerFeed.verified(store?.viewerFeed() ?? [:], now: now)
-        let known = ((try? store?.knownHosts()) ?? [:]).mapValues { ViewerFeed.applying(feed, to: $0) }
+        let linux = ViewerFeed.verifiedLinux(store?.viewerFeedLinux(), now: now)
+        let known = ((try? store?.knownHosts()) ?? [:]).mapValues { ViewerFeed.applying(feed, linux: linux, to: $0) }
         return hosts(known: known, recent: ViewerSettings.recentHosts(defaults)).map { h in
             var h = h
             if let id = known[h.alias]?.hostID, let icon = store?.hostIcon(hostID: id) { h.icon = icon.png256 ?? icon.png128 }
@@ -886,10 +887,15 @@ enum UpdateOutcomeNotice: Equatable {
     }
 }
 
-/// The viewer's own feed checks (`ViewerFeed`): each channel its paired hosts follow, on launch and when a list appears or
-/// the app comes forward, and hourly; a channel read in the last 30-60 min (jittered) is not read again, and a failure is
-/// quiet and backs off (5 min doubling to an hour). GitHub's unauthenticated API allows 60 requests an hour per address,
-/// shared with the hosts there.
+/// The viewer's own feed checks (`ViewerFeed`), once per platform, not per host: each Mac channel its paired hosts follow,
+/// and the Linux host's builds when a Linux host is paired.
+///
+/// - When a list opens or the app comes forward (at most once a minute; phrz, 2026-11-21: that is when someone sees the
+///   offer): the download URLs, which no API rate limit counts. GitHub's CDN can serve the previous head for a few minutes
+///   after a publish, so a head older than the one kept is never taken.
+/// - Hourly, and at launch: through the GitHub API (fresh), a channel read in the last 30-60 min (jittered) not read
+///   again; a failure is quiet and backs off (5 min doubling to an hour). GitHub's unauthenticated API allows 60 requests
+///   an hour per address, shared with the hosts there.
 @MainActor
 final class ViewerFeedCenter: ObservableObject {
     static let shared = ViewerFeedCenter()
@@ -904,8 +910,15 @@ final class ViewerFeedCenter: ObservableObject {
     private var backoff: TimeInterval = 0
     private var loop: Task<Void, Never>?
 
+    private var lastOpenCheck: Date?
+    static let openCheckEvery: TimeInterval = 60
+
     /// A list appeared, or the app came forward (launch included).
     func nudge(now: Date = Date()) {
+        if lastOpenCheck.map({ now.timeIntervalSince($0) >= Self.openCheckEvery || now < $0 }) ?? true {
+            lastOpenCheck = now
+            Task { await checkOpened(now: now) }
+        }
         if loop == nil {
             loop = Task { [weak self] in
                 while !Task.isCancelled {
@@ -920,9 +933,32 @@ final class ViewerFeedCenter: ObservableObject {
         Task { await checkAll() }
     }
 
-    /// The channels the paired hosts follow.
+    /// The Mac channels the paired Macs follow (a Linux host's channel is its own platform's).
     static func channels(_ known: [String: Store.KnownHost]) -> Set<UpdateChannel> {
-        Set(known.values.compactMap { $0.hostChannel })
+        Set(known.values.filter { !ViewerFeed.isLinux($0) }.compactMap { $0.hostChannel })
+    }
+
+    /// The list opened: each platform's head from the download URLs, kept when it verifies and is not older than the one kept.
+    func checkOpened(now: Date = Date()) async {
+        guard let store = store() else { return }
+        let feed = self.feed
+        let known = (try? store.knownHosts()) ?? [:]
+        var changed = false
+        for ch in Self.channels(known).union(ownChannels()).sorted(by: { $0.rawValue < $1.rawValue }) {
+            guard let (v, m, s) = try? await feed.checkDownload(ch, trust: ManifestTrust(), now: now) else { continue }
+            let kept = ViewerFeed.verified(store.viewerFeed(), now: now)[ch]
+            guard v.manifest.build >= (kept?.build ?? 0), store.viewerFeed()[ch]?.manifest != m else { continue }
+            try? store.saveViewerFeed(.init(manifest: m, signatures: s, checked: now), channel: ch)
+            changed = true
+        }
+        if known.values.contains(where: ViewerFeed.isLinux), let (v, m, s) = try? await feed.checkLinux(now: now) {
+            let kept = ViewerFeed.verifiedLinux(store.viewerFeedLinux(), now: now)
+            if v.manifest.build >= (kept?.build ?? 0), store.viewerFeedLinux()?.manifest != m {
+                try? store.saveViewerFeedLinux(.init(manifest: m, signatures: s, checked: now))
+                changed = true
+            }
+        }
+        if changed { revision += 1 }
     }
     /// This device's own channel too (the Mac's own host, set by the Mac app), for the update card. None on iOS.
     var ownChannels: () -> Set<UpdateChannel> = { [] }

@@ -53,6 +53,29 @@ final class ViewerFeedTests: XCTestCase {
                        .updateAvailable(from: host().hostVersion!, to: ViewerFeed.verified([.nightly: try entry(483)], trust: trust)[.nightly]!.mirageVersion))
     }
 
+    /// Linux hosts are their own platform (phrz, 2026-11-21): their own builds, never a Mac channel's.
+    func testALinuxHostIsOfferedLinuxBuildsOnly() throws {
+        func linuxManifest(_ build: Int) -> Manifest {
+            Manifest(channel: .stable, version: "Linux", build: build, commit: "c", minProtocol: 1, protocolVersion: 6, minOS: "ubuntu-26.04",
+                     zipURL: "mirage-host-linux-x86_64", zipSHA256: "00", zipSize: 1, notes: "", published: Date(), expires: Date().addingTimeInterval(86_400))
+        }
+        var bigrig = host(running: 605, reported: nil, os: "6.17", channel: .stable)
+        bigrig.hostVersion = MirageVersion(version: "Linux", build: 605, commit: "a", channel: .stable)
+        XCTAssertTrue(ViewerFeed.isLinux(bigrig))
+        let macFeed = ViewerFeed.verified([.nightly: try entry(999)], trust: trust)
+        let offered = ViewerFeed.latest(for: bigrig, feed: macFeed, linux: linuxManifest(607))
+        XCTAssertEqual(offered?.build, 607)
+        XCTAssertEqual(offered?.display, "Linux (607)")
+        XCTAssertNil(ViewerFeed.latest(for: bigrig, feed: macFeed, linux: nil), "a Mac build is never a Linux host's offer")
+        var stableMac = bigrig; stableMac.hostChannel = .nightly
+        XCTAssertNil(ViewerFeed.latest(for: stableMac, feed: macFeed, linux: nil), "not even on the channel it reports")
+        XCTAssertNil(ViewerFeed.latest(for: bigrig, feed: [:], linux: linuxManifest(605)), "it runs that build already")
+        var noTrigger = bigrig; noTrigger.updateTrigger = false
+        XCTAssertNil(ViewerFeed.latest(for: noTrigger, feed: [:], linux: linuxManifest(607)), "no triggers from this device: its own word")
+        XCTAssertEqual(ViewerFeed.latest(for: host(), feed: macFeed, linux: linuxManifest(9999))?.build, 999, "a Mac never takes a Linux build")
+        XCTAssertFalse(ViewerFeed.isLinux(host()))
+    }
+
     func testTheCacheRoundTrips() throws {
         let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("mirage-viewerfeed-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: tmp) }
