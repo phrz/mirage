@@ -169,7 +169,7 @@ struct Check: AsyncParsableCommand {
     func run() async throws {
         let source: KMSDesktop
         do { source = try KMSDesktop(log: { _ in }) } catch { print("✗ \(error)"); throw ExitCode(1) }
-        guard let lease = source.acquire(timeout: 6) else { print("✗ \(source.unavailableReason ?? "no picture")"); throw ExitCode(1) }
+        guard let lease = source.acquire(timeout: 10) else { print("✗ \(source.unavailableReason ?? "no picture")"); throw ExitCode(1) }
         var w: Int32 = 0, h: Int32 = 0
         md_picture_size(lease.picture, &w, &h)
         print("✓ screen \(w)x\(h), keyboard and pointer ready")

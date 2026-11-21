@@ -55,7 +55,7 @@ final class KMSDesktop: DesktopSource, @unchecked Sendable {
 
     func acquire(timeout: TimeInterval) -> DesktopLease? {
         let start = Date(), deadline = start.addingTimeInterval(timeout)
-        var woke = false
+        var lastTap: Date? = nil
         while true {
             var w: Int32 = 0, h: Int32 = 0
             md_picture_size(lease.picture, &w, &h)
@@ -63,8 +63,11 @@ final class KMSDesktop: DesktopSource, @unchecked Sendable {
             mk_capture_status(capture, &buf, buf.count)
             if w > 1, h > 1, buf[0] == 0 { return lease }
             if Date() >= deadline { return nil }
-            // A blanked screen has nothing to read: a Shift tap wakes it (and types nothing, at the lock screen too).
-            if !woke, Date().timeIntervalSince(start) >= 0.3 { woke = true; lease.input.key(42, true); lease.input.key(42, false) }
+            // A blanked screen has nothing to read: a Shift tap wakes it (and types nothing, at the lock screen too). Again
+            // every 1.5 s: a virtual keyboard created a moment ago is not yet one the compositor listens to.
+            if Date().timeIntervalSince(start) >= 0.3, lastTap.map({ Date().timeIntervalSince($0) >= 1.5 }) ?? true {
+                lastTap = Date(); lease.input.key(42, true); lease.input.key(42, false)
+            }
             Thread.sleep(forTimeInterval: 0.1)
         }
     }
