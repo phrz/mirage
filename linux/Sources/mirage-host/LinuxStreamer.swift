@@ -5,9 +5,11 @@ import CMirageDesktop
 /// The Linux host's desktop streamer: a desktop source's picture (the kernel's display, or GNOME's screen cast), x265
 /// HEVC, whole display only (layer 0, no tiles), input through the source's backend.
 ///
-/// Video: one thread encodes the newest captured frame at up to `fps`; nothing is sent while the screen is still, except
-/// one sharpening frame at a low quantizer a moment after it stops changing. A lost frame (the viewer's ack) asks for a
-/// keyframe; a NACK resends fragments from a ring of recent frames.
+/// Video: one thread encodes the newest captured frame at up to `fps`; while the screen is still only one sharpening frame
+/// at a low quantizer goes a moment after it stops changing, and then a heartbeat ping each second (the viewer warns of a
+/// stall after 3 s without a packet; its echo gives the round trip). Every frame of two or more datagrams carries parity
+/// (one lost datagram per group rebuilt without a round trip, as Wi-Fi loses them); a lost frame (the viewer's ack) asks for
+/// a keyframe; a NACK resends fragments from a ring of recent frames. Every 10 s of streaming the log has the numbers.
 final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
     private let log: @Sendable (String) -> Void
     private let lock = NSLock()
@@ -26,6 +28,18 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
     private var receiver = InputReceiver()
     private var lastInputSeq: UInt64 = 0
     private let input = LinuxInput()
+    private var lastSentNanos: UInt64 = 0
+    private var heartbeatSeq: UInt64 = 0
+    private var stats = Stats()
+
+    /// What the log reports every 10 s while streaming.
+    struct Stats {
+        var since: UInt64 = 0
+        var frames = 0, bytes = 0, keyframes = 0, nacks = 0, resent = 0, lostFrames = 0
+        var ackMs: [Double] = [], rttMs: [Double] = []
+        static func median(_ v: [Double]) -> Double { v.isEmpty ? 0 : v.sorted()[v.count / 2] }
+        static func p95(_ v: [Double]) -> Double { v.isEmpty ? 0 : v.sorted()[min(v.count - 1, Int(Double(v.count) * 0.95))] }
+    }
 
     init(source: DesktopSource, log: @escaping @Sendable (String) -> Void) { self.source = source; self.log = log }
 
@@ -43,7 +57,7 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         lease = l
         self.output = output
         width = Int(w) & ~1; height = Int(h) & ~1
-        fps = max(5, min(request.maxFPS > 0 ? request.maxFPS : 30, envFPS ?? 30))
+        fps = max(5, min(request.maxFPS > 0 ? request.maxFPS : 60, envFPS ?? 60))
         maxKbps = max(2_000, min(request.bitrateKbps > 0 ? request.bitrateKbps : 20_000, 60_000))
         needKeyframe = true
         running = true
@@ -70,6 +84,10 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     func handle(ack: ControlMessage.FrameAck) {
+        lock.lock()
+        if ack.lost { stats.lostFrames += 1 }
+        else { stats.ackMs.append(Double(Clock.elapsed(since: ack.captureNanos, now: Clock.nowNanos())) / 1e6) }   // capture → decoded and acked
+        lock.unlock()
         guard ack.lost else { return }
         askKeyframe("frame \(ack.seq) lost")
     }
@@ -82,6 +100,7 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         guard let frags, let out else { askKeyframe("frame \(nack.frameSeq) no longer held"); return }
         let which = nack.fragments.isEmpty ? Array(frags.indices) : nack.fragments.filter { $0 >= 0 && $0 < frags.count }
         for i in which { out.sendDatagram(frags[i]) }
+        lock.lock(); stats.nacks += 1; stats.resent += which.count; lastSentNanos = Clock.nowNanos(); lock.unlock()
     }
     func handle(input message: ControlMessage) { input.apply(message) }
     func handle(inputPacket: InputPacket) -> InputAck? {
@@ -92,7 +111,33 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         for m in apply { input.apply(m) }
         return ack
     }
-    func handle(probeEcho sentNanos: UInt64, receivedNanos: UInt64) {}
+    func handle(probeEcho sentNanos: UInt64, receivedNanos: UInt64) {
+        lock.lock(); stats.rttMs.append(Double(Clock.elapsed(since: sentNanos, now: Clock.nowNanos())) / 1e6); lock.unlock()
+    }
+
+    /// While the screen is still: a ping each second, so the viewer always hears from the host. Then the 10 s report.
+    private func heartbeatAndReport(now: UInt64) {
+        lock.lock()
+        let out = output
+        var ping: Data? = nil
+        if Clock.elapsed(since: lastSentNanos, now: now) >= 1_000_000_000 {
+            heartbeatSeq &+= 1; lastSentNanos = now
+            ping = DatagramPing.encode(seq: heartbeatSeq)
+        }
+        if stats.since == 0 { stats.since = now }
+        var line: String? = nil
+        let span = Double(Clock.elapsed(since: stats.since, now: now)) / 1e9
+        if span >= 10 {
+            let st = stats
+            line = String(format: "stream: %.0f fps, %.0f kbit/s, %d keyframes, capture→ack median %.0f ms (p95 %.0f, %d), round trip %.1f ms, %d NACKs (%d datagrams resent), %d frames lost",
+                          Double(st.frames) / span, Double(st.bytes) * 8 / 1000 / span, st.keyframes, Stats.median(st.ackMs), Stats.p95(st.ackMs),
+                          st.ackMs.count, Stats.median(st.rttMs), st.nacks, st.resent, st.lostFrames)
+            stats = Stats(); stats.since = now
+        }
+        lock.unlock()
+        if let ping, let out { out.sendDatagram(ping) }
+        if let line { log(line) }
+    }
 
     func suspend() async { await halt() }
     func resume(_ request: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
@@ -167,6 +212,7 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
             }
             let latest = md_picture_wait(l.picture, seen, 100)
             let now = Clock.nowNanos()
+            heartbeatAndReport(now: now)
             var qp: Int32 = 0
             if latest != seen {
                 seen = latest; lastChange = now; sharpened = false
@@ -223,12 +269,15 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         let frags = VideoFragment.fragments(frameSeq: seq, flags: flags, captureNanos: captureNanos, payload: payload, maxPayload: maxPayload,
                                             captureSeq: seq, inputSeq: inputSeq, region: PixelRect(x: 0, y: 0, width: width, height: height), layerID: 0)
         for d in frags { out.sendDatagram(d) }
-        // Keyframes carry parity: one lost fragment per group is rebuilt without a round trip.
-        if keyframe, frags.count > 1 {
+        // Parity on every frame of two or more datagrams: one lost fragment per group is rebuilt without a round trip.
+        var sent = frags.reduce(0) { $0 + $1.count }
+        if frags.count > 1 {
             let payloads = frags.map { $0.subdata(in: ($0.startIndex + VideoFragment.headerSize)..<$0.endIndex) }
-            for p in ParityFragment.parity(frameSeq: seq, payloads: payloads) { out.sendDatagram(p) }
+            for p in ParityFragment.parity(frameSeq: seq, payloads: payloads) { out.sendDatagram(p); sent += p.count }
         }
         lock.lock()
+        stats.frames += 1; stats.bytes += sent; if keyframe { stats.keyframes += 1 }
+        lastSentNanos = Clock.nowNanos()
         ring[seq] = frags
         if seq > 120 { ring[seq - 120] = nil }
         lock.unlock()
