@@ -55,6 +55,7 @@ final class LinuxUpdater: @unchecked Sendable {
     /// A build downloaded and checked, waiting for nobody to stream (the automatic install holds the lock meanwhile).
     private var waiting: Int?
     private var latestAt: Date?
+    private var reading = false
 
     /// How builds show in the viewer: "Linux (602)".
     static func version(_ build: Int, _ commit: String) -> MirageVersion {
@@ -229,8 +230,19 @@ final class LinuxUpdater: @unchecked Sendable {
         if due { latestAt = Date() }
         lock.unlock()
         guard due else { return }
-        Task.detached { [self] in
-            do { _ = try verifiedManifest() } catch { log("update: \(error)") }
+        Task.detached { [self] in await readManifest() }
+    }
+
+    /// Reads the manifest, and on a failure again every 30 seconds, a few times: just after a release GitHub can serve
+    /// the new manifest with the old signatures for a few minutes, and the next regular read is 5 minutes away.
+    private func readManifest() async {
+        lock.lock(); if reading { lock.unlock(); return }; reading = true; lock.unlock()
+        defer { lock.lock(); reading = false; lock.unlock() }
+        for attempt in 0..<6 {
+            do { _ = try verifiedManifest(); return } catch {
+                if attempt == 0 { log("update: \(error)") }
+            }
+            try? await Task.sleep(for: .seconds(30))
         }
     }
 
