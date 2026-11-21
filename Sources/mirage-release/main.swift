@@ -11,7 +11,7 @@ struct MirageRelease: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mirage-release",
         abstract: "Mirage release helper: manifest keys, manifests and their signatures.",
-        subcommands: [Keygen.self, KeyID.self, WriteManifest.self, Sign.self, Verify.self])
+        subcommands: [Keygen.self, KeyID.self, PubKey.self, WriteManifest.self, Sign.self, Verify.self])
 }
 
 struct Keygen: ParsableCommand {
@@ -22,6 +22,15 @@ struct Keygen: ParsableCommand {
         let out = ["keyID": ManifestKey.keyID(publicKey: pub), "publicKey": pub.base64EncodedString(), "privateKey": k.rawRepresentation.base64EncodedString()]
         let e = JSONEncoder(); e.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         print(String(decoding: try e.encode(out), as: UTF8.self))
+    }
+}
+
+struct PubKey: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "pubkey", abstract: "Print the base64 public key of the base64 private key on stdin.")
+    func run() throws {
+        guard let line = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines), let raw = Data(base64Encoded: line),
+              let k = try? Curve25519.Signing.PrivateKey(rawRepresentation: raw) else { throw ValidationError("stdin is not a base64 Ed25519 private key") }
+        print(k.publicKey.rawRepresentation.base64EncodedString())
     }
 }
 

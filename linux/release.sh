@@ -104,8 +104,18 @@ EOF
     say "stored in 1Password: $KEY_REF"
 }
 
+# What a release needs here: the key, and the builder reachable with Docker.
+can_release() {
+    ok=0
+    ( linux_key >/dev/null ) 2>/dev/null || { echo "missing: the Linux manifest key ($KEY_REF)" >&2; ok=1; }
+    ssh -o BatchMode=yes -o ConnectTimeout=8 "$BUILDER" 'docker version --format "{{.Server.Version}}"' >/dev/null 2>&1 ||
+        { echo "missing: Docker on the Linux builder $BUILDER over SSH (MIRAGE_LINUX_BUILDER)" >&2; ok=1; }
+    return $ok
+}
+
 case "${1:-}" in
 "") d=.build/linux-release/$(build_number); build "$d"; publish "$d" ;;
+can-release) can_release ;;
 build) build "${2:?build DIR}" ;;
 publish) publish "${2:?publish DIR}" ;;
 key-to-1password) key_to_1password "${2:-$KEY_FILE}" ;;

@@ -7,22 +7,29 @@
 #
 #   scripts/release.sh --check                  what this Mac still needs to release, and how to set it up
 #   scripts/release.sh keys-init                once: generate the manifest keys (current + next), see below
-#   scripts/release.sh nightly                  release HEAD of main as nightly-<build>
+#   scripts/release.sh nightly                  release HEAD of main as nightly-<build>, and the Linux host (same build)
 #   scripts/release.sh beta N                   release vVERSION-beta.N
 #   scripts/release.sh stable                   release vVERSION
+#   scripts/release.sh linux                    release only the Linux host (linux/release.sh: built in Docker on bigrig)
+#   scripts/release.sh mac-key-to-1password     once: copy the keychain's manifest key into 1Password (then any Mac with
+#                                               the 1Password CLI signed in can release; the keychain item can go)
 #   options (after the channel):
 #     --no-publish   build, notarize, sign into .build/release/<tag>/ as a local feed; nothing goes to GitHub
+#     --no-linux     a nightly without the Linux host
 #     --broken       a deliberately broken build that exits in main (U3's rollback test); implies --no-publish
 #     --skip-tests   skip `swift test` (a rebuild of a commit already tested)
 #   environment:
 #     VERSION=0.4.1  (default: MARKETING_VERSION in App/project.yml)   BUILD=…  (default: commit count of HEAD)
 #     NOTES="…"      release notes                                       MIRAGE_NEXT_KEY=<base64 public key>: nextKey
-#     MIRAGE_MANIFEST_KEY=<base64 private key>   sign with this instead of the keychain's current key (CI)
+#     MIRAGE_MANIFEST_KEY=<base64 private key>   sign with this instead of 1Password's or the keychain's current key (CI)
+#     MIRAGE_MANIFEST_KEY_REF=op://...            where the 1Password CLI reads it (default op://Private/Mirage manifest key/credential)
+#     MIRAGE_LINUX_BUILDER=host                   the Linux host's builder (ssh, Docker; default bigrig)
 #     MIRAGE_EXTRA_SIGNING_KEY_FILE=path         a second private key (rotation: the promoted key, from 1Password)
 #
-# The manifest's signing key: its private half is in the login keychain as the generic password service
-# com.paulherz.mirage.manifest-key, account current; its public half (and the offline next key's) are compiled into the
-# app in Sources/MirageCore/Update/TrustedKeys.swift.
+# The manifest's signing key: its private half is read with the 1Password CLI (MIRAGE_MANIFEST_KEY_REF), else from the
+# login keychain as the generic password service com.paulherz.mirage.manifest-key, account current; its public half (and
+# the offline next key's) are compiled into the app in Sources/MirageCore/Update/TrustedKeys.swift. The Linux host's key is
+# its own (linux/release.sh, op://Private/Mirage Linux manifest key/credential).
 set -e
 cd "$(dirname "$0")/.."
 if [ -z "${DEVELOPER_DIR:-}" ]; then
@@ -34,6 +41,7 @@ TEAM=M8MME6Q9DA
 REPO=phrz/mirage
 PROFILE=mirage
 KEY_SERVICE=com.paulherz.mirage.manifest-key
+KEY_REF=${MIRAGE_MANIFEST_KEY_REF:-op://${MIRAGE_OP_VAULT:-Private}/Mirage manifest key/credential}
 DR_APP='anchor apple generic and identifier "com.paulherz.mirage" and certificate leaf[subject.OU] = "M8MME6Q9DA"'
 DR_HOST='anchor apple generic and identifier "com.paulherz.mirage.host" and certificate leaf[subject.OU] = "M8MME6Q9DA"'
 
@@ -63,13 +71,29 @@ missing: the notarytool keychain profile "$PROFILE".
 EOF
     return 1
 }
+# The current manifest key (base64 private key) on stdout: the environment, else 1Password, else the keychain.
+manifest_key() {
+    if [ -n "${MIRAGE_MANIFEST_KEY:-}" ]; then echo "$MIRAGE_MANIFEST_KEY"; return; fi
+    if command -v op >/dev/null 2>&1; then
+        k=$(op read "$KEY_REF" 2>/dev/null || true)
+        if [ -n "$k" ]; then echo "$k"; return; fi
+    fi
+    security find-generic-password -s "$KEY_SERVICE" -a current -w
+}
 check_manifest_key() {
     [ -n "${MIRAGE_MANIFEST_KEY:-}" ] && return 0
+    command -v op >/dev/null 2>&1 && op read "$KEY_REF" >/dev/null 2>&1 && return 0
     security find-generic-password -s "$KEY_SERVICE" -a current >/dev/null 2>&1 && return 0
     cat >&2 <<EOF
-missing: the manifest signing key (keychain item $KEY_SERVICE / current).
-  Set up once: scripts/release.sh keys-init (then commit Sources/MirageCore/Update/TrustedKeys.swift).
+missing: the manifest signing key (1Password: $KEY_REF; or the keychain item $KEY_SERVICE / current).
+  On a Mac that has it in the keychain: scripts/release.sh mac-key-to-1password. Elsewhere: brew install 1password-cli,
+  then 1Password > Settings > Developer > Integrate with 1Password CLI. New keys: scripts/release.sh keys-init.
 EOF
+    return 1
+}
+check_linux() {
+    sh linux/release.sh can-release && return 0
+    echo "note: the Linux host cannot be released from here (above); Mac releases still can (--no-linux)" >&2
     return 1
 }
 check_compiled_keys() {
@@ -100,8 +124,40 @@ if [ "${1:-}" = --check ]; then
     check_compiled_keys || ok=1
     check_script_keys || ok=1
     check_gh || ok=1
+    check_linux || true
     [ $ok = 0 ] && echo "ready to release"
     exit $ok
+fi
+
+# MARK: the manifest key in 1Password (once, on the Mac whose keychain has it)
+
+if [ "${1:-}" = mac-key-to-1password ]; then
+    command -v op >/dev/null 2>&1 || die "install the 1Password CLI first: brew install 1password-cli (then 1Password > Settings > Developer > Integrate with 1Password CLI)"
+    op read "$KEY_REF" >/dev/null 2>&1 && die "1Password already has $KEY_REF"
+    priv=$(security find-generic-password -s "$KEY_SERVICE" -a current -w) || die "no keychain item $KEY_SERVICE / current on this Mac"
+    build_tool
+    pub=$(printf '%s\n' "$priv" | tool pubkey) || die "could not derive the public key"
+    id=$(tool keyid "$pub")
+    grep -q "$pub" Sources/MirageCore/Update/TrustedKeys.swift || die "the keychain's key ($id) is not one TrustedKeys.swift trusts: not copying it"
+    PRIV="$priv" PUB="$pub" ID="$id" python3 -c '
+import json, os
+print(json.dumps({"title": "Mirage manifest key", "category": "API_CREDENTIAL", "fields": [
+  {"id": "credential", "type": "CONCEALED", "label": "credential", "value": os.environ["PRIV"]},
+  {"id": "publicKey", "type": "STRING", "label": "public key", "value": os.environ["PUB"]},
+  {"id": "keyID", "type": "STRING", "label": "key ID", "value": os.environ["ID"]},
+  {"id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain",
+   "value": "The current manifest key: signs Mirage Mac releases (scripts/release.sh). Its public half is in TrustedKeys.swift. The offline next key is a separate item."}]}))' |
+        op item create --vault "${MIRAGE_OP_VAULT:-Private}" - >/dev/null
+    [ "$(op read "$KEY_REF")" = "$priv" ] || die "stored, but reading it back did not match"
+    echo "stored in 1Password: $KEY_REF (key $id). Releases now read it there; the keychain item can be deleted once another Mac has released with it."
+    exit 0
+fi
+
+# MARK: the Linux host on its own
+
+if [ "${1:-}" = linux ]; then
+    [ -z "$(git status --porcelain)" ] || die "the working tree has changes: a release is exactly a commit"
+    exec sh linux/release.sh
 fi
 
 # MARK: Homebrew (U6)
@@ -167,12 +223,13 @@ CHANNEL=${1:-}
 case "$CHANNEL" in
     nightly|stable) shift ;;
     beta) shift; BETA=${1:-}; [ -n "$BETA" ] || die "beta needs its number: scripts/release.sh beta N"; shift ;;
-    *) die "usage: scripts/release.sh --check | keys-init | nightly | beta N | stable [--no-publish] [--broken] [--skip-tests]" ;;
+    *) die "usage: scripts/release.sh --check | keys-init | mac-key-to-1password | linux | nightly | beta N | stable [--no-publish] [--no-linux] [--broken] [--skip-tests]" ;;
 esac
-PUBLISH=1; BROKEN=; TESTS=1
+PUBLISH=1; BROKEN=; TESTS=1; LINUX=1
 for a in "$@"; do
     case "$a" in
         --no-publish) PUBLISH= ;;
+        --no-linux) LINUX= ;;
         --broken) BROKEN=1; PUBLISH= ;;
         --skip-tests) TESTS= ;;
         *) die "unknown option $a" ;;
@@ -260,8 +317,7 @@ else ZIPURL=../$TAG/$ZIPNAME; HEAD_DIR=.build/release/channel-$CHANNEL; fi
 tool manifest --channel "$CHANNEL" --version "$VERSION" --build "$BUILD" --commit "$COMMIT" --zip "$OUT/$ZIPNAME" \
     --zip-url "$ZIPURL" --notes "${NOTES:-}" ${MIRAGE_NEXT_KEY:+--next-key "$MIRAGE_NEXT_KEY"} --out "$OUT/manifest.json"
 {
-    if [ -n "${MIRAGE_MANIFEST_KEY:-}" ]; then echo "$MIRAGE_MANIFEST_KEY"
-    else security find-generic-password -s "$KEY_SERVICE" -a current -w; fi
+    manifest_key
     [ -n "${MIRAGE_EXTRA_SIGNING_KEY_FILE:-}" ] && cat "$MIRAGE_EXTRA_SIGNING_KEY_FILE"
     true
 } | tool sign --manifest "$OUT/manifest.json" --out "$OUT/manifest.sigs.json"
@@ -289,6 +345,12 @@ if ! gh release view "channel-$CHANNEL" --repo "$REPO" >/dev/null 2>&1; then
         --title "channel-$CHANNEL (rolling head)" --notes "The current $CHANNEL manifest for Mirage's updater (DESIGN §3.10). Not a release: see $TAG."
 fi
 gh release upload "channel-$CHANNEL" "$OUT/manifest.json" "$OUT/manifest.sigs.json" --repo "$REPO" --clobber
+# The Linux host from the same commit (the same build number), before the floor commit moves HEAD. Its failure leaves the
+# Mac release standing: `scripts/release.sh linux` tries again (from that commit, or a later one).
+if [ "$CHANNEL" = nightly ] && [ -n "$LINUX" ]; then
+    echo "== the Linux host, build $BUILD"
+    sh linux/release.sh || echo "== the Linux host was not released (above); the Mac release stands. Again: scripts/release.sh linux" >&2
+fi
 # install-host.sh's floor for this channel follows the head: a replayed older manifest cannot install an older build.
 FLOORVAR=MIN_BUILD_$(echo "$CHANNEL" | tr 'a-z' 'A-Z')
 sed -i '' "s/^$FLOORVAR=[0-9]*$/$FLOORVAR=$BUILD/" scripts/install-host.sh
