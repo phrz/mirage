@@ -2,8 +2,8 @@ import Foundation
 import MirageCore
 import CMirageDesktop
 
-/// The Linux host's desktop streamer: GNOME's primary monitor (CMirageDesktop: Mutter remote desktop + PipeWire), x265
-/// HEVC, whole display only (layer 0, no tiles), input through the same Mutter session.
+/// The Linux host's desktop streamer: a desktop source's picture (the kernel's display, or GNOME's screen cast), x265
+/// HEVC, whole display only (layer 0, no tiles), input through the source's backend.
 ///
 /// Video: one thread encodes the newest captured frame at up to `fps`; nothing is sent while the screen is still, except
 /// one sharpening frame at a low quantizer a moment after it stops changing. A lost frame (the viewer's ack) asks for a
@@ -11,7 +11,8 @@ import CMirageDesktop
 final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
     private let log: @Sendable (String) -> Void
     private let lock = NSLock()
-    private var session: OpaquePointer?
+    private let source: DesktopSource
+    private var lease: DesktopLease?
     private var output: StreamOutput?
     private var running = false
     private var thread: Thread?
@@ -26,20 +27,20 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
     private var lastInputSeq: UInt64 = 0
     private let input = LinuxInput()
 
-    init(log: @escaping @Sendable (String) -> Void) { self.log = log }
+    init(source: DesktopSource, log: @escaping @Sendable (String) -> Void) { self.source = source; self.log = log }
 
     // MARK: DesktopStreamer
 
     func start(_ request: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
-        guard let s = GnomeSession.shared.acquire(timeout: 3) else {
-            throw MirageError.transport(GnomeSession.shared.unavailableReason ?? "GNOME's screen is not shared")
+        guard let l = source.acquire(timeout: 3) else {
+            throw MirageError.transport(source.unavailableReason ?? "\(source.name) is not available")
         }
         var w: Int32 = 0, h: Int32 = 0
-        md_session_size(s, &w, &h)
-        guard w > 1, h > 1 else { GnomeSession.shared.release(s); throw MirageError.transport("GNOME's screen cast has sent no picture yet") }
+        md_picture_size(l.picture, &w, &h)
+        guard w > 1, h > 1 else { source.release(l); throw MirageError.transport("\(source.name) has shown no picture yet") }
         let envFPS = ProcessInfo.processInfo.environment["MIRAGE_FPS"].flatMap(Int.init)
         lock.lock()
-        session = s
+        lease = l
         self.output = output
         width = Int(w) & ~1; height = Int(h) & ~1
         fps = max(5, min(request.maxFPS > 0 ? request.maxFPS : 30, envFPS ?? 30))
@@ -47,14 +48,13 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         needKeyframe = true
         running = true
         lock.unlock()
-        input.session = s
-        input.size = (Double(w), Double(h))
+        input.backend = l.input
         let t = Thread { [weak self] in self?.encodeLoop() }
         t.name = "mirage-encode"
         t.qualityOfService = .userInteractive
         thread = t
         t.start()
-        log("streaming GNOME's screen: \(w)x\(h), up to \(fps) fps, HEVC ≤ \(maxKbps) kbit/s")
+        log("streaming \(source.name): \(w)x\(h), up to \(fps) fps, HEVC ≤ \(maxKbps) kbit/s")
         return info()
     }
 
@@ -109,11 +109,11 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         output = nil
         ring = [:]
         lock.unlock()
-        input.session = nil
-        // The encode thread notices within one wait (≤ 100 ms) and stops touching the session.
+        input.backend = nil
+        // The encode thread notices within one wait (≤ 100 ms) and stops touching the picture.
         while let t, !t.isFinished { try? await Task.sleep(for: .milliseconds(20)) }
-        lock.lock(); let s = session; session = nil; lock.unlock()
-        if let s { GnomeSession.shared.release(s) }
+        lock.lock(); let l = lease; lease = nil; lock.unlock()
+        if let l { source.release(l) }
     }
 
     private func askKeyframe(_ why: String) {
@@ -129,7 +129,7 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
 
     private func encodeLoop() {
         lock.lock()
-        guard var s = session else { lock.unlock(); return }
+        guard var l = lease else { lock.unlock(); return }
         let fps = self.fps, kbps = maxKbps
         var w = width, h = height
         lock.unlock()
@@ -148,24 +148,24 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         while true {
             lock.lock(); let go = running; lock.unlock()
             if !go { return }
-            if md_session_ended(s) != 0 {
+            if l.ended {
                 // GNOME ended the session (the indicator's Stop, a crash): carry on with the next one.
-                log("GNOME ended the screen cast; waiting for a new one")
-                input.session = nil
-                var next: OpaquePointer?
+                log("\(source.name) ended; waiting for it again")
+                input.backend = nil
+                var next: DesktopLease?
                 while next == nil {
                     lock.lock(); let go = running; lock.unlock()
                     if !go { return }
-                    next = GnomeSession.shared.acquire(timeout: 1)
+                    next = source.acquire(timeout: 1)
                 }
-                lock.lock(); session = next; needKeyframe = true; lock.unlock()
-                GnomeSession.shared.release(s)
-                s = next!
-                input.session = s
+                lock.lock(); lease = next; needKeyframe = true; lock.unlock()
+                source.release(l)
+                l = next!
+                input.backend = l.input
                 seen = 0
                 continue
             }
-            let latest = md_session_wait_frame(s, seen, 100)
+            let latest = md_picture_wait(l.picture, seen, 100)
             let now = Clock.nowNanos()
             var qp: Int32 = 0
             if latest != seen {
@@ -180,7 +180,7 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
             if since < interval { usleep(useconds_t((interval - since) / 1000)) }
 
             var cw: Int32 = 0, ch: Int32 = 0
-            md_session_size(s, &cw, &ch)
+            md_picture_size(l.picture, &cw, &ch)
             if Int(cw) & ~1 != w || Int(ch) & ~1 != h {
                 // The screen changed size: a new encoder, a keyframe, and the viewer hears the new size.
                 md_encoder_close(enc); enc = nil
@@ -188,7 +188,6 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
                 enc = md_encoder_open(Int32(w), Int32(h), Int32(fps), Int32(kbps), &err, err.count)
                 if enc == nil { log("encoder: \(String(cString: err))"); return }
                 lock.lock(); width = w; height = h; needKeyframe = true; let out = output; lock.unlock()
-                input.size = (Double(cw), Double(ch))
                 out?.sendControl(.streamInfo(info()))
                 log("screen is now \(cw)x\(ch)")
             }
@@ -196,7 +195,7 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
             lock.lock(); let idr = needKeyframe; needKeyframe = false; lock.unlock()
             var sample: UnsafePointer<UInt8>?
             var key: Int32 = 0
-            let n = md_encoder_encode(enc, s, idr ? 1 : 0, idr ? 0 : qp, &sample, &key)
+            let n = md_encoder_encode(enc, l.picture, idr ? 1 : 0, idr ? 0 : qp, &sample, &key)
             lastEncode = Clock.nowNanos()
             if n < 0 { if idr { lock.lock(); needKeyframe = true; lock.unlock() }; continue }
             guard n > 0, let sample else { continue }

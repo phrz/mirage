@@ -7,10 +7,15 @@ import CMirageDesktop
 struct MirageHost: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mirage-host",
-        abstract: "Mirage host for Linux: shares this GNOME desktop with paired Mirage viewers over QUIC.",
-        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self],
+        abstract: "Mirage host for Linux: shares this computer's screen with paired Mirage viewers over QUIC.",
+        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Check.self],
         defaultSubcommand: Serve.self)
 }
+
+/// As root (the system service, from boot) the host keeps its identity and pairings in /var/lib/mirage; as a user, in
+/// ~/.local/share/Mirage.
+let systemStore = URL(fileURLWithPath: "/var/lib/mirage", isDirectory: true)
+func hostStore() throws -> Store { geteuid() == 0 ? try Store(root: systemStore) : try Store() }
 
 func log(_ s: String) {
     let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -18,19 +23,29 @@ func log(_ s: String) {
 }
 
 struct Serve: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(abstract: "Run the host (foreground; the installer runs it as a systemd user service).")
+    static let configuration = CommandConfiguration(abstract: "Run the host (foreground; the installer runs it as a systemd service).",
+        discussion: "As root it shows and drives the screen itself (the kernel's display and virtual input devices): the login screen, the lock screen and any desktop. As a user it shares that user's GNOME session.")
     @Option(name: .shortAndLong, help: "UDP port to listen on.") var port: UInt16 = Mirage.defaultPort
     @Option(help: "Host name shown to viewers (default: this computer's host name).") var name: String?
-    @Flag(help: "Let GNOME lock the screen when idle. GNOME ends screen sharing when it locks, so viewers then get no picture until someone unlocks it at the computer.") var allowLock = false
+    @Flag(help: "As a user: let GNOME lock the screen when idle. GNOME ends screen sharing when it locks, so viewers then get no picture until someone unlocks it at the computer.") var allowLock = false
 
     func run() async throws {
         setvbuf(stdout, nil, _IOLBF, 0)
-        let store = try Store()
+        let store = try hostStore()
         let identity = try store.identity(role: "host", name: name ?? DeviceNames.current())
         let tls = try TLSIdentity.loadOrCreate(store: store)
+        let source: DesktopSource
+        if geteuid() == 0 {
+            source = try KMSDesktop(log: { log($0) })
+            log("showing the screen itself (login screen, lock screen, any desktop)")
+        } else {
+            let gnome = GnomeSession()
+            gnome.start(log: { log($0) })
+            source = gnome
+        }
         let ctx = HostContext(identity: identity, store: store, tlsFingerprint: tls.fingerprint, log: { log($0) },
-                              makeStreamer: { LinuxStreamer(log: { log($0) }) })
-        if !allowLock {
+                              makeStreamer: { LinuxStreamer(source: source, log: { log($0) }) })
+        if geteuid() != 0, !allowLock {
             var err = [CChar](repeating: 0, count: 256)
             if md_inhibit_idle("Shared with Mirage: GNOME stops screen sharing when the screen locks", &err, err.count) == 0 {
                 log("the screen will not idle-lock while mirage-host runs (GNOME ends screen sharing when it locks); --allow-lock turns this off")
@@ -38,7 +53,6 @@ struct Serve: AsyncParsableCommand {
                 log("could not keep the screen from idle-locking: \(String(cString: err))")
             }
         }
-        GnomeSession.shared.start(log: { log($0) })
         let host = QUICHost(port: port, tls: tls)
         host.log = { log($0) }
         try host.start(onStream: { stream, id, remote in
@@ -55,7 +69,7 @@ struct Pair: AsyncParsableCommand {
 
     func run() async throws {
         setvbuf(stdout, nil, _IOLBF, 0)
-        let store = try Store()
+        let store = try hostStore()
         let code = PairingCode.generate()
         let pending = Store.PendingPairing(code: code, expiresAt: Date().addingTimeInterval(TimeInterval(timeout)))
         try store.setPendingPairing(pending)
@@ -112,7 +126,7 @@ struct Pair: AsyncParsableCommand {
 struct Devices: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "List paired devices.")
     func run() throws {
-        let list = try Store().authorizedDevices()
+        let list = try hostStore().authorizedDevices()
         if list.isEmpty { print("no paired devices"); return }
         let f = ISO8601DateFormatter()
         for d in list { print("\(d.id.prefix(12))  \(f.string(from: d.pairedAt))  \(d.name)") }
@@ -123,8 +137,20 @@ struct Revoke: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Remove a paired device by id prefix.")
     @Argument var idPrefix: String
     func run() throws {
-        let removed = try Store().revoke(idPrefix: idPrefix)
+        let removed = try hostStore().revoke(idPrefix: idPrefix)
         if removed.isEmpty { print("no device matches \(idPrefix)"); throw ExitCode(1) }
         for d in removed { print("revoked \(d.id.prefix(12)) \(d.name)") }
+    }
+}
+
+struct Check: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "As root: check that this computer's screen can be read and driven (the installer runs it before switching to the system service).")
+    func run() async throws {
+        let source: KMSDesktop
+        do { source = try KMSDesktop(log: { _ in }) } catch { print("✗ \(error)"); throw ExitCode(1) }
+        guard let lease = source.acquire(timeout: 6) else { print("✗ \(source.unavailableReason ?? "no picture")"); throw ExitCode(1) }
+        var w: Int32 = 0, h: Int32 = 0
+        md_picture_size(lease.picture, &w, &h)
+        print("✓ screen \(w)x\(h), keyboard and pointer ready")
     }
 }

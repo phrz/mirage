@@ -80,23 +80,28 @@ self-signed TLS certificate on first start under `~/Library/Application Support/
 
 ## Linux host (preview)
 
-`mirage-host` shares a GNOME desktop on Wayland (built and tested on Ubuntu 26.04 / GNOME 50, no GPU needed) with the
-Mac viewer. In a terminal on that desktop, as yourself:
+`mirage-host` shares a Linux computer's screen with the Mac viewer (built and tested on Ubuntu 26.04 / GNOME 50, no GPU
+needed). In a terminal on it, as yourself:
 
 ```sh
 curl -fsSL https://github.com/phrz/mirage/releases/download/linux-host/install.sh | sh
 ```
 
-It installs `~/.local/bin/mirage-host` as a systemd user service that starts with the desktop session and prints a
-6-digit code: in Mirage on the Mac, click +, enter the address it shows and the code, then answer `y` in the terminal.
-`mirage-host pair` pairs another device; `journalctl --user -u mirage-host -f` shows the log.
+It installs `/usr/local/bin/mirage-host` as a system service that starts at boot and, when nothing is paired yet, prints
+a 6-digit code: in Mirage on the Mac, click +, enter the address it shows and the code, then answer `y` in the terminal.
+`sudo mirage-host pair` pairs another device; `sudo journalctl -u mirage-host -f` shows the log. Running the installer
+again updates it and keeps the pairings.
 
-- The picture comes from Mutter's remote-desktop session (as gnome-remote-desktop's), encoded with x265 on the CPU; input
-  goes through the same session. Command is Ctrl (⌘C copies), Option is Alt, right Command is Super.
-- GNOME ends screen sharing when the screen locks and starts it again only once someone unlocks it at the computer, so
-  the host keeps the screen from idle-locking while it runs (`mirage-host serve --allow-lock` lets it lock).
-- Whole display only (no Unified mode, no lossless tiles), the primary monitor.
-- Built from `linux/` on Linux: msquic (static) in /usr/local, then `swift build -c release --static-swift-stdlib` there.
+- The system service reads the screen from the kernel's display (KMS) and types and clicks through virtual devices
+  (uinput), so the viewer sees and drives whatever is on screen: GDM's login screen, the lock screen, the desktop, a text
+  console. A blanked screen is woken with a Shift tap when a viewer arrives. Linear framebuffers only (BMC graphics,
+  virtio-gpu, software rendering); with a GPU's tiled framebuffer the installer falls back to sharing the logged-in
+  GNOME session through Mutter's remote-desktop interface (a user service; the screen then does not idle-lock, since GNOME
+  ends sharing when it locks).
+- x265 encodes on the CPU. Command is Ctrl (⌘C copies), Option is Alt, right Command is Super.
+- Whole display only (no Unified mode, no lossless tiles), the first active display.
+- Built from `linux/` on Linux: msquic (static) in /usr/local, libdrm, PipeWire and GLib headers, then
+  `swift build -c release --static-swift-stdlib` there.
 
 ## Viewer app (GUI)
 

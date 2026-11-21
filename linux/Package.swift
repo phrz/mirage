@@ -7,7 +7,7 @@ import PackageDescription
 let systemIncludes: [String] = [
     "-I/usr/include/pipewire-0.3", "-I/usr/include/spa-0.2",
     "-I/usr/include/glib-2.0", "-I/usr/lib/x86_64-linux-gnu/glib-2.0/include", "-I/usr/lib/aarch64-linux-gnu/glib-2.0/include",
-    "-I/usr/local/include",
+    "-I/usr/local/include", "-I/usr/include/libdrm",
 ]
 
 let package = Package(
@@ -45,14 +45,14 @@ let package = Package(
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
-        // Mutter remote desktop + PipeWire capture + x265, in C.
+        // Mutter remote desktop + PipeWire capture, KMS capture + uinput, x265, in C.
         .target(
             name: "CMirageDesktop",
             path: "Sources/CMirageDesktop",
             cSettings: [.unsafeFlags(systemIncludes + ["-O3"])],
             linkerSettings: [
                 .unsafeFlags(["-L/usr/local/lib"]),
-                .linkedLibrary("pipewire-0.3"), .linkedLibrary("gio-2.0"), .linkedLibrary("gobject-2.0"), .linkedLibrary("glib-2.0"),
+                .linkedLibrary("pipewire-0.3"), .linkedLibrary("drm"), .linkedLibrary("gio-2.0"), .linkedLibrary("gobject-2.0"), .linkedLibrary("glib-2.0"),
                 // x265 static (a desktop rarely has libx265); its C++ runtime is on every desktop.
                 .unsafeFlags(["-Xlinker", "-l:libx265.a", "-Xlinker", "-l:libnuma.a"]), .linkedLibrary("stdc++"), .linkedLibrary("mvec"), .linkedLibrary("m"), .linkedLibrary("dl"),
             ]

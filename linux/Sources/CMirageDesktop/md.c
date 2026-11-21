@@ -2,6 +2,7 @@
 // no portal dialog for a process of the logged-in user. Frames come over PipeWire into one shared buffer; the encoder
 // takes the newest.
 #include "md.h"
+#include "picture.h"
 
 #include <errno.h>
 #include <gio/gio.h>
@@ -47,12 +48,7 @@ struct md_session {
     struct spa_hook stream_listener;
     struct spa_video_info_raw format;
 
-    // Newest frame (guarded by lock)
-    uint8_t *frame;
-    size_t frame_cap;
-    int width, height, stride;
-    int r_off, g_off, b_off;
-    uint64_t seq;
+    md_picture pic;
 };
 
 // MARK: - The D-Bus main loop (one thread for the process, for signals)
@@ -109,6 +105,7 @@ static void on_closed(GDBusConnection *c, const char *sender, const char *path, 
     s->ended = 1;
     pthread_cond_broadcast(&s->cond);
     pthread_mutex_unlock(&s->lock);
+    md_picture_end(&s->pic);
 }
 
 // MARK: - PipeWire
@@ -159,16 +156,10 @@ static void on_process(void *data) {
         }
         size_t need = (size_t)stride * hgt;
         const uint8_t *src = (const uint8_t *)d->data + d->chunk->offset;
-        pthread_mutex_lock(&s->lock);
-        if (s->frame_cap < need) { free(s->frame); s->frame = malloc(need); s->frame_cap = s->frame ? need : 0; }
-        if (s->frame && (size_t)d->chunk->offset + need <= d->maxsize) {
-            memcpy(s->frame, src, need);
-            s->width = w; s->height = hgt; s->stride = stride;
-            s->r_off = r; s->g_off = g; s->b_off = bl;
-            s->seq++;
-            pthread_cond_broadcast(&s->cond);
+        if ((size_t)d->chunk->offset + need <= d->maxsize) {
+            uint8_t *dst = md_picture_begin(&s->pic, stride, hgt);
+            if (dst) { memcpy(dst, src, need); md_picture_commit(&s->pic, w, hgt, stride, r, g, bl); }
         }
-        pthread_mutex_unlock(&s->lock);
     }
     pw_stream_queue_buffer(s->stream, b);
 }
@@ -181,6 +172,7 @@ static void on_state_changed(void *data, enum pw_stream_state old, enum pw_strea
         s->ended = 1;
         pthread_cond_broadcast(&s->cond);
         pthread_mutex_unlock(&s->lock);
+        md_picture_end(&s->pic);
     }
 }
 
@@ -246,6 +238,7 @@ md_session *md_session_open(char *err, size_t err_len) {
     pthread_condattr_init(&ca);
     pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
     pthread_cond_init(&s->cond, &ca);
+    md_picture_init(&s->pic);
     GError *e = NULL;
     s->bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &e);
     if (!s->bus) {
@@ -326,35 +319,11 @@ void md_session_close(md_session *s) {
         g_object_unref(s->bus);
     }
     g_free(s->rd_path); g_free(s->sc_path); g_free(s->stream_path);
-    free(s->frame);
+    md_picture_free(&s->pic);
     // Signal handlers may still be queued on the D-Bus thread for this session; it is leaked rather than freed under them.
 }
 
-uint64_t md_session_wait_frame(md_session *s, uint64_t after_seq, int timeout_ms) {
-    struct timespec until;
-    clock_gettime(CLOCK_MONOTONIC, &until);
-    until.tv_sec += timeout_ms / 1000;
-    until.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
-    if (until.tv_nsec >= 1000000000L) { until.tv_sec++; until.tv_nsec -= 1000000000L; }
-    pthread_mutex_lock(&s->lock);
-    while (s->seq == after_seq && !s->ended) { if (pthread_cond_timedwait(&s->cond, &s->lock, &until) == ETIMEDOUT) break; }
-    uint64_t seq = s->seq;
-    pthread_mutex_unlock(&s->lock);
-    return seq;
-}
-
-void md_session_size(md_session *s, int *width, int *height) {
-    pthread_mutex_lock(&s->lock);
-    *width = s->width; *height = s->height;
-    pthread_mutex_unlock(&s->lock);
-}
-
-int md_session_ended(md_session *s) {
-    pthread_mutex_lock(&s->lock);
-    int e = s->ended;
-    pthread_mutex_unlock(&s->lock);
-    return e;
-}
+md_picture *md_session_picture(md_session *s) { return &s->pic; }
 
 // MARK: - Idle
 
@@ -375,7 +344,7 @@ int md_inhibit_idle(const char *reason, char *err, size_t err_len) {
 
 void md_pointer_move(md_session *s, double x, double y) {
     int w, h;
-    md_session_size(s, &w, &h);
+    md_picture_size(&s->pic, &w, &h);
     if (s->logical_w > 0 && w > 0) { x = x * s->logical_w / w; y = y * s->logical_h / h; }
     fire(s, "NotifyPointerMotionAbsolute", g_variant_new("(sdd)", s->stream_path, x, y));
 }
@@ -511,11 +480,11 @@ static void to_i420(md_encoder *e, const uint8_t *src, int stride, int ro, int g
     }
 }
 
-int md_encoder_encode(md_encoder *e, md_session *s, int force_idr, int force_qp, const uint8_t **sample, int *keyframe) {
-    pthread_mutex_lock(&s->lock);
-    if (!s->frame || (s->width & ~1) != e->width || (s->height & ~1) != e->height) { pthread_mutex_unlock(&s->lock); return -2; }
-    to_i420(e, s->frame, s->stride, s->r_off, s->g_off, s->b_off);
-    pthread_mutex_unlock(&s->lock);
+int md_encoder_encode(md_encoder *e, md_picture *p, int force_idr, int force_qp, const uint8_t **sample, int *keyframe) {
+    pthread_mutex_lock(&p->lock);
+    if (!p->frame || (p->width & ~1) != e->width || (p->height & ~1) != e->height) { pthread_mutex_unlock(&p->lock); return -2; }
+    to_i420(e, p->frame, p->stride, p->r_off, p->g_off, p->b_off);
+    pthread_mutex_unlock(&p->lock);
 
     e->in->pts = e->pts++;
     e->in->sliceType = force_idr ? X265_TYPE_IDR : X265_TYPE_AUTO;

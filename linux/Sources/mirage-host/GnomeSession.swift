@@ -6,8 +6,8 @@ import CMirageDesktop
 /// GNOME ends remote-desktop sessions when the screen locks and refuses new ones until it is unlocked ("Session creation
 /// inhibited"); the host keeps the screen from idle-locking (md_inhibit_idle) and opens a session as soon as it can, so a
 /// viewer gets a picture at once. While it is open GNOME shows its screen-sharing indicator in the top bar.
-final class GnomeSession: @unchecked Sendable {
-    static let shared = GnomeSession()
+final class GnomeSession: DesktopSource, @unchecked Sendable {
+    let name = "GNOME's screen"
 
     private let lock = NSLock()
     private var current: OpaquePointer?
@@ -40,14 +40,14 @@ final class GnomeSession: @unchecked Sendable {
     }
 
     /// The open session (counted as used until `release`), waiting up to `timeout` for one.
-    func acquire(timeout: TimeInterval) -> OpaquePointer? {
+    func acquire(timeout: TimeInterval) -> DesktopLease? {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
             lock.lock()
-            if let s = current, md_session_ended(s) == 0 {
+            if let s = current, md_picture_ended(md_session_picture(s)) == 0 {
                 users[s, default: 0] += 1
                 lock.unlock()
-                return s
+                return DesktopLease(picture: md_session_picture(s), input: MutterBackend(s), token: s)
             }
             lock.unlock()
             if Date() >= deadline { return nil }
@@ -56,7 +56,8 @@ final class GnomeSession: @unchecked Sendable {
         }
     }
 
-    func release(_ s: OpaquePointer) {
+    func release(_ lease: DesktopLease) {
+        guard let s = lease.token else { return }
         lock.lock()
         let n = (users[s] ?? 1) - 1
         users[s] = n > 0 ? n : nil
@@ -70,7 +71,7 @@ final class GnomeSession: @unchecked Sendable {
     private func tick() {
         opening.lock(); defer { opening.unlock() }
         lock.lock()
-        if let s = current, md_session_ended(s) != 0 {
+        if let s = current, md_picture_ended(md_session_picture(s)) != 0 {
             current = nil
             let unused = users[s] == nil
             lock.unlock()
@@ -84,8 +85,8 @@ final class GnomeSession: @unchecked Sendable {
         var err = [CChar](repeating: 0, count: 512)
         if let s = md_session_open(&err, err.count) {
             var w: Int32 = 0, h: Int32 = 0
-            _ = md_session_wait_frame(s, 0, 2000)
-            md_session_size(s, &w, &h)
+            _ = md_picture_wait(md_session_picture(s), 0, 2000)
+            md_picture_size(md_session_picture(s), &w, &h)
             lock.lock(); current = s; lastError = nil; lock.unlock()
             log?("sharing GNOME's screen (\(w)x\(h))")
         } else {

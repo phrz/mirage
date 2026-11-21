@@ -2,61 +2,48 @@ import Foundation
 import MirageCore
 import CMirageDesktop
 
-/// Viewer input (normalized pointer positions, Mac key codes and modifier flags) injected through the Mutter session.
+/// Viewer input (normalized pointer positions, Mac key codes and modifier flags), delivered through a backend: GNOME's
+/// remote-desktop session, or virtual devices.
 ///
-/// Keys go by position (Mac virtual key code → Linux evdev code), so GNOME's own keyboard layout applies. Modifiers:
+/// Keys go by position (Mac virtual key code → Linux evdev code), so the desktop's own keyboard layout applies. Modifiers:
 /// Command is Ctrl (⌘C copies, as Mac users expect), Control is the other Ctrl, Option is Alt (right Option is AltGr),
 /// and right Command is Super (the Activities key).
 final class LinuxInput: @unchecked Sendable {
     private let lock = NSLock()
-    private var _session: OpaquePointer?
-    var session: OpaquePointer? {
-        get { lock.lock(); defer { lock.unlock() }; return _session }
-        set { lock.lock(); _session = newValue; if newValue == nil { held = [] }; lock.unlock() }
+    private var _backend: InputBackend?
+    /// Where input goes (nil: dropped). A new backend starts with nothing held.
+    var backend: InputBackend? {
+        get { lock.lock(); defer { lock.unlock() }; return _backend }
+        set { lock.lock(); _backend = newValue; held = []; buttons = []; lock.unlock() }
     }
-    var size: (Double, Double) {
-        get { lock.lock(); defer { lock.unlock() }; return _size }
-        set { lock.lock(); _size = newValue; lock.unlock() }
-    }
-    private var _size: (Double, Double) = (1, 1)
     /// Modifier keys (evdev) held down here, so they are released when the viewer's flags say they are up.
     private var held: Set<UInt32> = []
     private var buttons: Set<Int32> = []
 
     func apply(_ m: ControlMessage) {
-        lock.lock()
-        guard let s = _session else { lock.unlock(); return }
-        let (w, h) = _size
-        lock.unlock()
-        func move(_ x: Double, _ y: Double) { md_pointer_move(s, min(max(x, 0), 1) * (w - 1), min(max(y, 0), 1) * (h - 1)) }
+        guard let s = backend else { return }
         switch m {
         case .mouseMove(let mv):
-            move(mv.x, mv.y)
+            s.move(mv.x, mv.y)
         case .mouseButton(let b):
             syncModifiers(b.modifiers, s)
-            move(b.x, b.y)
+            s.move(b.x, b.y)
             let code: Int32 = [0: 0x110, 1: 0x111, 2: 0x112, 3: 0x113, 4: 0x114][b.button] ?? 0x112
             lock.lock()
             let change = b.down ? buttons.insert(code).inserted : buttons.remove(code) != nil
             lock.unlock()
-            if change { md_pointer_button(s, code, b.down ? 1 : 0) }
+            if change { s.button(code, b.down) }
         case .scroll(let sc):
             syncModifiers(sc.modifiers, s)
-            move(sc.x, sc.y)
-            // Mac deltas are positive up/left; GNOME's are positive down/right.
-            if sc.precise {
-                md_pointer_axis(s, -sc.dx, -sc.dy, 1)
-            } else {
-                let v = Int32((-sc.dy).rounded()), hz = Int32((-sc.dx).rounded())
-                if v != 0 { md_pointer_axis_discrete(s, 0, v) }
-                if hz != 0 { md_pointer_axis_discrete(s, 1, hz) }
-            }
+            s.move(sc.x, sc.y)
+            // Mac deltas are positive up/left; the backends take positive down/right.
+            s.scroll(dx: -sc.dx, dy: -sc.dy, precise: sc.precise)
         case .key(let k):
             if Self.modifierKeys[k.keyCode] != nil { modifierKey(k.keyCode, flags: k.modifiers, s); return }
             syncModifiers(k.modifiers, s)
-            if k.isRepeat { return }   // GNOME repeats a held key itself
-            if let code = Self.keys[k.keyCode] { md_key(s, code, k.down ? 1 : 0) }
-            else if let ch = k.characters?.unicodeScalars.first { md_keysym(s, Self.keysym(ch), k.down ? 1 : 0) }
+            if k.isRepeat { return }   // the desktop repeats a held key itself
+            if let code = Self.keys[k.keyCode] { s.key(code, k.down) }
+            else if let ch = k.characters?.unicodeScalars.first { s.keysym(Self.keysym(ch), k.down) }
         case .modifiers(let mo):
             modifierKey(mo.keyCode, flags: mo.modifiers, s)
         default:
@@ -77,8 +64,8 @@ final class LinuxInput: @unchecked Sendable {
         0x3A: (56, option), 0x3D: (100, option),       // Option → Alt, right Option → AltGr
     ]
 
-    private func modifierKey(_ keyCode: UInt16, flags: UInt64, _ s: OpaquePointer) {
-        if keyCode == 0x39 { md_key(s, 58, 1); md_key(s, 58, 0); return }   // Caps Lock toggles
+    private func modifierKey(_ keyCode: UInt16, flags: UInt64, _ s: InputBackend) {
+        if keyCode == 0x39 { s.key(58, true); s.key(58, false); return }   // Caps Lock toggles
         guard let (code, flag) = Self.modifierKeys[keyCode] else { syncModifiers(flags, s); return }
         let down = flags & flag != 0
         lock.lock()
@@ -88,12 +75,12 @@ final class LinuxInput: @unchecked Sendable {
         let press = down && !isHeld
         if press { held.insert(code) } else if isHeld { held.remove(code) }
         lock.unlock()
-        if press { md_key(s, code, 1) } else if isHeld { md_key(s, code, 0) }
+        if press { s.key(code, true) } else if isHeld { s.key(code, false) }
         syncModifiers(flags, s)
     }
 
     /// Releases held modifiers whose flag is no longer set (a release the viewer never sent as its own event).
-    private func syncModifiers(_ flags: UInt64, _ s: OpaquePointer) {
+    private func syncModifiers(_ flags: UInt64, _ s: InputBackend) {
         lock.lock()
         let stale = held.filter { code in
             guard let flag = Self.modifierKeys.values.first(where: { $0.0 == code })?.1 else { return false }
@@ -101,7 +88,7 @@ final class LinuxInput: @unchecked Sendable {
         }
         held.subtract(stale)
         lock.unlock()
-        for code in stale { md_key(s, code, 0) }
+        for code in stale { s.key(code, false) }
     }
 
     // MARK: Key codes
@@ -127,4 +114,51 @@ final class LinuxInput: @unchecked Sendable {
     static func keysym(_ c: Unicode.Scalar) -> UInt32 {
         c.value < 0x100 ? c.value : 0x0100_0000 + c.value
     }
+}
+
+/// Where input is delivered. Positions are 0...1 of the screen; scrolling is positive down/right, in pixels when
+/// `precise` (a trackpad), else in wheel clicks.
+protocol InputBackend: AnyObject, Sendable {
+    func move(_ x: Double, _ y: Double)
+    func button(_ evdev: Int32, _ down: Bool)
+    func scroll(dx: Double, dy: Double, precise: Bool)
+    func key(_ evdev: UInt32, _ down: Bool)
+    /// A character with no key of its own (only GNOME's session can type these).
+    func keysym(_ sym: UInt32, _ down: Bool)
+}
+
+/// Through GNOME's remote-desktop session (the host runs as the logged-in user).
+final class MutterBackend: InputBackend, @unchecked Sendable {
+    let session: OpaquePointer
+    init(_ session: OpaquePointer) { self.session = session }
+    func move(_ x: Double, _ y: Double) {
+        var w: Int32 = 0, h: Int32 = 0
+        md_picture_size(md_session_picture(session), &w, &h)
+        md_pointer_move(session, min(max(x, 0), 1) * Double(max(w - 1, 0)), min(max(y, 0), 1) * Double(max(h - 1, 0)))
+    }
+    func button(_ evdev: Int32, _ down: Bool) { md_pointer_button(session, evdev, down ? 1 : 0) }
+    func scroll(dx: Double, dy: Double, precise: Bool) {
+        if precise { md_pointer_axis(session, dx, dy, 1); return }
+        let v = Int32(dy.rounded()), hz = Int32(dx.rounded())
+        if v != 0 { md_pointer_axis_discrete(session, 0, v) }
+        if hz != 0 { md_pointer_axis_discrete(session, 1, hz) }
+    }
+    func key(_ evdev: UInt32, _ down: Bool) { md_key(session, evdev, down ? 1 : 0) }
+    func keysym(_ sym: UInt32, _ down: Bool) { md_keysym(session, sym, down ? 1 : 0) }
+}
+
+/// Through virtual devices (the host runs as root): works at the login and lock screens too.
+final class UInputBackend: InputBackend, @unchecked Sendable {
+    let device: OpaquePointer
+    init(_ device: OpaquePointer) { self.device = device }
+    func move(_ x: Double, _ y: Double) { mu_pointer_move(device, x, y) }
+    func button(_ evdev: Int32, _ down: Bool) { mu_pointer_button(device, evdev, down ? 1 : 0) }
+    func scroll(dx: Double, dy: Double, precise: Bool) {
+        // A wheel click is 120; a trackpad's pixels at about 50 per click (three lines).
+        let per: Double = precise ? 2.4 : 120
+        let v = Int32((dy * per).rounded()), hz = Int32((dx * per).rounded())
+        if v != 0 || hz != 0 { mu_wheel(device, v, hz) }
+    }
+    func key(_ evdev: UInt32, _ down: Bool) { mu_key(device, evdev, down ? 1 : 0) }
+    func keysym(_ sym: UInt32, _ down: Bool) {}
 }
