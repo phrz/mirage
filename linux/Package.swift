@@ -62,6 +62,7 @@ let package = Package(
             dependencies: [
                 "MirageCore", "CMirageDesktop",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Crypto", package: "swift-crypto"),
             ],
             path: "Sources/mirage-host",
             swiftSettings: [.swiftLanguageMode(.v5)]

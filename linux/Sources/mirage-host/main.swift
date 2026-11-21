@@ -8,7 +8,7 @@ struct MirageHost: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mirage-host",
         abstract: "Mirage host for Linux: shares this computer's screen with paired Mirage viewers over QUIC.",
-        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Check.self],
+        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Check.self, Version.self, Update.self],
         defaultSubcommand: Serve.self)
 }
 
@@ -32,6 +32,9 @@ struct Serve: AsyncParsableCommand {
     func run() async throws {
         setvbuf(stdout, nil, _IOLBF, 0)
         let store = try hostStore()
+        log("mirage-host build \(LinuxBuild.number) (\(LinuxBuild.commit))")
+        let updater = geteuid() == 0 ? LinuxUpdater(store: store, log: { log($0) }) : nil
+        updater?.beginStart()
         let identity = try store.identity(role: "host", name: name ?? DeviceNames.current())
         let tls = try TLSIdentity.loadOrCreate(store: store)
         let source: DesktopSource
@@ -59,6 +62,10 @@ struct Serve: AsyncParsableCommand {
             Task { await HostSession.handle(stream: stream, connectionID: id, remote: remote, ctx: ctx) }
         })
         log("mirage host \(identity.name) (Linux) id=\(identity.id.prefix(12)) devices=\(try store.authorizedDevices().count), listening on udp/\(port)")
+        if let updater {
+            if updater.disabled { log("automatic updates: off (\(store.url("no-auto-update").path))") }
+            else { updater.start(ctx: ctx) }
+        }
         while true { try await Task.sleep(for: .seconds(3600)) }
     }
 }
@@ -152,5 +159,20 @@ struct Check: AsyncParsableCommand {
         var w: Int32 = 0, h: Int32 = 0
         md_picture_size(lease.picture, &w, &h)
         print("✓ screen \(w)x\(h), keyboard and pointer ready")
+    }
+}
+
+struct Version: ParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Print this build.")
+    func run() throws { print("mirage-host build \(LinuxBuild.number) (\(LinuxBuild.commit)) \(LinuxUpdater.arch)") }
+}
+
+struct Update: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "As root: check for a newer build now and install it (the service also checks every 6 hours).")
+    func run() async throws {
+        guard geteuid() == 0 else { print("run it with sudo"); throw ExitCode(1) }
+        let updater = LinuxUpdater(store: try hostStore(), log: { print($0) })
+        guard let build = try await updater.stage() else { print("up to date (build \(LinuxBuild.number))"); return }
+        updater.install(build, restart: true)
     }
 }
