@@ -353,7 +353,7 @@ final class HostMenu: NSObject, NSMenuDelegate {
         if isConnected, let devices = status?.devices, !devices.isEmpty {
             defer {
                 menu.addItem(.separator())
-                _ = item("Connect to a Mac…", #selector(connectWindow))
+                _ = item("Connect…", #selector(connectWindow))
                 _ = item("Quit Mirage…", #selector(quit))
             }
             let sub = NSMenu()
@@ -368,7 +368,7 @@ final class HostMenu: NSObject, NSMenuDelegate {
             return
         }
         menu.addItem(.separator())
-        _ = item("Connect to a Mac…", #selector(connectWindow))
+        _ = item("Connect…", #selector(connectWindow))
         _ = item("Quit Mirage…", #selector(quit))
     }
     @objc private func connectWindow() { onConnectWindow?() }

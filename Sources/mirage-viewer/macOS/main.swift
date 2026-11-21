@@ -172,7 +172,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// While this Mac accepts connections the app stays as a menu-bar accessory without windows; a viewer makes it regular.
     private var hostingCompanion: Bool { hostMenu != nil && HostMenu.hosting }
 
-    /// "Connect to a Mac…" (or a Dock click): the connect window, or the running viewer.
+    /// "Connect…" (or a Dock click): the connect window, or the running viewer.
     @MainActor func openViewer() {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -471,7 +471,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         let connItem = NSMenuItem(); main.addItem(connItem)
         let conn = NSMenu(title: "Connection")
-        _ = item(conn, "Connect to a Mac…", #selector(newConnection(_:)), "n")
+        _ = item(conn, "Connect…", #selector(newConnection(_:)), "n")
         _ = item(conn, "Disconnect", #selector(disconnectMenu(_:)), "d", [.command, .shift])
         conn.addItem(.separator())
         _ = item(conn, "Pair a Device with This Mac…", #selector(pairDeviceMenu(_:)))
