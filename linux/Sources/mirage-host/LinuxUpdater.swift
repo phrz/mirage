@@ -52,6 +52,8 @@ final class LinuxUpdater: @unchecked Sendable {
     private var checking = false
     private var lockFD: Int32 = -1
     private var latest: MirageVersion?
+    /// A build downloaded and checked, waiting for nobody to stream (the automatic install holds the lock meanwhile).
+    private var waiting: Int?
     private var latestAt: Date?
 
     /// How builds show in the viewer: "Linux (602)".
@@ -165,6 +167,7 @@ final class LinuxUpdater: @unchecked Sendable {
                     do {
                         // Not while this build is still on trial: it is judged first.
                         if loadState().trial == nil, let staged = try await stage() {
+                            lock.lock(); waiting = staged; lock.unlock()
                             while await !ctx.connections.streamingDeviceIDs().isEmpty { try? await Task.sleep(for: .seconds(60)) }
                             install(staged, restart: false)
                         }
@@ -179,7 +182,7 @@ final class LinuxUpdater: @unchecked Sendable {
     func stage() async throws -> Int? {
         lock.lock(); if checking { lock.unlock(); return nil }; checking = true; lock.unlock()
         defer { lock.lock(); checking = false; lock.unlock() }
-        guard takeLock() else { log("update: another update is running"); return nil }
+        guard takeLock() else { throw MirageError.storage("another update is in progress") }
         var keepLock = false
         defer { if !keepLock { dropLock() } }
         let (m, manifestURL) = try verifiedManifest()
@@ -237,6 +240,15 @@ final class LinuxUpdater: @unchecked Sendable {
         switch cmd {
         case .update(let target):
             reply(.init(phase: .checking, message: "Checking for a newer build…", from: from, yours: true))
+            // Downloaded already, waiting for the streams to end: the viewer asking is reason enough.
+            lock.lock(); let ready = waiting; lock.unlock()
+            if let ready {
+                let to = Self.version(ready, latestAvailable?.commit ?? "")
+                reply(.init(phase: .restarting, message: "Restarting into \(to.display)…", from: from, to: to, yours: true))
+                try? await Task.sleep(for: .milliseconds(500))
+                install(ready, restart: false)
+                return
+            }
             do {
                 guard let build = try await stage() else {
                     let asked = target.map { $0 > LinuxBuild.number } ?? false
@@ -253,9 +265,10 @@ final class LinuxUpdater: @unchecked Sendable {
                 reply(.init(phase: .failed, message: "\(error)", from: from, yours: true))
             }
         case .rollback:
-            guard FileManager.default.fileExists(atPath: Self.previous), takeLock() else {
+            guard FileManager.default.fileExists(atPath: Self.previous) else {
                 reply(.init(phase: .failed, message: "No earlier build to go back to", from: from, yours: true)); return
             }
+            guard takeLock() else { reply(.init(phase: .failed, message: "An update is in progress", from: from, yours: true)); return }
             reply(.init(phase: .restarting, message: "Going back to the previous build…", from: from, yours: true))
             try? await Task.sleep(for: .milliseconds(500))
             guard rename(Self.previous, Self.binary) == 0 else {

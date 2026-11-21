@@ -36,10 +36,25 @@ public final class MessageStream: @unchecked Sendable {
 
     // MARK: From msquic's threads
 
+    /// Unread bytes a stream may hold: two whole frames. A peer that sends more than the host reads (any peer, before it
+    /// has paired) would otherwise grow the root service without bound; such a stream is aborted.
+    static let maxBuffered = 2 * Frame.maxLength + 4096
+
     func deliver(_ d: Data) {
         lock.lock()
         switch kind {
-        case .stream: bytes.append(d)
+        case .stream(let h):
+            if bytes.count + d.count > Self.maxBuffered {
+                let open = !handleClosed && !finished
+                finished = true
+                bytes = Data()
+                let w = waiter; waiter = nil
+                lock.unlock()
+                if open { mq_stream_abort(h) }
+                w?.resume()
+                return
+            }
+            bytes.append(d)
         case .datagrams:
             datagrams.append(d)
             // A reader that fell behind loses the oldest datagrams, as the network would have.

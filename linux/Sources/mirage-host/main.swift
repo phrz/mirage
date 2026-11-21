@@ -69,7 +69,8 @@ struct Serve: AsyncParsableCommand {
         if let updater {
             // A paired Mac's update arrow: this build, the newest verified one, and its trigger.
             ctx.updateInfo = {
-                var info = HostUpdateInfo(latestAvailable: updater.latestAvailable, permission: UpdatePermission(policy: .automatic, viewerMayTrigger: true))
+                var info = HostUpdateInfo(latestAvailable: updater.latestAvailable,
+                                          permission: UpdatePermission(policy: updater.disabled ? .ask : .automatic, viewerMayTrigger: true))
                 info.channel = .stable
                 info.installed = LinuxUpdater.current
                 return info
@@ -204,6 +205,8 @@ struct Update: AsyncParsableCommand {
 struct Tray: ParsableCommand {
     static let configuration = CommandConfiguration(abstract: "The top-bar icon for this desktop session (started at login): Share This Computer, Pair a Device…, Allow / Deny, paired devices, updates.")
     func run() throws {
+        // Only administrators can use the icon (the service serves no one else): others get none.
+        guard let me = getpwuid(getuid()).map({ String(cString: $0.pointee.pw_name) }), TrayLauncher.isAdmin(me) else { return }
         TrayLauncher.enableAppIndicators()
         let dir = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] ?? NSTemporaryDirectory()
         let path = (dir as NSString).appendingPathComponent("mirage-tray.js")

@@ -433,12 +433,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func endSession(then: @escaping @MainActor () -> Void) {
         guard let s = session, endingSession == nil else { if endingSession == nil { MainActor.assumeIsolated { then() } }; return }
         endingSession = s
-        s.stop { DispatchQueue.main.async { MainActor.assumeIsolated { self.endingSession = nil; then() } } }
+        s.stop { DispatchQueue.main.async { MainActor.assumeIsolated {
+            self.endingSession = nil; then()
+            if self.quitWhenEnded { self.quitWhenEnded = false; NSApp.reply(toApplicationShouldTerminate: true) }
+        } } }
     }
+    /// A quit that came while a closed window's session was still ending: answered once the host has heard the end.
+    private var quitWhenEnded = false
     /// Quitting (⌘Q, the menu, logout) with a session open: it ends first, so the host does not keep it suspended for a
     /// day with the curtain up.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard session != nil, endingSession == nil else { return .terminateNow }
+        // A stream window just closed (its session still ending, `session` already cleared): wait for that end too.
+        if endingSession != nil { quitWhenEnded = true; return .terminateLater }
+        guard session != nil else { return .terminateNow }
         endSession { [weak self] in self?.session = nil; NSApp.reply(toApplicationShouldTerminate: true) }
         return .terminateLater
     }

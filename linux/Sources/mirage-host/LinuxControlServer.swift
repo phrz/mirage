@@ -77,6 +77,8 @@ final class LinuxControlServer: @unchecked Sendable {
         let c = Glibc.accept(listenFD, nil, nil)
         guard c >= 0 else { return }
         guard let user = Self.admittedUser(fd: c) else { log("local control: refused a peer that is not an administrator"); close(c); return }
+        // Never blocks the queue: an icon that stops reading is dropped (EAGAIN) instead of stalling everyone else's.
+        _ = fcntl(c, F_SETFL, fcntl(c, F_GETFL) | O_NONBLOCK)
         let src = DispatchSource.makeReadSource(fileDescriptor: c, queue: queue)
         let client = Client(fd: c, user: user, source: src)
         clients[c] = client
@@ -230,7 +232,8 @@ final class LinuxControlServer: @unchecked Sendable {
     private func broadcast(_ e: LocalControl.Event) { for c in clients.values { send(e, to: c) } }
     private func send(_ e: LocalControl.Event, to c: Client) {
         guard let line = try? LocalControl.encodeLine(e) else { return }
-        _ = line.withUnsafeBytes { Glibc.send(c.fd, $0.baseAddress, $0.count, Int32(MSG_NOSIGNAL)) }
+        let n = line.withUnsafeBytes { Glibc.send(c.fd, $0.baseAddress, $0.count, Int32(MSG_NOSIGNAL)) }
+        if n != line.count { log("local control: \(c.user)'s icon is not reading; dropped"); drop(c) }
     }
 }
 

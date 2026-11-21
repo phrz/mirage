@@ -65,7 +65,9 @@ publish() {
     n=$(build_number); c=$(commit)
     # Hosts install only a higher build: a lower one (a rebased branch) would be ignored by every host, silently.
     live=$(curl -fsSL "https://github.com/$REPO/releases/download/$TAG/linux-x86_64.manifest.json" 2>/dev/null |
-        python3 -c "import json,sys; print(json.load(sys.stdin)['build'])" 2>/dev/null || echo 0)
+        python3 -c "import json,sys; print(json.load(sys.stdin)['build'])" 2>/dev/null) ||
+        die "cannot read the published Linux build (to check this one is higher); MIRAGE_LINUX_FIRST=1 for a first release"
+    [ -n "${MIRAGE_LINUX_FIRST:-}" ] && [ -z "$live" ] && live=0
     [ "$n" -gt "$live" ] || die "build $n is not above the published build $live: hosts would ignore it"
     key=$(linux_key)
     cp linux/install.sh "$dir/install.sh"

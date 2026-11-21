@@ -138,7 +138,7 @@ if [ "${1:-}" = mac-key-to-1password ]; then
     build_tool
     pub=$(printf '%s\n' "$priv" | tool pubkey) || die "could not derive the public key"
     id=$(tool keyid "$pub")
-    grep -q "$pub" Sources/MirageCore/Update/TrustedKeys.swift || die "the keychain's key ($id) is not one TrustedKeys.swift trusts: not copying it"
+    swift_keys | tr ' ' '\n' | grep -qxF "$pub" || die "the keychain's key ($id) is not one TrustedKeys.swift trusts: not copying it"
     PRIV="$priv" PUB="$pub" ID="$id" python3 -c '
 import json, os
 print(json.dumps({"title": "Mirage manifest key", "category": "API_CREDENTIAL", "fields": [
