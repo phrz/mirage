@@ -5,7 +5,7 @@
 #   curl -fsSL <this script's URL> | sh
 #
 # Run it as yourself in a terminal (it asks for your password through sudo). Running it again updates mirage-host and
-# keeps its pairings. Where the screen cannot be read directly (a GPU's tiled framebuffer), it falls back to sharing your
+# keeps its pairings; the service also updates itself (signed builds, checked every 6 hours). Where the screen cannot be read directly (a GPU's tiled framebuffer), it falls back to sharing your
 # GNOME session as a user service, which needs you logged in and keeps the screen from idle-locking.
 set -eu
 
@@ -103,12 +103,14 @@ system_service() {
 Description=Mirage host (shares this computer's screen with paired Mirage viewers)
 After=network-online.target systemd-user-sessions.service
 Wants=network-online.target
+# Never give up restarting: an update on trial is rolled back by its own restarts.
+StartLimitIntervalSec=0
 
 [Service]
 ExecStartPre=-/sbin/modprobe uinput
 ExecStart=$BIN serve
 Restart=always
-RestartSec=2
+RestartSec=3
 
 [Install]
 WantedBy=multi-user.target

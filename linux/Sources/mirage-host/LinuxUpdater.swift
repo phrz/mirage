@@ -5,14 +5,18 @@ import Crypto
 /// Automatic updates of the system service (root): the Mac's signed-manifest scheme (ManifestVerifier) with the Linux
 /// host's own key (LinuxTrustedKeys).
 ///
-/// Every 6 hours (first 5 minutes after start) it fetches `linux-<arch>.manifest.json` and its signatures from the
+/// Every 6 hours (first a minute after start) it fetches `linux-<arch>.manifest.json` and its signatures from the
 /// `linux-host` release. A manifest signed by a trusted key, for a newer build that was not rolled back before, names the
 /// binary: downloaded beside the installed one, checked against the manifest's SHA-256 and size, and run once
-/// (`version` must name the build). Once no viewer is streaming, it replaces /usr/local/bin/mirage-host (the old one kept
+/// (`version` must name the build and this processor). Once no viewer is streaming, it replaces /usr/local/bin/mirage-host (the old one kept
 /// as mirage-host.previous) and the service exits for systemd to start the new build.
 ///
-/// The new build is on trial: a build that starts more than 3 times without running 2 minutes puts the previous binary
-/// back, is never offered again, and exits for systemd to start the previous one.
+/// The new build is on trial until a viewer has streamed from it for a minute (or it has run a day): one that starts more
+/// than 3 times before that puts the previous binary back, is never offered again, and exits for systemd to start the
+/// previous one. A build that crashes as a viewer connects is so rolled back after the viewer's reconnects.
+///
+/// The state (`linux-update.json`) is read at a fixed path before anything else at start, so a build that fails early is
+/// counted too; a lock file keeps the service and `mirage-host update` from installing at once.
 ///
 /// `/var/lib/mirage/no-auto-update` turns it off; `sudo mirage-host update` checks now.
 final class LinuxUpdater: @unchecked Sendable {
@@ -38,14 +42,15 @@ final class LinuxUpdater: @unchecked Sendable {
         var refused: [Int] = []
     }
 
-    let store: Store
+    let dir: URL
     let log: @Sendable (String) -> Void
     private let lock = NSLock()
     private var checking = false
+    private var lockFD: Int32 = -1
 
-    init(store: Store, log: @escaping @Sendable (String) -> Void) { self.store = store; self.log = log }
+    init(dir: URL, log: @escaping @Sendable (String) -> Void) { self.dir = dir; self.log = log }
 
-    private var stateURL: URL { store.url("linux-update.json") }
+    private var stateURL: URL { dir.appendingPathComponent("linux-update.json") }
     private func loadState() -> State {
         guard let d = try? Data(contentsOf: stateURL), let s = try? JSONDecoder().decode(State.self, from: d) else { return State() }
         return s
@@ -53,11 +58,26 @@ final class LinuxUpdater: @unchecked Sendable {
     private func save(_ s: State) {
         if let d = try? JSONEncoder().encode(s) { try? d.write(to: stateURL, options: .atomic) }
     }
-    var disabled: Bool { FileManager.default.fileExists(atPath: store.url("no-auto-update").path) }
+    var disabledPath: String { dir.appendingPathComponent("no-auto-update").path }
+    var disabled: Bool { FileManager.default.fileExists(atPath: disabledPath) }
+
+    /// One updater at a time across processes (the service, `mirage-host update`). False when another holds it.
+    private func takeLock() -> Bool {
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let fd = open(dir.appendingPathComponent("update.lock").path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { return false }
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 { close(fd); return false }
+        lock.lock(); lockFD = fd; lock.unlock()
+        return true
+    }
+    private func dropLock() {
+        lock.lock(); let fd = lockFD; lockFD = -1; lock.unlock()
+        if fd >= 0 { flock(fd, LOCK_UN); close(fd) }
+    }
 
     // MARK: Trial (at the service's start, before anything else)
 
-    /// Counts this start of a build on trial; rolls back (and exits) after too many. Ends the trial after 2 minutes up.
+    /// Counts this start of a build on trial; rolls back (and exits) after too many.
     func beginStart() {
         var s = loadState()
         guard var t = s.trial else { return }
@@ -69,7 +89,12 @@ final class LinuxUpdater: @unchecked Sendable {
             log("update: build \(t.build) failed to stay up \(t.starts - 1) times; going back to build \(t.previous)")
             let fm = FileManager.default
             if fm.fileExists(atPath: Self.previous) {
-                _ = rename(Self.previous, Self.binary)
+                guard rename(Self.previous, Self.binary) == 0 else {
+                    // The trial stays: the next start tries again.
+                    log("update: cannot put \(Self.previous) back (\(String(cString: strerror(errno)))); still on build \(t.build)")
+                    return
+                }
+                syncDirectory(Self.binary)
                 s.trial = nil
                 if !s.refused.contains(t.build) { s.refused.append(t.build) }
                 save(s)
@@ -80,22 +105,38 @@ final class LinuxUpdater: @unchecked Sendable {
             return
         }
         log("update: build \(t.build) on trial (start \(t.starts) of 3)")
-        DispatchQueue.global().asyncAfter(deadline: .now() + 120) { [self] in
-            var s = loadState()
-            if s.trial?.build == LinuxBuild.number { s.trial = nil; save(s); log("update: build \(LinuxBuild.number) stays") }
+    }
+
+    /// Ends this build's trial once a viewer has streamed for a minute without a break, or after a day up.
+    private func watchTrial(ctx: HostContext) {
+        guard loadState().trial?.build == LinuxBuild.number else { return }
+        Task.detached { [self] in
+            let start = Date()
+            var streamed = 0
+            while loadState().trial?.build == LinuxBuild.number {
+                try? await Task.sleep(for: .seconds(10))
+                streamed = await ctx.connections.streamingDeviceIDs().isEmpty ? 0 : streamed + 10
+                if streamed >= 60 || Date().timeIntervalSince(start) >= 86_400 {
+                    var s = loadState(); s.trial = nil; save(s)
+                    log("update: build \(LinuxBuild.number) stays")
+                    return
+                }
+            }
         }
     }
 
     // MARK: Checking
 
-    /// Checks every 6 hours, the first 5 minutes after start; installs once nobody is streaming.
+    /// Checks every 6 hours, the first a minute after start; installs once nobody is streaming.
     func start(ctx: HostContext) {
+        watchTrial(ctx: ctx)
         Task.detached { [self] in
-            try? await Task.sleep(for: .seconds(300))
+            try? await Task.sleep(for: .seconds(60))
             while true {
                 if !disabled {
                     do {
-                        if let staged = try await stage() {
+                        // Not while this build is still on trial: it is judged first.
+                        if loadState().trial == nil, let staged = try await stage() {
                             while await !ctx.connections.streamingDeviceIDs().isEmpty { try? await Task.sleep(for: .seconds(60)) }
                             install(staged, restart: false)
                         }
@@ -110,6 +151,9 @@ final class LinuxUpdater: @unchecked Sendable {
     func stage() async throws -> Int? {
         lock.lock(); if checking { lock.unlock(); return nil }; checking = true; lock.unlock()
         defer { lock.lock(); checking = false; lock.unlock() }
+        guard takeLock() else { log("update: another update is running"); return nil }
+        var keepLock = false
+        defer { if !keepLock { dropLock() } }
         let name = "linux-\(Self.arch).manifest"
         let manifestURL = Self.feed.appendingPathComponent("\(name).json")
         let data = try fetch(manifestURL, maxBytes: 64 << 10)
@@ -127,21 +171,21 @@ final class LinuxUpdater: @unchecked Sendable {
         guard bin.count == m.zipSize else { throw MirageError.storage("downloaded \(bin.count) bytes, the manifest says \(m.zipSize)") }
         let sha = SHA256.hash(data: bin).map { String(format: "%02x", $0) }.joined()
         guard sha == m.zipSHA256.lowercased() else { throw MirageError.storage("the download's SHA-256 does not match the signed manifest") }
-        guard FileManager.default.createFile(atPath: Self.staged, contents: bin, attributes: [.posixPermissions: 0o755]) else {
-            throw MirageError.storage("cannot write \(Self.staged)")
-        }
-        let says = try run(Self.staged, ["version"], timeout: 20)
-        guard says.contains("build \(m.build) ") else {
+        try writeDurably(bin, to: Self.staged)
+        let says = try run(Self.staged, ["version"], timeout: 20).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard says.contains("build \(m.build) "), says.hasSuffix(" \(Self.arch)") else {
             try? FileManager.default.removeItem(atPath: Self.staged)
             throw MirageError.storage("the new binary does not run here (it said: \(says.prefix(200)))")
         }
         log("update: build \(m.build) downloaded and checked")
+        keepLock = true   // held until install
         return m.build
     }
 
     /// Puts the staged binary in place (the installed one kept as .previous) and starts it: the service exits for systemd
     /// (`restart` false), or `systemctl restart` (the `update` command, run beside the service).
     func install(_ build: Int, restart: Bool) {
+        defer { dropLock() }
         var s = loadState()
         s.trial = .init(build: build, previous: LinuxBuild.number, starts: 0)
         _ = unlink(Self.previous)
@@ -150,12 +194,36 @@ final class LinuxUpdater: @unchecked Sendable {
         }
         save(s)
         guard rename(Self.staged, Self.binary) == 0 else { log("update: cannot replace \(Self.binary)"); s.trial = nil; save(s); return }
+        syncDirectory(Self.binary)
         log("update: installed build \(build); restarting into it")
         if restart { _ = try? run("/usr/bin/systemctl", ["restart", "mirage-host.service"], timeout: 30) }
         else { exit(0) }
     }
 
     // MARK: Helpers
+
+    /// Written and flushed to disk before it is renamed into place (a power cut leaves the old binary, not an empty one).
+    private func writeDurably(_ data: Data, to path: String) throws {
+        _ = unlink(path)
+        let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o755)
+        guard fd >= 0 else { throw MirageError.storage("cannot write \(path)") }
+        defer { close(fd) }
+        let ok = data.withUnsafeBytes { buf -> Bool in
+            var off = 0
+            while off < buf.count {
+                let n = write(fd, buf.baseAddress! + off, buf.count - off)
+                if n <= 0 { return false }
+                off += n
+            }
+            return true
+        }
+        guard ok, fsync(fd) == 0 else { throw MirageError.storage("cannot write \(path)") }
+    }
+
+    private func syncDirectory(_ file: String) {
+        let fd = open((file as NSString).deletingLastPathComponent, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        if fd >= 0 { fsync(fd); close(fd) }
+    }
 
     private func fetch(_ url: URL, maxBytes: Int) throws -> Data {
         let out = try run("/usr/bin/env", ["curl", "-fsSL", "--proto", Self.testFeed == nil ? "=https" : "=https,http", "--max-time", "600", "--max-filesize", "\(maxBytes)", url.absoluteString],

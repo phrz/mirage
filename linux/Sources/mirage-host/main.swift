@@ -31,10 +31,11 @@ struct Serve: AsyncParsableCommand {
 
     func run() async throws {
         setvbuf(stdout, nil, _IOLBF, 0)
-        let store = try hostStore()
         log("mirage-host build \(LinuxBuild.number) (\(LinuxBuild.commit))")
-        let updater = geteuid() == 0 ? LinuxUpdater(store: store, log: { log($0) }) : nil
+        // First: a build on trial that fails anywhere later is counted.
+        let updater = geteuid() == 0 ? LinuxUpdater(dir: systemStore, log: { log($0) }) : nil
         updater?.beginStart()
+        let store = try hostStore()
         let identity = try store.identity(role: "host", name: name ?? DeviceNames.current())
         let tls = try TLSIdentity.loadOrCreate(store: store)
         let source: DesktopSource
@@ -63,7 +64,7 @@ struct Serve: AsyncParsableCommand {
         })
         log("mirage host \(identity.name) (Linux) id=\(identity.id.prefix(12)) devices=\(try store.authorizedDevices().count), listening on udp/\(port)")
         if let updater {
-            if updater.disabled { log("automatic updates: off (\(store.url("no-auto-update").path))") }
+            if updater.disabled { log("automatic updates: off (\(updater.disabledPath))") }
             else { updater.start(ctx: ctx) }
         }
         while true { try await Task.sleep(for: .seconds(3600)) }
@@ -171,7 +172,7 @@ struct Update: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "As root: check for a newer build now and install it (the service also checks every 6 hours).")
     func run() async throws {
         guard geteuid() == 0 else { print("run it with sudo"); throw ExitCode(1) }
-        let updater = LinuxUpdater(store: try hostStore(), log: { print($0) })
+        let updater = LinuxUpdater(dir: systemStore, log: { print($0) })
         guard let build = try await updater.stage() else { print("up to date (build \(LinuxBuild.number))"); return }
         updater.install(build, restart: true)
     }

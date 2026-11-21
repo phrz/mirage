@@ -29,6 +29,9 @@ publish)
     c=$(grep -o 'static let commit = "[^"]*"' "$STAMP" | cut -d'"' -f2)
     [ "$n" -gt 0 ] || { echo "LinuxBuild.swift is not stamped (run: linux/release.sh stamp, then build)"; exit 1; }
     [ -f "$KEY" ] || { echo "no Linux manifest key at $KEY"; exit 1; }
+    # Hosts install only a higher build: a lower one (a rebased branch) would be ignored by every host, silently.
+    live=$(curl -fsSL "https://github.com/phrz/mirage/releases/download/$TAG/linux-x86_64.manifest.json" 2>/dev/null | python3 -c "import json,sys; print(json.load(sys.stdin)['build'])" 2>/dev/null || echo 0)
+    [ "$n" -gt "$live" ] || { echo "build $n is not above the published build $live: hosts would ignore it"; exit 1; }
     DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer} swift build --product mirage-release >/dev/null
     cp linux/install.sh "$DIR/install.sh"
     for a in x86_64 aarch64; do
