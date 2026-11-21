@@ -8,13 +8,15 @@ struct MirageHost: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mirage-host",
         abstract: "Mirage host for Linux: shares this computer's screen with paired Mirage viewers over QUIC.",
-        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Check.self, Version.self, Update.self, Tray.self],
+        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Check.self, Version.self, Update.self, Tray.self, Display.self],
         defaultSubcommand: Serve.self)
 }
 
 /// As root (the system service, from boot) the host keeps its identity and pairings in /var/lib/mirage; as a user, in
 /// ~/.local/share/Mirage.
 let systemStore = URL(fileURLWithPath: "/var/lib/mirage", isDirectory: true)
+/// Held for the process's life (the SIGTERM handler).
+nonisolated(unsafe) var terminationSource: DispatchSourceSignal?
 func hostStore() throws -> Store { geteuid() == 0 ? try Store(root: systemStore) : try Store() }
 
 func log(_ s: String) {
@@ -49,6 +51,12 @@ struct Serve: AsyncParsableCommand {
             source = gnome
         }
         HostSession.computerNoun = "computer"
+        // Stopped (systemctl stop or restart, shutdown): a display fitted to a viewer's window goes back first.
+        signal(SIGTERM, SIG_IGN)
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+        term.setEventHandler { DisplayFitter.shared.restoreNow(); Foundation.exit(0) }
+        term.resume()
+        terminationSource = term
         let settingsURL = store.url(HostSettings.fileName)
         // Lock When Finished (the host's settings, as on a Mac): when the last session ends, the screen locks.
         let lockIfLast: @Sendable (HostConnections) -> Void = { conns in

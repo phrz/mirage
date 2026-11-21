@@ -18,6 +18,7 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
     private var output: StreamOutput?
     private var running = false
     private var thread: Thread?
+    private var cursorThread: Thread?
     private var width = 0, height = 0
     private var fps = 30
     private var maxKbps = 20_000
@@ -43,8 +44,11 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// The session ended for good (stop, not suspend): Lock When Finished.
     private let ended: @Sendable () -> Void
+    /// Dynamic Resolution: the screen's mode follows the viewer's window while it asks.
+    private let fitter = DisplayFitter.shared
     init(source: DesktopSource, log: @escaping @Sendable (String) -> Void, ended: @escaping @Sendable () -> Void = {}) {
         self.source = source; self.log = log; self.ended = ended
+        fitter.log = log
     }
 
     // MARK: DesktopStreamer
@@ -61,7 +65,8 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         lease = l
         self.output = output
         width = Int(w) & ~1; height = Int(h) & ~1
-        fps = max(5, min(request.maxFPS > 0 ? request.maxFPS : 60, envFPS ?? 60))
+        // 60 whatever the viewer asks (as a Mac host streaming its whole display does): frames go only when the screen changes.
+        fps = max(5, min(max(request.maxFPS, 60), envFPS ?? 60))
         maxKbps = max(2_000, min(request.bitrateKbps > 0 ? request.bitrateKbps : 20_000, 60_000))
         needKeyframe = true
         running = true
@@ -72,12 +77,20 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         t.qualityOfService = .userInteractive
         thread = t
         t.start()
+        let relay = CursorRelay(source: source, lease: l)
+        let ct = Thread { [weak self] in self?.cursorLoop(relay) }
+        ct.name = "mirage-cursor"
+        ct.qualityOfService = .userInteractive
+        cursorThread = ct
+        ct.start()
         log("streaming \(source.name): \(w)x\(h), up to \(fps) fps, HEVC ≤ \(maxKbps) kbit/s")
+        fitter.request(request.fitDisplay, owner: self)   // the new size reaches the viewer as the picture changes size
         return info()
     }
 
     func update(_ request: ControlMessage.StreamRequest) async throws -> ControlMessage.StreamInfo {
         lock.lock(); needKeyframe = true; lock.unlock()
+        fitter.request(request.fitDisplay, owner: self)
         return info()
     }
 
@@ -155,14 +168,17 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         lock.lock()
         running = false
         let t = thread; thread = nil
+        let ct = cursorThread; cursorThread = nil
         output = nil
         ring = [:]
         lock.unlock()
         input.backend = nil
         // The encode thread notices within one wait (≤ 100 ms) and stops touching the picture.
         while let t, !t.isFinished { try? await Task.sleep(for: .milliseconds(20)) }
+        while let ct, !ct.isFinished { try? await Task.sleep(for: .milliseconds(10)) }
         lock.lock(); let l = lease; lease = nil; lock.unlock()
         if let l { source.release(l) }
+        fitter.request(nil, owner: self)
     }
 
     private func askKeyframe(_ why: String) {
@@ -172,6 +188,19 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         if due { needKeyframe = true; lastKeyframeAsk = now }
         lock.unlock()
         if due { log("keyframe: \(why)") }
+    }
+
+    // MARK: Pointer
+
+    /// The pointer's image and position to the viewer as they change (a few milliseconds behind the screen).
+    private func cursorLoop(_ relay: CursorRelay) {
+        guard source is KMSDesktop else { return }   // GNOME's screen cast draws the pointer into the picture
+        while true {
+            lock.lock(); let go = running; let out = output; lock.unlock()
+            guard go, let out else { return }
+            for m in relay.poll() { out.sendControl(m) }
+            usleep(5000)
+        }
     }
 
     // MARK: Encoding
@@ -225,9 +254,10 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
             } else {
                 continue
             }
-            // Pace to the frame rate: the newest frame when the interval is up.
+            // Pace to the frame rate: the newest frame when the interval is up (what is encoded is read then).
             let since = Clock.elapsed(since: lastEncode, now: now)
             if since < interval { usleep(useconds_t((interval - since) / 1000)) }
+            let captured = Clock.nowNanos()
 
             var cw: Int32 = 0, ch: Int32 = 0
             md_picture_size(l.picture, &cw, &ch)
@@ -249,7 +279,7 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
             lastEncode = Clock.nowNanos()
             if n < 0 { if idr { lock.lock(); needKeyframe = true; lock.unlock() }; continue }
             guard n > 0, let sample else { continue }
-            send(sample: Data(bytes: sample, count: Int(n)), keyframe: key != 0, encoder: enc!, captureNanos: now, width: w, height: h)
+            send(sample: Data(bytes: sample, count: Int(n)), keyframe: key != 0, encoder: enc!, captureNanos: captured, width: w, height: h)
         }
     }
 

@@ -131,16 +131,21 @@ final class VideoNSView: NSView {
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300), execute: w)
     }
 
-    /// Forget what was requested (back from Unified mode, which asks for its own size).
-    func resetStreamRequest() { lastRequested = (0, 0) }
+    /// Forget what was requested (back from Unified mode, which asks for its own size; Dynamic Resolution switched).
+    func resetStreamRequest() { lastRequested = (0, 0); lastFit = nil }
+    private var lastFit: ControlMessage.FitDisplay?
     func sendStreamRequest() {
         guard let session, let model, bounds.width > 0, !model.unified else { return }
+        // Not while the window is being dragged to a new size: the host's display changes once, at the end.
+        guard !(inLiveResize && ViewerSettings.dynamicResolution) else { return }
         let scale = window?.backingScaleFactor ?? 2
         let w = Int(bounds.width * scale * model.pixelFactor), h = Int(bounds.height * scale * model.pixelFactor)
-        guard (w, h) != lastRequested else { return }
-        lastRequested = (w, h)
-        session.requestStream(width: w, height: h)
+        let fit = ViewerSettings.dynamicResolution ? ControlMessage.FitDisplay(width: Int(bounds.width), height: Int(bounds.height), scale: scale) : nil
+        guard (w, h) != lastRequested || fit != lastFit else { return }
+        lastRequested = (w, h); lastFit = fit
+        session.requestStream(width: w, height: h, fit: fit)
     }
+    override func viewDidEndLiveResize() { super.viewDidEndLiveResize(); scheduleStreamRequest() }
 
     /// Where the picture actually is inside the view (letterboxed), in points.
     var videoRect: CGRect {

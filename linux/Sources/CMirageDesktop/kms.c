@@ -1,6 +1,6 @@
 // The kernel's display (KMS): the framebuffer scanned out on the first active CRTC, read as root, whatever compositor or
 // console drew it (GDM's login screen, the lock screen, a desktop, a text console). The hardware cursor lives on its own
-// plane and is drawn into the copy. Only linear 32-bit framebuffers (dumb buffers, as BMC graphics, virtio-gpu and
+// plane: its image and position are kept apart (the viewer draws the pointer itself), so a moving pointer costs no frame. Only linear 32-bit framebuffers (dumb buffers, as BMC graphics, virtio-gpu and
 // software rendering use); a GPU's tiled buffers are reported as unsupported.
 #include "md.h"
 #include "picture.h"
@@ -25,13 +25,20 @@ struct mk_capture {
     int crtc_index;
     uint32_t cursor_plane;
     uint32_t prop_fb, prop_crtc, prop_x, prop_y;
+    uint32_t prop_hx, prop_hy;   // the hotspot, on virtual GPUs (0: not given)
 
     md_picture pic;
     uint8_t *raw, *tmp;   // the primary plane's last copy, and the next one
     size_t raw_cap, tmp_cap;
-    uint8_t *cursor;      // premultiplied ARGB8888, cursor_w*cursor_h
+    uint8_t *cursor;      // premultiplied B, G, R, A; cursor_w*cursor_h
     int cursor_w, cursor_h;
     uint32_t cursor_fb;
+    // What readers see of the cursor (under status_lock): the plane's top-left on the screen, whether it shows, and a
+    // serial that changes with the image.
+    int cur_x, cur_y, cur_on, cur_hx, cur_hy;
+    uint64_t cur_serial;
+    uint8_t *cur_image;
+    int cur_w, cur_h;
 
     pthread_mutex_t status_lock;
     char status[256];
@@ -70,13 +77,23 @@ static uint32_t prop_id(int fd, uint32_t obj, uint32_t type, const char *name, u
     return id;
 }
 
-static int prop_value(int fd, uint32_t obj, uint32_t prop, uint64_t *value) {
-    drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(fd, obj, DRM_MODE_OBJECT_PLANE);
+/// The cursor plane's framebuffer, CRTC and position, in one read. 0 when all four were found.
+static int cursor_props(mk_capture *c, uint64_t *fb, uint64_t *crtc, uint64_t *x, uint64_t *y, int64_t *hx, int64_t *hy) {
+    drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(c->fd, c->cursor_plane, DRM_MODE_OBJECT_PLANE);
     if (!props) return -1;
-    int found = -1;
-    for (uint32_t i = 0; i < props->count_props; i++) if (props->props[i] == prop) { *value = props->prop_values[i]; found = 0; break; }
+    int found = 0;
+    for (uint32_t i = 0; i < props->count_props; i++) {
+        uint32_t id = props->props[i];
+        uint64_t v = props->prop_values[i];
+        if (id == c->prop_fb) { *fb = v; found |= 1; }
+        else if (id == c->prop_crtc) { *crtc = v; found |= 2; }
+        else if (id == c->prop_x) { *x = v; found |= 4; }
+        else if (id == c->prop_y) { *y = v; found |= 8; }
+        else if (c->prop_hx && id == c->prop_hx) *hx = (int64_t)v;
+        else if (c->prop_hy && id == c->prop_hy) *hy = (int64_t)v;
+    }
     drmModeFreeObjectProperties(props);
-    return found;
+    return found == 15 ? 0 : -1;
 }
 
 /// The cards, each opened once for the process's life and never as DRM master: the first opener of a card becomes its
@@ -92,6 +109,8 @@ static void open_cards(void) {
         drmDropMaster(Cards[n]);
         drmSetClientCap(Cards[n], DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
         drmSetClientCap(Cards[n], DRM_CLIENT_CAP_ATOMIC, 1);
+        // A virtual GPU (virtio, VMware, QXL) shows its cursor plane only to a client that knows cursor hotspots.
+        drmSetClientCap(Cards[n], 6 /* DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT */, 1);
     }
 }
 
@@ -125,6 +144,8 @@ static int find_display(mk_capture *c) {
                     c->prop_crtc = prop_id(fd, p->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_ID", NULL);
                     c->prop_x = prop_id(fd, p->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_X", NULL);
                     c->prop_y = prop_id(fd, p->plane_id, DRM_MODE_OBJECT_PLANE, "CRTC_Y", NULL);
+                    c->prop_hx = prop_id(fd, p->plane_id, DRM_MODE_OBJECT_PLANE, "HOTSPOT_X", NULL);
+                    c->prop_hy = prop_id(fd, p->plane_id, DRM_MODE_OBJECT_PLANE, "HOTSPOT_Y", NULL);
                     if (!c->prop_fb || !c->prop_crtc || !c->prop_x || !c->prop_y) c->cursor_plane = 0;
                 }
             }
@@ -209,56 +230,60 @@ out:
     return rc;
 }
 
+/// Reads the cursor plane's image; publishes it (a new serial) when it differs from the last one.
 static void load_cursor(mk_capture *c, uint32_t fb_id) {
     c->cursor_fb = fb_id;
-    c->cursor_w = c->cursor_h = 0;
     mapped m;
     const char *why = NULL;
     if (map_fb(c->fd, fb_id, &m, &why) != 0) return;
     size_t need = (size_t)m.width * m.height * 4;
-    free(c->cursor);
-    c->cursor = malloc(need);
-    if (c->cursor) {
+    uint8_t *img = malloc(need);
+    if (img) {
         for (uint32_t y = 0; y < m.height; y++) {
             const uint8_t *src = m.base + (size_t)y * m.pitch;
-            uint8_t *dst = c->cursor + (size_t)y * m.width * 4;
+            uint8_t *dst = img + (size_t)y * m.width * 4;
             for (uint32_t x = 0; x < m.width; x++) {   // to B, G, R, A order whatever the plane's format
                 dst[x * 4 + 0] = src[x * 4 + m.b]; dst[x * 4 + 1] = src[x * 4 + m.g];
                 dst[x * 4 + 2] = src[x * 4 + m.r]; dst[x * 4 + 3] = src[x * 4 + 3];
             }
         }
-        c->cursor_w = (int)m.width; c->cursor_h = (int)m.height;
+        int changed = !c->cursor || c->cursor_w != (int)m.width || c->cursor_h != (int)m.height || memcmp(c->cursor, img, need) != 0;
+        if (changed) {
+            free(c->cursor);
+            c->cursor = img; c->cursor_w = (int)m.width; c->cursor_h = (int)m.height;
+            uint8_t *copy = malloc(need);
+            if (copy) memcpy(copy, img, need);
+            pthread_mutex_lock(&c->status_lock);
+            free(c->cur_image);
+            c->cur_image = copy; c->cur_w = copy ? c->cursor_w : 0; c->cur_h = copy ? c->cursor_h : 0;
+            c->cur_serial++;
+            pthread_mutex_unlock(&c->status_lock);
+        } else free(img);
     }
     unmap(&m);
 }
 
-/// Premultiplied cursor over the picture (its own channel order).
-static void draw_cursor(mk_capture *c, uint8_t *dst, int w, int h, int stride, int cx, int cy, int ro, int go, int bo) {
-    for (int y = 0; y < c->cursor_h; y++) {
-        int py = cy + y;
-        if (py < 0 || py >= h) continue;
-        const uint8_t *src = c->cursor + (size_t)y * c->cursor_w * 4;
-        uint8_t *row = dst + (size_t)py * stride;
-        for (int x = 0; x < c->cursor_w; x++) {
-            int px = cx + x;
-            if (px < 0 || px >= w) continue;
-            const uint8_t *s = src + x * 4;
-            int a = s[3];
-            if (!a) continue;
-            uint8_t *d = row + px * 4;
-            d[bo] = (uint8_t)(s[0] + d[bo] * (255 - a) / 255);
-            d[go] = (uint8_t)(s[1] + d[go] * (255 - a) / 255);
-            d[ro] = (uint8_t)(s[2] + d[ro] * (255 - a) / 255);
-        }
-    }
+int mk_cursor_state(mk_capture *c, int *x, int *y, int *hx, int *hy, uint64_t *serial) {
+    pthread_mutex_lock(&c->status_lock);
+    *x = c->cur_x; *y = c->cur_y; *hx = c->cur_hx; *hy = c->cur_hy; *serial = c->cur_serial;
+    int on = c->cur_on;
+    pthread_mutex_unlock(&c->status_lock);
+    return on;
+}
+
+int mk_cursor_image(mk_capture *c, uint8_t *bgra, size_t cap, int *width, int *height, uint64_t *serial) {
+    pthread_mutex_lock(&c->status_lock);
+    size_t need = (size_t)c->cur_w * c->cur_h * 4;
+    int ok = c->cur_image && need > 0 && need <= cap;
+    if (ok) { memcpy(bgra, c->cur_image, need); *width = c->cur_w; *height = c->cur_h; *serial = c->cur_serial; }
+    pthread_mutex_unlock(&c->status_lock);
+    return ok ? 0 : -1;
 }
 
 static void *capture_thread(void *arg) {
     mk_capture *c = arg;
     uint32_t last_fb = 0;
-    int64_t last_cx = -1, last_cy = -1;
-    uint32_t last_cfb = 0;
-    uint64_t last_check = 0, last_find = 0;
+    uint64_t last_check = 0, last_find = 0, last_cursor_read = 0;
     for (;;) {
         uint64_t now = now_ms();
         if (c->fd < 0 || !c->crtc_id) {
@@ -273,6 +298,7 @@ static void *capture_thread(void *arg) {
         if (!crtc || !crtc->mode_valid || !crtc->buffer_id) {
             // The screen is off (blanked), or the display moved to another CRTC: look again now and then.
             drmModeFreeCrtc(crtc);
+            pthread_mutex_lock(&c->status_lock); c->cur_on = 0; pthread_mutex_unlock(&c->status_lock);
             if (now - last_find >= 500) { last_find = now; if (find_display(c) == 0) last_fb = 0; }
             usleep(100000);
             continue;
@@ -282,17 +308,19 @@ static void *capture_thread(void *arg) {
         drmModeFreeCrtc(crtc);
 
         uint64_t cfb = 0, ccrtc = 0, cx = 0, cy = 0;
-        int cursor_on = 0;
-        if (c->cursor_plane && prop_value(c->fd, c->cursor_plane, c->prop_fb, &cfb) == 0 &&
-            prop_value(c->fd, c->cursor_plane, c->prop_crtc, &ccrtc) == 0 && prop_value(c->fd, c->cursor_plane, c->prop_x, &cx) == 0 &&
-            prop_value(c->fd, c->cursor_plane, c->prop_y, &cy) == 0) {
-            cursor_on = cfb && ccrtc == c->crtc_id;
-        }
-        int64_t sx = (int64_t)cx, sy = (int64_t)cy;   // signed in the property's 64 bits
-        if (!cursor_on) { sx = -1; sy = -1; cfb = 0; }
-        int hint = fb_id != last_fb || sx != last_cx || sy != last_cy || (uint32_t)cfb != last_cfb;
+        int64_t hx = -1, hy = -1;
+        int cursor_on = c->cursor_plane && cursor_props(c, &cfb, &ccrtc, &cx, &cy, &hx, &hy) == 0 && cfb && ccrtc == c->crtc_id;
+        // A new cursor buffer, and now and then the same one (a compositor may draw a new shape into it).
+        if (cursor_on && ((uint32_t)cfb != c->cursor_fb || now - last_cursor_read >= 250)) { load_cursor(c, (uint32_t)cfb); last_cursor_read = now; }
+        pthread_mutex_lock(&c->status_lock);
+        c->cur_on = cursor_on;
+        if (cursor_on) { c->cur_x = (int)(int64_t)cx - ox; c->cur_y = (int)(int64_t)cy - oy; c->cur_hx = (int)hx; c->cur_hy = (int)hy; }   // signed in the property's 64 bits
+        pthread_mutex_unlock(&c->status_lock);
+
+        // A flip to another framebuffer is a new picture; a compositor drawing into the same one is caught by comparing.
+        int hint = fb_id != last_fb;
         int periodic = now - last_check >= 250;
-        if (!hint && !periodic) { usleep(16000); continue; }
+        if (!hint && !periodic) { usleep(4000); continue; }
         last_check = now;
 
         mapped m;
@@ -312,23 +340,19 @@ static void *capture_thread(void *arg) {
         for (int y = 0; y < h; y++) memcpy(c->tmp + (size_t)y * stride, m.base + (size_t)(oy + y) * m.pitch + (size_t)ox * 4, stride);
         int ro = m.r, go = m.g, bo = m.b;
         unmap(&m);
-        int same = !hint && c->raw && c->raw_cap == need && memcmp(c->tmp, c->raw, need) == 0;
+        int same = c->raw && c->raw_cap == need && memcmp(c->tmp, c->raw, need) == 0;
         last_fb = fb_id;
-        if (same) { usleep(16000); continue; }
+        if (same) { usleep(4000); continue; }
         uint8_t *t = c->raw; size_t tc = c->raw_cap;
         c->raw = c->tmp; c->raw_cap = need;
         c->tmp = t; c->tmp_cap = tc;
-        if (cursor_on && (uint32_t)cfb != c->cursor_fb) load_cursor(c, (uint32_t)cfb);
-        last_cx = sx; last_cy = sy; last_cfb = (uint32_t)cfb;
-
         uint8_t *dst = md_picture_begin(&c->pic, stride, h);
         if (dst) {
             memcpy(dst, c->raw, need);
-            if (cursor_on && c->cursor_w > 0) draw_cursor(c, dst, w, h, stride, (int)(sx - ox), (int)(sy - oy), ro, go, bo);
             md_picture_commit(&c->pic, w, h, stride, ro, go, bo);
         }
         set_status(c, "%s", "");
-        usleep(16000);
+        usleep(4000);
     }
     return NULL;
 }

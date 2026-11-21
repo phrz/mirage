@@ -403,6 +403,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     public init(log: @escaping @Sendable (String) -> Void) {
         self.log = log
         hostLog = log
+        DynamicResolution.shared.log = log
         // Env var, or a marker file for the LaunchAgent: ~/Library/Application Support/Mirage/debug-shift
         let marker = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Mirage/debug-shift").path
         if ProcessInfo.processInfo.environment["MIRAGE_DEBUG_SHIFT"] != nil || FileManager.default.fileExists(atPath: marker) { detector.debug = { log($0) } }
@@ -414,7 +415,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
 
     public func start(_ reqIn: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         // The whole display as video: the display's rate (60 on a LAN, the tier's cap below it), whatever the viewer asked.
-        var req = reqIn
+        var req = await DynamicResolution.shared.prepare(reqIn, owner: self)
+        await DynamicResolution.shared.settle()
         if Self.wholeDisplayOnlyWanted() { req.maxFPS = max(req.maxFPS, 60) }
         queue.sync { holdWarm(true) }
         beginCurtain(req)   // before any capture exists: every filter built from here on leaves the curtain out
@@ -1056,9 +1058,12 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         return pb
     }
 
-    public func update(_ req: ControlMessage.StreamRequest) async throws -> ControlMessage.StreamInfo {
+    public func update(_ reqIn: ControlMessage.StreamRequest) async throws -> ControlMessage.StreamInfo {
         guard let cap = capturer else { throw MirageError.transport("not streaming") }
-        let t = try await cap.update(req)
+        let req = await DynamicResolution.shared.prepare(reqIn, owner: self)
+        let t: ScreenCapturer.Target
+        do { t = try await cap.update(req) } catch { await DynamicResolution.shared.settle(); throw error }
+        await DynamicResolution.shared.settle()   // the capture is off a virtual display let go of: now it goes
         return try await withCheckedThrowingContinuation { c in
             queue.async {
                 let old = self.target
@@ -1337,6 +1342,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Whatever was in flight is treated as lost: unacked tile messages have their rects queued for a
     /// lossless resend, unacked video frames are forgotten (the resume keyframe replaces them).
     public func suspend() async {
+        await DynamicResolution.shared.end(owner: self)   // the person at the Mac gets their displays back meanwhile
         endCurtain(stopped: false)
         queue.sync { holdWarm(false) }
         queue.sync { Self.savePriorDelivery(self.rc, for: self.output?.peerID, network: self.priorDeliveryNetwork) }   // the next connect starts there
@@ -1435,9 +1441,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// output, restart capture (display and window layers), and bring the picture current with a keyframe
     /// masked to the tiles the viewer does not have crisp plus the diff of each layer's first capture
     /// against the last frame it saw. The ladder rung, tier, controller target and all sequences continue.
-    public func resume(_ req: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
+    public func resume(_ reqIn: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         // Taken over from a connection the host had not yet noticed was dead: suspend that side first.
         if capturer != nil { await suspend() }
+        let req = await DynamicResolution.shared.prepare(reqIn, owner: self)
+        await DynamicResolution.shared.settle()
         queue.sync { holdWarm(true) }
         beginCurtain(req)
         do { let info = try await resumeStream(req, output: output); Curtain.shared.sessionStreamed(curtainID); return info }
@@ -1504,6 +1512,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     public func stop() async {
+        await DynamicResolution.shared.end(owner: self)
         endCurtain(stopped: true)
         queue.sync { holdWarm(false) }
         queue.sync { Self.savePriorDelivery(self.rc, for: self.output?.peerID, network: self.priorDeliveryNetwork) }

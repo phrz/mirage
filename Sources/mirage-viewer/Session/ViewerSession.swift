@@ -450,7 +450,7 @@ final class ViewerSession: @unchecked Sendable {
             log("connected: control, tile streams and datagram flow up")
             log("connect timing: all streams up at \(since())")
             if let v = viewInterest { sender?.send(.viewInterest(v)) }   // before the stream: Unified never streams the desktop
-            await MainActor.run { if let p = pendingRequest { pendingRequest = nil; requestStream(width: p.width, height: p.height) } }
+            await MainActor.run { if let p = pendingRequest { pendingRequest = nil; requestStream(width: p.width, height: p.height, fit: p.fitDisplay) } }
             await MainActor.run { model.reconnecting = nil; model.error = nil }
             startLoopsOnce()
             try await receiveControl(control)
@@ -596,7 +596,7 @@ final class ViewerSession: @unchecked Sendable {
 
     /// The gate harness's run-scoped truth reference (MIRAGE_TEST_TRUTH=1 or --truth): the host logs it for this stream only.
     nonisolated(unsafe) static var truthReference = ProcessInfo.processInfo.environment["MIRAGE_TEST_TRUTH"] == "1"
-    func requestStream(width: Int, height: Int) {
+    func requestStream(width: Int, height: Int, fit: ControlMessage.FitDisplay? = nil) {
         Task { @MainActor in
             var req = ControlMessage.StreamRequest(width: width, height: height, bitrateKbps: max(0, model.bitrateKbps), maxFPS: 30, snapNative: Self.snapNative ? true : nil, tunablesVersion: Tunables.schemaVersion,
                                                    explicitBitrate: true, throttle: model.throttle, networkFingerprint: networkFingerprint)
@@ -605,6 +605,7 @@ final class ViewerSession: @unchecked Sendable {
             req.transactionalVersion = 1
             req.tileKeys = true
             if Self.truthReference { req.truthReference = true }
+            req.fitDisplay = fit
             if req == lastRequest { return }
             guard let sender else { pendingRequest = req; log("stream request \(width)x\(height) queued until connected"); return }
             lastRequest = req; lastRequestSent = req
@@ -631,7 +632,7 @@ final class ViewerSession: @unchecked Sendable {
     @MainActor func setBitrate(_ kbps: Int) {
         guard kbps != model.bitrateKbps else { return }
         model.bitrateKbps = max(0, kbps)
-        if let r = lastRequest { lastRequest = nil; requestStream(width: r.width, height: r.height) }
+        if let r = lastRequest { lastRequest = nil; requestStream(width: r.width, height: r.height, fit: r.fitDisplay) }
     }
     /// A simulated link (nil = off): the host shapes its downstream from the next stream request, this viewer its upstream now.
     @MainActor func setThrottle(_ t: NetworkThrottle?) {
@@ -639,7 +640,7 @@ final class ViewerSession: @unchecked Sendable {
         model.throttle = t
         applyUpstreamThrottle(t)
         log(t.map { "network throttle: \($0.name) (\($0.summary))" } ?? "network throttle off")
-        if let r = lastRequest { lastRequest = nil; requestStream(width: r.width, height: r.height) }
+        if let r = lastRequest { lastRequest = nil; requestStream(width: r.width, height: r.height, fit: r.fitDisplay) }
     }
 
     /// The throttle's upstream half: input datagrams, pings, probe echoes and control messages go through it.

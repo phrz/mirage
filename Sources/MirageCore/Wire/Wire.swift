@@ -567,12 +567,22 @@ public enum ControlMessage: Codable, Equatable {
         /// Test runs (the gate harness): for this stream only, the host logs its truth reference (the composited display's
         /// cell means every second). Never stored on the host: a run turns it on, and it ends with the stream.
         public var truthReference: Bool?
+        /// Dynamic Resolution: the host makes its display this size (the viewer's window), and back when the stream ends.
+        /// nil: the display stays as it is. Hosts that cannot ignore it (older ones do not decode it).
+        public var fitDisplay: FitDisplay?
         public init(width: Int, height: Int, bitrateKbps: Int = 0, maxFPS: Int = 30, displayID: UInt32? = nil, snapNative: Bool? = nil, holdsPicture: Bool? = nil, tunablesVersion: Int? = nil,
                     explicitBitrate: Bool? = nil, throttle: NetworkThrottle? = nil, networkFingerprint: String? = nil) {
             self.width = width; self.height = height; self.bitrateKbps = bitrateKbps; self.maxFPS = maxFPS; self.displayID = displayID; self.snapNative = snapNative
             self.holdsPicture = holdsPicture; self.tunablesVersion = tunablesVersion; self.explicitBitrate = explicitBitrate; self.throttle = throttle
             self.networkFingerprint = networkFingerprint
         }
+    }
+    /// A display size the viewer asks for: its window's content in points, and its pixels per point.
+    public struct FitDisplay: Codable, Equatable, Sendable {
+        public var width: Int
+        public var height: Int
+        public var scale: Double
+        public init(width: Int, height: Int, scale: Double) { self.width = width; self.height = height; self.scale = scale }
     }
     public struct StreamInfo: Codable, Equatable {
         public var width: Int            // actual stream pixels

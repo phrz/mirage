@@ -33,12 +33,25 @@ md_picture *md_session_picture(md_session *s);
 
 // MARK: The kernel's display (KMS) and virtual input devices (the host runs as root, from boot)
 
-/// Starts reading the scanned-out framebuffer of the first active display (the cursor plane drawn in), whatever shows
+/// Starts reading the scanned-out framebuffer of the first active display (the cursor kept apart: mk_cursor_*), whatever shows
 /// there: the login screen, the lock screen, a desktop, a text console. Needs root. NULL on failure, with a message.
 mk_capture *mk_capture_open(char *err, size_t err_len);
 md_picture *mk_capture_picture(mk_capture *c);
 /// Why there is no picture right now ("" when there is one).
 void mk_capture_status(mk_capture *c, char *buf, size_t len);
+/// The hardware cursor: its image's top-left on the screen, in pixels, its hotspot when the GPU says (virtual GPUs; else
+/// -1) and the serial of its image; 1 when it shows.
+int mk_cursor_state(mk_capture *c, int *x, int *y, int *hx, int *hy, uint64_t *serial);
+// MARK: GNOME's display configuration (the calling process's session bus)
+
+/// Sets the primary monitor to the mode closest to `width`x`height` points (the desktop's scale applied); the layout before
+/// goes into `saved` (for md_display_restore) and the mode chosen into `chosen`. 0 on success.
+int md_display_fit(int width, int height, char *saved, size_t saved_len, char *chosen, size_t chosen_len, char *err, size_t err_len);
+/// Puts back a layout `md_display_fit` saved.
+int md_display_restore(const char *saved, char *err, size_t err_len);
+
+/// The cursor's image (premultiplied B, G, R, A) into `bgra`; 0 when there is one that fits `cap` bytes.
+int mk_cursor_image(mk_capture *c, uint8_t *bgra, size_t cap, int *width, int *height, uint64_t *serial);
 /// Creates a virtual keyboard and an absolute pointer (uinput). Needs root. NULL on failure, with a message.
 mu_input *mu_input_open(char *err, size_t err_len);
 /// Pointer at (x, y) in 0...1 of the screen.

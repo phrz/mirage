@@ -11,6 +11,16 @@ protocol DesktopSource: AnyObject, Sendable {
     var unavailableReason: String? { get }
     /// What the log calls it ("the screen", "GNOME's screen").
     var name: String { get }
+    /// The pointer apart from the picture: its image's top-left on the screen (pixels) and the image's serial; nil while
+    /// it does not show, and always for a source that draws it into the picture.
+    func cursor() -> (x: Int, y: Int, hotspot: (Int, Int)?, serial: UInt64)?
+    /// The pointer's image (premultiplied B, G, R, A).
+    func cursorImage() -> (bgra: [UInt8], width: Int, height: Int, serial: UInt64)?
+}
+
+extension DesktopSource {
+    func cursor() -> (x: Int, y: Int, hotspot: (Int, Int)?, serial: UInt64)? { nil }
+    func cursorImage() -> (bgra: [UInt8], width: Int, height: Int, serial: UInt64)? { nil }
 }
 
 /// One use of a source's desktop: its picture (CMirageDesktop's md_picture) and its input.
@@ -73,6 +83,19 @@ final class KMSDesktop: DesktopSource, @unchecked Sendable {
     }
 
     func release(_ lease: DesktopLease) {}
+
+    func cursor() -> (x: Int, y: Int, hotspot: (Int, Int)?, serial: UInt64)? {
+        var x: Int32 = 0, y: Int32 = 0, hx: Int32 = -1, hy: Int32 = -1, serial: UInt64 = 0
+        guard mk_cursor_state(capture, &x, &y, &hx, &hy, &serial) != 0 else { return nil }
+        return (Int(x), Int(y), hx >= 0 && hy >= 0 ? (Int(hx), Int(hy)) : nil, serial)
+    }
+
+    func cursorImage() -> (bgra: [UInt8], width: Int, height: Int, serial: UInt64)? {
+        var buf = [UInt8](repeating: 0, count: 256 * 256 * 4)
+        var w: Int32 = 0, h: Int32 = 0, serial: UInt64 = 0
+        guard mk_cursor_image(capture, &buf, buf.count, &w, &h, &serial) == 0 else { return nil }
+        return (Array(buf[0..<Int(w * h * 4)]), Int(w), Int(h), serial)
+    }
 
     var unavailableReason: String? {
         var buf = [CChar](repeating: 0, count: 256)

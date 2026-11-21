@@ -23,6 +23,8 @@ struct Options {
     var unified = false
     /// Seconds after connecting before the video-gap (freeze) metric starts counting.
     var steadyAfter = 3.0
+    /// Headless: ask for Dynamic Resolution (the host's display at the window's size, as a Retina window's points).
+    var fit = false
 
     static func parse() -> Options {
         var o = Options()
@@ -46,6 +48,7 @@ struct Options {
         if let i = args.firstIndex(of: "--observe") { o.observe = true; args.remove(at: i) }
         if let i = args.firstIndex(of: "--unified") { o.unified = true; args.remove(at: i) }
         if let i = args.firstIndex(of: "--probe-input") { o.probeInput = true; args.remove(at: i) }
+        if let i = args.firstIndex(of: "--fit") { o.fit = true; args.remove(at: i) }
         // The host companion's flags (HostMenu, applicationWillFinishLaunching), and the -NSDocumentRevisionsDebugMode style
         // pairs macOS may pass: not a host name.
         args.removeAll { $0 == "--background" || $0 == "--allow-connections" || $0 == "--permissions" }
@@ -59,6 +62,7 @@ struct Options {
                   --throttle NAME | DOWN/UP/RTT[/LOSS]  simulate a link: Fast 4G, Slow 4G, 3G, Japan bus 4G, Extreme, or kbps/kbps/ms/%
                   --scale    stream pixels = window points × backing scale × F (default 1.0)
                   --window   initial window size in points, WxH (default 1280x720)
+                  --fit      headless: Dynamic Resolution, the host's display made --window pixels (half that in points)
                   --stats-log PATH  append one line of stats per second to PATH
                   --headless --duration S --stats PATH.json
                              no window: connect, request --window pixels (× --scale), decode for S seconds,
@@ -369,6 +373,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func toggleUnified(_ sender: Any?) { MainActor.assumeIsolated { setUnified(!(model?.unified ?? false)) } }
     @objc func toggleStats(_ sender: Any?) { MainActor.assumeIsolated { controls.toggleStats() } }
     @objc func toggleShortcuts(_ sender: Any?) { MainActor.assumeIsolated { controls.toggleCaptureShortcuts() } }
+    @objc func toggleDynamicResolution(_ sender: Any?) {
+        MainActor.assumeIsolated {
+            UserDefaults.standard.set(!ViewerSettings.dynamicResolution, forKey: ViewerSettings.dynamicResolutionKey)
+            if let v = findVideoView(window.contentView) { v.resetStreamRequest(); v.sendStreamRequest() }
+        }
+    }
     @objc func disconnectMenu(_ sender: Any?) { MainActor.assumeIsolated { disconnect() } }
     @objc func newConnection(_ sender: Any?) { MainActor.assumeIsolated { openViewer() } }
 
@@ -400,6 +410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             switch item.action {
             case #selector(toggleStats(_:)): item.state = controls.showStats ? .on : .off; return true
             case #selector(toggleShortcuts(_:)): item.state = controls.captureShortcuts ? .on : .off; return true
+            case #selector(toggleDynamicResolution(_:)): item.state = ViewerSettings.dynamicResolution ? .on : .off; return true
             case #selector(toggleUnified(_:)): item.state = model?.unified == true ? .on : .off; return session != nil
             case #selector(toggleDock(_:)): return model?.unified == true
             case #selector(disconnectMenu(_:)): return session != nil
@@ -498,6 +509,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let view = NSMenu(title: "View")
         _ = item(view, "Show Stats", #selector(toggleStats(_:)), "s", [.control, .option, .command])
         _ = item(view, "Send Keyboard Shortcuts to Mac", #selector(toggleShortcuts(_:)))
+        _ = item(view, "Dynamic Resolution", #selector(toggleDynamicResolution(_:)))
         view.addItem(.separator())
         _ = item(view, "Unified Windows", #selector(toggleUnified(_:)), "u", [.control, .option, .command])
         _ = item(view, "Show Remote Dock", #selector(toggleDock(_:)))
@@ -897,7 +909,8 @@ if CommandLine.arguments.contains("--headless") {
     session.inputAutoFlush = true   // no one is there to choose: the queue flushes when the path returns
     session.steadyAfterNanos = UInt64(o.steadyAfter * 1e9)
     session.start()
-    session.requestStream(width: Int(Double(o.window.0) * o.pixelFactor), height: Int(Double(o.window.1) * o.pixelFactor))
+    session.requestStream(width: Int(Double(o.window.0) * o.pixelFactor), height: Int(Double(o.window.1) * o.pixelFactor),
+                          fit: o.fit ? .init(width: o.window.0 / 2, height: o.window.1 / 2, scale: 2) : nil)
     if o.probeInput { Task { try? await Task.sleep(for: .seconds(8)); await session.probeInput() } }
     // Test knob MIRAGE_TEST_LOCK_TYPE=N (a host whose screen is locked, phrz's OK): from 4 s, N keystrokes "a" into the lock
     // screen's password field, 700 ms apart, then N Deletes (never Return), sent as a person's keys (not scripted: the host

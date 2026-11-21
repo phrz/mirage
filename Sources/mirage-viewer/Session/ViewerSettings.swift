@@ -16,6 +16,9 @@ enum ViewerSettings {
     static let keyAccessoryKey = "keyboardAccessoryRow"
     /// Mac: ⌘-shortcuts typed over the picture go to the remote Mac (on, the default) or to this app's menus first.
     static let captureShortcutsKey = "captureKeyboardShortcuts"
+    /// Mac: Dynamic Resolution, the host's display made the size of the window (and back when the session ends).
+    static let dynamicResolutionKey = "dynamicResolution"
+    static var dynamicResolution: Bool { UserDefaults.standard.bool(forKey: dynamicResolutionKey) }
     /// "Lock After Suspending" (DESIGN §3.12): how long a host keeps the curtain up for this device's suspended session before
     /// it locks; sent in the Hello. 600 s unless chosen.
     static let lockAfterSuspendKey = "lockAfterSuspendSeconds"

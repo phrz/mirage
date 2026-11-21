@@ -151,7 +151,15 @@ final class MutterBackend: InputBackend, @unchecked Sendable {
 final class UInputBackend: InputBackend, @unchecked Sendable {
     let device: OpaquePointer
     init(_ device: OpaquePointer) { self.device = device }
-    func move(_ x: Double, _ y: Double) { mu_pointer_move(device, x, y) }
+    private let lock = NSLock()
+    private var _lastMove: (x: Double, y: Double, nanos: UInt64, seq: UInt64)?
+    /// Where this host last put the pointer (0...1), when, and a count of moves (CursorRelay learns hotspots from it).
+    var lastMove: (x: Double, y: Double, nanos: UInt64, seq: UInt64)? { lock.lock(); defer { lock.unlock() }; return _lastMove }
+    func move(_ x: Double, _ y: Double) {
+        let cx = min(max(x, 0), 1), cy = min(max(y, 0), 1)
+        mu_pointer_move(device, cx, cy)
+        lock.lock(); _lastMove = (cx, cy, Clock.nowNanos(), (_lastMove?.seq ?? 0) &+ 1); lock.unlock()
+    }
     func button(_ evdev: Int32, _ down: Bool) { mu_pointer_button(device, evdev, down ? 1 : 0) }
     func scroll(dx: Double, dy: Double, precise: Bool) {
         // A wheel click is 120; a trackpad's pixels at about 50 per click (three lines).

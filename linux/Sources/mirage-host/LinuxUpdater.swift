@@ -292,6 +292,7 @@ final class LinuxUpdater: @unchecked Sendable {
             if !s.refused.contains(LinuxBuild.number) { s.refused.append(LinuxBuild.number) }
             save(s)
             log("update: rolled back from build \(LinuxBuild.number) at a viewer's request")
+            DisplayFitter.shared.restoreNow()
             exit(0)
         }
     }
@@ -311,7 +312,7 @@ final class LinuxUpdater: @unchecked Sendable {
         syncDirectory(Self.binary)
         log("update: installed build \(build); restarting into it")
         if restart { _ = try? run("/usr/bin/systemctl", ["restart", "mirage-host.service"], timeout: 30) }
-        else { exit(0) }
+        else { DisplayFitter.shared.restoreNow(); exit(0) }
     }
 
     // MARK: Helpers
