@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(CoreGraphics)
 import CoreGraphics
+#endif
 
 /// Two fingers on a touch screen: a scroll unless they clearly pinch, decided once per gesture.
 ///

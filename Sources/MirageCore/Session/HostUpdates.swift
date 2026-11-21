@@ -80,6 +80,7 @@ public enum HostProbe {
         return ["device not paired", "unknown device", "removed", "revoked"].contains(where: { r.contains($0) }) ? reason : nil
     }
 
+    #if !os(Linux)   // viewer side (ClientSession)
     @discardableResult
     public static func probe(connect: HostUpdateTrigger.Connect, store: Store, alias: String, now: Date = Date()) async -> Bool {
         do {
@@ -110,6 +111,7 @@ public enum HostProbe {
             return true
         }
     }
+    #endif
 }
 
 /// The notice a viewer gets when it resumes its session (U6 review): it may have been away (suspended) while the host
@@ -128,6 +130,7 @@ public enum ResumeNotice {
     }
 }
 
+#if !os(Linux)   // viewer side (ClientSession)
 /// Removing a paired host from a device's list (phrz, 2026-10-26): best effort, the host is asked to forget this device
 /// too, on a control-only connection like a status probe.
 public enum HostUnpair {
@@ -161,3 +164,4 @@ public enum HostUnpair {
         }
     }
 }
+#endif

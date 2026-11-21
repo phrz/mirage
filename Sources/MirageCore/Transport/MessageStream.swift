@@ -39,6 +39,15 @@ public final class MessageStream: @unchecked Sendable {
 
     public func cancel() { connection.cancel() }
 
+    /// Largest datagram this flow can send (a datagram flow; 0 if unknown).
+    public var maximumDatagramSize: Int { connection.maximumDatagramSize }
+    /// The peer's address, for logs.
+    public var remoteDescription: String? { connection.currentPath?.remoteEndpoint.map { "\($0)" } }
+    /// Sends without waiting: a datagram, or bytes queued in order on a stream. `failed` hears of a send error.
+    public func sendNoWait(_ data: Data, failed: (@Sendable (Error) -> Void)? = nil) {
+        connection.send(content: data, completion: .contentProcessed { err in if let err { failed?(err) } })
+    }
+
     // MARK: Raw
 
     public func sendRaw(_ data: Data) async throws {

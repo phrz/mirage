@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(CoreGraphics)
 import CoreGraphics
+#endif
 
 /// How touches on the picture become Mac input (iOS). Persisted under `defaultsKey`; direct touch unless set otherwise.
 public enum TouchMode: String, CaseIterable, Sendable {

@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto (Linux host)
+#endif
 #if canImport(SystemConfiguration)
 import SystemConfiguration
 #endif

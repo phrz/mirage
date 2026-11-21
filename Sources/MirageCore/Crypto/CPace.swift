@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto (Linux host)
+#endif
 
 /// Balanced PAKE in the shape of CPace (draft-irtf-cfrg-cpace) instantiated on X25519,
 /// which is the only elliptic-curve scalar multiplication CryptoKit exposes on an

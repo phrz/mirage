@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto (Linux host)
+#endif
 
 /// Base64url without padding (RFC 4648 §5): what pairing links carry.
 public enum Base64URL {

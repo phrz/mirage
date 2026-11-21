@@ -28,6 +28,7 @@ let package = Package(
         .target(
             name: "MirageCore",
             dependencies: ["CWebP"],
+            exclude: ["Linux"],   // the Linux host's transport (linux/Package.swift)
             swiftSettings: [.swiftLanguageMode(.v5)],
             // MetalFX autolinks from `import MetalFX` (absent from the iOS Simulator SDK, so it cannot be linked unconditionally).
             linkerSettings: [.linkedFramework("Metal"), .linkedFramework("VideoToolbox")]

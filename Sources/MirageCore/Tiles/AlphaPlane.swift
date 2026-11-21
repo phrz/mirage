@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(Compression)
 import Compression
+#endif
 
 /// A tile's alpha as an 8-bit greyscale plane, zlib-compressed for `TileMessage.alphaMask` (a raw single-channel plane: the
 /// cheapest lossless form for masks that are mostly flat with soft edges).

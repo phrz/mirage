@@ -31,7 +31,11 @@ public enum TileCodec {
     public static func fillSolid(_ data: Data, into dst: UnsafeMutableRawPointer, width: Int, height: Int, stride: Int) -> Bool {
         guard data.count >= 4 else { return false }
         var px = data.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        #if canImport(Darwin)
         for y in 0..<height { memset_pattern4(dst.advanced(by: y * stride), &px, width * 4) }
+        #else
+        for y in 0..<height { let row = dst.advanced(by: y * stride).bindMemory(to: UInt32.self, capacity: width); for x in 0..<width { row[x] = px } }
+        #endif
         return true
     }
 

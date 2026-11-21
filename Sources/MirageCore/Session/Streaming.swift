@@ -1,6 +1,8 @@
 import Foundation
+#if canImport(Network)
 import Network
 import Security
+#endif
 
 /// What a desktop streamer needs from the session: a way to send datagrams and control messages.
 public protocol StreamOutput: AnyObject, Sendable {
@@ -86,7 +88,7 @@ public final class HostConnection: @unchecked Sendable {
     }
     /// A datagram to the viewer from the session itself (ping echoes, input acks), through the throttle when there is one.
     public func sendDatagram(_ d: Data, on flow: MessageStream) {
-        let send = { flow.connection.send(content: d, completion: .contentProcessed { _ in }) }
+        let send = { flow.sendNoWait(d) }
         if let s = shaper { s.send(bytes: d.count, channel: LinkShaper.Channel.datagrams, reliable: false, send) } else { send() }
     }
 
@@ -209,9 +211,8 @@ public actor HostConnections {
 
     /// A fresh token for an authenticated connection's session.
     public func issueToken(for id: UUID, deviceID: String) -> Data {
-        var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        let token = Data(bytes)
+        var rng = SystemRandomNumberGenerator()   // arc4random on Apple platforms, getrandom on Linux
+        let token = Data((0..<32).map { _ in UInt8.random(in: .min ... .max, using: &rng) })
         active[token] = id
         if let c = connections[id] { c.resumeToken = token; c.deviceID = deviceID }
         return token
@@ -345,18 +346,14 @@ final class ConnectionOutput: StreamOutput, @unchecked Sendable {
         self.flow = flow; self.tiles = tiles; self.fastTiles = fastTiles; self.control = ControlSender(stream: control, log: log); self.log = log
         self.link = link
         self.control.shaper = { [weak link] in link?.shaper }
-        let m = flow.connection.maximumDatagramSize
+        let m = flow.maximumDatagramSize
         maxDatagramSize = m > 0 ? min(m, VideoFragment.datagramSize) : VideoFragment.datagramSize
         if LossInjector.shared.isActive { log("TEST: dropping datagrams on purpose: \(LossInjector.shared.description)") }
     }
 
     func sendDatagram(_ data: Data) {
         if LossInjector.shared.shouldDrop() { return }   // test-only (MIRAGE_TEST_LOSS / MIRAGE_TEST_BURST_MS)
-        let send = { [flow, log] in
-            flow.connection.send(content: data, completion: .contentProcessed { err in
-                if let err { log("datagram send: \(err)") }
-            })
-        }
+        let send = { [flow, log] in flow.sendNoWait(data) { err in log("datagram send: \(err)") } }
         if let s = link?.shaper { s.send(bytes: data.count, channel: LinkShaper.Channel.datagrams, reliable: false, send) } else { send() }
     }
 
@@ -365,11 +362,7 @@ final class ConnectionOutput: StreamOutput, @unchecked Sendable {
     func sendTiles(_ data: Data, fast: Bool) {
         // Network.framework queues sends in order on one connection; no await needed for ordering.
         guard let stream = (fast ? fastTiles : nil) ?? tiles else { return }
-        let send = { [log] in
-            stream.connection.send(content: data, completion: .contentProcessed { err in
-                if let err { log("tile send: \(err)") }
-            })
-        }
+        let send = { [log] in stream.sendNoWait(data) { err in log("tile send: \(err)") } }
         if let s = link?.shaper { s.send(bytes: data.count, channel: stream === fastTiles ? LinkShaper.Channel.fastTiles : LinkShaper.Channel.tiles, reliable: true, send) } else { send() }
     }
 }

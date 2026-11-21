@@ -1,6 +1,12 @@
 import Foundation
+#if canImport(Network)
 import Network
+#endif
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto (Linux host)
+#endif
 
 public struct HostContext: Sendable {
     public let identity: DeviceIdentity
@@ -83,10 +89,17 @@ public enum HostSession {
         out.sendControl(.tunables(t))
     }
 
+    #if canImport(Network)
     public static func handle(connection: NWConnection, connectionID: UUID, remote: String, ctx: HostContext) async {
         let stream = MessageStream(connection: connection, queue: DispatchQueue(label: "mirage.host.stream"))
         stream.adoptStarted()
-        let remote = connection.currentPath?.remoteEndpoint.map { "\($0)" } ?? remote
+        await handle(stream: stream, connectionID: connectionID, remote: remote, ctx: ctx)
+    }
+    #endif
+
+    /// One stream or datagram flow of a connection, already started.
+    public static func handle(stream: MessageStream, connectionID: UUID, remote: String, ctx: HostContext) async {
+        let remote = stream.remoteDescription ?? remote
         let conn = await ctx.connections.connection(connectionID)
         var isControl = false
         do {
@@ -146,7 +159,7 @@ public enum HostSession {
     }
 
     static func serveDatagrams(_ flow: MessageStream, conn: HostConnection, remote: String, ctx: HostContext) async throws {
-        ctx.log("[\(remote)] datagram flow open (max datagram \(flow.connection.maximumDatagramSize))")
+        ctx.log("[\(remote)] datagram flow open (max datagram \(flow.maximumDatagramSize))")
         while true {
             let d = try await flow.receiveSome()
             guard d.count >= 2, d[d.startIndex] == datagramMagic else { continue }

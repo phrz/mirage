@@ -1,6 +1,8 @@
 import Foundation
 #if canImport(UniformTypeIdentifiers)
+#if canImport(UniformTypeIdentifiers)
 import UniformTypeIdentifiers
+#endif
 #endif
 
 /// What kind of Apple device a peer is, for its icon: the host reports its hardware model identifier (`Mac15,14`) in

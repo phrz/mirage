@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto (Linux host)
+#endif
 
 /// The host's own picture of itself (phrz, 2026-10-26: "it shows generic iMac icon rather than a green iMac"): the icon
 /// Finder and About This Mac show for this Mac, colour included, rendered by the host once per start as PNG at 128 and

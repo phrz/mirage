@@ -1,5 +1,9 @@
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto   // swift-crypto (Linux host)
+#endif
 
 /// One release as the feed describes it (DESIGN §3.10, feed and channels): `manifest.json` beside the zip, signed by
 /// `manifest.sigs.json`. The signatures cover the file's exact bytes, so it is verified before it is decoded.

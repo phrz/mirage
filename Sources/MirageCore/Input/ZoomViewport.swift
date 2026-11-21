@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(CoreGraphics)
 import CoreGraphics
+#endif
 
 /// Presentation-only zoom and pan for a touch client: where the stream's picture is drawn in the view. Nothing here
 /// reaches the host; the stream and what the host sends are the same at every zoom (DESIGN: the host never re-streams
