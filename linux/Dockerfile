@@ -3,7 +3,7 @@
 # takes the stripped binary out; the build number and commit come in as arguments, so the checkout is never stamped.
 FROM swift:6.4.3-resolute AS base
 RUN apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
-        cmake ninja-build pkg-config git perl ca-certificates binutils \
+        cmake ninja-build make pkg-config git perl ca-certificates binutils \
         libpipewire-0.3-dev libglib2.0-dev libx265-dev libnuma-dev libdrm-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 ARG MSQUIC=v2.6.4
