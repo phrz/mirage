@@ -19,7 +19,8 @@ import Crypto
 /// counted too; a lock file keeps the service and `mirage-host update` from installing at once.
 ///
 /// A paired Mac's update arrow works too: the Welcome reports this build and the newest verified one (refreshed when a
-/// viewer checks in, at most every 10 minutes), and an update or rollback request runs the same verified path at once.
+/// viewer checks in and its news is over a minute old, and every 5 minutes on its own), and an update or rollback request
+/// runs the same verified path at once.
 ///
 /// `/var/lib/mirage/no-auto-update` turns the automatic install off; `sudo mirage-host update` checks now.
 final class LinuxUpdater: @unchecked Sendable {
@@ -145,6 +146,16 @@ final class LinuxUpdater: @unchecked Sendable {
 
     // MARK: Checking
 
+    /// Keeps the newest build current for the Welcome: the manifest every 5 minutes (two small files, no download).
+    func watchFeed() {
+        Task.detached { [self] in
+            while true {
+                try? await Task.sleep(for: .seconds(300))
+                refreshSoon()
+            }
+        }
+    }
+
     /// Checks every 6 hours, the first a minute after start; installs once nobody is streaming.
     func start(ctx: HostContext) {
         Task.detached { [self] in
@@ -207,10 +218,11 @@ final class LinuxUpdater: @unchecked Sendable {
         return (m, manifestURL)
     }
 
-    /// A viewer checked in: read the manifest again when the last read is over 10 minutes old (no download).
+    /// A viewer checked in: read the manifest again when the last read is over a minute old (no download). The Mac app
+    /// checks in every minute while its device list shows, so a new build shows there within about two.
     func refreshSoon() {
         lock.lock()
-        let due = latestAt.map { Date().timeIntervalSince($0) > 600 } ?? true
+        let due = latestAt.map { Date().timeIntervalSince($0) > 60 } ?? true
         if due { latestAt = Date() }
         lock.unlock()
         guard due else { return }

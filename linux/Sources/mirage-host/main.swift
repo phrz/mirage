@@ -77,6 +77,8 @@ struct Serve: AsyncParsableCommand {
         log("mirage host \(identity.name) (Linux) id=\(identity.id.prefix(12)) devices=\(try store.authorizedDevices().count), listening on udp/\(port)")
         if let updater {
             updater.watchTrial(ctx: ctx)   // a new build's trial ends the same way whether or not it installs on its own
+            updater.watchFeed()
+            updater.refreshSoon()
             if updater.disabled { log("automatic updates: off (\(updater.disabledPath)); a viewer's update still works") }
             else { updater.start(ctx: ctx) }
         }
