@@ -74,4 +74,7 @@ const uint8_t *md_encoder_param_set(md_encoder *e, int i, int *len);
 /// the next call. Returns its length, 0 when nothing came out, -1 on error; `*keyframe` says whether it is an IDR.
 int md_encoder_encode(md_encoder *e, md_picture *p, int force_idr, int force_qp, const uint8_t **sample, int *keyframe);
 
+/// The user id at the other end of a Unix socket. 0 on success.
+int md_peer_uid(int fd, uint32_t *uid);
+
 #endif

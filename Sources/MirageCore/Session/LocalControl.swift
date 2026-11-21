@@ -8,6 +8,13 @@ import Foundation
 public enum LocalControl {
     public static let version = 1
     public static let socketName = "control.sock"
+    #if canImport(Darwin)
+    public static let streamType = SOCK_STREAM
+    static func connectSocket(_ s: Int32, _ a: UnsafePointer<sockaddr>, _ l: socklen_t) -> Int32 { Darwin.connect(s, a, l) }
+    #else
+    public static let streamType = Int32(SOCK_STREAM.rawValue)
+    static func connectSocket(_ s: Int32, _ a: UnsafePointer<sockaddr>, _ l: socklen_t) -> Int32 { Glibc.connect(s, a, l) }
+    #endif
 
     /// The app's requests.
     public enum Request: Codable, Equatable {
@@ -174,10 +181,10 @@ public final class LocalControlClient: @unchecked Sendable {
 
     /// Connects (throws if no host is listening).
     public func connect(client: String) throws {
-        let s = socket(AF_UNIX, SOCK_STREAM, 0)
+        let s = socket(AF_UNIX, LocalControl.streamType, 0)
         guard s >= 0 else { throw MirageError.transport("control socket: \(String(cString: strerror(errno)))") }
         var addr = sockaddr_un.make(path)
-        let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.connect(s, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
+        let ok = withUnsafePointer(to: &addr) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { LocalControl.connectSocket(s, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) } }
         guard ok == 0 else { let e = String(cString: strerror(errno)); close(s); throw MirageError.transport("no local host (\(e))") }
         lock.lock(); fd = s; lock.unlock()
         let t = Thread { [weak self] in self?.readLoop(s) }
@@ -197,7 +204,7 @@ public final class LocalControlClient: @unchecked Sendable {
 
     public func disconnect() {
         lock.lock(); let s = fd; fd = -1; lock.unlock()
-        if s >= 0 { shutdown(s, SHUT_RDWR); close(s) }
+        if s >= 0 { shutdown(s, Int32(SHUT_RDWR)); close(s) }
     }
 
     private func readLoop(_ s: Int32) {
@@ -227,7 +234,9 @@ extension sockaddr_un {
             for (i, b) in bytes.enumerated() { raw[i] = b }
             raw[bytes.count] = 0
         }
+        #if canImport(Darwin)
         a.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        #endif
         return a
     }
 }

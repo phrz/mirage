@@ -41,7 +41,7 @@ let package = Package(
                 "Transport/QUIC.swift", "Transport/MessageStream.swift", "Transport/TLSIdentity.swift",
                 "Video/HEVCDecoder.swift", "Render/Compositor.swift", "Render/LayerScenePlan.swift", "Session/HostAgent.swift",
                 // Viewer side, the Mac's local control socket and updater feed: not part of the Linux host.
-                "Session/ClientSession.swift", "Session/HostUpdateTrigger.swift", "Session/LocalControl.swift", "Update/Feed.swift", "Tiles/AlphaPlane.swift",
+                "Session/ClientSession.swift", "Session/HostUpdateTrigger.swift", "Update/Feed.swift", "Tiles/AlphaPlane.swift",
             ],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),

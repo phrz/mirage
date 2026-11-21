@@ -79,7 +79,9 @@ public struct HostUpdateInfo: Sendable {
 /// Handles one incoming stream or datagram flow on the host.
 public enum HostSession {
     /// Why a Mac that is not shared refuses a stream or a pairing.
-    public static let notShared = "this Mac is not shared: turn on Share This Mac in Mirage on it"
+    /// What the host calls itself in these messages ("Mac"; the Linux host says "computer").
+    nonisolated(unsafe) public static var computerNoun = "Mac"
+    public static var notShared: String { "this \(computerNoun) is not shared: turn on Share This \(computerNoun == "Mac" ? "Mac" : "Computer") in Mirage on it" }
     /// The viewer's tunables (Tunables), after every streamInfo, to viewers that asked for them: the defaults overridden by
     /// `tunables.json` in the store directory, read each time (retuned without a restart).
     static func sendTunables(_ out: ConnectionOutput, _ req: ControlMessage.StreamRequest, _ ctx: HostContext) {
@@ -242,7 +244,7 @@ public enum HostSession {
                 trigger(.rollback, device: device, connection: conn.id, reply: { sendUpdate(.updateStatus($0)) }, remote: remote, ctx: ctx)
             case .pairRequest(let req):
                 guard ctx.sharing() else {
-                    try await stream.send(.reject(.init(reason: Self.notShared))); throw MirageError.pairingFailed("this Mac is not shared")
+                    try await stream.send(.reject(.init(reason: Self.notShared))); throw MirageError.pairingFailed("this \(Self.computerNoun) is not shared")
                 }
                 if !(ctx.missingPermissions?() ?? []).isEmpty { ctx.onShareAttempt?(.pairing(device: req.deviceName)) }
                 try await pair(req, stream, remote: remote, ctx: ctx)

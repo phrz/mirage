@@ -417,20 +417,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func windowWillClose(_ notification: Notification) {
         if (notification.object as? NSWindow) === connectWindow { connectWindow = nil; becomeAccessoryIfIdle(); return }
         guard (notification.object as? NSWindow) === window else { return }
-        let back = disconnecting
         disconnecting = false
         // Closing the viewer ends the session (phrz, 2026-10-28): the host gets `streamStop` before the connection closes,
         // so it stops (curtain down, Lock When Finished) instead of suspending as for a dropped connection.
-        let quitAfter = !(back || hostingCompanion)
-        endSession { [weak self] in if quitAfter { self?.session = nil; NSApp.terminate(nil) } }
+        endSession {}
         MainActor.assumeIsolated { ViewerPreferences.shared.session = nil; controls.model = nil }
         chrome?.stop(); unified?.stop()
-        // Disconnect: back to the connect window. Closing the viewer while hosting: the app stays in the menu bar.
-        // Otherwise closing the viewer quits, as before (once the host has heard the session end).
-        if !quitAfter {
-            session = nil; window = nil; model = nil; toolbar = nil; unified = nil; chrome = nil
-            if back { MainActor.assumeIsolated { showConnectWindow() } } else { becomeAccessoryIfIdle() }
-        }
+        // Back to the device list, as Disconnect does (phrz, 2026-11-21: it used to quit). Closing that list quits Mirage,
+        // or leaves the menu-bar item while this Mac is shared (applicationShouldTerminateAfterLastWindowClosed).
+        session = nil; window = nil; model = nil; toolbar = nil; unified = nil; chrome = nil
+        MainActor.assumeIsolated { showConnectWindow() }
     }
     /// Sends the session's `streamStop` once and runs `then` on the main queue when the host has it (about a second at
     /// most); at once when there is no session.

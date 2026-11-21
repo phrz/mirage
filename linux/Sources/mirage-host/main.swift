@@ -8,7 +8,7 @@ struct MirageHost: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mirage-host",
         abstract: "Mirage host for Linux: shares this computer's screen with paired Mirage viewers over QUIC.",
-        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Check.self, Version.self, Update.self],
+        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Check.self, Version.self, Update.self, Tray.self],
         defaultSubcommand: Serve.self)
 }
 
@@ -48,8 +48,24 @@ struct Serve: AsyncParsableCommand {
             gnome.start(log: { log($0) })
             source = gnome
         }
+        HostSession.computerNoun = "computer"
+        let settingsURL = store.url(HostSettings.fileName)
+        // Lock When Finished (the host's settings, as on a Mac): when the last session ends, the screen locks.
+        let lockIfLast: @Sendable (HostConnections) -> Void = { conns in
+            Task {
+                try? await Task.sleep(for: .seconds(1))
+                guard HostSettings.load(from: settingsURL).lockWhenFinished, await conns.streamingDeviceIDs().isEmpty, geteuid() == 0 else { return }
+                log("the last session ended: locking the screen (Lock When Finished)")
+                let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/loginctl"); p.arguments = ["lock-sessions"]
+                try? p.run()
+            }
+        }
+        let connections = HostConnectionsBox()
         var ctx = HostContext(identity: identity, store: store, tlsFingerprint: tls.fingerprint, log: { log($0) },
-                              makeStreamer: { LinuxStreamer(source: source, log: { log($0) }) })
+                              makeStreamer: { LinuxStreamer(source: source, log: { log($0) }, ended: { if let c = connections.value { lockIfLast(c) } }) })
+        connections.value = ctx.connections
+        // Share This Computer: off, streams and pairing are refused (read at each use, so the icon's change applies at once).
+        ctx.sharing = { HostSettings.load(from: settingsURL).shareThisMac }
         if let updater {
             // A paired Mac's update arrow: this build, the newest verified one, and its trigger.
             ctx.updateInfo = {
@@ -69,6 +85,14 @@ struct Serve: AsyncParsableCommand {
                 log("could not keep the screen from idle-locking: \(String(cString: err))")
             }
         }
+        if geteuid() == 0 {
+            let s = HostSettings.load(from: settingsURL)
+            StayAwake.shared.set(s.shareThisMac && s.stayReachable)
+            let control = LinuxControlServer(ctx: ctx, port: port, log: { log($0) })
+            do { try control.start(); controlServer = control } catch { log("local control unavailable: \(error)") }
+            TrayLauncher.installAutostart(log: { log($0) })
+            TrayLauncher.startInRunningSessions(log: { log($0) })
+        }
         let host = QUICHost(port: port, tls: tls)
         host.log = { log($0) }
         try host.start(onStream: { stream, id, remote in
@@ -86,6 +110,12 @@ struct Serve: AsyncParsableCommand {
     }
 }
 
+/// The local control server, kept for the process's life (its socket's handlers hold it only weakly).
+nonisolated(unsafe) var controlServer: LinuxControlServer?
+
+/// Lets the streamer factory reach the context's connections, made after it.
+final class HostConnectionsBox: @unchecked Sendable { var value: HostConnections? }
+
 struct Pair: AsyncParsableCommand {
     static let configuration = CommandConfiguration(abstract: "Print a one-time 6-digit code and wait for a device to pair.")
     @Option(help: "Seconds the code stays valid.") var timeout: Int = 300
@@ -96,7 +126,7 @@ struct Pair: AsyncParsableCommand {
         let code = PairingCode.generate()
         let pending = Store.PendingPairing(code: code, expiresAt: Date().addingTimeInterval(TimeInterval(timeout)))
         try store.setPendingPairing(pending)
-        let addresses = localAddresses()
+        let addresses = LinuxNetwork.addresses()
         print("""
 
             Pairing code:  \(code.prefix(3)) \(code.suffix(3))
@@ -121,28 +151,6 @@ struct Pair: AsyncParsableCommand {
         store.remove("pending-pair.json")
         print("✗ timed out, code expired")
         throw ExitCode(1)
-    }
-
-    /// IPv4 addresses of this computer's up, non-loopback interfaces, LAN first.
-    func localAddresses() -> [String] {
-        var out: [String] = []
-        var ifap: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&ifap) == 0, let first = ifap else { return [] }
-        defer { freeifaddrs(ifap) }
-        var p: UnsafeMutablePointer<ifaddrs>? = first
-        while let i = p {
-            defer { p = i.pointee.ifa_next }
-            guard let a = i.pointee.ifa_addr, a.pointee.sa_family == UInt16(AF_INET), i.pointee.ifa_flags & UInt32(IFF_LOOPBACK) == 0,
-                  i.pointee.ifa_flags & UInt32(IFF_UP) != 0 else { continue }
-            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            if getnameinfo(a, socklen_t(MemoryLayout<sockaddr_in>.size), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 {
-                let name = String(cString: i.pointee.ifa_name)
-                let addr = String(cString: host)
-                if name.hasPrefix("docker") || name.hasPrefix("br-") || name.hasPrefix("virbr") || name.hasPrefix("veth") { continue }
-                if name.hasPrefix("tailscale") { out.append(addr) } else { out.insert(addr, at: 0) }
-            }
-        }
-        return out
     }
 }
 
@@ -190,5 +198,99 @@ struct Update: AsyncParsableCommand {
         let updater = LinuxUpdater(dir: systemStore, log: { print($0) })
         guard let build = try await updater.stage() else { print("up to date (build \(LinuxBuild.number))"); return }
         updater.install(build, restart: true)
+    }
+}
+
+struct Tray: ParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "The top-bar icon for this desktop session (started at login): Share This Computer, Pair a Device…, Allow / Deny, paired devices, updates.")
+    func run() throws {
+        TrayLauncher.enableAppIndicators()
+        let dir = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"] ?? NSTemporaryDirectory()
+        let path = (dir as NSString).appendingPathComponent("mirage-tray.js")
+        try trayScript.write(toFile: path, atomically: true, encoding: .utf8)
+        let args = ["gjs", "-m", path]
+        var cargs = args.map { strdup($0) } + [nil]
+        execvp("gjs", &cargs)
+        print("cannot start gjs: \(String(cString: strerror(errno)))")
+        throw ExitCode(1)
+    }
+}
+
+/// Where the top-bar icon comes from: a login autostart entry (written by the root service), and, at the service's start,
+/// the icon started in the desktop sessions already running for administrators (others cannot use it).
+enum TrayLauncher {
+    static let autostart = "/etc/xdg/autostart/mirage-tray.desktop"
+    static var entry: String {
+        """
+        [Desktop Entry]
+        Type=Application
+        Name=Mirage
+        Comment=Share this computer with Mirage
+        Exec=\(LinuxUpdater.binary) tray
+        NoDisplay=true
+        X-GNOME-Autostart-enabled=true
+        OnlyShowIn=GNOME;Unity;
+
+        """
+    }
+    static func installAutostart(log: (String) -> Void) {
+        guard (try? String(contentsOfFile: autostart, encoding: .utf8)) != entry else { return }
+        do { try entry.write(toFile: autostart, atomically: true, encoding: .utf8); log("top-bar icon: \(autostart) written") }
+        catch { log("top-bar icon: cannot write \(autostart): \(error)") }
+    }
+
+    /// Graphical sessions' users that are administrators, each once.
+    static func adminSessionUsers() -> [String] {
+        guard let list = run("/usr/bin/loginctl", ["list-sessions", "--no-legend"]) else { return [] }
+        var users: [String] = []
+        for line in list.split(separator: "\n") {
+            guard let id = line.split(separator: " ").first.map(String.init),
+                  let props = run("/usr/bin/loginctl", ["show-session", id, "-p", "Type", "-p", "Class", "-p", "Name", "-p", "Active"]) else { continue }
+            var p: [String: String] = [:]
+            for l in props.split(separator: "\n") { let kv = l.split(separator: "=", maxSplits: 1); if kv.count == 2 { p[String(kv[0])] = String(kv[1]) } }
+            guard ["wayland", "x11"].contains(p["Type"] ?? ""), p["Class"] == "user", let name = p["Name"], !users.contains(name), isAdmin(name) else { continue }
+            users.append(name)
+        }
+        return users
+    }
+
+    static func startInRunningSessions(log: @escaping (String) -> Void) {
+        DispatchQueue.global().async {
+            for user in adminSessionUsers() {
+                // Its own process in that user's session (the user's systemd manager has the desktop's environment). A second
+                // copy only activates the first (one Gio application per session).
+                _ = run("/usr/bin/systemd-run", ["--machine=\(user)@.host", "--user", "--collect", "--quiet", LinuxUpdater.binary, "tray"])
+                log("top-bar icon: started for \(user)")
+            }
+        }
+    }
+
+    static func isAdmin(_ user: String) -> Bool {
+        guard let pw = getpwnam(user) else { return false }
+        if pw.pointee.pw_uid == 0 { return true }
+        var count: Int32 = 64
+        var groups = [gid_t](repeating: 0, count: Int(count))
+        if getgrouplist(pw.pointee.pw_name, pw.pointee.pw_gid, &groups, &count) < 0 { return false }
+        return groups.prefix(Int(max(count, 0))).contains { g in getgrgid(g).map { ["sudo", "admin", "wheel"].contains(String(cString: $0.pointee.gr_name)) } ?? false }
+    }
+
+    /// GNOME shows other apps' top-bar icons through the AppIndicator extension (on Ubuntu installed, though not always on).
+    static func enableAppIndicators() {
+        let ext = "ubuntu-appindicators@ubuntu.com"
+        guard (ProcessInfo.processInfo.environment["XDG_CURRENT_DESKTOP"] ?? "").contains("GNOME"),
+              let info = run("/usr/bin/gnome-extensions", ["info", ext]), !info.contains("State: ACTIVE") else { return }
+        _ = run("/usr/bin/gnome-extensions", ["enable", ext])
+    }
+
+    @discardableResult
+    static func run(_ tool: String, _ args: [String]) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: tool)
+        p.arguments = args
+        let out = Pipe(); p.standardOutput = out; p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+        let d = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return p.terminationStatus == 0 ? String(decoding: d, as: UTF8.self) : nil
     }
 }

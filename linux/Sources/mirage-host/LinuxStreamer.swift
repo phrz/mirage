@@ -41,7 +41,11 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         static func p95(_ v: [Double]) -> Double { v.isEmpty ? 0 : v.sorted()[min(v.count - 1, Int(Double(v.count) * 0.95))] }
     }
 
-    init(source: DesktopSource, log: @escaping @Sendable (String) -> Void) { self.source = source; self.log = log }
+    /// The session ended for good (stop, not suspend): Lock When Finished.
+    private let ended: @Sendable () -> Void
+    init(source: DesktopSource, log: @escaping @Sendable (String) -> Void, ended: @escaping @Sendable () -> Void = {}) {
+        self.source = source; self.log = log; self.ended = ended
+    }
 
     // MARK: DesktopStreamer
 
@@ -143,7 +147,7 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
     func resume(_ request: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
         try await start(request, output: output)
     }
-    func stop() async { await halt() }
+    func stop() async { await halt(); ended() }
     func cachedBytes() async -> Int { 0 }
     func shedCaches() async {}
 
