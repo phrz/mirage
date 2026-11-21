@@ -46,6 +46,16 @@ DR_APP='anchor apple generic and identifier "com.paulherz.mirage" and certificat
 DR_HOST='anchor apple generic and identifier "com.paulherz.mirage.host" and certificate leaf[subject.OU] = "M8MME6Q9DA"'
 
 die() { echo "error: $*" >&2; exit 1; }
+# Reads a 1Password secret reference, trying the default account, then every other signed-in account (a Mac with
+# several accounts may default to one the item is not in). Nothing on stdout when no account has it.
+op_read() {
+    command -v op >/dev/null 2>&1 || return 1
+    op read "$1" 2>/dev/null && return 0
+    for a in $(op account list --format json 2>/dev/null | python3 -c "import json,sys; print(' '.join(x.get('url','') for x in json.load(sys.stdin)))" 2>/dev/null); do
+        op read --account "$a" "$1" 2>/dev/null && return 0
+    done
+    return 1
+}
 tool() { .build/release/mirage-release "$@"; }
 build_tool() { swift build -c release --product mirage-release >/dev/null 2>&1 || swift build -c release --product mirage-release; }
 
@@ -74,15 +84,13 @@ EOF
 # The current manifest key (base64 private key) on stdout: the environment, else 1Password, else the keychain.
 manifest_key() {
     if [ -n "${MIRAGE_MANIFEST_KEY:-}" ]; then echo "$MIRAGE_MANIFEST_KEY"; return; fi
-    if command -v op >/dev/null 2>&1; then
-        k=$(op read "$KEY_REF" 2>/dev/null || true)
-        if [ -n "$k" ]; then echo "$k"; return; fi
-    fi
+    k=$(op_read "$KEY_REF" || true)
+    if [ -n "$k" ]; then echo "$k"; return; fi
     security find-generic-password -s "$KEY_SERVICE" -a current -w
 }
 check_manifest_key() {
     [ -n "${MIRAGE_MANIFEST_KEY:-}" ] && return 0
-    command -v op >/dev/null 2>&1 && op read "$KEY_REF" >/dev/null 2>&1 && return 0
+    op_read "$KEY_REF" >/dev/null && return 0
     security find-generic-password -s "$KEY_SERVICE" -a current >/dev/null 2>&1 && return 0
     cat >&2 <<EOF
 missing: the manifest signing key (1Password: $KEY_REF; or the keychain item $KEY_SERVICE / current).

@@ -25,6 +25,16 @@ TAG=linux-host
 REPO=phrz/mirage
 
 die() { echo "linux release: $*" >&2; exit 1; }
+# Reads a 1Password secret reference, trying the default account, then every other signed-in account (a Mac with
+# several accounts may default to one the item is not in). Nothing on stdout when no account has it.
+op_read() {
+    command -v op >/dev/null 2>&1 || return 1
+    op read "$1" 2>/dev/null && return 0
+    for a in $(op account list --format json 2>/dev/null | python3 -c "import json,sys; print(' '.join(x.get('url','') for x in json.load(sys.stdin)))" 2>/dev/null); do
+        op read --account "$a" "$1" 2>/dev/null && return 0
+    done
+    return 1
+}
 say() { echo "linux release: $*"; }
 REL() { DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer} swift build -c release --product mirage-release >/dev/null && .build/release/mirage-release "$@"; }
 
@@ -34,10 +44,8 @@ commit() { git rev-parse --short HEAD; }
 # The private key, base64, on stdout.
 linux_key() {
     if [ -n "${MIRAGE_LINUX_KEY:-}" ]; then echo "$MIRAGE_LINUX_KEY"; return; fi
-    if command -v op >/dev/null 2>&1; then
-        k=$(op read "$KEY_REF" 2>/dev/null || true)
-        if [ -n "$k" ]; then echo "$k"; return; fi
-    fi
+    k=$(op_read "$KEY_REF" || true)
+    if [ -n "$k" ]; then echo "$k"; return; fi
     if [ -f "$KEY_FILE" ]; then python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['privateKey'])" "$KEY_FILE"; return; fi
     die "no Linux manifest key: install the 1Password CLI and sign in (it reads $KEY_REF), or set MIRAGE_LINUX_KEY"
 }
