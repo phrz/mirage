@@ -27,7 +27,8 @@ public struct MirageVersion: Codable, Equatable, Hashable, Sendable, Comparable 
 
     /// This process's build, from its bundle's Info.plist: the host inside Mirage.app (Bundle.main is the app for an
     /// executable in Contents/MacOS), the viewer app. A bare SwiftPM binary has no Info.plist: build 0, "unknown".
-    public static let current: MirageVersion = from(infoDictionary: Bundle.main.infoDictionary ?? [:])
+    /// The Linux host has no Info.plist and sets its own at start, before serving.
+    nonisolated(unsafe) public static var current: MirageVersion = from(infoDictionary: Bundle.main.infoDictionary ?? [:])
 
     /// A bundle's version from its Info.plist keys (also used on a staged bundle before it is installed).
     public static func from(infoDictionary info: [String: Any]) -> MirageVersion {

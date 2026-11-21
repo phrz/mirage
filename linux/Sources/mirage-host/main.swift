@@ -32,6 +32,7 @@ struct Serve: AsyncParsableCommand {
     func run() async throws {
         setvbuf(stdout, nil, _IOLBF, 0)
         log("mirage-host build \(LinuxBuild.number) (\(LinuxBuild.commit))")
+        MirageVersion.current = LinuxUpdater.current   // what Welcomes report
         // First: a build on trial that fails anywhere later is counted.
         let updater = geteuid() == 0 ? LinuxUpdater(dir: systemStore, log: { log($0) }) : nil
         updater?.beginStart()
@@ -47,8 +48,19 @@ struct Serve: AsyncParsableCommand {
             gnome.start(log: { log($0) })
             source = gnome
         }
-        let ctx = HostContext(identity: identity, store: store, tlsFingerprint: tls.fingerprint, log: { log($0) },
+        var ctx = HostContext(identity: identity, store: store, tlsFingerprint: tls.fingerprint, log: { log($0) },
                               makeStreamer: { LinuxStreamer(source: source, log: { log($0) }) })
+        if let updater {
+            // A paired Mac's update arrow: this build, the newest verified one, and its trigger.
+            ctx.updateInfo = {
+                var info = HostUpdateInfo(latestAvailable: updater.latestAvailable, permission: UpdatePermission(policy: .automatic, viewerMayTrigger: true))
+                info.channel = .stable
+                info.installed = LinuxUpdater.current
+                return info
+            }
+            ctx.updateHandler = { cmd, _, reply in await updater.handle(cmd, reply: reply) }
+            ctx.welcomed = { updater.refreshSoon() }
+        }
         if geteuid() != 0, !allowLock {
             var err = [CChar](repeating: 0, count: 256)
             if md_inhibit_idle("Shared with Mirage: GNOME stops screen sharing when the screen locks", &err, err.count) == 0 {
@@ -64,7 +76,8 @@ struct Serve: AsyncParsableCommand {
         })
         log("mirage host \(identity.name) (Linux) id=\(identity.id.prefix(12)) devices=\(try store.authorizedDevices().count), listening on udp/\(port)")
         if let updater {
-            if updater.disabled { log("automatic updates: off (\(updater.disabledPath))") }
+            updater.watchTrial(ctx: ctx)   // a new build's trial ends the same way whether or not it installs on its own
+            if updater.disabled { log("automatic updates: off (\(updater.disabledPath)); a viewer's update still works") }
             else { updater.start(ctx: ctx) }
         }
         while true { try await Task.sleep(for: .seconds(3600)) }

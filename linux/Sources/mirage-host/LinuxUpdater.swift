@@ -18,7 +18,10 @@ import Crypto
 /// The state (`linux-update.json`) is read at a fixed path before anything else at start, so a build that fails early is
 /// counted too; a lock file keeps the service and `mirage-host update` from installing at once.
 ///
-/// `/var/lib/mirage/no-auto-update` turns it off; `sudo mirage-host update` checks now.
+/// A paired Mac's update arrow works too: the Welcome reports this build and the newest verified one (refreshed when a
+/// viewer checks in, at most every 10 minutes), and an update or rollback request runs the same verified path at once.
+///
+/// `/var/lib/mirage/no-auto-update` turns the automatic install off; `sudo mirage-host update` checks now.
 final class LinuxUpdater: @unchecked Sendable {
     static let release = URL(string: "https://github.com/phrz/mirage/releases/download/linux-host/")!
     /// Tests: another feed (http allowed), from the service's environment, which only root sets.
@@ -47,6 +50,21 @@ final class LinuxUpdater: @unchecked Sendable {
     private let lock = NSLock()
     private var checking = false
     private var lockFD: Int32 = -1
+    private var latest: MirageVersion?
+    private var latestAt: Date?
+
+    /// How builds show in the viewer: "Linux (602)".
+    static func version(_ build: Int, _ commit: String) -> MirageVersion {
+        MirageVersion(version: "Linux", build: build, commit: commit, channel: .stable)
+    }
+    static var current: MirageVersion { version(LinuxBuild.number, LinuxBuild.commit) }
+
+    /// The newest build a verified manifest named, for the Welcome (nil: none newer known).
+    var latestAvailable: MirageVersion? {
+        lock.lock(); defer { lock.unlock() }
+        guard let l = latest, l.build > LinuxBuild.number else { return nil }
+        return l
+    }
 
     init(dir: URL, log: @escaping @Sendable (String) -> Void) { self.dir = dir; self.log = log }
 
@@ -108,7 +126,7 @@ final class LinuxUpdater: @unchecked Sendable {
     }
 
     /// Ends this build's trial once a viewer has streamed for a minute without a break, or after a day up.
-    private func watchTrial(ctx: HostContext) {
+    func watchTrial(ctx: HostContext) {
         guard loadState().trial?.build == LinuxBuild.number else { return }
         Task.detached { [self] in
             let start = Date()
@@ -129,7 +147,6 @@ final class LinuxUpdater: @unchecked Sendable {
 
     /// Checks every 6 hours, the first a minute after start; installs once nobody is streaming.
     func start(ctx: HostContext) {
-        watchTrial(ctx: ctx)
         Task.detached { [self] in
             try? await Task.sleep(for: .seconds(60))
             while true {
@@ -154,14 +171,7 @@ final class LinuxUpdater: @unchecked Sendable {
         guard takeLock() else { log("update: another update is running"); return nil }
         var keepLock = false
         defer { if !keepLock { dropLock() } }
-        let name = "linux-\(Self.arch).manifest"
-        let manifestURL = Self.feed.appendingPathComponent("\(name).json")
-        let data = try fetch(manifestURL, maxBytes: 64 << 10)
-        let sigs = try fetch(Self.feed.appendingPathComponent("\(name).sigs.json"), maxBytes: 64 << 10)
-        let verified = try ManifestVerifier.verify(manifest: data, signatures: sigs,
-                                                   trust: ManifestTrust(compiled: LinuxTrustedKeys.compiled, learned: [], revoked: []),
-                                                   channel: nil)
-        let m = verified.manifest
+        let (m, manifestURL) = try verifiedManifest()
         guard m.build > LinuxBuild.number else { return nil }
         guard !loadState().refused.contains(m.build) else { return nil }
         guard let url = m.zipURL(relativeTo: manifestURL), url.scheme == "https" || Self.testFeed != nil else { throw MirageError.storage("manifest names no https binary") }
@@ -180,6 +190,73 @@ final class LinuxUpdater: @unchecked Sendable {
         log("update: build \(m.build) downloaded and checked")
         keepLock = true   // held until install
         return m.build
+    }
+
+    /// The feed's manifest for this processor, its signature verified; remembered as the newest build seen.
+    private func verifiedManifest() throws -> (Manifest, URL) {
+        let name = "linux-\(Self.arch).manifest"
+        let manifestURL = Self.feed.appendingPathComponent("\(name).json")
+        let data = try fetch(manifestURL, maxBytes: 64 << 10)
+        let sigs = try fetch(Self.feed.appendingPathComponent("\(name).sigs.json"), maxBytes: 64 << 10)
+        let verified = try ManifestVerifier.verify(manifest: data, signatures: sigs,
+                                                   trust: ManifestTrust(compiled: LinuxTrustedKeys.compiled, learned: [], revoked: []),
+                                                   channel: nil)
+        let m = verified.manifest
+        let refused = loadState().refused.contains(m.build)
+        lock.lock(); latest = refused ? nil : Self.version(m.build, m.commit); latestAt = Date(); lock.unlock()
+        return (m, manifestURL)
+    }
+
+    /// A viewer checked in: read the manifest again when the last read is over 10 minutes old (no download).
+    func refreshSoon() {
+        lock.lock()
+        let due = latestAt.map { Date().timeIntervalSince($0) > 600 } ?? true
+        if due { latestAt = Date() }
+        lock.unlock()
+        guard due else { return }
+        Task.detached { [self] in
+            do { _ = try verifiedManifest() } catch { log("update: \(error)") }
+        }
+    }
+
+    /// An update or rollback a paired viewer asked for: progress to it, then the restart (the process exits).
+    func handle(_ cmd: UpdateCommand, reply: @escaping @Sendable (ControlMessage.UpdateStatus) -> Void) async {
+        let from = Self.current
+        switch cmd {
+        case .update(let target):
+            reply(.init(phase: .checking, message: "Checking for a newer build…", from: from, yours: true))
+            do {
+                guard let build = try await stage() else {
+                    let asked = target.map { $0 > LinuxBuild.number } ?? false
+                    reply(.init(phase: .failed, message: asked ? "That build is not published yet" : "Already up to date (\(from.display))",
+                                from: from, yours: true, notPublished: asked ? true : nil))
+                    return
+                }
+                let to = Self.version(build, latestAvailable?.commit ?? "")
+                reply(.init(phase: .installing, message: "Installing \(to.display)…", from: from, to: to, yours: true))
+                reply(.init(phase: .restarting, message: "Restarting into \(to.display)…", from: from, to: to, yours: true))
+                try? await Task.sleep(for: .milliseconds(500))   // the replies leave first
+                install(build, restart: false)
+            } catch {
+                reply(.init(phase: .failed, message: "\(error)", from: from, yours: true))
+            }
+        case .rollback:
+            guard FileManager.default.fileExists(atPath: Self.previous), takeLock() else {
+                reply(.init(phase: .failed, message: "No earlier build to go back to", from: from, yours: true)); return
+            }
+            reply(.init(phase: .restarting, message: "Going back to the previous build…", from: from, yours: true))
+            try? await Task.sleep(for: .milliseconds(500))
+            guard rename(Self.previous, Self.binary) == 0 else {
+                dropLock(); reply(.init(phase: .failed, message: "Cannot put the previous build back", from: from, yours: true)); return
+            }
+            syncDirectory(Self.binary)
+            var s = loadState()
+            s.trial = nil
+            if !s.refused.contains(LinuxBuild.number) { s.refused.append(LinuxBuild.number) }
+            save(s)
+            log("update: rolled back from build \(LinuxBuild.number) at a viewer's request")
+            exit(0)
+        }
     }
 
     /// Puts the staged binary in place (the installed one kept as .previous) and starts it: the service exits for systemd
