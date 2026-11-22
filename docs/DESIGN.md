@@ -1792,6 +1792,14 @@ About 4.5–5 days for 1–4.
 2. On the outer display (closed), should a connect start in Desktop or Unified, or the last one used?
 3. Open inner display: two windows side by side by default, or one window with the strip until you drag a second?
 
+**Host side (as built, 2026-11-22).** Strip windows (`ViewInterest.stillLayers`) are captured at 2 fps; their changes are
+held in the tile tracker (`holdForStill`) and released to lossless refinement by `StillCadence`: once the window has
+been quiet 1 s, at most one picture every 4 s, and a window that never settles is released anyway after 4 s. No video,
+copy-rects or small-animation path; they come last in refinement order. A strip window's first still goes even during
+motion. Temporary fits (`WindowCommand.temporary`) keep the window's first frame (`TemporaryFrames`), clamp the size to
+its display's visible area and keep the window on that display; the frame is put back on a temporary `.restore`, when
+the viewer leaves Unified mode and when the session stops (not on a suspend).
+
 ### 3.12 The curtain: evil-maid protection while a session streams (phrz approved, 2026-10-26; as built)
 
 **Threat.** While someone uses the host remotely, the Mac itself sits unlocked at its desk: anyone walking past could see

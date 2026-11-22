@@ -91,6 +91,33 @@ final class WindowTracker {
         return rects
     }
 
+    /// Every display's visible area (menu bar and Dock left out; global points, top-left origin), from NSScreen on the main
+    /// queue, refreshed when older than 2 s. Until it first answers (and for a display NSScreen does not list): the display's
+    /// bounds less a 24-pt menu bar.
+    private var visibleAreasCache: [CGRect] = []
+    private var visibleAskedNanos: UInt64 = 0
+    func visibleAreas() -> [CGRect] {
+        let now = Clock.nowNanos()
+        lock.lock()
+        let cached = visibleAreasCache
+        let ask = now &- visibleAskedNanos > 2_000_000_000
+        if ask { visibleAskedNanos = now }
+        lock.unlock()
+        if ask {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let primary = NSScreen.screens.first else { return }
+                let h = primary.frame.height
+                let areas = NSScreen.screens.map { s -> CGRect in let v = s.visibleFrame; return CGRect(x: v.minX, y: h - v.maxY, width: v.width, height: v.height) }
+                self.lock.lock(); self.visibleAreasCache = areas; self.lock.unlock()
+            }
+        }
+        if !cached.isEmpty { return cached }
+        var count: UInt32 = 0
+        var ids = [CGDirectDisplayID](repeating: 0, count: 16)
+        guard CGGetActiveDisplayList(16, &ids, &count) == .success, count > 0 else { return [displayBounds] }
+        return ids.prefix(Int(count)).map { let b = CGDisplayBounds($0); return CGRect(x: b.minX, y: b.minY + 24, width: b.width, height: max(0, b.height - 24)) }
+    }
+
     /// The Dock's icon list frame from Accessibility (global points, top-left origin), nil if unavailable.
     private static func axDockFrame() -> CGRect? {
         guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { return nil }
