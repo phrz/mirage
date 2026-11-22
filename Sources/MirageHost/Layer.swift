@@ -55,6 +55,10 @@ final class Layer {
     /// Visible tiles held back (not due) at the last invariant audit.
     var auditHeldVisible = Set<Int>()
     var frontmost = false
+    /// Unified on a phone or tablet: the viewer shows this window only as a small still (`ViewInterest.stillLayers`). Its
+    /// changes are held and released on `stillCadence` (DesktopStreamer.captured, releaseStills).
+    var stillOnly = false
+    var stillCadence = StillCadence()
     /// When a capture last found changed tiles (0: never): the window capture runs at the tier's video rate while it moves.
     var contentChangedNanos: UInt64 = 0
     /// Video frames sent since the last 5-s stats line.

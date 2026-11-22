@@ -112,6 +112,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
     /// Window-command targets of windows that left the list (minimized from the viewer), for the restore.
     private var lastTargets: [UInt32: (target: AXWindows.Target, nanos: UInt64)] = [:]
+    /// Frames windows had before Unified on a phone or tablet fitted them to its panes (`WindowCommand.temporary`): put back
+    /// on a temporary restore, when the viewer leaves Unified mode and when the session ends (not on a suspend: the viewer
+    /// comes back). When windows absent from the list were last checked for having gone away.
+    private var temporaryFrames = TemporaryFrames()
+    private var temporaryGoneCheckNanos: UInt64 = 0
     private var request: ControlMessage.StreamRequest?
     private var target: ScreenCapturer.Target?
 
@@ -1217,6 +1222,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let was = self.unifiedView, wasWhole = self.wholeOnly
                 self.interest = v
                 if was != v.unified { self.log(v.unified ? "viewer: Unified mode (window layers by the viewer's arrangement, display layer only where shown)" : "viewer: Desktop mode") }
+                if v.unified { _ = self.windows?.visibleAreas() }   // (its first temporary fit then knows the Dock)
+                else if was { self.restoreTemporaryFrames(why: "viewer left Unified mode") }
                 if let s = self.windows?.current { self.reconcileLayers(s, now: Clock.nowNanos()) }
                 if wasWhole != self.wholeOnly { self.switchPipeline(toWhole: self.wholeOnly) }
             }
@@ -1275,6 +1282,15 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// count it as an input so the next window list can say it reflects it.
     private func handle(windowCommand c: ControlMessage.WindowCommand) {
         guard let windows, let ax, let s = windows.current else { return }
+        // Unified on a phone or tablet: the window back to the frame it had before the viewer fitted it (not an un-minimize).
+        if c.action == .restore, c.temporary == true {
+            if InputInjector.consoleLocked() { return }
+            if InputInjector.sinkPath != nil, s.byID[c.id]?.app != "Mirage Test Bench" { injector?.record(.windowCommand(c)); return }
+            statWindowCommands += 1
+            if let seq = c.inputSeq { injector?.noteApplied(seq: seq) }
+            restoreTemporaryFrame(c.id, refresh: true)
+            return
+        }
         // A window minimized from the viewer is no longer listed: its restore goes to the last target it had.
         if s.byID[c.id] == nil, c.action == .restore || c.action == .raise, let last = lastTargets[c.id], !InputInjector.consoleLocked() {
             if InputInjector.sinkPath != nil { injector?.record(.windowCommand(c)); return }
@@ -1293,8 +1309,16 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         if InputInjector.sinkPath != nil, w.app != "Mirage Test Bench" || ![.move, .raise, .resize].contains(c.action) { injector?.record(.windowCommand(c)); return }
         // Whole points: a fractional origin (stream pixels ÷ 1.89 on mac-daddy) made the window list report a size that
         // wobbled by a pixel as the window moved, and every wobble re-sent the layer (~400 KB per Finder drag).
-        let origin = (c.x != nil && c.y != nil) ? { let p = windows.originInPoints(x: c.x!, y: c.y!); return CGPoint(x: p.x.rounded(), y: p.y.rounded()) }() : nil
-        let size = (c.width != nil && c.height != nil) ? CGSize(width: Double(c.width!) / windows.pxPerPoint, height: Double(c.height!) / windows.pxPerPoint) : nil
+        var origin = (c.x != nil && c.y != nil) ? { let p = windows.originInPoints(x: c.x!, y: c.y!); return CGPoint(x: p.x.rounded(), y: p.y.rounded()) }() : nil
+        var size = (c.width != nil && c.height != nil) ? CGSize(width: Double(c.width!) / windows.pxPerPoint, height: Double(c.height!) / windows.pxPerPoint) : nil
+        if c.action == .resize, c.temporary == true, let want = size {
+            // Fitted to the viewer's pane for as long as it shows it: the frame it had first is kept for the restore. The size
+            // fits the display's visible area (menu bar, Dock), and the whole window stays on its display.
+            temporaryFrames.willResize(c.id, current: bounds)
+            let f = TemporaryFrames.fit(size: want, origin: origin, current: bounds, visibleAreas: windows.visibleAreas())
+            origin = CGPoint(x: f.minX.rounded(), y: f.minY.rounded())
+            size = CGSize(width: f.width.rounded(.down), height: f.height.rounded(.down))
+        }
         if c.action == .move || c.action == .raise { lastMotionNanos = Clock.nowNanos() }
         if c.action == .move { layers[c.id]?.movedNanos = Clock.nowNanos() }
         if let seq = c.inputSeq { injector?.noteApplied(seq: seq) }
@@ -1305,6 +1329,47 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 // Make the list reflect it as soon as it happened, not at the next 50 ms tick.
                 if let w = self.windows?.sample(captureSeq: self.captureSeq, now: Clock.nowNanos(), force: true) { self.reconcileLayers(w.sample, now: Clock.nowNanos()); self.pendingMoved += w.moved; self.publishWindows(now: Clock.nowNanos(), full: false) }
             }
+        }
+    }
+
+    /// Puts a temporarily fitted window back where it was (and forgets the frame). `refresh`: the window list is re-sampled
+    /// once it is done (a viewer's command; not while the session ends).
+    private func restoreTemporaryFrame(_ id: UInt32, refresh: Bool) {
+        guard let frame = temporaryFrames.take(id), let ax, let s = windows?.current else { return }
+        let target: AXWindows.Target
+        if let w = s.byID[id], let bounds = s.pointBounds[id] { target = .init(id: w.id, pid: w.pid, title: w.title, bounds: bounds) }
+        else if let last = lastTargets[id] { target = last.target }   // minimized: not listed
+        else { return }
+        ax.apply(.init(id: id, action: .resize, width: Int(frame.width), height: Int(frame.height)), target: target, origin: frame.origin, size: frame.size) { [weak self] ok in
+            guard let self else { return }
+            self.queue.async {
+                if !ok { self.log("window \(id): its frame from before Unified could not be put back") }
+                guard refresh, let w = self.windows?.sample(captureSeq: self.captureSeq, now: Clock.nowNanos(), force: true) else { return }
+                self.reconcileLayers(w.sample, now: Clock.nowNanos()); self.pendingMoved += w.moved; self.publishWindows(now: Clock.nowNanos(), full: false)
+            }
+        }
+    }
+    /// Every temporarily fitted window back (the viewer left Unified mode, or the session ends), with the same guards as
+    /// window commands.
+    private func restoreTemporaryFrames(why: String) {
+        guard !temporaryFrames.isEmpty else { return }
+        let ids = Array(temporaryFrames.original.keys)
+        if InputInjector.consoleLocked() { _ = temporaryFrames.takeAll(); log("\(why): console locked; \(ids.count) windows keep the size Unified gave them"); return }
+        let bench = InputInjector.sinkPath != nil
+        for id in ids {
+            if bench, windows?.current?.byID[id]?.app != "Mirage Test Bench" { temporaryFrames.forget(id); continue }
+            restoreTemporaryFrame(id, refresh: false)
+        }
+        log("\(why): \(ids.count) windows back to their frames from before Unified")
+    }
+    /// Windows with a kept frame that left the list: gone for good (closed, the app quit) drops the frame; a minimized one
+    /// keeps it (CGWindowList still knows it). At most once a second.
+    private func forgetGoneTemporaryFrames(_ s: WindowTracker.Sample, now: UInt64) {
+        guard !temporaryFrames.isEmpty, Clock.elapsed(since: temporaryGoneCheckNanos, now: now) > 1_000_000_000 else { return }
+        temporaryGoneCheckNanos = now
+        for id in temporaryFrames.original.keys where s.byID[id] == nil {
+            let info = CGWindowListCopyWindowInfo([.optionIncludingWindow], CGWindowID(id)) as? [[String: Any]] ?? []
+            if info.isEmpty { temporaryFrames.forget(id) }
         }
     }
 
@@ -1530,6 +1595,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 self.statTimer?.cancel(); self.statTimer = nil
                 self.refineTimer?.cancel(); self.refineTimer = nil
                 self.rateTimer?.cancel(); self.rateTimer = nil
+                self.restoreTemporaryFrames(why: "session ended")
                 self.capturer = nil; self.output = nil; self.setLive(false); self.truthTimer?.cancel(); self.truthTimer = nil
                 self.layers = [:]
                 self.chrome?.stop(); self.chrome = nil
@@ -1824,6 +1890,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Creates, resizes, stops and reprioritises window layers after a window-list sample; computes
     /// occlusion; keeps the display stream's exclusion list in step with the layers the viewer shows.
     private func reconcileLayers(_ s: WindowTracker.Sample, now: UInt64) {
+        forgetGoneTemporaryFrames(s, now: now)
         guard let t = target, let d = display else { return }
         let displayRect = d.bounds
         InputInjector.shieldWindow = ScreenLock.shieldPresent(s.windows, display: displayRect)
@@ -1924,6 +1991,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             guard let l = layers[w.id] else { continue }
             var (fraction, covering) = WindowTracker.occlusion(of: w, in: occluders, display: displayRect)
             let hiddenHere = interest?.hiddenLayers?.contains(w.id) ?? false
+            let stillHere = unifiedView && !hiddenHere && (interest?.stillLayers?.contains(w.id) ?? false)
+            if stillHere != l.stillOnly {
+                // Shown again (or no longer a still): what its still held back is due now. Becoming a still: a cadence of its own.
+                if l.stillOnly { _ = l.tracker.releaseHeld(Set(0..<l.tracker.tileCount), now: now) }
+                l.stillOnly = stillHere
+                l.stillCadence = StillCadence()
+                if debugLayers { log("layer \(l.id): \(stillHere ? "a still in the viewer's window strip" : "shown")") }
+            }
             if unifiedView {
                 // Unified: the viewer stacks windows itself; only the part off this display (not capturable) and a
                 // window minimized there count as hidden.
@@ -2747,7 +2822,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     /// Layers in the order refinement serves them (DESIGN §3.3): the window under the pointer, the focused (frontmost normal-level) window, then
-    /// the other visible windows by visible area, then the hidden ones, then the display (its visible part before
+    /// the other visible windows by visible area, then the hidden ones, then the viewer's small stills, then the display (its visible part before
     /// its underlay: planBlocks).
     private func layersByPriority() -> [Layer] {
         guard let d = display else { return [] }
@@ -2762,6 +2837,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         ordered += visible.sorted { a, b in Double(a.0.frame.area) * a.1.visibleFraction > Double(b.0.frame.area) * b.1.visibleFraction }.map(\.1)
         for w in list { if let l = layers[w.id], !ordered.contains(where: { $0 === l }) { ordered.append(l) } }
         if compositor, let ov = layers[ControlMessage.WindowInfo.overlayID] { ordered.insert(ov, at: 0) }   // the menu bar, the Dock, menus first
+        // Windows the viewer shows only as small stills (Unified's strip) after every window it actually shows.
+        ordered = ordered.filter { !$0.stillOnly } + ordered.filter(\.stillOnly)
         ordered.append(d)
         return ordered
     }
@@ -2970,6 +3047,22 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         layer.account.dirtyTiles += dirty.count
         tracker.noteContent(dirty, seq: captureSeq)   // (TileKey: what changed, at this capture)
         if dirty.isEmpty { layer.lastFrame = pb; layer.tracker = tracker; refine(now: now); return }
+        // A window the viewer shows only as a small still (Unified's window strip on a phone or tablet): none of the paths
+        // below (copy-rects, classify's video and lossless, small animations, the backdrop hold) apply. Its changed tiles are
+        // held in the tracker (holdForStill: not due, no backlog, no presentation level waits for them) and the capture
+        // counts as no motion; releaseStills makes them due refinement on StillCadence (once it settles, at most one every
+        // ~4 s), so the strip gets an occasional crisp lossless picture through the ordinary refinement queue, behind every
+        // shown layer (layersByPriority puts still layers last). Its capture runs at `stillCaptureFPS`. Its first picture
+        // is the layer's ordinary still (fresh `.still`), which goes even during motion (refine).
+        if layer.stillOnly {
+            let notShown = layer.occludedTiles.union(layer.offDisplayTiles)
+            let hidden = dirty.filter { notShown.contains($0) }
+            if !hidden.isEmpty { tracker.defer(hidden, now: now, delayNanos: 3_600_000_000_000, direct: false) }
+            tracker.holdForStill(dirty.filter { !notShown.contains($0) }, now: now)
+            layer.stillCadence.changed(now: now)
+            layer.tracker = tracker; layer.lastFrame = pb
+            return
+        }
         // A window moving (or 300 ms after it moved) whose pixels changed widely: its translucent parts (Liquid Glass
         // toolbars and sidebars) show the blurred desktop behind it, which a move changes everywhere. Nothing goes now:
         // the tiles are held, the window settles, one lossy whole-layer level shows it (sendBackdropLevels), and lossless
@@ -3576,6 +3669,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// within `windowCaptureBudgetFPS`: the idle rates first, then the animating windows, frontmost first and then by
     /// visible area; none drops below its idle rate. Visibility is the previous reconcile's.
     static let windowCaptureBudgetFPS = 120
+    /// A still layer's capture rate: enough to tell a settled window from a changing one, at the cost of a hidden window's.
+    static let stillCaptureFPS = 2
     /// Every tick: a window that starts or stops animating in place changes no window list, so `reconcileLayers` (run on
     /// list changes) never raised its rate: the LAN row's bench stayed at 7-10 fps on 327ecc2. Only captures whose rate
     /// changes are touched.
@@ -3594,6 +3689,8 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         var rates: [UInt32: Int] = [:]
         var animating: [Layer] = []
         for l in ls where l.visibleFraction > 0.001 {
+            // A still in the viewer's window strip: a settled picture every few seconds at most, never motion (releaseStills).
+            if l.stillOnly { rates[l.id] = Self.stillCaptureFPS; continue }
             let idle = l.id == frontID ? 30 : 10
             rates[l.id] = idle
             if l.contentChangedNanos > 0, Clock.elapsed(since: l.contentChangedNanos, now: now) < 2_000_000_000, videoFPS > idle { animating.append(l) }
@@ -4556,8 +4653,19 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Where refine() stopped, per 5 s (diagnostics: what holds refinement back when visible tiles stay soft).
     private var refineGates: [String: Int] = [:]
     private func gate(_ g: String) { refineGates[g, default: 0] += 1 }
+    /// Still layers (captured holds their changes): what each holds becomes due refinement when its cadence says so, the
+    /// tiles the viewer can see (covered or off-display ones wait to be uncovered, as for any layer).
+    private func releaseStills(now: UInt64) {
+        for l in layers.values where l.stillOnly && l.stillCadence.due(now: now) {
+            let n = l.tracker.releaseHeld(Set(0..<l.tracker.tileCount).subtracting(l.occludedTiles).subtracting(l.offDisplayTiles), now: now)
+            l.stillCadence.released(now: now)
+            if debugLayers { log("layer \(l.id): still refreshed, \(n) tiles due") }
+        }
+    }
+
     private func refine(now: UInt64) {
         wholeCheck(now: now)
+        releaseStills(now: now)
         // A lock or unlock: the display's whole still first, from the first frame after the switch, ahead of every budget and
         // pacing gate. Changed tiles of a lock screen that keeps changing (the clock, the blur) used the tile budget and the
         // still never went: 60 % of mac-daddy's lock screen stayed unfilled on 510 (phrz, 2026-10-27).
@@ -4603,6 +4711,11 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         // flight at most (so it cannot build the queue the next keystroke would wait in).
         // Sustained motion: refinement sends nothing and its queue is frozen (the blocks too). Video has
         // the whole target meanwhile; refinement resumes 300 ms after the motion stops, locus first.
+        // A window in the viewer's strip with no picture at all yet: its still goes now, motion or not (one lossy still, paced
+        // by freshStep's own block gate); the strip needs a thumbnail at once.
+        if motionSustained(now), let l = layersByPriority().first(where: { $0.stillOnly && $0.fresh == .still && $0.lastFrame != nil && !$0.stillSent }) {
+            freshStep(l, now: now)
+        }
         guard !motionSustained(now) else {
             gate("motion")
             // Video under half its budget (a small moving region) is the picture's rate, not the link's.
@@ -4913,7 +5026,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 let bytes = submitIntermediate(l, from: f, nanos: now, backdrop: true)
                 debit("backdrop", Double(bytes))
                 pacer.noteDirect(bytes: bytes, now: now)
-            } else if Clock.elapsed(since: l.movedNanos, now: now) >= Self.backdropIdleNanos, Clock.elapsed(since: lastMotionNanos, now: now) >= 2_000_000_000, l.tracker.heldCount > 0 {
+            } else if !l.stillOnly, Clock.elapsed(since: l.movedNanos, now: now) >= Self.backdropIdleNanos, Clock.elapsed(since: lastMotionNanos, now: now) >= 2_000_000_000, l.tracker.heldCount > 0 {
                 let n = l.tracker.releaseHeld(now: now)
                 statBackdropReleased += n
                 if debugLayers { log("layer \(l.id): idle; \(n) backdrop tiles released to lossless refinement") }

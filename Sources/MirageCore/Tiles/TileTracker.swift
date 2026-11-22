@@ -187,6 +187,23 @@ public struct TileTracker {
             cells[i] = c
         }
     }
+    /// A change of a window the viewer shows only as a small still (StillCadence): recorded and held like a backdrop
+    /// (not due, not owed by a presentation level, not a backlog, not audited) until the still's next release
+    /// (`releaseHeld(_:now:)`). A tile a release already made due stays due: it goes from whatever the frame is when its
+    /// turn comes, and a window that keeps changing cannot push its own refinement back for good.
+    public mutating func holdForStill(_ tiles: [Int], now: UInt64) {
+        for i in tiles where i >= 0 && i < cells.count {
+            var c = cells[i]
+            if now &- c.lastDirtyNanos > tuning.historyNanos { c.hits = 0 }
+            c.lastDirtyNanos = now
+            if !(c.pending && !c.held && c.dueNanos <= now) {
+                c.pending = true; c.viaVideo = false; c.direct = false; c.held = true
+                if c.pendingSince == 0 { c.pendingSince = now }
+                c.dueNanos = .max
+            }
+            cells[i] = c
+        }
+    }
     /// These held tiles become due now (they came back onto the display). Returns how many.
     @discardableResult
     public mutating func releaseHeld(_ tiles: Set<Int>, now: UInt64) -> Int {
