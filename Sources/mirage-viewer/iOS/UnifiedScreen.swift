@@ -75,16 +75,19 @@ final class MobileUnified: ObservableObject {
         let list = candidates()
         guard !list.isEmpty || !cards.isEmpty else { session.setViewInterest(.init(unified: true, displayRects: [], hiddenLayers: [], stillLayers: [])); return }
         let ids = Set(list.map(\.id))
+        let listed = Set(session.hostOrder().map(\.id))
         // A stable strip: windows keep their place; a new one comes in at the front (where the host just opened it).
-        order.removeAll { !ids.contains($0) }
+        order.removeAll { !ids.contains($0) && !(listed.contains($0) && panes.contains($0)) }
         for w in list.reversed() where !order.contains(w.id) { order.insert(w.id, at: 0) }
         let byID = Dictionary(list.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var next = order.compactMap { id -> Card? in
             guard let w = byID[id] else { return nil }
             return Card(id: id, title: w.title, app: w.app ?? "", image: cards.first { $0.id == id }?.image)
         }
-        // Panes: a window that went away leaves its pane; none left shows the host's frontmost window.
-        var p = panes.filter { ids.contains($0) }
+        // Panes: a window that went away leaves its pane; none left shows the host's frontmost window. Gone means not listed
+        // at all: while the host resizes a window it may briefly not be a candidate (not layered yet, or mid-change), and
+        // dropping it then undid a split for good.
+        var p = panes.filter { listed.contains($0) }
         if p.isEmpty, let front = list.first?.id { p = [front] }
         if p != panes { panes = p; focused = min(focused, max(0, p.count - 1)) }
         if Clock.elapsed(since: lastThumbs, now: Clock.nowNanos()) > 1_000_000_000 { lastThumbs = Clock.nowNanos(); updateThumbnails(&next) }
