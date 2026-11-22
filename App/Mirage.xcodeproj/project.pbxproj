@@ -32,6 +32,7 @@
 		D3F97D038F9250050FA17FE6 /* FrameRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AC0202C99A0D70F399D3307 /* FrameRecorder.swift */; };
 		E625DF2408EB215132DD7892 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2DA7AE0BDF90A099212DED70 /* Assets.xcassets */; };
 		EA3E0E78C3C0B6AFC60D4E2B /* Unified.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C92DC8DF01A4C1DA1C1D47C /* Unified.swift */; platformFilters = (macos, ); };
+		EE4E916D5DEFCF2D5DF6F883 /* DuoPoseReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2972E1B0F71CA07A19FDA536 /* DuoPoseReader.swift */; platformFilters = (ios, ); };
 		F65B1355DAC4957AFDDB166C /* DesktopScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D94099A71D8AD29B4BD2E85 /* DesktopScreen.swift */; platformFilters = (ios, ); };
 		FA8F16A91020EE8BC1963847 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0003F84E3451502535B85F5 /* main.swift */; platformFilters = (macos, ); };
 		FAF456F4D2244C37CB79C758 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = F366146B8A77C7662288C1DE /* Keychain.swift */; };
@@ -45,6 +46,7 @@
 		1F1B24601B3BA9FBB7FA9EBA /* Mirage.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Mirage.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1FC92DFBEF1A760FADB7938B /* MirageMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MirageMobileApp.swift; sourceTree = "<group>"; };
 		2733E6F347ED1DBD6DF6D971 /* Chrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Chrome.swift; sourceTree = "<group>"; };
+		2972E1B0F71CA07A19FDA536 /* DuoPoseReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuoPoseReader.swift; sourceTree = "<group>"; };
 		2DA7AE0BDF90A099212DED70 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		3C074F19EC38BC7C9F819575 /* Scenarios.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Scenarios.swift; sourceTree = "<group>"; };
 		4AC0202C99A0D70F399D3307 /* FrameRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameRecorder.swift; sourceTree = "<group>"; };
@@ -118,6 +120,7 @@
 			children = (
 				4D94099A71D8AD29B4BD2E85 /* DesktopScreen.swift */,
 				B06C52757592A86DAD20286B /* DesktopUIView.swift */,
+				2972E1B0F71CA07A19FDA536 /* DuoPoseReader.swift */,
 				1FC92DFBEF1A760FADB7938B /* MirageMobileApp.swift */,
 				93E8937960B6FDB51878604D /* PairingScan.swift */,
 				70D1AC2C3486AD48FE02A0F8 /* SettingsSheet.swift */,
@@ -303,6 +306,7 @@
 				B94FA278ACBE439D4331EE5F /* ConnectList.swift in Sources */,
 				F65B1355DAC4957AFDDB166C /* DesktopScreen.swift in Sources */,
 				1B30C0B6740C396DC668CA12 /* DesktopUIView.swift in Sources */,
+				EE4E916D5DEFCF2D5DF6F883 /* DuoPoseReader.swift in Sources */,
 				D3F97D038F9250050FA17FE6 /* FrameRecorder.swift in Sources */,
 				B431D8ABB3B18C11C2FE3220 /* HostMenu.swift in Sources */,
 				FAF456F4D2244C37CB79C758 /* Keychain.swift in Sources */,

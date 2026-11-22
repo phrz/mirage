@@ -133,6 +133,9 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
     var safeInsets: UIEdgeInsets = .zero { didSet { if safeInsets != oldValue { syncViewport() } } }
     /// The bottom of the control pill (or its handle) in this view: the picture can be panned down until it clears it.
     var topObstruction: CGFloat = 0 { didSet { if topObstruction != oldValue { syncViewport() } } }
+    /// What a fold keeps the picture from in every orientation (DuoPose: the hinge and the region below it in the laptop
+    /// pose). Also part of `safeInsets`; named apart only so landscape's full-height fit doesn't drop it.
+    var foldInsets: UIEdgeInsets = .zero { didSet { if foldInsets != oldValue { syncViewport() } } }
     /// What the current two- or three-finger gesture turned out to be: undecided until the fingers either spread
     /// (zoom) or travel together (scroll); three fingers pan the view.
     private enum MultiTouch { case idle, undecided, scroll, zoom, viewPan }
@@ -242,7 +245,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
     /// (nothing sits above it, and the home indicator floats over it).
     private var containerRect: CGRect {
         var i = safeInsets
-        if bounds.width > bounds.height { i.top = 0; i.bottom = 0 }
+        if bounds.width > bounds.height { i.top = foldInsets.top; i.bottom = foldInsets.bottom }
         return bounds.inset(by: i)
     }
 
@@ -1023,11 +1026,13 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
     // MARK: Keyboard
 
     private lazy var noKeyboard = UIView(frame: .zero)
-    private lazy var accessoryBar = KeyAccessoryBar(owner: self)
+    private(set) lazy var accessoryBar = KeyAccessoryBar(owner: self)
     override var canBecomeFirstResponder: Bool { true }
     /// While the on-screen keyboard is off the view stays first responder (hardware keys arrive here) with an empty input view.
     override var inputView: UIView? { softKeyboard ? nil : noKeyboard }
-    override var inputAccessoryView: UIView? { softKeyboard && accessoryRow ? accessoryBar : nil }
+    override var inputAccessoryView: UIView? { softKeyboard && accessoryRow && !accessoryDocked ? accessoryBar : nil }
+    /// The accessory row sits in the screen's own layout (under the hinge in the laptop pose), not on the keyboard.
+    var accessoryDocked = false { didSet { if accessoryDocked != oldValue, softKeyboard { reloadInputViews() } } }
     /// Settings › Input › Keyboard Accessory Row: esc, tab, ⌃⌥⌘ and the arrows above the on-screen keyboard.
     var accessoryRow = true { didSet { if accessoryRow != oldValue, softKeyboard { reloadInputViews() } } }
 
