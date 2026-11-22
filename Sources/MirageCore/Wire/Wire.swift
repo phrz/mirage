@@ -734,7 +734,12 @@ public enum ControlMessage: Codable, Equatable {
         public var height: Int?
         /// The client's input sequence at the time (the host echoes it in the window list once applied).
         public var inputSeq: UInt64?
-        public init(id: UInt32, action: Action, x: Int? = nil, y: Int? = nil, width: Int? = nil, height: Int? = nil, inputSeq: UInt64? = nil) { self.id = id; self.action = action; self.x = x; self.y = y; self.width = width; self.height = height; self.inputSeq = inputSeq }
+        /// Unified mode on a phone or tablet: a `.resize` fits the window to the pane showing it, for as long as it is shown.
+        /// The host keeps the frame the window had before its first such resize and puts it back on a `.restore` with
+        /// `temporary` set, when the viewer leaves Unified mode, and when the session ends. (Hosts that predate it resize for
+        /// good, and read the restore as un-minimize: harmless.)
+        public var temporary: Bool?
+        public init(id: UInt32, action: Action, x: Int? = nil, y: Int? = nil, width: Int? = nil, height: Int? = nil, inputSeq: UInt64? = nil, temporary: Bool? = nil) { self.id = id; self.action = action; self.x = x; self.y = y; self.width = width; self.height = height; self.inputSeq = inputSeq; self.temporary = temporary }
     }
     public struct MenuRequest: Codable, Equatable {
         public var pid: Int32
@@ -849,7 +854,10 @@ public enum ControlMessage: Codable, Equatable {
         public var displayRects: [PixelRect]?
         /// Window layers the viewer does not show at the moment (minimized here): no refinement for them.
         public var hiddenLayers: [UInt32]?
-        public init(unified: Bool, displayRects: [PixelRect]? = nil, hiddenLayers: [UInt32]? = nil) { self.unified = unified; self.displayRects = displayRects; self.hiddenLayers = hiddenLayers }
+        /// Window layers the viewer shows only as small stills (Unified's window strip on a phone or tablet): a settled
+        /// picture now and again (at most one every few seconds while the window changes), never motion video.
+        public var stillLayers: [UInt32]?
+        public init(unified: Bool, displayRects: [PixelRect]? = nil, hiddenLayers: [UInt32]? = nil, stillLayers: [UInt32]? = nil) { self.unified = unified; self.displayRects = displayRects; self.hiddenLayers = hiddenLayers; self.stillLayers = stillLayers }
     }
     public struct Nack: Codable, Equatable {
         public var frameSeq: UInt32

@@ -35,12 +35,13 @@ final class DynamicResolution: @unchecked Sendable {
         get { logLock.withLock { _log } }
         set { logLock.withLock { _log = newValue } }
     }
-    /// Off unless asked for (`defaults write com.paulherz.mirage MacDynamicResolution -bool YES`, or
-    /// MIRAGE_DYNAMIC_RESOLUTION=1): in a macOS 27 VM, mirroring a new virtual display sometimes failed while taking
-    /// effect, and left it online after its process had gone, holding the desktop until the session locked. Until it has
-    /// run on a real Mac, viewers that ask get the real displays, as from a host without it.
+    /// On unless turned off (`defaults write com.paulherz.mirage MacDynamicResolution -bool NO`, or
+    /// MIRAGE_DYNAMIC_RESOLUTION=0). On a real Mac (M4 Pro mini, macOS 27.2) the helper's display mirrored cleanly every
+    /// time; in a macOS 27 VM mirroring a new virtual display sometimes failed while taking effect and left it holding the
+    /// desktop, so the switch stays for hosts where that happens.
     static var enabled: Bool {
-        ProcessInfo.processInfo.environment["MIRAGE_DYNAMIC_RESOLUTION"] == "1" || UserDefaults.standard.bool(forKey: "MacDynamicResolution")
+        if let env = ProcessInfo.processInfo.environment["MIRAGE_DYNAMIC_RESOLUTION"] { return env != "0" }
+        return UserDefaults.standard.object(forKey: "MacDynamicResolution") as? Bool ?? true
     }
 
     /// One change at a time: the helper answers each line in order.
