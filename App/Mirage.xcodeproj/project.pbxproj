@@ -19,6 +19,7 @@
 		8B9E3396DF922F97557183F6 /* DesktopUIView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEEE1C67B65AE477DCDF5D99 /* DesktopUIView.swift */; platformFilters = (ios, ); };
 		98A22E05D6AAAC07987921F4 /* Platform.swift in Sources */ = {isa = PBXBuildFile; fileRef = 325AE3F4F8CE4455604ECEFB /* Platform.swift */; };
 		9C8C86E9B0B43EF2040EEF1E /* DesktopScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59942C8471DEE8FACC7C60A6 /* DesktopScreen.swift */; platformFilters = (ios, ); };
+		D0A5E1F2B3C4D5E6F7A80002 /* DuoPoseReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0A5E1F2B3C4D5E6F7A80001 /* DuoPoseReader.swift */; platformFilters = (ios, ); };
 		AE70D0898558C65B7F6D9A78 /* VideoView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0D40802ED1D018B7D94046B /* VideoView.swift */; platformFilters = (macos, ); };
 		C4DE1008FBECEE2276DF4255 /* Unified.swift in Sources */ = {isa = PBXBuildFile; fileRef = 593D553163B75E9D6D807360 /* Unified.swift */; platformFilters = (macos, ); };
 		D4955D8CADDBC6C1A94F4118 /* HostMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0DEE1C387469669B68D1F6D9 /* HostMenu.swift */; platformFilters = (macos, ); };
@@ -46,6 +47,7 @@
 		50E8318C6686CABEEB9AB706 /* MirageMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MirageMobileApp.swift; sourceTree = "<group>"; };
 		593D553163B75E9D6D807360 /* Unified.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Unified.swift; sourceTree = "<group>"; };
 		59942C8471DEE8FACC7C60A6 /* DesktopScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopScreen.swift; sourceTree = "<group>"; };
+		D0A5E1F2B3C4D5E6F7A80001 /* DuoPoseReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuoPoseReader.swift; sourceTree = "<group>"; };
 		5A7BD24766B550945C4E385B /* Chrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Chrome.swift; sourceTree = "<group>"; };
 		670E76E253BB3EF4D7177FA4 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		6997B50C1540FB4C278BB8AB /* PairingScan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PairingScan.swift; sourceTree = "<group>"; };
@@ -99,6 +101,7 @@
 			isa = PBXGroup;
 			children = (
 				59942C8471DEE8FACC7C60A6 /* DesktopScreen.swift */,
+				D0A5E1F2B3C4D5E6F7A80001 /* DuoPoseReader.swift */,
 				EEEE1C67B65AE477DCDF5D99 /* DesktopUIView.swift */,
 				50E8318C6686CABEEB9AB706 /* MirageMobileApp.swift */,
 				6997B50C1540FB4C278BB8AB /* PairingScan.swift */,
@@ -298,6 +301,7 @@
 			files = (
 				E179BADF39B60A6D17B7BB75 /* Chrome.swift in Sources */,
 				9C8C86E9B0B43EF2040EEF1E /* DesktopScreen.swift in Sources */,
+				D0A5E1F2B3C4D5E6F7A80002 /* DuoPoseReader.swift in Sources */,
 				8B9E3396DF922F97557183F6 /* DesktopUIView.swift in Sources */,
 				ECB3983ACC10C20F61032EB2 /* FrameRecorder.swift in Sources */,
 				D4955D8CADDBC6C1A94F4118 /* HostMenu.swift in Sources */,

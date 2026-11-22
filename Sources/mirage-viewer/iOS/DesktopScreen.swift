@@ -7,6 +7,11 @@ import MirageCore
 /// happen in the view, presentation only. Stats are a small translucent overlay behind the stats button (off at connect
 /// unless Settings › Display says otherwise). In landscape the bar hides itself after a few seconds, leaving a handle in
 /// the corner that brings it back.
+///
+/// On an iPhone Duo (DESIGN §3.11) the layout follows the pose. Laptop (and tent: a hinge running side to side): the
+/// picture fills the region above the hinge, the bar sits at the top of the region below it, and with the keyboard up
+/// the accessory row docks under the bar, the keyboard below. Book, open flat and closed: as above, the picture a canvas
+/// that may cross a vertical hinge.
 struct DesktopScreen: View {
     let session: ViewerSession
     @ObservedObject var model: ViewerModel
@@ -23,23 +28,36 @@ struct DesktopScreen: View {
     @State private var hideToolbar: Task<Void, Never>?
     /// The pill's (or its handle's) bottom edge on screen: a zoomed picture pans down until it clears it.
     @State private var pillBottom: CGFloat = 0
+    /// The fold, read on DesktopView (it covers the screen), so in its coordinates and the screen's.
+    @State private var pose = DuoPose(kind: .closed, bounds: .zero)
+    /// The picture's view, for the accessory row docked in the laptop pose.
+    @State private var desktop = DesktopViewHandle()
+
+    private var laptop: Bool { pose.kind == .laptop }
 
     var body: some View {
         ZStack {
             GeometryReader { geo in
                 let landscape = geo.size.width > geo.size.height
+                let fold = pose.pictureInsets
+                let foldInsets = UIEdgeInsets(top: fold.top, left: fold.left, bottom: fold.bottom, right: fold.right)
+                let safe = UIEdgeInsets(top: max(geo.safeAreaInsets.top, fold.top), left: max(geo.safeAreaInsets.leading, fold.left), bottom: max(geo.safeAreaInsets.bottom, fold.bottom), right: max(geo.safeAreaInsets.trailing, fold.right))
                 ZStack(alignment: .topLeading) {
-                    DesktopView(session: session, model: model, keyboard: $keyboard, touchMode: touchMode, accessoryRow: accessoryRow, safeInsets: UIEdgeInsets(top: geo.safeAreaInsets.top, left: geo.safeAreaInsets.leading, bottom: geo.safeAreaInsets.bottom, right: geo.safeAreaInsets.trailing), topObstruction: pillBottom)
+                    DesktopView(session: session, model: model, keyboard: $keyboard, touchMode: touchMode, accessoryRow: accessoryRow, safeInsets: safe, topObstruction: laptop ? 0 : pillBottom, foldInsets: foldInsets, accessoryDocked: laptop, handle: desktop)
                         .ignoresSafeArea()
+                        .onDuoPoseChange { pose = $0 }
                     if model.showStats {
                         StatsPanel(model: model).padding(.top, landscape ? 8 : 44).padding(.leading, 8)
                     }
-                    toolbar
-                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { pillBottom = $0 }
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .padding(.top, landscape ? 8 : 4).padding(.trailing, 8)
+                    if !laptop {
+                        toolbar
+                            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { pillBottom = $0 }
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            .padding(.top, landscape ? 8 : 4).padding(.trailing, 8)
+                    }
                 }
-                .onChange(of: landscape, initial: true) { _, l in showToolbar(autoHide: l) }
+                // Laptop: the bar under the hinge; tent (no keyboard) hides it after 3 s like landscape does.
+                .onChange(of: laptop ? !keyboard : landscape, initial: true) { _, autoHide in showToolbar(autoHide: autoHide) }
                 .task {
                     // Test hook: `-openSettings 1` (simctl launch) opens the settings sheet once the picture is up.
                     guard UserDefaults.standard.bool(forKey: "openSettings") else { return }
@@ -47,14 +65,16 @@ struct DesktopScreen: View {
                 }
             }
             .ignoresSafeArea(.keyboard)   // the picture keeps its size (no re-stream); it lifts above the keyboard instead
-            VStack(alignment: .leading, spacing: 8) {
-                Spacer()
-                SessionBanners(session: session, model: model)   // the Mac viewer's too
+            if laptop, let lower = pose.lowerRegion { deck(lower) }
+            if laptop {
+                // Laptop: at the bottom of the picture, above the hinge; the keyboard deck stays clear.
+                banners
+                    .frame(height: max(0, pose.upperRegion.maxY - pose.bounds.minY), alignment: .bottom)
+                    .frame(maxHeight: .infinity, alignment: .top)
+                    .ignoresSafeArea()
+            } else {
+                banners
             }
-            .padding(10)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            // Hit-testable (phrz, 2026-10-27): a tap on a banner's button is the banner's, never the host's; the empty
-            // area around them passes through to the picture.
         }
         .background(Color.black.ignoresSafeArea())
         .sheet(isPresented: $settingsShown, onDismiss: { showToolbar() }) {
@@ -63,6 +83,43 @@ struct DesktopScreen: View {
         }
         .statusBarHidden()
         .persistentSystemOverlays(.hidden)
+    }
+
+    private var banners: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Spacer()
+            SessionBanners(session: session, model: model)   // the Mac viewer's too
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // Hit-testable (phrz, 2026-10-27): a tap on a banner's button is the banner's, never the host's; the empty
+        // area around them passes through to the picture.
+    }
+
+    /// The laptop pose's lower region (screen coordinates): from the hinge down it is the deck, never the picture (a
+    /// zoomed picture is cut off at the hinge). The bar is at its top edge, where a MacBook's function row is; with the
+    /// keyboard up, the accessory row docks under it and the system keyboard sits below. In trackpad mode touches on the
+    /// empty deck go through to the picture's view as trackpad touches; in direct mode they land nowhere.
+    private func deck(_ lower: CGRect) -> some View {
+        let hingeTop = pose.upperRegion.maxY
+        return ZStack(alignment: .top) {
+            Color.black
+                .frame(height: max(0, pose.bounds.maxY - hingeTop))
+                .frame(maxHeight: .infinity, alignment: .bottom)
+                .allowsHitTesting(touchMode == .direct)
+            VStack(spacing: 8) {
+                toolbar
+                if keyboard && accessoryRow {
+                    DockedKeyRow(handle: desktop)
+                        .frame(height: 46)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+            }
+            .padding(.top, lower.minY - pose.bounds.minY + 8)
+            .padding(.horizontal, 8)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .ignoresSafeArea()
     }
 
     @State private var landscapeAutoHide = false
@@ -166,9 +223,15 @@ struct DesktopView: UIViewRepresentable {
     let accessoryRow: Bool
     let safeInsets: UIEdgeInsets
     let topObstruction: CGFloat
+    /// The fold's share of `safeInsets` (DuoPose.pictureInsets), kept in landscape too.
+    var foldInsets: UIEdgeInsets = .zero
+    /// The accessory row lives in the screen's layout (DockedKeyRow), not on the keyboard.
+    var accessoryDocked = false
+    var handle: DesktopViewHandle? = nil
 
     func makeUIView(context: Context) -> DesktopUIView {
         let v = DesktopUIView(frame: .zero)
+        handle?.view = v
         v.model = model
         v.onKeyboardRequest = { on in keyboard = on }
         v.attach(session)
@@ -177,11 +240,35 @@ struct DesktopView: UIViewRepresentable {
     func updateUIView(_ v: DesktopUIView, context: Context) {
         v.safeInsets = safeInsets
         v.topObstruction = topObstruction
+        v.foldInsets = foldInsets
+        v.accessoryDocked = accessoryDocked
         v.touchMode = touchMode
         v.accessoryRow = accessoryRow
         v.setSoftKeyboard(keyboard)
         v.updateCursorLayer()
         v.scheduleStreamRequest()
+    }
+}
+
+/// The picture's view, for siblings that act on it (the docked accessory row).
+@MainActor final class DesktopViewHandle {
+    weak var view: DesktopUIView?
+}
+
+/// The keyboard's accessory row (esc, tab, ⌃⌥⌘, arrows) docked in the screen's own layout: the laptop pose puts it under
+/// the hinge. It is the picture's own row, moved here while `accessoryDocked` keeps it off the keyboard.
+struct DockedKeyRow: UIViewRepresentable {
+    let handle: DesktopViewHandle
+    func makeUIView(context: Context) -> UIView { UIView() }
+    func updateUIView(_ v: UIView, context: Context) {
+        // Next turn: the keyboard gives the row up once `accessoryDocked` reaches the picture's view in this same update.
+        DispatchQueue.main.async { [weak v, handle] in
+            guard let v, let bar = handle.view?.accessoryBar, bar.superview !== v else { return }
+            bar.removeFromSuperview()
+            bar.frame = v.bounds
+            bar.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            v.addSubview(bar)
+        }
     }
 }
 
