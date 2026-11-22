@@ -34,6 +34,9 @@ final class MobileUnified: ObservableObject {
     private var lastThumbs: UInt64 = 0
     private var thumbGeneration: [UInt32: Int] = [:]
     private(set) var active = false
+    private var splitHookDone = false
+    private var lastDebug: UInt64 = 0
+    static let debug = UserDefaults.standard.bool(forKey: "unifiedDebug")
 
     init(session: ViewerSession) { self.session = session }
 
@@ -41,6 +44,8 @@ final class MobileUnified: ObservableObject {
         guard !active else { return }
         active = true
         session.log("unified (mobile): on")
+        // Panes come with the host's windows, which come with a stream: ask for one now (a connect may start here).
+        session.requestStream(width: StreamScale.nativeRequest.0, height: StreamScale.nativeRequest.1)
         refresh()
         timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.refresh() } }
         RunLoop.main.add(timer!, forMode: .common)
@@ -84,6 +89,11 @@ final class MobileUnified: ObservableObject {
         if p != panes { panes = p; focused = min(focused, max(0, p.count - 1)) }
         if Clock.elapsed(since: lastThumbs, now: Clock.nowNanos()) > 1_000_000_000 { lastThumbs = Clock.nowNanos(); updateThumbnails(&next) }
         if next != cards { cards = next }
+        if Self.debug, Clock.elapsed(since: lastDebug, now: Clock.nowNanos()) > 2_000_000_000 { lastDebug = Clock.nowNanos(); NSLog("mirage-unified: windows %@ panes %@ sizes %@ hook %@ %@", "\(order)", "\(panes)", "\(paneSizes)", "\(splitHookDone)", "\(UserDefaults.standard.bool(forKey: "unifiedSplit"))") }
+        // Test hook: `-unifiedSplit 1` puts the strip's second window beside the first once both are known.
+        if !splitHookDone, UserDefaults.standard.bool(forKey: "unifiedSplit"), panes.count == 1, let other = order.first(where: { $0 != panes[0] }) {
+            splitHookDone = true; panes = [panes[0], other]; split = 0.5
+        }
         // Fit the shown windows to their panes, side by side on the host (so clicks in either land in it); put the others back.
         applyFits(byID)
         for id in fitted.keys where !panes.contains(id) {
