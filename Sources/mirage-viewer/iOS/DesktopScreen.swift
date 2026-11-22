@@ -23,23 +23,42 @@ struct DesktopScreen: View {
     @State private var hideToolbar: Task<Void, Never>?
     /// The pill's (or its handle's) bottom edge on screen: a zoomed picture pans down until it clears it.
     @State private var pillBottom: CGFloat = 0
+    /// Read here so a change in Settings re-sends the stream request at once.
+    @AppStorage(ViewerSettings.dynamicResolutionKey) private var dynamicResolution = false
+    /// Unified mode (DESIGN §3.11): the host's windows one at a time, a strip of them on top. A connect starts in the mode
+    /// last used with this host.
+    @State private var unifiedOn = false
+    @StateObject private var unifiedHolder = UnifiedHolder()
 
     var body: some View {
         ZStack {
             GeometryReader { geo in
                 let landscape = geo.size.width > geo.size.height
                 ZStack(alignment: .topLeading) {
-                    DesktopView(session: session, model: model, keyboard: $keyboard, touchMode: touchMode, accessoryRow: accessoryRow, safeInsets: UIEdgeInsets(top: geo.safeAreaInsets.top, left: geo.safeAreaInsets.leading, bottom: geo.safeAreaInsets.bottom, right: geo.safeAreaInsets.trailing), topObstruction: pillBottom)
-                        .ignoresSafeArea()
+                    let insets = UIEdgeInsets(top: geo.safeAreaInsets.top, left: geo.safeAreaInsets.leading, bottom: geo.safeAreaInsets.bottom, right: geo.safeAreaInsets.trailing)
+                    if unifiedOn {
+                        UnifiedArea(session: session, model: model, unified: unifiedHolder.get(session), keyboard: $keyboard, touchMode: touchMode, accessoryRow: accessoryRow, safeInsets: insets)
+                    } else {
+                        DesktopView(session: session, model: model, keyboard: $keyboard, touchMode: touchMode, accessoryRow: accessoryRow, safeInsets: insets, topObstruction: pillBottom, dynamicResolution: dynamicResolution)
+                            .ignoresSafeArea()
+                    }
                     if model.showStats {
                         StatsPanel(model: model).padding(.top, landscape ? 8 : 44).padding(.leading, 8)
                     }
+                    // Unified: the strip takes the top, so the bar floats at the bottom and hides itself.
                     toolbar
-                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { pillBottom = $0 }
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .padding(.top, landscape ? 8 : 4).padding(.trailing, 8)
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { pillBottom = unifiedOn ? 0 : $0 }
+                        .frame(maxWidth: .infinity, maxHeight: unifiedOn ? .infinity : nil, alignment: unifiedOn ? .bottom : .trailing)
+                        .padding(.top, landscape ? 8 : 4).padding(.trailing, unifiedOn ? 0 : 8).padding(.bottom, unifiedOn ? 4 : 0)
                 }
-                .onChange(of: landscape, initial: true) { _, l in showToolbar(autoHide: l) }
+                .onChange(of: landscape, initial: true) { _, l in showToolbar(autoHide: l || unifiedOn) }
+                .onChange(of: unifiedOn) { _, on in
+                    UserDefaults.standard.set(on, forKey: ViewerSettings.unifiedKey(host: model.hostName))
+                    if !on { unifiedHolder.stop() }
+                    showToolbar(autoHide: on || landscape)
+                }
+                .onAppear { unifiedOn = UserDefaults.standard.bool(forKey: ViewerSettings.unifiedKey(host: model.hostName)) }
+                .onDisappear { unifiedHolder.stop() }
                 .task {
                     // Test hook: `-openSettings 1` (simctl launch) opens the settings sheet once the picture is up.
                     guard UserDefaults.standard.bool(forKey: "openSettings") else { return }
@@ -85,7 +104,7 @@ struct DesktopScreen: View {
             controls.transition(.opacity)
         } else {
             Button { showToolbar() } label: {
-                Image(systemName: "chevron.compact.down")
+                Image(systemName: unifiedOn ? "chevron.compact.up" : "chevron.compact.down")
                     .font(.system(size: 17, weight: .semibold))
                     .frame(width: 56, height: 28)
                     .glassBar(in: Capsule())
@@ -113,6 +132,7 @@ struct DesktopScreen: View {
             }
             .accessibilityLabel("Touch: \(touchMode.title)")
             .onChange(of: touchMode) { showToolbar() }
+            barButton(Self.unifiedSymbol, "Unified", on: unifiedOn) { withAnimation(.snappy(duration: 0.3)) { unifiedOn.toggle() } }
             barButton("gearshape", "Settings", on: false) { settingsShown = true; hideToolbar?.cancel() }
             barButton("xmark", "Disconnect", on: false) { onDisconnect() }
         }
@@ -120,6 +140,9 @@ struct DesktopScreen: View {
         .foregroundStyle(.white)
         .glassBar(in: Capsule())
     }
+
+    /// iOS 27's symbol for windows over a desktop, else its iOS 18 forerunner.
+    static let unifiedSymbol = UIImage(systemName: "interface.window.on.rectangle.dashed") != nil ? "interface.window.on.rectangle.dashed" : "rectangle.on.rectangle.dashed"
 
     private func barButton(_ symbol: String, _ label: String, on: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) { barIcon(symbol, on: on) }
@@ -166,6 +189,7 @@ struct DesktopView: UIViewRepresentable {
     let accessoryRow: Bool
     let safeInsets: UIEdgeInsets
     let topObstruction: CGFloat
+    var dynamicResolution = false
 
     func makeUIView(context: Context) -> DesktopUIView {
         let v = DesktopUIView(frame: .zero)
@@ -183,6 +207,17 @@ struct DesktopView: UIViewRepresentable {
         v.updateCursorLayer()
         v.scheduleStreamRequest()
     }
+}
+
+/// Keeps one Unified controller per screen (made on first use: it needs the session).
+@MainActor
+final class UnifiedHolder: ObservableObject {
+    private var unified: MobileUnified?
+    func get(_ session: ViewerSession) -> MobileUnified {
+        if let u = unified { return u }
+        let u = MobileUnified(session: session); unified = u; return u
+    }
+    func stop() { unified?.stop() }
 }
 
 extension View {

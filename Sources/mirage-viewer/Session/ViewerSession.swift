@@ -1711,6 +1711,31 @@ final class ViewerSession: @unchecked Sendable {
         return LayerScene(background: bg, items: items, displacements: sd, bandColors: colors, displayFill: fill, fillColor: fillColor)
     }
 
+    /// Unified on a phone or tablet: one window alone, its menus and popovers over it (cut from the display layer, which the
+    /// host sends only there in Unified mode), nothing behind it.
+    func focusScene(window id: UInt32, pxPerPoint: Double) -> LayerScene? {
+        guard let bg = compositor, bg.width > 0 else { return nil }
+        scenePxPerPoint = pxPerPoint
+        let arranged = arrangedWindows()
+        guard let w = arranged.first(where: { $0.id == id }) else { return nil }
+        let layout = UnifiedLayout.plan(arranged, hasCanvas: { (self.layerViews[$0]?.compositor.width ?? 0) > 0 }, display: PixelRect(x: 0, y: 0, width: bg.width, height: bg.height))
+        var items: [LayerScene.Item] = []
+        let ppp = Float(pxPerPoint)
+        // Front to back: its transients and sheets, then the window itself.
+        for e in layout.entries where e.parent == id {
+            switch e.source {
+            case .display(let r): items.append(.cutout(r, shadow: .menu(pxPerPoint: ppp), clips: [r]))
+            case .layer(let l): if let c = layerViews[l]?.compositor, c.width > 0 { items.append(.layer(c, frame: e.frame, shadow: .inactive(pxPerPoint: ppp), dim: 1)) }
+            }
+        }
+        if let c = layerViews[id]?.compositor, c.width > 0 { items.append(.layer(c, frame: w.frame, shadow: nil, dim: 1)) }
+        let (disp, colors) = displacements()
+        let sd = disp.filter { $0.windowID == id }.map { LayerScene.Displacement(layerID: id, displacement: $0) }
+        var scene = LayerScene(background: bg, items: items, displacements: sd, bandColors: colors)
+        scene.drawsBackground = false
+        return scene
+    }
+
     /// Per-layer diagnostics (DESIGN §6 M3.1 field regression): what the viewer holds for every window the
     /// host lists, and what the composited scene shows of it. `viewport` is where the window lands in the
     /// drawable (pixels; display-layer pixels when headless), `visible` whether any of it is drawn from

@@ -1135,6 +1135,9 @@ public struct LayerScene {
     /// layer): filled with `fillColor` over the display layer, under every window.
     public var displayFill: [PixelRect] = []
     public var fillColor = SIMD4<Float>(0.3, 0.3, 0.32, 1)
+    /// False: the display layer is not drawn (Unified on a phone shows one window with nothing behind it); it still sets
+    /// the coordinate space, and cut-outs (menus, popovers) still come from it.
+    public var drawsBackground = true
     public init(background: Compositor?, items: [Item], displacements: [Displacement], bandColors: [UInt32: SIMD4<Float>], displayFill: [PixelRect] = [], fillColor: SIMD4<Float>? = nil) {
         self.background = background; self.items = items; self.displacements = displacements; self.bandColors = bandColors
         self.displayFill = displayFill; if let fillColor { self.fillColor = fillColor }
@@ -1243,8 +1246,8 @@ public enum SceneRenderer {
             re.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
         // 1. The display layer, whole, then the desktop areas it holds no clean pixels for.
-        drawCanvas(bg, frame: display, layerID: 0, alpha: nil)
-        if !scene.displayFill.isEmpty {
+        if scene.drawsBackground { drawCanvas(bg, frame: display, layerID: 0, alpha: nil) }
+        if scene.drawsBackground, !scene.displayFill.isEmpty {
             var color = scene.fillColor
             re.setRenderPipelineState(context.fillPipeline)
             re.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)

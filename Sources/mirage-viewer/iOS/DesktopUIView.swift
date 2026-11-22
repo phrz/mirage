@@ -94,8 +94,41 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
     /// Hardware keyboard: modifier flags held now.
     private var hardwareFlags: UInt64 = 0
 
-    /// Where the picture is drawn: fit, zoom and pan (view points). Never sent anywhere.
+    /// Where the picture is drawn: fit, zoom and pan (view points). Never sent anywhere. With a focus window, its content
+    /// is that window (fit, zoom and pan apply to it), not the whole display.
     private(set) var viewport = ZoomViewport()
+    /// Unified on a phone or tablet: the one host window this view shows, alone (nil: the whole display, Desktop mode).
+    var focus: UInt32? { didSet { if focus != oldValue { focusFrame = nil; updateFocusFrame(); forceRedraw = true } } }
+    /// The focus window's frame (stream pixels), as arranged now.
+    private(set) var focusFrame: PixelRect?
+    /// A touch began here (Unified: the pane raises its window on the host first).
+    var onTouchDown: (() -> Void)?
+    /// The focus window's frame as a unit rect of the display.
+    private var focusUnit: CGRect? {
+        guard let f = focusFrame, let c = session?.compositor, c.width > 0, c.height > 0, f.width > 0, f.height > 0 else { return nil }
+        return CGRect(x: Double(f.x) / Double(c.width), y: Double(f.y) / Double(c.height), width: Double(f.width) / Double(c.width), height: Double(f.height) / Double(c.height))
+    }
+    private func updateFocusFrame() {
+        guard let focus, let session else { if focusFrame != nil { focusFrame = nil; syncViewport() }; return }
+        let f = session.arrangedWindows().first { $0.id == focus }?.frame
+        if f != focusFrame { focusFrame = f; syncViewport(); forceRedraw = true }
+    }
+    /// A view point as a display position (0…1), through the focus window when there is one.
+    private func displayUnit(_ p: CGPoint) -> CGPoint {
+        let n = viewport.normalized(p)
+        guard let u = focusUnit else { return n }
+        return CGPoint(x: u.minX + n.x * u.width, y: u.minY + n.y * u.height)
+    }
+    /// A display position (0…1) as a view point.
+    private func viewPoint(display n: CGPoint) -> CGPoint {
+        guard let u = focusUnit else { return viewport.viewPoint(n) }
+        return viewport.viewPoint(CGPoint(x: (n.x - u.minX) / u.width, y: (n.y - u.minY) / u.height))
+    }
+    /// The pointer kept inside the focus window.
+    private func clampPointerToFocus() {
+        guard let u = focusUnit else { return }
+        pointer.x = min(Double(u.maxX), max(Double(u.minX), pointer.x)); pointer.y = min(Double(u.maxY), max(Double(u.minY), pointer.y))
+    }
     /// The screen's safe area in this view (SwiftUI passes it in; the view itself covers the whole screen).
     var safeInsets: UIEdgeInsets = .zero { didSet { if safeInsets != oldValue { syncViewport() } } }
     /// The bottom of the control pill (or its handle) in this view: the picture can be panned down until it clears it.
@@ -179,13 +212,14 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         if touchMode == .direct { perform(direct.tick(time: CACurrentMediaTime())) }
         stepViewMomentum(dt: dt)
         if scrollView.isTracking || scrollView.isDecelerating { pullFromScrollView() }
+        if focus != nil { updateFocusFrame() }
         syncViewport()
         applyStartZoom()
         stepZoomAnimation()
         followCaret(dt: dt)
         // The scene's presentation is the Mac viewer's too (`ScenePresenter`); the viewport says where the picture goes.
         guard let session else { return }
-        if presenter.tick(session, layer: metalLayer, videoRect: videoRect) { drawTypeahead() }
+        if presenter.tick(session, layer: metalLayer, videoRect: videoRect, focus: focus) { drawTypeahead() }
     }
 
     override func layoutSubviews() {
@@ -227,7 +261,8 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
     /// Zoom at which one host display pixel is one device pixel.
     private var oneToOne: Double {
         guard let i = model?.streamInfo, i.displayWidth > 0 else { return 2 }
-        return viewport.oneToOneZoom(hostPixelWidth: Double(i.displayWidth) * max(1, i.displayScale), screenScale: Double(screenScale))
+        let part = focusUnit.map { Double($0.width) } ?? 1
+        return viewport.oneToOneZoom(hostPixelWidth: Double(i.displayWidth) * max(1, i.displayScale) * part, screenScale: Double(screenScale))
     }
 
     /// Brings the viewport up to date with the container, the keyboard and the stream's size.
@@ -235,6 +270,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         guard bounds.width > 0, bounds.height > 0 else { return }
         var content = CGSize(width: 16, height: 10)
         if let comp = session?.compositor, comp.width > 0, comp.height > 0 { content = CGSize(width: comp.width, height: comp.height) }
+        if let f = focusFrame, f.width > 0, f.height > 0 { content = CGSize(width: f.width, height: f.height) }
         let before = viewport
         viewport.setLayout(container: containerRect, unobstructed: unobstructedRect, keyboardTop: keyboardHeight > 0 ? Double(bounds.height - keyboardHeight) : nil, content: content)
         viewport.setZoomRange(oneToOne: oneToOne)
@@ -393,7 +429,8 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         if c != lastCaret {
             lastCaret = c
             if let c, zoomAnimation == nil, multi == .idle || multi == .undecided {
-                caretGlide = viewport.caretTarget(viewport.viewRect(contentRect: CGRect(x: c.x, y: c.y, width: max(1, c.width), height: c.height)))
+                let o = focusFrame.map { (x: $0.x, y: $0.y) } ?? (x: 0, y: 0)
+                caretGlide = viewport.caretTarget(viewport.viewRect(contentRect: CGRect(x: c.x - o.x, y: c.y - o.y, width: max(1, c.width), height: c.height)))
             }
         }
         guard let target = caretGlide else { return }
@@ -429,15 +466,33 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
     }
 
     func sendStreamRequest() {
-        guard let session, let (w, h) = wantedStreamSize(), (w, h) != lastRequested else { return }
-        lastRequested = (w, h)
+        guard let session else { return }
+        // Dynamic Resolution (Desktop mode only: Unified shows host windows on the host's own display): the host's display
+        // becomes the size of the picture's container, in points, Retina.
+        if ViewerSettings.dynamicResolution, focus == nil, bounds.width > 0 {
+            let c = containerRect, scale = screenScale
+            let fit = ControlMessage.FitDisplay(width: Int(c.width), height: Int(c.height), scale: Double(scale))
+            let w = Int(c.width) * 2, h = Int(c.height) * 2
+            guard (w, h) != lastRequested || !lastRequestedFit else { return }
+            lastRequested = (w, h); lastRequestedFit = true
+            session.requestStream(width: w, height: h, fit: fit)
+            return
+        }
+        guard let (w, h) = wantedStreamSize(), (w, h) != lastRequested || lastRequestedFit else { return }
+        lastRequested = (w, h); lastRequestedFit = false
         session.requestStream(width: w, height: h)
     }
+    private var lastRequestedFit = false
 
     /// Where the picture is drawn, in points: fitted into the safe area, zoomed and panned, lifted above the keyboard.
-    var videoRect: CGRect { viewport.pictureRect }
+    var videoRect: CGRect {
+        let r = viewport.pictureRect
+        guard let u = focusUnit else { return r }
+        let w = r.width / u.width, h = r.height / u.height
+        return CGRect(x: r.minX - u.minX * w, y: r.minY - u.minY * h, width: w, height: h)
+    }
 
-    private var pointerInView: CGPoint { viewport.viewPoint(CGPoint(x: pointer.x, y: pointer.y)) }
+    private var pointerInView: CGPoint { viewPoint(display: CGPoint(x: pointer.x, y: pointer.y)) }
     private func streamPixel() -> (Int, Int)? {
         guard let comp = session?.compositor, comp.width > 0 else { return nil }
         return (Int(pointer.x * Double(comp.width)), Int(pointer.y * Double(comp.height)))
@@ -562,6 +617,8 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
     private func touchID(_ t: UITouch) -> Int { ObjectIdentifier(t).hashValue }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        onTouchDown?()
+        if !isFirstResponder { becomeFirstResponder() }   // Unified's split: keys go to the pane last touched
         guard touchMode == .direct else { super.touchesBegan(touches, with: event); return }
         let now = CACurrentMediaTime()
         // A finger on a coasting view stops it there (and is no click), as in any scroll view; a rubber band finishes.
@@ -629,8 +686,9 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
 
     /// Direct touch: the pointer jumps to a view point (clamped to the picture), and the host is told unless `send` is false.
     private func jumpPointer(to p: CGPoint, send: Bool = true) {
-        let n = viewport.normalized(p)
+        let n = displayUnit(p)
         pointer.x = min(1, max(0, Double(n.x))); pointer.y = min(1, max(0, Double(n.y)))
+        clampPointerToFocus()
         updateCursorLayer()
         if send, !observeOnly { session?.sendMouseMove(x: pointer.x, y: pointer.y) }
     }
@@ -744,6 +802,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         let dt = lastPanTime > 0 ? now - lastPanTime : 0
         lastPanTime = now
         pointer.move(dx: d.x, dy: d.y, pictureWidth: r.width, pictureHeight: r.height, dt: dt)
+        clampPointerToFocus()
         followPointer()
         updateCursorLayer()
     }
@@ -771,8 +830,9 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
     @objc private func hover(_ g: UIHoverGestureRecognizer) {
         guard g.state == .began || g.state == .changed else { return }
         guard videoRect.width > 0 else { return }
-        let n = viewport.normalized(g.location(in: self))
+        let n = displayUnit(g.location(in: self))
         pointer.x = min(1, max(0, Double(n.x))); pointer.y = min(1, max(0, Double(n.y)))
+        clampPointerToFocus()
         updateCursorLayer()
         if !observeOnly { session?.sendMouseMove(x: pointer.x, y: pointer.y) }
     }
@@ -843,7 +903,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         defer { updateCursorLayer() }   // the hold ring
         guard let p = streamPixel() else { button(0, down: true); return }
         // The same rule as the Mac viewer (`WindowHitTest`): the overlay is never hit, only a plain press raises or drags.
-        let target = session.press(at: p.0, p.1, plain: modifierFlags == 0)
+        let target: WindowHitTest.Press = focus != nil ? .none : session.press(at: p.0, p.1, plain: modifierFlags == 0)   // a focus window fills its pane: nothing to drag
         switch target {
         case .layerTitleBar(let id, let frame):
             layerDrag = (id, frame, p, false)
@@ -1292,7 +1352,7 @@ extension DesktopUIView {
         guard let session, let comp = session.compositor, comp.width > 0 else { return }
         // The largest bench window (a `--still` one behind it has the same title).
         let bench = session.windowsSnapshot().filter { $0.title.contains("Mirage Test Bench") && !$0.title.contains("overlay") }.max { $0.frame.area < $1.frame.area } ?? bench
-        func view(_ x: Int, _ y: Int) -> CGPoint { viewport.viewPoint(CGPoint(x: Double(x) / Double(comp.width), y: Double(y) / Double(comp.height))) }
+        func view(_ x: Int, _ y: Int) -> CGPoint { viewPoint(display: CGPoint(x: Double(x) / Double(comp.width), y: Double(y) / Double(comp.height))) }
         func now() -> Double { CACurrentMediaTime() }
         func down(_ id: Int, _ p: CGPoint) { perform(direct.began(id, at: p, time: now())) }
         func move(_ id: Int, _ p: CGPoint) { perform(direct.moved(id, to: p, time: now())) }
@@ -1320,7 +1380,7 @@ extension DesktopUIView {
         down(1, CGPoint(x: spot.x - 18, y: spot.y)); down(2, CGPoint(x: spot.x + 18, y: spot.y))
         for i in 1...30 { let y = spot.y - Double(i) * 4; move(1, CGPoint(x: spot.x - 18, y: y)); move(2, CGPoint(x: spot.x + 18, y: y)); await pause(0.016) }
         up(1, CGPoint(x: spot.x - 18, y: spot.y - 120)); up(2, CGPoint(x: spot.x + 18, y: spot.y - 120))
-        let n = viewport.normalized(spot)
+        let n = displayUnit(spot)
         log(String(format: "scrolled with the pointer at %.3f,%.3f (the swipe began at %.3f,%.3f)", pointer.x, pointer.y, n.x, n.y))
         await pause(2.5)
 

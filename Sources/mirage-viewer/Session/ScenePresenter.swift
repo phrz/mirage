@@ -44,10 +44,10 @@ final class ScenePresenter {
 
     /// Draws the scene if it changed since the last tick; returns whether it did.
     @discardableResult
-    func tick(_ session: ViewerSession, layer: CAMetalLayer, videoRect r: CGRect) -> Bool {
+    func tick(_ session: ViewerSession, layer: CAMetalLayer, videoRect r: CGRect, focus: UInt32? = nil) -> Bool {
         guard let comp = session.compositor, comp.width > 0, let context = session.context else { return false }
         let ppp = MainActor.assumeIsolated { session.pixelsPerPoint }
-        guard let scene = session.scene(pxPerPoint: ppp) else { return false }
+        guard let scene = focus.map({ session.focusScene(window: $0, pxPerPoint: ppp) }) ?? session.scene(pxPerPoint: ppp) else { return false }
         let arrangement = session.arrangementGeneration
         var layersDirty = false
         for it in scene.items { if case .layer(let c, _, _, _) = it, c.needsRender { layersDirty = true; break } }
