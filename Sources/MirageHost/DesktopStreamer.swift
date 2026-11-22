@@ -1342,7 +1342,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     /// Whatever was in flight is treated as lost: unacked tile messages have their rects queued for a
     /// lossless resend, unacked video frames are forgotten (the resume keyframe replaces them).
     public func suspend() async {
-        await DynamicResolution.shared.end(owner: self)   // the person at the Mac gets their displays back meanwhile
         endCurtain(stopped: false)
         queue.sync { holdWarm(false) }
         queue.sync { Self.savePriorDelivery(self.rc, for: self.output?.peerID, network: self.priorDeliveryNetwork) }   // the next connect starts there
@@ -1393,6 +1392,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
         }
         await stopCaptures(cap, caps)
+        await DynamicResolution.shared.end(owner: self)   // the person at the Mac gets their displays back meanwhile, once nothing captures it
     }
     private var suspendedAt: UInt64 = 0
 
@@ -1512,7 +1512,6 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     }
 
     public func stop() async {
-        await DynamicResolution.shared.end(owner: self)
         endCurtain(stopped: true)
         queue.sync { holdWarm(false) }
         queue.sync { Self.savePriorDelivery(self.rc, for: self.output?.peerID, network: self.priorDeliveryNetwork) }
@@ -1541,6 +1540,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             }
         }
         await stopCaptures(cap, caps)
+        await DynamicResolution.shared.end(owner: self)   // once nothing captures it
     }
 
     // MARK: Layers

@@ -11,7 +11,7 @@ struct Miraged: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "miraged",
         abstract: "Mirage host daemon: serves this Mac to paired devices over QUIC.",
-        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Unlock.self, Install.self, Uninstall.self, ProbeLayers.self, Update.self],
+        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Unlock.self, Install.self, Uninstall.self, ProbeLayers.self, Update.self, VirtualDisplay.self],
         defaultSubcommand: Serve.self)
 }
 
@@ -382,4 +382,15 @@ func shell(_ tool: String, _ args: [String]) -> String {
     let pipe = Pipe(); p.standardOutput = pipe; p.standardError = pipe
     try? p.run(); p.waitUntilExit()
     return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+}
+
+/// Dynamic Resolution's display, owned by its own process for the host (DynamicResolution.swift).
+struct VirtualDisplay: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "virtual-display", abstract: "Hold the host's Dynamic Resolution display (run by the host).",
+                                                    shouldDisplay: false)
+    func run() async throws {
+        stayInvisible()
+        VirtualDisplayHelper.start()   // exits at the end of its input
+        while true { try await Task.sleep(for: .seconds(3600)) }
+    }
 }
