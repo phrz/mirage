@@ -13,6 +13,10 @@ final class AXWindows {
     private var cache: [UInt32: AXUIElement] = [:]
     private let log: (String) -> Void
     private var lastLogNanos: UInt64 = 0
+    /// Seconds an app may take to answer a window command.
+    static let timeout: Float = 2
+    /// Why the last lookup found no window (for the log).
+    private var lastMiss = ""
     private(set) var applied = 0, failed = 0
 
     init(log: @escaping (String) -> Void) { self.log = log }
@@ -30,7 +34,7 @@ final class AXWindows {
 
     private func perform(_ c: ControlMessage.WindowCommand, target: Target, origin: CGPoint?, size: CGSize?) -> Bool {
         guard let elem = element(for: target) else {
-            if Clock.elapsed(since: lastLogNanos, now: Clock.nowNanos()) > 2_000_000_000 { lastLogNanos = Clock.nowNanos(); log("ax: no accessibility window for \(target.id) (pid \(target.pid), '\(target.title.prefix(30))')") }
+            if Clock.elapsed(since: lastLogNanos, now: Clock.nowNanos()) > 2_000_000_000 { lastLogNanos = Clock.nowNanos(); log("ax: no accessibility window for \(target.id) (pid \(target.pid), '\(target.title.prefix(30))'): \(lastMiss)") }
             return false
         }
         switch c.action {
@@ -41,7 +45,9 @@ final class AXWindows {
             // mid-drag (phrz, 08:2xZ). The app's AXFrontmost and the window's AXMain do it from here.
             let r = AXUIElementPerformAction(elem, kAXRaiseAction as CFString)
             AXUIElementSetAttributeValue(elem, kAXMainAttribute as CFString, kCFBooleanTrue)
-            AXUIElementSetAttributeValue(AXUIElementCreateApplication(target.pid), kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+            let app = AXUIElementCreateApplication(target.pid)
+            AXUIElementSetMessagingTimeout(app, Self.timeout)
+            AXUIElementSetAttributeValue(app, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
             NSRunningApplication(processIdentifier: target.pid)?.activate()
             if r != .success { cache[target.id] = nil }
             return r == .success
@@ -74,10 +80,16 @@ final class AXWindows {
     private func element(for t: Target) -> AXUIElement? {
         if let e = cache[t.id], frame(of: e) != nil { return e }
         let app = AXUIElementCreateApplication(t.pid)
+        // Its own timeout: CaretTracker sets the system-wide element's to 0.15 s, which is every element's default in this
+        // process. A loaded host (a macOS VM at load 3.75) took longer to list an app's windows, and every window command
+        // failed with kAXErrorCannotComplete (-25204).
+        AXUIElementSetMessagingTimeout(app, Self.timeout)
         var windowsRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsRef) == .success, let windows = windowsRef as? [AXUIElement] else { return nil }
+        let err = AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &windowsRef)
+        guard err == .success, let windows = windowsRef as? [AXUIElement] else { lastMiss = "the app's window list: AX error \(err.rawValue)"; return nil }
         var byTitle: AXUIElement? = nil
         for w in windows {
+            AXUIElementSetMessagingTimeout(w, Self.timeout)
             if let f = frame(of: w), abs(f.minX - t.bounds.minX) <= 2, abs(f.minY - t.bounds.minY) <= 2, abs(f.width - t.bounds.width) <= 2, abs(f.height - t.bounds.height) <= 2 {
                 cache[t.id] = w; return w
             }
@@ -87,6 +99,7 @@ final class AXWindows {
             }
         }
         if let w = byTitle { cache[t.id] = w }
+        else { lastMiss = "\(windows.count) AX windows, frames \(windows.prefix(4).map { frame(of: $0).map { "\(Int($0.minX)),\(Int($0.minY)) \(Int($0.width))x\(Int($0.height))" } ?? "?" }), wanted \(Int(t.bounds.minX)),\(Int(t.bounds.minY)) \(Int(t.bounds.width))x\(Int(t.bounds.height))" }
         return byTitle
     }
 
