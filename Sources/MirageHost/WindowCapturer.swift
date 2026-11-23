@@ -52,8 +52,7 @@ final class WindowCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     /// mac-daddy's 1.89 px/pt stream). The capture is therefore taken at the native scale, where it is position-
     /// independent, and scaled to the layer's size here with a fixed transform (VTPixelTransfer).
     private lazy var nativeScale: CGFloat = {
-        guard let m = CGDisplayCopyDisplayMode(display.displayID), m.width > 0 else { return 2 }
-        return CGFloat(m.pixelWidth) / CGFloat(m.width)
+        CGFloat(DynamicResolution.backingScale(of: display.displayID) ?? 2)
     }()
     private var transfer: VTPixelTransferSession?
     private var pool: CVPixelBufferPool?

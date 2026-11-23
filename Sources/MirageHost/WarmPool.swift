@@ -132,7 +132,7 @@ public final class WarmPool: @unchecked Sendable {
             let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
             guard let self else { return }
             guard let display = content?.displays.first(where: { $0.displayID == id }) else { self.queue.async { self.shooting = false }; return }
-            let native = CGDisplayCopyDisplayMode(id).map { $0.pixelWidth } ?? display.width * 2
+            let native = Int(Double(display.width) * (DynamicResolution.backingScale(of: id) ?? 2))
             let w = max(800, native / 2), h = max(1, w * display.height / max(1, display.width))
             let t0 = Clock.nowNanos()
             let px = await MacDesktopStreamer.displayShot(display, width: w, height: h)
@@ -253,7 +253,7 @@ public final class WarmPool: @unchecked Sendable {
                 let keepIDs = Set(keep.map(\.windowID))
                 for (id, e) in self.entries where !keepIDs.contains(id) { self.entries[id] = nil; Task { await e.cap.stop() } }
                 // The display's native scale: the capture is taken there in any case (WindowCapturer.nativeScale), so no scaling.
-                let pxPerPoint = CGDisplayCopyDisplayMode(display.displayID).map { $0.width > 0 ? Double($0.pixelWidth) / Double($0.width) : 2 } ?? 2
+                let pxPerPoint = DynamicResolution.backingScale(of: display.displayID) ?? 2
                 for w in keep where self.entries[w.windowID] == nil {
                     let k = self.tun[.warmScale]
                     let width = Int((w.frame.width * pxPerPoint * k).rounded()), height = Int((w.frame.height * pxPerPoint * k).rounded())

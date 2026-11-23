@@ -26,6 +26,10 @@ final class DynamicResolution: @unchecked Sendable {
     /// The main display before the mirroring: where a stream goes back to.
     private var realMain: CGDirectDisplayID = 0
     private var current: ControlMessage.FitDisplay?
+    /// The virtual display's pixels per point, as ScreenCaptureKit confirmed it (`waitForCapture`). This process's
+    /// CoreGraphics keeps reporting a new display's first (1x) mode after it took its HiDPI one, so captures read the scale
+    /// here (`backingScale(of:)`), else they took a Retina display at one pixel per point (blurry on every Retina viewer).
+    private var confirmedScale: (id: CGDirectDisplayID, scale: Double)?
     private var owner: ObjectIdentifier?
     /// Unmirrored, still existing: removed once the capture has moved off it (`settle`).
     private var releasing = false
@@ -73,11 +77,24 @@ final class DynamicResolution: @unchecked Sendable {
             return req
         }
         let shown = await waitForCapture(id, width: w, height: h, scale: scale)
+        lock.withLock { confirmedScale = shown == .points ? (id, Double(scale)) : (shown == .pixels ? (id, 1) : nil) }
         log("dynamic resolution: one display of \(w)x\(h) points\(scale > 1 ? (shown == .points ? " (Retina)" : shown == .pixels ? " (at 1x: no Retina mode)" : " (not seen yet)") : "")")
         var r = req
         r.displayID = id
         r.width = w * scale; r.height = h * scale
         return r
+    }
+
+    /// The pixels per point of `id` when it is the virtual display and ScreenCaptureKit has shown its mode, else nil.
+    func confirmedScale(of id: CGDirectDisplayID) -> Double? {
+        lock.withLock { confirmedScale?.id == id ? confirmedScale?.scale : nil }
+    }
+
+    /// A display's pixels per point: the virtual display's as confirmed, else its current mode's (nil: no mode).
+    static func backingScale(of id: CGDirectDisplayID) -> Double? {
+        if let s = shared.confirmedScale(of: id) { return s }
+        guard let m = CGDisplayCopyDisplayMode(id), m.width > 0 else { return nil }
+        return Double(m.pixelWidth) / Double(m.width)
     }
 
     /// Removes a virtual display that was let go of (`prepare` without a fit), once nothing captures it.

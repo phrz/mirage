@@ -61,8 +61,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
     static func target(for display: SCDisplay, requested: (Int, Int)?, snapNative: Bool) -> Target {
         var pw = Double(CGDisplayPixelsWide(display.displayID)), ph = Double(CGDisplayPixelsHigh(display.displayID))
         if pw < 64 || ph < 64 { pw = Double(display.width); ph = Double(display.height) }
-        let mode = CGDisplayCopyDisplayMode(display.displayID)
-        let scale = mode.map { Double($0.pixelWidth) / Double($0.width) } ?? 1
+        let scale = DynamicResolution.backingScale(of: display.displayID) ?? 1
         // Fit the display aspect into the requested box, never beyond native pixels; even dimensions keep the encoder happy.
         let (ew, eh) = StreamScale.resolve(requested: requested ?? (Int(pw * scale), Int(ph * scale)), nativePixels: (pw * scale, ph * scale), snapNative: requested == nil || snapNative)
         // (CGDisplayPixelsWide reports points on current macOS; the mode's scale gives the backing pixels.)
