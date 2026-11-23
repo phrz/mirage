@@ -54,6 +54,10 @@ public struct Predictor {
         var lastHostNanos: UInt64
         var createdNanos: UInt64
         var ended = false
+        /// The host moved the window since the press (its window list, or a copy-rect that agreed): until then nothing is
+        /// shown, so a press the host does not take as a drag (a toolbar, a window that cannot move) never moves a window
+        /// here only for it to snap back (phrz on 642).
+        var hostMoved = false
         /// Where the host's window manager lets the window go (nil: anywhere).
         var limits: WindowDragLimits?
         func pointer(at seq: UInt64) -> (x: Int, y: Int) { pointers.last(where: { $0.seq <= seq }).map { ($0.x, $0.y) } ?? pointer0 }
@@ -86,7 +90,13 @@ public struct Predictor {
         if windows[windowID]?.confident ?? true { stats.shown += 1 }
     }
     public mutating func endDrag(windowID: UInt32) { drags[windowID]?.ended = true }
-    public func dragResidual(windowID: UInt32) -> (dx: Int, dy: Int)? { drags[windowID]?.residual }
+    public func dragResidual(windowID: UInt32) -> (dx: Int, dy: Int)? { drags[windowID].flatMap { $0.hostMoved ? $0.residual : nil } }
+    /// The host's window list shows the window at `frame`: a frame away from where the drag began is the host moving it.
+    public mutating func hostFrame(windowID: UInt32, frame: PixelRect) {
+        guard var d = drags[windowID], !d.hostMoved, frame.x != d.frame0.x || frame.y != d.frame0.y else { return }
+        d.hostMoved = true
+        drags[windowID] = d
+    }
 
     public var timeoutNanos: UInt64 = 1_200_000_000
     /// After a mismatch, show predictions again once one has been confirmed or this much time has passed.
@@ -111,6 +121,7 @@ public struct Predictor {
         for id in dragIDs {
             guard var d = drags[id], var w = windows[id] else { continue }
             d.hostDX += dx; d.hostDY += dy; d.lastHostNanos = now
+            if dx != 0 || dy != 0 { d.hostMoved = true }   // the host moved it (agreeing or not: confidence decides what shows)
             if inputSeq > d.confirmedSeq { d.confirmedSeq = inputSeq }
             let (ex, ey) = d.expected(d.pointer(at: inputSeq > 0 ? inputSeq : d.confirmedSeq))
             // Agreement per axis: the host has moved toward where the pointer was at k and not past it
@@ -182,6 +193,8 @@ public struct Predictor {
             guard let d = drags[id] else { continue }
             let r = d.residual
             if d.ended && r.dx == 0 && r.dy == 0 { drags[id] = nil; continue }
+            // Never shown (the host never moved it): dropped quietly, no mismatch (nothing snapped back).
+            if !d.hostMoved { if d.ended || now &- d.createdNanos > timeoutNanos { drags[id] = nil }; continue }
             if (r.dx != 0 || r.dy != 0), now &- max(d.lastHostNanos, d.createdNanos) > timeoutNanos {
                 stats.expired += 1
                 if var w = windows[id] { w.confident = false; w.lastMismatchNanos = now; w.mismatches += 1; windows[id] = w }
@@ -209,7 +222,7 @@ public struct Predictor {
     /// What the renderer should displace right now, one entry per window with unconfirmed predictions.
     public func displacements() -> [Displacement] {
         var out: [Displacement] = []
-        for (id, d) in drags where windows[id]?.confident ?? true {
+        for (id, d) in drags where d.hostMoved && windows[id]?.confident ?? true {
             let r = d.residual
             if r.dx != 0 || r.dy != 0 { out.append(Displacement(kind: .drag, windowID: id, rect: d.confirmedFrame, dx: r.dx, dy: r.dy)) }
         }
@@ -235,7 +248,7 @@ public struct Predictor {
     }
 
     public func isConfident(_ windowID: UInt32) -> Bool { windows[windowID]?.confident ?? true }
-    public var hasPending: Bool { windows.values.contains { !$0.predictions.isEmpty } || drags.values.contains { $0.residual.dx != 0 || $0.residual.dy != 0 } }
+    public var hasPending: Bool { windows.values.contains { !$0.predictions.isEmpty } || drags.values.contains { $0.hostMoved && ($0.residual.dx != 0 || $0.residual.dy != 0) } }
     public mutating func forget(windowID: UInt32) { windows[windowID] = nil; drags[windowID] = nil }
 }
 

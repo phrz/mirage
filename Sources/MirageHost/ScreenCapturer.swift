@@ -136,9 +136,22 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
             IOPMAssertionCreateWithName(kIOPMAssertPreventUserIdleDisplaySleep as CFString, IOPMAssertionLevel(kIOPMAssertionLevelOn), "Mirage viewer connected" as CFString, &displayAssertion)
         }
     }
+    /// The whole display as one picture (no window is a layer of its own): the windows' shadows stay in it, since nothing
+    /// else draws them (the viewer shadows only layers and cut-outs). Desktop mode has sent the whole display since
+    /// 2026-11-12, and its windows lost their shadows until this (phrz on 642: "windows don't have shadows").
+    private(set) var keepsShadows = false
+    private var lastMaxFPS = 60
+    func setKeepsShadows(_ on: Bool) async {
+        guard on != keepsShadows else { return }
+        keepsShadows = on
+        guard let stream, let target else { return }
+        try? await stream.updateConfiguration(configuration(for: target, maxFPS: lastMaxFPS))
+    }
     /// This source's configuration (the overlay's on a clear background, its menus' shadows kept).
     private func configuration(for t: Target, maxFPS: Int) -> SCStreamConfiguration {
+        lastMaxFPS = maxFPS
         let config = Self.configuration(for: t, maxFPS: maxFPS)
+        if keepsShadows, source == .display { config.ignoreShadowsDisplay = false }
         if source == .overlay {
             // Clear where no overlay window is (the window layers show through), and the menus' own shadows kept.
             config.backgroundColor = CGColor.clear

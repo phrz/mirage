@@ -461,6 +461,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.capturer = cap
                     self.compositor = comp; self.overlay = ov
                     self.reapplyCurtainExclusion()
+                    self.syncCaptureShadows()
                     self.target = t
                     self.request = req
                     self.windows = tracker
@@ -781,6 +782,13 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             rebuildAllEncoders(keyframes: true)
         }
         beginFreshPicture(.viewMode, detail: toWhole ? " to the whole display" : " to window layers")
+        syncCaptureShadows()
+    }
+    /// On `queue`: the display capture keeps the windows' shadows while it is the whole picture (wholeOnly).
+    private func syncCaptureShadows() {
+        guard let cap = capturer else { return }
+        let on = wholeOnly
+        Task { await cap.setKeepsShadows(on) }
     }
     /// Pure, for tests: how one capture of the whole display goes out in wholeDisplayOnly: every changed tile in one video
     /// frame (TRUTH: a presented frame is one capture, never part now and the rest as tiles later).
@@ -1533,6 +1541,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     self.capturer = cap
                     self.compositor = comp; self.overlay = ov
                     self.reapplyCurtainExclusion()
+                    self.syncCaptureShadows()
                     self.ensureOverlayLayer()
                     self.ensureUnderlay(t)
                     if !self.fallbackLayers.isEmpty { self.ensureFallbackCapture() }

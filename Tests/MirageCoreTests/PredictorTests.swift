@@ -80,8 +80,9 @@ final class DragPredictionTests: XCTestCase {
         var seq: UInt64 = 1
         var x = 300, y = 110
         var now: UInt64 = 0
-        // 10 pointer moves of (6, 3) with no host answer yet: the window follows the pointer fully.
+        // 10 pointer moves of (6, 3), the host's list showing the window moving: it follows the pointer fully.
         for _ in 0..<10 { seq += 1; x += 6; y += 3; now += 16_000_000; p.dragPointer(windowID: 7, pointer: (x, y), inputSeq: seq, now: now) }
+        p.hostFrame(windowID: 7, frame: frame.offset(6, 3))
         XCTAssertEqual(p.displacements().first?.dx, 60); XCTAssertEqual(p.displacements().first?.dy, 30)
         XCTAssertEqual(p.displacements().first?.rect, frame)
         // The host confirms the first 4 moves axis by axis: (24, 0) at seq 5, then (0, 12) at seq 5.
@@ -114,6 +115,26 @@ final class DragPredictionTests: XCTestCase {
         XCTAssertTrue(p.displacements().isEmpty)
         XCTAssertFalse(p.isConfident(7))
         XCTAssertEqual(p.dragResidual(windowID: 7).map { $0.dx } ?? -1, 0)
+    }
+
+    /// A press the host does not take as a drag (a toolbar near the top, a window that cannot move): its window never moves
+    /// here, so nothing snaps back, and no mismatch is counted against the window.
+    func testNothingMovesUntilTheHostMovesTheWindow() {
+        var p = Predictor()
+        let frame = PixelRect(x: 100, y: 100, width: 400, height: 300)
+        p.beginDrag(windowID: 7, frame: frame, pointer: (300, 110), inputSeq: 1, now: 0)
+        for i in 2...6 { p.dragPointer(windowID: 7, pointer: (300 + 10 * (i - 1), 110), inputSeq: UInt64(i), now: UInt64(i) * 16_000_000) }
+        XCTAssertTrue(p.displacements().isEmpty, "the host has not moved it: shown where the host has it")
+        XCTAssertFalse(p.hasPending)
+        p.hostFrame(windowID: 7, frame: frame)   // a list with the window where it was: no move
+        XCTAssertTrue(p.displacements().isEmpty)
+        p.endDrag(windowID: 7); p.expire(now: 2_000_000_000)
+        XCTAssertTrue(p.isConfident(7)); XCTAssertEqual(p.stats.mismatched, 0)
+        // Another drag the host does move: shown once its list says so.
+        p.beginDrag(windowID: 7, frame: frame, pointer: (300, 110), inputSeq: 10, now: 3_000_000_000)
+        p.dragPointer(windowID: 7, pointer: (350, 110), inputSeq: 11, now: 3_016_000_000)
+        p.hostFrame(windowID: 7, frame: frame.offset(20, 0))
+        XCTAssertEqual(p.displacements().first?.dx, 50)
     }
 }
 

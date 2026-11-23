@@ -42,6 +42,7 @@ final class WindowDragTests: XCTestCase {
         let frame = PixelRect(x: 400, y: 300, width: 1200, height: 800)
         p.beginDrag(windowID: 7, frame: frame, pointer: (1000, 320), inputSeq: 1, now: 0, limits: limits)
         p.dragPointer(windowID: 7, pointer: (1000, 120), inputSeq: 2, now: 16_000_000)
+        p.hostFrame(windowID: 7, frame: frame.offset(0, -20))   // the host's list: it is moving
         XCTAssertEqual(p.displacements().first?.dy, -200, "inside the limits it follows the pointer")
         p.dragPointer(windowID: 7, pointer: (1100, -400), inputSeq: 3, now: 32_000_000)
         let d = p.displacements().first

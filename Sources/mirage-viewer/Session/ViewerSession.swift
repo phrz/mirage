@@ -1684,6 +1684,7 @@ final class ViewerSession: @unchecked Sendable {
         let before = hostFrames
         windows = list.apply(to: windows)
         hostFrames = Dictionary(windows.map { ($0.id, $0.frame) }, uniquingKeysWith: { a, _ in a })
+        for (id, f) in hostFrames where before[id] != nil && before[id] != f { predictor.hostFrame(windowID: id, frame: f) }
         if let s = list.inputSeq { lastHostListInputSeq = max(lastHostListInputSeq, s) }
         hostListSeq += 1
         if watchWindowID != 0, let f = hostFrames[watchWindowID], before[watchWindowID] != f { lastWatchedMoveNanos = now; watchedMoves += 1 }
