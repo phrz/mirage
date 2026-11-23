@@ -209,6 +209,13 @@ public enum ControlMessage: Codable, Equatable {
     /// Viewer → host: end that agent session now (then Lock When Finished applies).
     case endAgentSession
 
+    // The clipboard, shared both ways. Sent only to a peer that announced `Feature.clipboard`.
+    /// Either way: the clipboard's contents after a copy on that side (host → viewer), or the viewer's clipboard before a
+    /// paste (viewer → host, with an `id` the host answers with `clipboardApplied` once its clipboard holds it).
+    case clipboard(Clipboard)
+    /// Host → viewer: the clipboard with that id is on the host's clipboard now (a ⌘V held back for it can go).
+    case clipboardApplied(ClipboardApplied)
+
     /// Optional abilities a peer announces in its Hello or Welcome, so newer messages go only to peers that decode them
     /// (within one protocol version).
     public enum Feature {
@@ -227,6 +234,8 @@ public enum ControlMessage: Codable, Equatable {
         public static let unlock = "unlock"
         /// A viewer that shows agent sessions (Hello); a host that has them (Welcome).
         public static let agentSession = "agentSession"
+        /// A peer that shares its clipboard (`clipboard`, `clipboardApplied`): Hello and Welcome.
+        public static let clipboard = "clipboard"
     }
 
     /// The password travels as UTF-8 bytes (`Data` prints as "N bytes", never its content) and is zeroed after typing.
@@ -284,6 +293,25 @@ public enum ControlMessage: Codable, Equatable {
         public var requester: String
         public var expiresAt: Date
         public init(id: String, reason: String, requester: String, expiresAt: Date) { self.id = id; self.reason = reason; self.requester = requester; self.expiresAt = expiresAt }
+    }
+    /// Plain text and an image (PNG), either or both. Never logged beyond its sizes.
+    public struct Clipboard: Codable, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+        public var id: UInt32?
+        public var text: String?
+        public var png: Data?
+        public init(id: UInt32? = nil, text: String?, png: Data?) { self.id = id; self.text = text; self.png = png }
+        public var isEmpty: Bool { (text ?? "").isEmpty && (png ?? Data()).isEmpty }
+        /// Whether it fits one control frame (`Frame.maxLength`, with room to spare): a larger clipboard is not shared.
+        public var fitsOneFrame: Bool {
+            guard (text?.utf8.count ?? 0) + (png?.count ?? 0) * 4 / 3 < Frame.maxLength / 2 else { return false }
+            return ((try? JSONEncoder().encode(ControlMessage.clipboard(self)))?.count ?? Int.max) < Frame.maxLength - 4096
+        }
+        public var description: String { "clipboard(\(id.map { "#\($0) " } ?? "")text \(text?.utf8.count ?? 0) B, png \(png?.count ?? 0) B)" }
+        public var debugDescription: String { description }
+    }
+    public struct ClipboardApplied: Codable, Equatable, Sendable {
+        public var id: UInt32
+        public init(id: UInt32) { self.id = id }
     }
     public struct AgentSessionInfo: Codable, Equatable, Sendable {
         public var open: Bool

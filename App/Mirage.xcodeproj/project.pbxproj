@@ -30,6 +30,7 @@
 		CB4D5F9DA399D2C4CD1806FD /* Scenarios.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C074F19EC38BC7C9F819575 /* Scenarios.swift */; platformFilters = (macos, ); };
 		D1E2552685221D2A995DD793 /* SettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70D1AC2C3486AD48FE02A0F8 /* SettingsSheet.swift */; platformFilters = (ios, ); };
 		D3F97D038F9250050FA17FE6 /* FrameRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4AC0202C99A0D70F399D3307 /* FrameRecorder.swift */; };
+		DF2808622405207E5930301C /* LocalClipboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 39BCE158377580A6AA2A7EFB /* LocalClipboard.swift */; };
 		E625DF2408EB215132DD7892 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2DA7AE0BDF90A099212DED70 /* Assets.xcassets */; };
 		EA3E0E78C3C0B6AFC60D4E2B /* Unified.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C92DC8DF01A4C1DA1C1D47C /* Unified.swift */; platformFilters = (macos, ); };
 		EE4E916D5DEFCF2D5DF6F883 /* DuoPoseReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2972E1B0F71CA07A19FDA536 /* DuoPoseReader.swift */; platformFilters = (ios, ); };
@@ -48,6 +49,7 @@
 		2733E6F347ED1DBD6DF6D971 /* Chrome.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Chrome.swift; sourceTree = "<group>"; };
 		2972E1B0F71CA07A19FDA536 /* DuoPoseReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuoPoseReader.swift; sourceTree = "<group>"; };
 		2DA7AE0BDF90A099212DED70 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		39BCE158377580A6AA2A7EFB /* LocalClipboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalClipboard.swift; sourceTree = "<group>"; };
 		3C074F19EC38BC7C9F819575 /* Scenarios.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Scenarios.swift; sourceTree = "<group>"; };
 		4AC0202C99A0D70F399D3307 /* FrameRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameRecorder.swift; sourceTree = "<group>"; };
 		4D94099A71D8AD29B4BD2E85 /* DesktopScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesktopScreen.swift; sourceTree = "<group>"; };
@@ -163,6 +165,7 @@
 				191036FEC334D8CFA44A34BE /* ConnectList.swift */,
 				4AC0202C99A0D70F399D3307 /* FrameRecorder.swift */,
 				F366146B8A77C7662288C1DE /* Keychain.swift */,
+				39BCE158377580A6AA2A7EFB /* LocalClipboard.swift */,
 				EE5F863A87FCA6BEA0BDF195 /* Platform.swift */,
 				974AB2B25E113BD7D7C2CCA0 /* ScenePresenter.swift */,
 				839E2B46F65DC7DDF14EBC90 /* SessionBanners.swift */,
@@ -310,6 +313,7 @@
 				D3F97D038F9250050FA17FE6 /* FrameRecorder.swift in Sources */,
 				B431D8ABB3B18C11C2FE3220 /* HostMenu.swift in Sources */,
 				FAF456F4D2244C37CB79C758 /* Keychain.swift in Sources */,
+				DF2808622405207E5930301C /* LocalClipboard.swift in Sources */,
 				73BF7E311CEBF5DF2C48895E /* MirageMobileApp.swift in Sources */,
 				AEDB0E1D985D6BF9E29952D5 /* PairingScan.swift in Sources */,
 				4CBA4E26ABC3073E8E92241C /* PermissionsWindow.swift in Sources */,

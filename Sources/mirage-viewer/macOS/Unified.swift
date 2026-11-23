@@ -584,6 +584,7 @@ final class RemoteWindowView: NSView {
 
     @MainActor private func key(_ e: NSEvent, down: Bool) {
         guard !observeOnly else { return }
+        if down, e.keyCode == 9, e.modifierFlags.intersection([.command, .control, .option]) == .command { session?.pasteFollows() }   // ⌘V
         session?.send(.key(.init(keyCode: e.keyCode, down: down, isRepeat: down && e.isARepeat, modifiers: flags(e), characters: down ? e.characters : nil)))
     }
     override func keyDown(with e: NSEvent) { MainActor.assumeIsolated { if !LocalShortcuts.handle(e, session: session) { key(e, down: true) } } }

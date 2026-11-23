@@ -54,6 +54,10 @@ public struct HostContext: Sendable {
     public var endAgentSession: (@Sendable (_ by: String) -> Void)?
     /// Viewers that answer agents' unlock requests, and the requests waiting.
     public let unlockRequests = UnlockRequests()
+    /// The clipboard, shared with viewers that ask (`Feature.clipboard`): puts a viewer's clipboard on this Mac's (returns
+    /// once it is there). nil: this host does not share it. Copies on this Mac go out through `clipboardListeners`.
+    public var setClipboard: (@Sendable (ControlMessage.Clipboard) async -> Void)?
+    public let clipboardListeners = ClipboardListeners()
 
     public init(identity: DeviceIdentity, store: Store, tlsFingerprint: Data, log: @escaping @Sendable (String) -> Void,
                 makeStreamer: (@Sendable () -> DesktopStreamer)? = nil) {
@@ -153,6 +157,7 @@ public enum HostSession {
             await ctx.updateListeners.remove(connectionID)
             await ctx.unlockRequests.remove(connectionID)
             await ctx.agentSessionNotices.remove(connectionID)
+            await ctx.clipboardListeners.remove(connectionID)
             ctx.probes.end(connectionID)
         } else if conn.streamer != nil {
             ctx.log("[\(remote)] datagram flow closed while streaming")
@@ -208,6 +213,9 @@ public enum HostSession {
                 if !probe, ctx.sharing(), ctx.endAgentSession != nil, (hello.features ?? []).contains(ControlMessage.Feature.agentSession) {
                     await ctx.agentSessionNotices.add(conn.id, sendUpdate)
                 }
+                if !probe, ctx.sharing(), ctx.setClipboard != nil, (hello.features ?? []).contains(ControlMessage.Feature.clipboard) {
+                    await ctx.clipboardListeners.add(conn.id, sendUpdate)
+                }
                 if !probe, (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) {
                     // A viewer back from a suspended session hears what happened (or is happening) while it was away.
                     if hello.resumeToken != nil, let n = ResumeNotice.make(lastResult: ctx.updateInfo?().lastResult, hostName: ctx.identity.name, now: Date()) {
@@ -235,6 +243,11 @@ public enum HostSession {
                 guard ctx.sharing() else { ctx.log("[\(remote)] \(device.name) asked to end an agent session, but this Mac is not shared: refused"); continue }
                 ctx.log("[\(remote)] \(device.name) ended the agent session")
                 ctx.endAgentSession?(device.name)
+            case .clipboard(let c):
+                guard authenticated != nil else { throw MirageError.protocolViolation("clipboard before auth") }
+                guard ctx.sharing(), let set = ctx.setClipboard else { continue }
+                await set(c)
+                if let id = c.id { sendUpdate(.clipboardApplied(.init(id: id))) }
             case .unlockDecline(let d):
                 guard let device = authenticated else { throw MirageError.protocolViolation("unlockDecline before auth") }
                 if await ctx.unlockRequests.isPending(d.requestID) { ctx.log("[\(remote)] \(device.name) declined the unlock request") }
@@ -466,7 +479,8 @@ public enum HostSession {
                                              protocolVersion: Mirage.protocolVersion,
                                              features: (ctx.advertisesUnpair ? [ControlMessage.Feature.unpair] : []) + (ctx.updateHandler != nil ? [ControlMessage.Feature.updateTrigger] : [])
                                                 + (ctx.sharing() && ctx.unlockHandler != nil ? [ControlMessage.Feature.unlock] : [])
-                                                + (ctx.sharing() && ctx.endAgentSession != nil ? [ControlMessage.Feature.agentSession] : []),
+                                                + (ctx.sharing() && ctx.endAgentSession != nil ? [ControlMessage.Feature.agentSession] : [])
+                                                + (ctx.sharing() && ctx.setClipboard != nil ? [ControlMessage.Feature.clipboard] : []),
                                              // Only to a viewer that decodes update statuses (one from before U4 never sees it).
                                              updateResult: (hello.features ?? []).contains(ControlMessage.Feature.updateStatus) ? updates?.lastResult : nil,
                                              hostStreaming: streamingElsewhere, minProtocolVersion: Mirage.minProtocolVersion,

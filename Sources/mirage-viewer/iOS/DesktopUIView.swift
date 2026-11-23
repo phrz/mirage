@@ -154,6 +154,7 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
 
     override init(frame: CGRect) {
         super.init(frame: frame)
+        pasteConfiguration = Self.pasteTypes
         backgroundColor = .black
         isMultipleTouchEnabled = true
         metalLayer.pixelFormat = .bgra8Unorm
@@ -1033,6 +1034,42 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
     private lazy var noKeyboard = UIView(frame: .zero)
     private(set) lazy var accessoryBar = KeyAccessoryBar(owner: self)
     override var canBecomeFirstResponder: Bool { true }
+
+    // MARK: Paste into the host: iOS lets an app read the clipboard in its paste action (⌘V, the Paste button), so the
+    // clipboard goes to the host there, then ⌘V.
+
+    /// A hardware ⌘V waiting for its paste action.
+    var hardwarePaste = false
+    /// What the Paste button may hand over (it is enabled only for these).
+    static let pasteTypes = UIPasteConfiguration(acceptableTypeIdentifiers: ["public.plain-text", "public.utf8-plain-text", "public.text", "public.image", "public.png"])
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(paste(_:)) { return session != nil && !observeOnly }
+        return super.canPerformAction(action, withSender: sender)
+    }
+    override func paste(_ sender: Any?) {
+        hardwarePaste = false
+        pasteIntoHost(LocalClipboard.read())
+    }
+    /// The Paste button on the key row (UIPasteControl).
+    override func paste(itemProviders: [NSItemProvider]) {
+        guard let p = itemProviders.first else { return }
+        if p.canLoadObject(ofClass: NSString.self) {
+            _ = p.loadObject(ofClass: NSString.self) { [weak self] s, _ in
+                let text = (s as? NSString).map { String($0) }
+                DispatchQueue.main.async { self?.pasteIntoHost(text.map { .init(text: $0, png: nil) }) }
+            }
+        } else if p.canLoadObject(ofClass: UIImage.self) {
+            _ = p.loadObject(ofClass: UIImage.self) { [weak self] i, _ in
+                let png = (i as? UIImage)?.pngData()
+                DispatchQueue.main.async { self?.pasteIntoHost(png.map { .init(text: nil, png: $0) }) }
+            }
+        }
+    }
+    private func pasteIntoHost(_ clip: ControlMessage.Clipboard?) {
+        guard !observeOnly, let session else { return }
+        if let clip { session.pasteFollows(clip) }
+        key(9, characters: "v", flags: MacKeys.commandFlag | hardwareFlags & ~MacKeys.capsLockFlag)
+    }
     /// While the on-screen keyboard is off the view stays first responder (hardware keys arrive here) with an empty input view.
     override var inputView: UIView? { softKeyboard ? nil : noKeyboard }
     override var inputAccessoryView: UIView? { softKeyboard && accessoryRow && !accessoryDocked ? accessoryBar : nil }
@@ -1152,6 +1189,20 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
             if m.contains(.command) { flags |= MacKeys.commandFlag }
             if m.contains(.alphaShift) { flags |= MacKeys.capsLockFlag }
             let chars = MacKeys.characters(forSpecialKey: code) ?? (k.characters.isEmpty ? nil : k.characters)
+            // ⌘V: UIKit sends it to `paste(_:)` as well, where reading the clipboard is allowed; that sends the clipboard and
+            // the keys. If no paste action follows (none was offered), the keys go as they are.
+            if code == 9, flags & (MacKeys.commandFlag | MacKeys.controlFlag | MacKeys.optionFlag) == MacKeys.commandFlag {
+                if down {
+                    hardwarePaste = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(150)) { [weak self] in
+                        guard let self, self.hardwarePaste else { return }
+                        self.hardwarePaste = false
+                        self.session?.send(.key(.init(keyCode: 9, down: true, isRepeat: false, modifiers: flags, characters: "v")))
+                        self.session?.send(.key(.init(keyCode: 9, down: false, isRepeat: false, modifiers: flags, characters: nil)))
+                    }
+                }
+                continue
+            }
             let seq = session.send(.key(.init(keyCode: code, down: down, isRepeat: false, modifiers: flags, characters: down ? chars : nil)))
             if down { session.typeaheadKey(keyCode: code, characters: chars, modifiers: Self.keyModifiers(flags), seq: seq) }
         }
@@ -1228,15 +1279,28 @@ final class KeyAccessoryBar: UIView {
         for (code, t) in [(MacKeys.left, "←"), (MacKeys.up, "↑"), (MacKeys.down, "↓"), (MacKeys.right, "→")] {
             _ = make(t) { [weak self] in self?.owner?.key(code, characters: MacKeys.characters(forSpecialKey: code), flags: 0) }
         }
+        // The system's Paste button: this device's clipboard into the host (iOS reads it only through such a button).
+        let c = UIPasteControl.Configuration()
+        c.displayMode = .iconOnly
+        c.cornerStyle = .fixed
+        c.cornerRadius = 6
+        c.baseBackgroundColor = UIColor(white: 0.32, alpha: 1)
+        c.baseForegroundColor = .white
+        let paste = UIPasteControl(configuration: c)
+        paste.target = owner
+        addSubview(paste)
+        pasteControl = paste
     }
+    private var pasteControl: UIPasteControl?
     required init?(coder: NSCoder) { fatalError() }
     override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: 46) }
 
     override func layoutSubviews() {
         super.layoutSubviews()
         let inset = max(6, safeAreaInsets.left), gap: CGFloat = 6
-        let w = (bounds.width - 2 * inset - gap * CGFloat(buttons.count - 1)) / CGFloat(buttons.count)
-        for (i, b) in buttons.enumerated() { b.frame = CGRect(x: inset + CGFloat(i) * (w + gap), y: 5, width: w, height: bounds.height - 10) }
+        let views: [UIView] = buttons + (pasteControl.map { [$0] } ?? [])
+        let w = (bounds.width - 2 * inset - gap * CGFloat(views.count - 1)) / CGFloat(views.count)
+        for (i, b) in views.enumerated() { b.frame = CGRect(x: inset + CGFloat(i) * (w + gap), y: 5, width: w, height: bounds.height - 10) }
     }
 
     func update(sticky: UInt64) {

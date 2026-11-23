@@ -328,6 +328,7 @@ final class VideoNSView: NSView {
     private func key(_ e: NSEvent, down: Bool) {
         guard !observeOnly, let session else { return }
         if down { keysDown.insert(e.keyCode) } else { keysDown.remove(e.keyCode) }
+        if down, e.keyCode == 9, e.modifierFlags.intersection([.command, .control, .option]) == .command { MainActor.assumeIsolated { session.pasteFollows() } }   // ⌘V
         let seq = session.send(.key(.init(keyCode: e.keyCode, down: down, isRepeat: down && e.isARepeat, modifiers: flags(e),
                                           characters: down ? e.characters : nil)))
         if down { session.typeaheadKey(keyCode: e.keyCode, characters: e.characters, modifiers: e.modifierFlags, seq: seq) }

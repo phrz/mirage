@@ -409,7 +409,7 @@ final class ViewerSession: @unchecked Sendable {
             }
             log("connect timing: control stream open at \(since())")
             let knownID = (try? store.knownHosts())?[host]?.hostID
-            let welcome = try await session.authenticate(resumeToken: resumeToken, features: [ControlMessage.Feature.updateStatus, ControlMessage.Feature.agentSession] + UnlockController.helloFeatures(hostID: knownID), suspendGraceSeconds: ViewerSettings.lockAfterSuspend())   // U4 hook: notices
+            let welcome = try await session.authenticate(resumeToken: resumeToken, features: [ControlMessage.Feature.updateStatus, ControlMessage.Feature.agentSession, ControlMessage.Feature.clipboard] + UnlockController.helloFeatures(hostID: knownID), suspendGraceSeconds: ViewerSettings.lockAfterSuspend())   // U4 hook: notices
             unlock.connected(hostID: knownID, welcome: welcome)
             log("connect timing: authenticated at \(since())")
             let resumed = welcome.resumed == true
@@ -422,7 +422,8 @@ final class ViewerSession: @unchecked Sendable {
                 predictorLock.lock(); predictor = Predictor(); predictorLock.unlock()
                 videoQueue.sync { for v in layerViews.values { v.awaitingRecovery = false } }
             }
-            Task { @MainActor in model.hostDisplayName = welcome.hostName; model.hostBuild = welcome.hostBuild }
+            let sharesClipboard = (welcome.features ?? []).contains(ControlMessage.Feature.clipboard)
+            Task { @MainActor in model.hostDisplayName = welcome.hostName; model.hostBuild = welcome.hostBuild; hostClipboard = sharesClipboard; clipboardCount = -1; lastShared = nil }
             log(resumed ? "session resumed by \(welcome.hostName) (\(disconnectedAt.map { String(format: "%.1f s gap", Date().timeIntervalSince($0)) } ?? ""))" : "authenticated to \(welcome.hostName)")
             setStatus(resumed ? "resumed session with \(welcome.hostName)" : "authenticated to \(welcome.hostName)")
             let s = ControlSender(stream: control, log: { [weak self] in self?.log($0) })
@@ -739,6 +740,11 @@ final class ViewerSession: @unchecked Sendable {
                 unlock.result(r)
             case .unlockRequest(let r):
                 unlock.request(r)
+            case .clipboard(let c):
+                // A copy on the host: on this device's clipboard (not sent back: its change count is ours).
+                Task { @MainActor in clipboardCount = LocalClipboard.write(c); var plain = c; plain.id = nil; lastShared = plain }
+            case .clipboardApplied(let a):
+                inputQueue.async { self.releasePasteGate(a.id) }
             case .agentSession(let a):
                 log("host: agent session \(a.open ? "open for \(a.requester)" : "ended")")
                 Task { @MainActor in model.agentSession = a.open ? a : nil }
@@ -1487,6 +1493,8 @@ final class ViewerSession: @unchecked Sendable {
             switch m { case .key(let k): unlock.key(k); case .mouseButton(let b) where b.down: unlock.click(); default: break }
         }
         return inputQueue.sync {
+            // A paste waits for its clipboard to reach the host: what follows it keeps its order behind it.
+            if pasteGate != nil, m.isDiscreteInput { heldInput.append(m); return 0 }
             let seq: UInt64
             if case .mouseMove(let mm) = m { seq = input.pointer(x: mm.x, y: mm.y) }
             else if m.isDiscreteInput { seq = input.enqueue(m, now: Clock.nowNanos()) }
@@ -1495,6 +1503,55 @@ final class ViewerSession: @unchecked Sendable {
             flushInputNow()
             return seq
         }
+    }
+
+    // MARK: The clipboard (shared with hosts whose Welcome lists `Feature.clipboard`)
+
+    @MainActor private var hostClipboard = false
+    /// This device's clipboard change count last sent to the host or written from it.
+    @MainActor private var clipboardCount = -1
+    @MainActor private var clipboardID: UInt32 = 0
+    /// The contents last shared either way (without an id).
+    @MainActor private var lastShared: ControlMessage.Clipboard?
+    /// Guarded by inputQueue: the clipboard a paste waits for, and the input held behind it.
+    private var pasteGate: UInt32?
+    private var heldInput: [ControlMessage] = []
+
+    /// The person is about to paste into the host (⌘V, or the system's Paste): this device's clipboard goes first, if it
+    /// changed since it was last shared, and the paste's keys wait until the host has it (half a second at most).
+    /// `contents`: what the paste action read (iOS lets an app read the clipboard only there); nil reads it here (macOS).
+    @MainActor func pasteFollows(_ contents: ControlMessage.Clipboard? = nil) {
+        guard hostClipboard, let sender else { return }
+        let count = LocalClipboard.changeCount
+        #if os(macOS)
+        guard count != clipboardCount else { return }
+        let read = contents ?? LocalClipboard.read()
+        #else
+        let read = contents
+        #endif
+        clipboardCount = count
+        guard var clip = read, clip != lastShared else { return }
+        lastShared = clip
+        guard clip.fitsOneFrame else { log("clipboard: too large to share (\(clip))"); return }
+        clipboardID &+= 1
+        let id = clipboardID
+        clip.id = id
+        inputQueue.sync { pasteGate = id }
+        sender.send(.clipboard(clip))
+        inputQueue.asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
+            guard let self, self.pasteGate == id else { return }
+            self.log("clipboard: the host did not confirm it within 0.5 s; the paste goes anyway")
+            self.releasePasteGate(id)
+        }
+    }
+
+    /// On inputQueue.
+    private func releasePasteGate(_ id: UInt32) {
+        guard pasteGate == id else { return }
+        pasteGate = nil
+        let held = heldInput; heldInput = []
+        for m in held { _ = input.enqueue(m, now: Clock.nowNanos()) }
+        if !held.isEmpty { flushInputNow() }
     }
 
     // MARK: Typeahead (DESIGN §3.5 item 4)

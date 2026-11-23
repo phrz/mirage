@@ -177,6 +177,17 @@ public actor AgentSessionNotices {
     }
 }
 
+/// Viewers that share the clipboard (their Hello listed `Feature.clipboard`): the host's clipboard goes to each after a
+/// copy on the host.
+public actor ClipboardListeners {
+    private var sinks: [UUID: @Sendable (ControlMessage) -> Void] = [:]
+    public init() {}
+    public func add(_ id: UUID, _ sink: @escaping @Sendable (ControlMessage) -> Void) { sinks[id] = sink }
+    public func remove(_ id: UUID) { sinks[id] = nil }
+    public var count: Int { sinks.count }
+    public func send(_ clip: ControlMessage.Clipboard) { for send in sinks.values { send(.clipboard(clip)) } }
+}
+
 /// The host's side of agent requests (DESIGN §3.13): viewers that answer them (their Hello listed `Feature.unlock`), and
 /// the requests waiting for an answer. A request goes to every such viewer; the first answer settles it, and the others are
 /// told (an `unlockResult` with its id) so their prompts close.

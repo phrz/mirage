@@ -128,6 +128,12 @@ struct Serve: AsyncParsableCommand {
                 log("unlock with biometry: off (this miraged is not signed with the hardened runtime)")
             }
         }
+        // The clipboard, shared with viewers that ask (both ways); not on a Mac that is not shared.
+        if role.sharing {
+            ctx.setClipboard = { clip in await ClipboardBridge.shared.set(clip) }
+            let listeners = ctx.clipboardListeners
+            Task { @MainActor in ClipboardBridge.shared.start(listeners: listeners, log: { log($0) }) }
+        }
         host.start(onStream: { conn, id, remote in
             Task { await HostSession.handle(connection: conn, connectionID: id, remote: remote, ctx: ctx) }
         }, onState: { state in
