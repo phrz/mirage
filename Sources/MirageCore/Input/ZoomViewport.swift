@@ -30,8 +30,17 @@ public struct ZoomViewport: Equatable {
     public private(set) var origin: CGPoint = .zero
     public var minZoom = 1.0
     public var maxZoom = 3.0
+    /// The picture is the screen (the host's display made this view's size): at fit, with no keyboard up, it does not
+    /// pan by what the pill or the safe area covers; zoomed in it pans as always.
+    public private(set) var pinnedAtFit = false
 
     public init() {}
+
+    public mutating func setPinnedAtFit(_ on: Bool) {
+        guard on != pinnedAtFit else { return }
+        pinnedAtFit = on
+        clamp()
+    }
 
     /// The part of the view the picture can be seen in: the unobstructed area above the keyboard.
     public var visible: CGRect {
@@ -95,6 +104,12 @@ public struct ZoomViewport: Equatable {
     /// far edge meeting the visible area's far edge to its near edge meeting the near one.
     public var originRange: (x: ClosedRange<Double>, y: ClosedRange<Double>) {
         let p = pictureRect.size, v = visible, c = container
+        if pinnedAtFit, zoom <= minZoom + 1e-9, keyboardTop == nil {
+            // The host's display is this screen (Dynamic Resolution): at fit it stays screen to screen, a drag only
+            // rubber-bands.
+            let o = CGPoint(x: c.midX - p.width / 2, y: c.midY - p.height / 2)
+            return (o.x...o.x, o.y...o.y)
+        }
         return (Self.axisRange(size: p.width, lo: v.minX, hi: v.maxX, centre: c.midX),
                 Self.axisRange(size: p.height, lo: v.minY, hi: v.maxY, centre: c.midY))
     }

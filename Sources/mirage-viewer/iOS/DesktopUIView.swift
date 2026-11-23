@@ -277,6 +277,11 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
         let before = viewport
         viewport.setLayout(container: containerRect, unobstructed: unobstructedRect, keyboardTop: keyboardHeight > 0 ? Double(bounds.height - keyboardHeight) : nil, content: content)
         viewport.setZoomRange(oneToOne: oneToOne)
+        // Dynamic Resolution: once the host's display has this container's shape, the fitted picture is the screen.
+        let c = containerRect
+        let sameShape = focusFrame == nil && c.width > 0 && c.height > 0 && content.height > 0
+            && abs((content.width / content.height) / (c.width / c.height) - 1) < 0.02
+        viewport.setPinnedAtFit(ViewerSettings.dynamicResolution && sameShape)
         if viewport != before { viewportChanged() }
     }
 

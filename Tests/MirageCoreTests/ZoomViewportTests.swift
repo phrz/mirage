@@ -25,6 +25,25 @@ final class ZoomViewportTests: XCTestCase {
         assertRect(l.pictureRect, CGRect(x: 59 + (734 - 628.8) / 2, y: 0, width: 628.8, height: 393))
     }
 
+    func testPinnedAtFitStaysScreenToScreenUntilZoomedOrTheKeyboardIsUp() {
+        // The host's display is the container (Dynamic Resolution), a pill covering the top 60 pt.
+        let c = CGRect(x: 0, y: 59, width: 393, height: 759)
+        var v = ZoomViewport()
+        v.setLayout(container: c, unobstructed: CGRect(x: 0, y: 110, width: 393, height: 708), keyboardTop: nil, content: CGSize(width: 786, height: 1518))
+        XCTAssertGreaterThan(v.originRange.y.upperBound - v.originRange.y.lowerBound, 1)   // unpinned: pans by the pill
+        v.setPinnedAtFit(true)
+        XCTAssertEqual(v.originRange.y.lowerBound, v.originRange.y.upperBound)
+        XCTAssertEqual(v.originRange.x.lowerBound, v.originRange.x.upperBound)
+        assertRect(v.pictureRect, c)
+        let i = v.scrollInsets(viewSize: CGSize(width: 393, height: 852))
+        XCTAssertEqual(i.top + i.bottom + Double(v.pictureRect.height), 852, accuracy: 0.01)   // nothing to scroll: rubber band only
+        v.setZoom(2, about: CGPoint(x: 196, y: 400))
+        XCTAssertGreaterThan(v.originRange.y.upperBound - v.originRange.y.lowerBound, 1)   // zoomed: pans
+        v.setZoom(1, about: CGPoint(x: 196, y: 400))
+        v.setLayout(container: c, unobstructed: CGRect(x: 0, y: 110, width: 393, height: 708), keyboardTop: 500, content: CGSize(width: 786, height: 1518))
+        XCTAssertGreaterThan(v.originRange.y.upperBound - v.originRange.y.lowerBound, 1)   // keyboard up: lifts above it
+    }
+
     func testOneToOneAndTheZoomRange() {
         var v = portrait()
         // A 3024 px wide host display on a 3× screen: fit is 1179 device pixels wide.
