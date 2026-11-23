@@ -42,8 +42,12 @@ final class LinuxInput: @unchecked Sendable {
             if Self.modifierKeys[k.keyCode] != nil { modifierKey(k.keyCode, flags: k.modifiers, s); return }
             syncModifiers(k.modifiers, s)
             if k.isRepeat { return }   // the desktop repeats a held key itself
+            // A key whose own flags say Shift or Option with no such key held (an on-screen keyboard's "!" is 1 with Shift,
+            // its capital letters with Shift: it sends no modifier events for them) gets that modifier around it here.
+            let around = k.down ? pressImplied(k.modifiers, s) : []
             if let code = Self.keys[k.keyCode] { s.key(code, k.down) }
             else if let ch = k.characters?.unicodeScalars.first { s.keysym(Self.keysym(ch), k.down) }
+            if k.down { lock.lock(); implied = around; lock.unlock() } else { releaseImplied(s) }
         case .modifiers(let mo):
             modifierKey(mo.keyCode, flags: mo.modifiers, s)
         default:
@@ -77,6 +81,24 @@ final class LinuxInput: @unchecked Sendable {
         lock.unlock()
         if press { s.key(code, true) } else if isHeld { s.key(code, false) }
         syncModifiers(flags, s)
+    }
+
+    /// Modifiers pressed for the key now down (`pressImplied`), released with its key-up.
+    private var implied: [UInt32] = []
+    private static let impliedKeys: [(flag: UInt64, code: UInt32)] = [(shift, 42), (option, 56)]
+
+    private func pressImplied(_ flags: UInt64, _ s: InputBackend) -> [UInt32] {
+        releaseImplied(s)
+        lock.lock()
+        let heldFlags = held.reduce(UInt64(0)) { acc, code in acc | (Self.modifierKeys.values.first { $0.0 == code }?.1 ?? 0) }
+        lock.unlock()
+        let codes = Self.impliedKeys.filter { flags & $0.flag != 0 && heldFlags & $0.flag == 0 }.map(\.code)
+        for c in codes { s.key(c, true) }
+        return codes
+    }
+    private func releaseImplied(_ s: InputBackend) {
+        lock.lock(); let codes = implied; implied = []; lock.unlock()
+        for c in codes.reversed() { s.key(c, false) }
     }
 
     /// Releases held modifiers whose flag is no longer set (a release the viewer never sent as its own event).
