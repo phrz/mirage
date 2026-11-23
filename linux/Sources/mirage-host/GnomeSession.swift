@@ -66,6 +66,15 @@ final class GnomeSession: DesktopSource, @unchecked Sendable {
         if close { md_session_close(s) }
     }
 
+    private var openedAt = Date.distantPast
+
+    /// The monitors changed under the open session (a virtual monitor came and went): a session opened before `date`
+    /// shows a monitor that may be gone, so it ends and the next one shows the primary monitor now.
+    func renew(openedBefore date: Date) {
+        lock.lock(); let s = openedAt < date ? current : nil; lock.unlock()
+        if let s { md_session_end(s) }
+    }
+
     private let opening = NSLock()   // one tick at a time (the thread's and an acquire's)
 
     private func tick() {
@@ -87,7 +96,7 @@ final class GnomeSession: DesktopSource, @unchecked Sendable {
             var w: Int32 = 0, h: Int32 = 0
             _ = md_picture_wait(md_session_picture(s), 0, 2000)
             md_picture_size(md_session_picture(s), &w, &h)
-            lock.lock(); current = s; lastError = nil; lock.unlock()
+            lock.lock(); current = s; lastError = nil; openedAt = Date(); lock.unlock()
             log?("sharing GNOME's screen (\(w)x\(h))")
         } else {
             let e = String(cString: err)

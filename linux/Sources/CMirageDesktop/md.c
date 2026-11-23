@@ -2,15 +2,12 @@
 // no portal dialog for a process of the logged-in user. Frames come over PipeWire into one shared buffer; the encoder
 // takes the newest.
 #include "md.h"
-#include "picture.h"
+#include "cast.h"
+#include "gnome.h"
 
 #include <errno.h>
 #include <gio/gio.h>
-#include <pipewire/pipewire.h>
 #include <pthread.h>
-#include <spa/debug/types.h>
-#include <spa/param/video/format-utils.h>
-#include <spa/param/video/type-info.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,14 +37,7 @@ struct md_session {
     // Logical size of the stream (pointer coordinates), from the stream's Parameters.
     int logical_w, logical_h;
 
-    // PipeWire
-    struct pw_thread_loop *loop;
-    struct pw_context *context;
-    struct pw_core *core;
-    struct pw_stream *stream;
-    struct spa_hook stream_listener;
-    struct spa_video_info_raw format;
-
+    md_cast cast;
     md_picture pic;
 };
 
@@ -66,7 +56,7 @@ static void dbus_init(void) {
     pthread_create(&t, NULL, dbus_thread, NULL);
     pthread_detach(t);
 }
-static void ensure_dbus_thread(void) {
+void md_dbus_thread(void) {
     static pthread_once_t once = PTHREAD_ONCE_INIT;
     pthread_once(&once, dbus_init);
 }
@@ -108,115 +98,16 @@ static void on_closed(GDBusConnection *c, const char *sender, const char *path, 
     md_picture_end(&s->pic);
 }
 
-// MARK: - PipeWire
-
-static void on_param_changed(void *data, uint32_t id, const struct spa_pod *param) {
-    md_session *s = data;
-    if (!param || id != SPA_PARAM_Format) return;
-    uint32_t media_type, media_subtype;
-    if (spa_format_parse(param, &media_type, &media_subtype) < 0) return;
-    if (media_type != SPA_MEDIA_TYPE_video || media_subtype != SPA_MEDIA_SUBTYPE_raw) return;
-    if (spa_format_video_raw_parse(param, &s->format) < 0) return;
-
-    uint8_t buf[1024];
-    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof buf);
-    const struct spa_pod *params[2];
-    params[0] = spa_pod_builder_add_object(&b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
-        SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(4, 2, 16),
-        SPA_PARAM_BUFFERS_blocks, SPA_POD_Int(1),
-        SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int((1 << SPA_DATA_MemFd) | (1 << SPA_DATA_MemPtr)));
-    params[1] = spa_pod_builder_add_object(&b, SPA_TYPE_OBJECT_ParamMeta, SPA_PARAM_Meta,
-        SPA_PARAM_META_type, SPA_POD_Id(SPA_META_Header),
-        SPA_PARAM_META_size, SPA_POD_Int(sizeof(struct spa_meta_header)));
-    pw_stream_update_params(s->stream, params, 2);
-}
-
-static void on_process(void *data) {
-    md_session *s = data;
-    struct pw_buffer *b = NULL, *next;
-    // Only the newest buffer matters.
-    while ((next = pw_stream_dequeue_buffer(s->stream))) {
-        if (b) pw_stream_queue_buffer(s->stream, b);
-        b = next;
-    }
-    if (!b) return;
-    struct spa_buffer *buf = b->buffer;
-    struct spa_meta_header *h = spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof *h);
-    struct spa_data *d = &buf->datas[0];
-    int ok = d->data && d->chunk && d->chunk->size > 0 && !(h && (h->flags & SPA_META_HEADER_FLAG_CORRUPTED));
-    if (ok) {
-        int w = (int)s->format.size.width, hgt = (int)s->format.size.height;
-        int stride = d->chunk->stride ? d->chunk->stride : w * 4;
-        int r = 2, g = 1, bl = 0;   // BGRx / BGRA
-        switch (s->format.format) {
-        case SPA_VIDEO_FORMAT_RGBx: case SPA_VIDEO_FORMAT_RGBA: r = 0; g = 1; bl = 2; break;
-        case SPA_VIDEO_FORMAT_xRGB: case SPA_VIDEO_FORMAT_ARGB: r = 1; g = 2; bl = 3; break;
-        case SPA_VIDEO_FORMAT_xBGR: case SPA_VIDEO_FORMAT_ABGR: r = 3; g = 2; bl = 1; break;
-        default: break;
-        }
-        size_t need = (size_t)stride * hgt;
-        const uint8_t *src = (const uint8_t *)d->data + d->chunk->offset;
-        if ((size_t)d->chunk->offset + need <= d->maxsize) {
-            uint8_t *dst = md_picture_begin(&s->pic, stride, hgt);
-            if (dst) { memcpy(dst, src, need); md_picture_commit(&s->pic, w, hgt, stride, r, g, bl); }
-        }
-    }
-    pw_stream_queue_buffer(s->stream, b);
-}
-
-static void on_state_changed(void *data, enum pw_stream_state old, enum pw_stream_state state, const char *error) {
-    (void)old; (void)error;
-    md_session *s = data;
-    if (state == PW_STREAM_STATE_ERROR || state == PW_STREAM_STATE_UNCONNECTED) {
-        pthread_mutex_lock(&s->lock);
-        s->ended = 1;
-        pthread_cond_broadcast(&s->cond);
-        pthread_mutex_unlock(&s->lock);
-        md_picture_end(&s->pic);
-    }
-}
-
-static const struct pw_stream_events StreamEvents = {
-    PW_VERSION_STREAM_EVENTS,
-    .state_changed = on_state_changed,
-    .param_changed = on_param_changed,
-    .process = on_process,
-};
-
-static void pw_once_init(void) { pw_init(NULL, NULL); }
-static int start_pipewire(md_session *s, char *err, size_t err_len) {
-    static pthread_once_t once = PTHREAD_ONCE_INIT;
-    pthread_once(&once, pw_once_init);
-    s->loop = pw_thread_loop_new("mirage-capture", NULL);
-    if (!s->loop) { snprintf(err, err_len, "PipeWire: no thread loop"); return -1; }
-    if (pw_thread_loop_start(s->loop) < 0) { snprintf(err, err_len, "PipeWire: thread loop did not start"); return -1; }
-    pw_thread_loop_lock(s->loop);
-    s->context = pw_context_new(pw_thread_loop_get_loop(s->loop), NULL, 0);
-    s->core = s->context ? pw_context_connect(s->context, NULL, 0) : NULL;
-    if (!s->core) { pw_thread_loop_unlock(s->loop); snprintf(err, err_len, "cannot connect to PipeWire: %s", strerror(errno)); return -1; }
-    s->stream = pw_stream_new(s->core, "Mirage", pw_properties_new(PW_KEY_MEDIA_TYPE, "Video", PW_KEY_MEDIA_CATEGORY, "Capture",
-                                                                   PW_KEY_MEDIA_ROLE, "Screen", NULL));
-    pw_stream_add_listener(s->stream, &s->stream_listener, &StreamEvents, s);
-
-    uint8_t buf[1024];
-    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof buf);
-    const struct spa_pod *params[1];
-    params[0] = spa_pod_builder_add_object(&b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
-        SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_video),
-        SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
-        SPA_FORMAT_VIDEO_format, SPA_POD_CHOICE_ENUM_Id(9, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
-                                                      SPA_VIDEO_FORMAT_RGBx, SPA_VIDEO_FORMAT_RGBA, SPA_VIDEO_FORMAT_xRGB,
-                                                      SPA_VIDEO_FORMAT_ARGB, SPA_VIDEO_FORMAT_xBGR, SPA_VIDEO_FORMAT_ABGR),
-        SPA_FORMAT_VIDEO_size, SPA_POD_CHOICE_RANGE_Rectangle(&SPA_RECTANGLE(1920, 1080), &SPA_RECTANGLE(1, 1), &SPA_RECTANGLE(16384, 16384)),
-        SPA_FORMAT_VIDEO_framerate, SPA_POD_CHOICE_RANGE_Fraction(&SPA_FRACTION(60, 1), &SPA_FRACTION(0, 1), &SPA_FRACTION(240, 1)));
-    int rc = pw_stream_connect(s->stream, PW_DIRECTION_INPUT, s->node_id,
-                               PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, params, 1);
-    pw_thread_loop_unlock(s->loop);
-    if (rc < 0) { snprintf(err, err_len, "PipeWire: cannot connect to the screen cast: %s", strerror(-rc)); return -1; }
-    return 0;
-}
-
 // MARK: - Session
+
+static void cast_ended(void *data) {
+    md_session *s = data;
+    pthread_mutex_lock(&s->lock);
+    s->ended = 1;
+    pthread_cond_broadcast(&s->cond);
+    pthread_mutex_unlock(&s->lock);
+    md_picture_end(&s->pic);
+}
 
 static void read_logical_size(md_session *s) {
     GVariant *r = call(s, SC_BUS, s->stream_path, "org.freedesktop.DBus.Properties", "Get",
@@ -231,7 +122,7 @@ static void read_logical_size(md_session *s) {
 }
 
 md_session *md_session_open(char *err, size_t err_len) {
-    ensure_dbus_thread();
+    md_dbus_thread();
     md_session *s = calloc(1, sizeof *s);
     pthread_mutex_init(&s->lock, NULL);
     pthread_condattr_t ca;
@@ -291,24 +182,31 @@ md_session *md_session_open(char *err, size_t err_len) {
     pthread_mutex_unlock(&s->lock);
     if (!node) { snprintf(err, err_len, "GNOME started the screen cast but sent no PipeWire stream"); goto fail; }
     read_logical_size(s);
-    if (start_pipewire(s, err, err_len) < 0) goto fail;
+    s->cast.pic = &s->pic;
+    s->cast.on_end = cast_ended;
+    s->cast.end_data = s;
+    if (md_cast_start(&s->cast, -1, node, 0, 0, err, err_len) < 0) goto fail;
     return s;
 fail:
     md_session_close(s);
     return NULL;
 }
 
+void md_session_end(md_session *s) {
+    pthread_mutex_lock(&s->lock);
+    int ended = s->ended;
+    s->ended = 1;
+    pthread_mutex_unlock(&s->lock);
+    if (!ended && s->rd_path) {
+        GVariant *r = call(s, RD_BUS, s->rd_path, RD_SESSION_IFACE, "Stop", NULL, NULL, NULL, 0);
+        if (r) g_variant_unref(r);
+    }
+    md_picture_end(&s->pic);
+}
+
 void md_session_close(md_session *s) {
     if (!s) return;
-    if (s->loop) {
-        pw_thread_loop_lock(s->loop);
-        if (s->stream) { pw_stream_disconnect(s->stream); pw_stream_destroy(s->stream); }
-        if (s->core) pw_core_disconnect(s->core);
-        if (s->context) pw_context_destroy(s->context);
-        pw_thread_loop_unlock(s->loop);
-        pw_thread_loop_stop(s->loop);
-        pw_thread_loop_destroy(s->loop);
-    }
+    md_cast_stop(&s->cast);
     if (s->bus) {
         if (s->sub_stream) g_dbus_connection_signal_unsubscribe(s->bus, s->sub_stream);
         if (s->sub_closed) g_dbus_connection_signal_unsubscribe(s->bus, s->sub_closed);

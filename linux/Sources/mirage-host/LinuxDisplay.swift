@@ -3,8 +3,9 @@ import ArgumentParser
 import MirageCore
 import CMirageDesktop
 
-/// Dynamic Resolution on Linux: the screen's mode nearest a viewer's window (a monitor's own modes; GNOME's display
-/// settings, temporarily), and the layout before put back when the stream ends or the viewer turns it off.
+/// Dynamic Resolution on Linux where there is no virtual monitor (VirtualScreen: the login and lock screens, desktops
+/// other than GNOME): the screen's mode nearest a viewer's window (a monitor's own modes; GNOME's display settings,
+/// temporarily), and the layout before put back when the stream ends or the viewer turns it off.
 ///
 /// GNOME's display settings live on the session bus of whoever has the screen (the login screen's or a user's), so the
 /// system service asks through `mirage-host display` run as that user.
@@ -30,6 +31,9 @@ final class DisplayFitter: @unchecked Sendable {
 
     /// Puts the display back now (the service is stopping or restarting into an update).
     func restoreNow() { queue.sync { lock.lock(); restoreLocked(); owner = nil; lock.unlock() } }
+
+    /// As `request`, waiting until it is done (VirtualScreen: the real monitor's mode back before a virtual one is made).
+    func apply(_ fit: ControlMessage.FitDisplay?, ownerID id: ObjectIdentifier) { queue.sync { apply(fit, owner: id) } }
 
     private func apply(_ fit: ControlMessage.FitDisplay?, owner id: ObjectIdentifier) {
         lock.lock(); defer { lock.unlock() }
@@ -89,6 +93,20 @@ struct SessionUser: Equatable {
     let uid: UInt32
     var gid: UInt32 { getpwuid(uid).map { $0.pointee.pw_gid } ?? uid }
     var home: String { getpwuid(uid).map { String(cString: $0.pointee.pw_dir) } ?? "/" }
+
+    /// The signed-in desktop on the screen, unlocked: where GNOME makes remote-desktop sessions (not at GDM's login
+    /// screen, nor while locked). When this process is not root, only its own user's.
+    static func desktop() -> SessionUser? {
+        guard let seat = TrayLauncher.run("/usr/bin/loginctl", ["show-seat", "seat0", "-p", "ActiveSession", "--value"])?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !seat.isEmpty,
+              let props = TrayLauncher.run("/usr/bin/loginctl", ["show-session", seat, "-p", "Name", "-p", "User", "-p", "Type",
+                                                                 "-p", "Class", "-p", "LockedHint"]) else { return nil }
+        var p: [String: String] = [:]
+        for l in props.split(separator: "\n") { let kv = l.split(separator: "=", maxSplits: 1); if kv.count == 2 { p[String(kv[0])] = String(kv[1]) } }
+        guard p["Type"] == "wayland", p["Class"] == "user", p["LockedHint"] != "yes", let name = p["Name"],
+              let uid = p["User"].flatMap(UInt32.init), geteuid() == 0 || geteuid() == uid else { return nil }
+        return SessionUser(name: name, uid: uid)
+    }
 
     static func onScreen() -> SessionUser? {
         guard let seat = TrayLauncher.run("/usr/bin/loginctl", ["show-seat", "seat0", "-p", "ActiveSession", "--value"])?

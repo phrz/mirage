@@ -29,7 +29,15 @@ final class DesktopLease: @unchecked Sendable {
     let input: InputBackend
     /// The source's own handle (GNOME's session), for its release.
     let token: OpaquePointer?
-    init(picture: OpaquePointer, input: InputBackend, token: OpaquePointer?) { self.picture = picture; self.input = input; self.token = token }
+    private let scaleNow: (() -> Double?)?
+    init(picture: OpaquePointer, input: InputBackend, token: OpaquePointer?, scale: (() -> Double?)? = nil) {
+        self.picture = picture; self.input = input; self.token = token; scaleNow = scale
+    }
+    /// The picture's pixels per point (a virtual monitor's scale; else 1); nil while it is changing size.
+    var scale: Double? {
+        guard let f = scaleNow else { return 1 }
+        return f()
+    }
     var ended: Bool { md_picture_ended(picture) != 0 }
 }
 

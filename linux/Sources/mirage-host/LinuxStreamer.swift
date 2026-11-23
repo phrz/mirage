@@ -44,25 +44,39 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// The session ended for good (stop, not suspend): Lock When Finished.
     private let ended: @Sendable () -> Void
-    /// Dynamic Resolution: the screen's mode follows the viewer's window while it asks.
-    private let fitter = DisplayFitter.shared
+    /// Dynamic Resolution: a virtual monitor the size of the viewer's window (else the screen's nearest mode) while it asks.
+    private let fitter = VirtualScreen.shared
+    /// The virtual monitor being shown (it is the whole desktop while it exists), else nil: the source's.
+    private var virtualLease: DesktopLease?
+    private var scale = 1.0
     init(source: DesktopSource, log: @escaping @Sendable (String) -> Void, ended: @escaping @Sendable () -> Void = {}) {
         self.source = source; self.log = log; self.ended = ended
         fitter.log = log
+        DisplayFitter.shared.log = log
     }
 
     // MARK: DesktopStreamer
 
     func start(_ request: ControlMessage.StreamRequest, output: StreamOutput) async throws -> ControlMessage.StreamInfo {
-        guard let l = source.acquire(timeout: 3) else {
+        // A virtual monitor already showing (another viewer's, or this one's before a suspend) is the desktop; the source's
+        // screen may then be dark.
+        let virt = VirtualScreen.shared.acquire()
+        let base = virt == nil ? source.acquire(timeout: 3) : nil   // taken once the virtual monitor goes
+        guard let shown = virt ?? base else {
             throw MirageError.transport(source.unavailableReason ?? "\(source.name) is not available")
         }
         var w: Int32 = 0, h: Int32 = 0
-        md_picture_size(l.picture, &w, &h)
-        guard w > 1, h > 1 else { source.release(l); throw MirageError.transport("\(source.name) has shown no picture yet") }
+        md_picture_size(shown.picture, &w, &h)
+        guard w > 1, h > 1 else {
+            if let base { source.release(base) }
+            if let virt { VirtualScreen.shared.release(virt) }
+            throw MirageError.transport("\(source.name) has shown no picture yet")
+        }
         let envFPS = ProcessInfo.processInfo.environment["MIRAGE_FPS"].flatMap(Int.init)
         lock.lock()
-        lease = l
+        lease = base
+        virtualLease = virt
+        scale = shown.scale ?? 1
         self.output = output
         width = Int(w) & ~1; height = Int(h) & ~1
         // 60 whatever the viewer asks (as a Mac host streaming its whole display does): frames go only when the screen changes.
@@ -71,19 +85,18 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         needKeyframe = true
         running = true
         lock.unlock()
-        input.backend = l.input
+        input.backend = shown.input
         let t = Thread { [weak self] in self?.encodeLoop() }
         t.name = "mirage-encode"
         t.qualityOfService = .userInteractive
         thread = t
         t.start()
-        let relay = CursorRelay(source: source, lease: l)
-        let ct = Thread { [weak self] in self?.cursorLoop(relay) }
+        let ct = Thread { [weak self] in self?.cursorLoop() }
         ct.name = "mirage-cursor"
         ct.qualityOfService = .userInteractive
         cursorThread = ct
         ct.start()
-        log("streaming \(source.name): \(w)x\(h), up to \(fps) fps, HEVC ≤ \(maxKbps) kbit/s")
+        log("streaming \(virt != nil ? "the virtual monitor" : source.name): \(w)x\(h), up to \(fps) fps, HEVC ≤ \(maxKbps) kbit/s")
         fitter.request(request.fitDisplay, owner: self)   // the new size reaches the viewer as the picture changes size
         return info()
     }
@@ -96,8 +109,8 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
 
     private func info() -> ControlMessage.StreamInfo {
         lock.lock(); defer { lock.unlock() }
-        return .init(width: width, height: height, displayID: 1, displayWidth: width, displayHeight: height, displayScale: 1,
-                     displayName: DeviceNames.current())
+        return .init(width: width, height: height, displayID: 1, displayWidth: Int((Double(width) / scale).rounded()),
+                     displayHeight: Int((Double(height) / scale).rounded()), displayScale: scale, displayName: DeviceNames.current())
     }
 
     func handle(ack: ControlMessage.FrameAck) {
@@ -176,8 +189,9 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         // The encode thread notices within one wait (≤ 100 ms) and stops touching the picture.
         while let t, !t.isFinished { try? await Task.sleep(for: .milliseconds(20)) }
         while let ct, !ct.isFinished { try? await Task.sleep(for: .milliseconds(10)) }
-        lock.lock(); let l = lease; lease = nil; lock.unlock()
+        lock.lock(); let l = lease, vl = virtualLease; lease = nil; virtualLease = nil; scale = 1; lock.unlock()
         if let l { source.release(l) }
+        if let vl { VirtualScreen.shared.release(vl) }
         fitter.request(nil, owner: self)
     }
 
@@ -193,21 +207,51 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
     // MARK: Pointer
 
     /// The pointer's image and position to the viewer as they change (a few milliseconds behind the screen).
-    private func cursorLoop(_ relay: CursorRelay) {
+    private func cursorLoop() {
         guard source is KMSDesktop else { return }   // GNOME's screen cast draws the pointer into the picture
+        var relay: (lease: DesktopLease, relay: CursorRelay)?
+        var hidden = false
         while true {
-            lock.lock(); let go = running; let out = output; lock.unlock()
+            lock.lock(); let go = running; let out = output; let base = lease; let virtual = virtualLease != nil; lock.unlock()
             guard go, let out else { return }
-            for m in relay.poll() { out.sendControl(m) }
+            if virtual {
+                // The virtual monitor draws the pointer into its picture: the kernel's cursor is another screen's.
+                if !hidden { out.sendControl(.cursorPosition(.init(x: 0, y: 0, visible: false))); hidden = true }
+                relay = nil
+            } else if let base {
+                hidden = false
+                if relay?.lease !== base { relay = (base, CursorRelay(source: source, lease: base)) }
+                for m in relay!.relay.poll() { out.sendControl(m) }
+            }
             usleep(5000)
         }
+    }
+
+    /// What to show now: the virtual monitor while there is one, else the source's desktop (the next one once it ended).
+    private func currentLease() -> DesktopLease? {
+        lock.lock(); var v = virtualLease; let base = lease; lock.unlock()
+        if let vl = v, vl.ended {
+            VirtualScreen.shared.release(vl); v = nil
+            lock.lock(); virtualLease = nil; lock.unlock()
+        }
+        if v == nil, let nv = VirtualScreen.shared.acquire() {
+            v = nv
+            lock.lock(); virtualLease = nv; lock.unlock()
+        }
+        if let v { return v }
+        if let base, !base.ended { return base }
+        // GNOME ended its session (the indicator's Stop, a crash), or there was none: the next one.
+        guard let next = source.acquire(timeout: 0.5) else { return nil }
+        if base != nil { log("\(source.name) is back") }
+        lock.lock(); lease = next; lock.unlock()
+        if let base { source.release(base) }
+        return next
     }
 
     // MARK: Encoding
 
     private func encodeLoop() {
         lock.lock()
-        guard var l = lease else { lock.unlock(); return }
         let fps = self.fps, kbps = maxKbps
         var w = width, h = height
         lock.unlock()
@@ -216,6 +260,7 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         if enc == nil { log("encoder: \(String(cString: err))"); return }
         defer { md_encoder_close(enc) }
         let interval = UInt64(1_000_000_000 / fps)
+        var shown: DesktopLease?
         var seen: UInt64 = 0
         var lastEncode: UInt64 = 0
         var lastChange: UInt64 = Clock.nowNanos()
@@ -226,22 +271,13 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
         while true {
             lock.lock(); let go = running; lock.unlock()
             if !go { return }
-            if l.ended {
-                // GNOME ended the session (the indicator's Stop, a crash): carry on with the next one.
-                log("\(source.name) ended; waiting for it again")
-                input.backend = nil
-                var next: DesktopLease?
-                while next == nil {
-                    lock.lock(); let go = running; lock.unlock()
-                    if !go { return }
-                    next = source.acquire(timeout: 1)
-                }
-                lock.lock(); lease = next; needKeyframe = true; lock.unlock()
-                source.release(l)
-                l = next!
+            guard let l = currentLease() else { heartbeatAndReport(now: Clock.nowNanos()); usleep(100_000); continue }
+            if l !== shown {
+                // Another desktop (the virtual monitor came or went, GNOME's session opened again): its input, a keyframe.
+                shown = l
                 input.backend = l.input
                 seen = 0
-                continue
+                lock.lock(); needKeyframe = true; lock.unlock()
             }
             let latest = md_picture_wait(l.picture, seen, 100)
             let now = Clock.nowNanos()
@@ -261,15 +297,20 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
 
             var cw: Int32 = 0, ch: Int32 = 0
             md_picture_size(l.picture, &cw, &ch)
-            if Int(cw) & ~1 != w || Int(ch) & ~1 != h {
-                // The screen changed size: a new encoder, a keyframe, and the viewer hears the new size.
-                md_encoder_close(enc); enc = nil
-                w = Int(cw) & ~1; h = Int(ch) & ~1
-                enc = md_encoder_open(Int32(w), Int32(h), Int32(fps), Int32(kbps), &err, err.count)
-                if enc == nil { log("encoder: \(String(cString: err))"); return }
-                lock.lock(); width = w; height = h; needKeyframe = true; let out = output; lock.unlock()
+            guard cw > 1, ch > 1 else { continue }
+            guard let s = l.scale else { sharpened = false; continue }   // a virtual monitor between sizes: again shortly
+            lock.lock(); let sameScale = s == scale; lock.unlock()
+            if Int(cw) & ~1 != w || Int(ch) & ~1 != h || !sameScale {
+                // The screen changed size (or pixels per point): a new encoder, a keyframe, and the viewer hears it.
+                if Int(cw) & ~1 != w || Int(ch) & ~1 != h {
+                    md_encoder_close(enc); enc = nil
+                    w = Int(cw) & ~1; h = Int(ch) & ~1
+                    enc = md_encoder_open(Int32(w), Int32(h), Int32(fps), Int32(kbps), &err, err.count)
+                    if enc == nil { log("encoder: \(String(cString: err))"); return }
+                }
+                lock.lock(); width = w; height = h; scale = s; needKeyframe = true; let out = output; lock.unlock()
                 out?.sendControl(.streamInfo(info()))
-                log("screen is now \(cw)x\(ch)")
+                log("screen is now \(cw)x\(ch)\(s != 1 ? " at scale \(s == s.rounded() ? String(Int(s)) : String(s))" : "")")
             }
 
             lock.lock(); let idr = needKeyframe; needKeyframe = false; lock.unlock()

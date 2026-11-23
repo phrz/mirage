@@ -8,7 +8,7 @@ struct MirageHost: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mirage-host",
         abstract: "Mirage host for Linux: shares this computer's screen with paired Mirage viewers over QUIC.",
-        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Check.self, Version.self, Update.self, Tray.self, Display.self],
+        subcommands: [Serve.self, Pair.self, Devices.self, Revoke.self, Check.self, Version.self, Update.self, Tray.self, Display.self, VirtualDisplayHelper.self, VirtualDisplayTest.self, StreamTest.self],
         defaultSubcommand: Serve.self)
 }
 
@@ -48,13 +48,14 @@ struct Serve: AsyncParsableCommand {
         } else {
             let gnome = GnomeSession()
             gnome.start(log: { log($0) })
+            VirtualScreen.shared.removed = { gnome.renew(openedBefore: $0) }
             source = gnome
         }
         HostSession.computerNoun = "computer"
         // Stopped (systemctl stop or restart, shutdown): a display fitted to a viewer's window goes back first.
         signal(SIGTERM, SIG_IGN)
         let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
-        term.setEventHandler { DisplayFitter.shared.restoreNow(); Foundation.exit(0) }
+        term.setEventHandler { VirtualScreen.shared.stopNow(); DisplayFitter.shared.restoreNow(); Foundation.exit(0) }
         term.resume()
         terminationSource = term
         let settingsURL = store.url(HostSettings.fileName)

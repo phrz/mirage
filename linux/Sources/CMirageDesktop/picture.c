@@ -72,3 +72,14 @@ int md_picture_ended(md_picture *p) {
     pthread_mutex_unlock(&p->lock);
     return e;
 }
+
+int md_picture_copy(md_picture *p, uint8_t *dst, size_t cap, int *width, int *height) {
+    pthread_mutex_lock(&p->lock);
+    int stride = 0;
+    if (p->frame && (size_t)p->stride * p->height <= cap) {
+        memcpy(dst, p->frame, (size_t)p->stride * p->height);
+        stride = p->stride; *width = p->width; *height = p->height;
+    }
+    pthread_mutex_unlock(&p->lock);
+    return stride;
+}

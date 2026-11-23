@@ -227,3 +227,87 @@ int md_display_restore(const char *saved, char *err, size_t err_len) {
     g_object_unref(bus);
     return rc;
 }
+
+int md_display_save(char *saved, size_t saved_len, char *err, size_t err_len) {
+    GDBusConnection *bus = session_bus(err, err_len);
+    if (!bus) return -1;
+    guint32 serial; lm_conf lms[MAX_LM]; int n; GVariant *monitors;
+    int rc = current(bus, &serial, lms, &n, &monitors, err, err_len);
+    if (rc == 0) { g_variant_unref(monitors); save(lms, n, saved, saved_len); }
+    g_object_unref(bus);
+    return rc;
+}
+
+/// Whether `saved` (a layout from save) has the connector.
+static int saved_has(const char *saved, const char *connector) {
+    char needle[80];
+    snprintf(needle, sizeof needle, ",%s:", connector);
+    if (strstr(saved, needle)) return 1;
+    snprintf(needle, sizeof needle, "|%s:", connector);
+    return strstr(saved, needle) != NULL;
+}
+
+int md_display_only_new(const char *saved, int width, int height, double scale, double *applied, char *err, size_t err_len) {
+    GDBusConnection *bus = session_bus(err, err_len);
+    if (!bus) return -1;
+    GVariant *st = call(bus, "GetCurrentState", NULL, "(ua((ssss)a(siiddada{sv})a{sv})a(iiduba(ssss)a{sv})a{sv})", err, err_len);
+    if (!st) { g_object_unref(bus); return -1; }
+    guint32 serial; GVariant *monitors = NULL, *logical = NULL, *props = NULL;
+    g_variant_get(st, "(u@a((ssss)a(siiddada{sv})a{sv})@a(iiduba(ssss)a{sv})@a{sv})", &serial, &monitors, &logical, &props);
+    char connector[64] = "", mode[64] = "";
+    double best = 1;
+    int others_on = 0;
+    GVariantIter mi;
+    g_variant_iter_init(&mi, monitors);
+    GVariant *mon;
+    while ((mon = g_variant_iter_next_value(&mi))) {
+        GVariant *spec = g_variant_get_child_value(mon, 0);
+        const char *mc;
+        g_variant_get_child(spec, 0, "&s", &mc);
+        int fresh = !saved_has(saved, mc);
+        GVariant *modes = g_variant_get_child_value(mon, 1);
+        GVariantIter mo;
+        g_variant_iter_init(&mo, modes);
+        const char *id; gint32 w, h; double rate, pref; GVariant *scales, *mprops;
+        while (g_variant_iter_next(&mo, "(&siidd@ad@a{sv})", &id, &w, &h, &rate, &pref, &scales, &mprops)) {
+            if (lookup_bool(mprops, "is-current")) {
+                if (fresh && !connector[0] && w == width && h == height) {
+                    snprintf(connector, sizeof connector, "%s", mc);
+                    snprintf(mode, sizeof mode, "%s", id);
+                    // The largest scale it supports up to the one asked (Mutter offers those that give whole logical pixels).
+                    gsize ns = 0;
+                    const double *sc = g_variant_get_fixed_array(scales, &ns, sizeof(double));
+                    for (gsize k = 0; k < ns; k++) if (sc[k] <= scale + 1e-3 && sc[k] > best) best = sc[k];
+                } else {
+                    others_on = 1;
+                }
+            }
+            g_variant_unref(scales); g_variant_unref(mprops);
+        }
+        g_variant_unref(modes);
+        g_variant_unref(spec); g_variant_unref(mon);
+    }
+    // The scale it has now: a layout that already is the one wanted is left alone.
+    double now_scale = 0;
+    GVariantIter li;
+    g_variant_iter_init(&li, logical);
+    gint32 x, y; double lscale; guint32 transform; gboolean primary; GVariant *specs, *lprops;
+    while (connector[0] && g_variant_iter_next(&li, "(iidub@a(ssss)@a{sv})", &x, &y, &lscale, &transform, &primary, &specs, &lprops)) {
+        for (gsize k = 0; k < g_variant_n_children(specs); k++) {
+            const char *c;
+            g_variant_get_child(specs, k, "(&s&s&s&s)", &c, NULL, NULL, NULL);
+            if (strcmp(c, connector) == 0) now_scale = lscale;
+        }
+        g_variant_unref(specs); g_variant_unref(lprops);
+    }
+    g_variant_unref(monitors); g_variant_unref(logical); g_variant_unref(props); g_variant_unref(st);
+    if (!connector[0]) { g_object_unref(bus); return 1; }
+    if (applied) *applied = best;
+    if (!others_on && fabs(now_scale - best) < 1e-3) { g_object_unref(bus); return 0; }
+    lm_conf only = { .x = 0, .y = 0, .scale = best, .transform = 0, .primary = TRUE, .count = 1 };
+    snprintf(only.connector[0], sizeof only.connector[0], "%s", connector);
+    snprintf(only.mode[0], sizeof only.mode[0], "%s", mode);
+    int rc = apply(bus, serial, &only, 1, err, err_len);
+    g_object_unref(bus);
+    return rc;
+}

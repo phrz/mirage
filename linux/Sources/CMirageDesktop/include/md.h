@@ -12,6 +12,7 @@ typedef struct md_encoder md_encoder;
 typedef struct md_picture md_picture;
 typedef struct mk_capture mk_capture;
 typedef struct mu_input mu_input;
+typedef struct md_virtual md_virtual;
 
 // MARK: The newest captured picture (from either capture path)
 
@@ -22,6 +23,8 @@ uint64_t md_picture_wait(md_picture *p, uint64_t after_seq, int timeout_ms);
 void md_picture_size(md_picture *p, int *width, int *height);
 /// Nonzero once its source ended (GNOME closed the session).
 int md_picture_ended(md_picture *p);
+/// Copies the newest frame (4 bytes per pixel) into `dst` when it fits `cap`; returns its stride, 0 when there is none.
+int md_picture_copy(md_picture *p, uint8_t *dst, size_t cap, int *width, int *height);
 
 // MARK: GNOME (a logged-in session's own remote-desktop interface; the host runs as that user)
 
@@ -29,6 +32,8 @@ int md_picture_ended(md_picture *p);
 /// starts receiving its frames. NULL on failure, with a message in `err`.
 md_session *md_session_open(char *err, size_t err_len);
 void md_session_close(md_session *s);
+/// Ends it (GNOME stops the screen cast) without freeing it: its picture ends.
+void md_session_end(md_session *s);
 md_picture *md_session_picture(md_session *s);
 
 // MARK: The kernel's display (KMS) and virtual input devices (the host runs as root, from boot)
@@ -47,8 +52,41 @@ int mk_cursor_state(mk_capture *c, int *x, int *y, int *hx, int *hy, uint64_t *s
 /// Sets the primary monitor to the mode closest to `width`x`height` points (the desktop's scale applied); the layout before
 /// goes into `saved` (for md_display_restore) and the mode chosen into `chosen`. 0 on success.
 int md_display_fit(int width, int height, char *saved, size_t saved_len, char *chosen, size_t chosen_len, char *err, size_t err_len);
-/// Puts back a layout `md_display_fit` saved.
+/// Puts back a layout `md_display_fit` (or `md_display_save`) saved.
 int md_display_restore(const char *saved, char *err, size_t err_len);
+/// The layout now, as `md_display_fit` saves it. 0 on success.
+int md_display_save(char *saved, size_t saved_len, char *err, size_t err_len);
+/// Makes the monitor showing a `width`x`height` mode that is not in `saved` the only one on, and the primary, at `scale` or
+/// the largest scale below it that the mode supports (into `applied`). 0 on success, 1 while there is no such monitor yet.
+int md_display_only_new(const char *saved, int width, int height, double scale, double *applied, char *err, size_t err_len);
+
+// MARK: GNOME's virtual monitor (Dynamic Resolution for a signed-in desktop)
+
+/// The helper's side, run as the desktop's user (`mirage-host virtual-display`): makes a Mutter remote-desktop session with
+/// a virtual monitor, sends its PipeWire node and connection over `fd` (a Unix socket to the host), then serves the host's
+/// commands until it says quit or closes its end. The layout before goes back afterwards. Returns the exit status.
+int md_virtual_helper(int fd, int cursor_metadata);
+/// The host's side: takes `fd` (the helper's socket; closed by md_virtual_stop, or on failure), captures the virtual
+/// monitor at `width`x`height` pixels and makes it the only monitor, at `scale` when Mutter allows it. NULL on failure.
+md_virtual *md_virtual_open(int fd, int width, int height, double scale, int cursor_metadata, char *err, size_t err_len);
+/// A new size (the monitor's mode follows the stream's). 0 on success.
+int md_virtual_resize(md_virtual *v, int width, int height, double scale, char *err, size_t err_len);
+/// Its size in logical pixels and its scale, as GNOME took them.
+void md_virtual_geometry(md_virtual *v, int *logical_width, int *logical_height, double *scale);
+md_picture *md_virtual_picture(md_virtual *v);
+/// The pointer's position in the picture (with cursor metadata), 1 once known.
+int md_virtual_cursor(md_virtual *v, int *x, int *y);
+/// Ends it: the helper quits (the monitor goes, the layout comes back) and the picture ends. Its picture stays readable
+/// until md_virtual_free.
+void md_virtual_stop(md_virtual *v);
+void md_virtual_free(md_virtual *v);
+/// Input; the pointer at (x, y) in 0...1 of the virtual monitor. Buttons and keys are evdev codes.
+void md_virtual_pointer_move(md_virtual *v, double x, double y);
+void md_virtual_pointer_button(md_virtual *v, int evdev_button, int pressed);
+void md_virtual_pointer_axis(md_virtual *v, double dx, double dy, int finger);
+void md_virtual_pointer_axis_discrete(md_virtual *v, int axis, int steps);
+void md_virtual_key(md_virtual *v, uint32_t evdev_key, int pressed);
+void md_virtual_keysym(md_virtual *v, uint32_t keysym, int pressed);
 
 /// The cursor's image (premultiplied B, G, R, A) into `bgra`; 0 when there is one that fits `cap` bytes.
 int mk_cursor_image(mk_capture *c, uint8_t *bgra, size_t cap, int *width, int *height, uint64_t *serial);
