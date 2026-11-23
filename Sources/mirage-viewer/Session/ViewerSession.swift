@@ -113,6 +113,8 @@ final class ViewerSession: @unchecked Sendable {
         let compositor: Compositor
         let decoder = HEVCDecoder()
         var tileCaptureSeq: [UInt32] = []
+        /// The picture's width in tiles when `tileCaptureSeq` was made (its row length).
+        var tileCaptureCols = 0
         var losslessAt: [UInt64] = []
         var awaitingRecovery = false
         /// Sequence of the last decoded recovery frame: a loss verdict for an older frame is already healed.
@@ -851,7 +853,7 @@ final class ViewerSession: @unchecked Sendable {
         let c = v.compositor
         guard c.width > 0 else { return true }
         let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
-        if v.tileCaptureSeq.count != cols * rows { v.tileCaptureSeq = Array(repeating: 0, count: cols * rows) }
+        if v.tileCaptureSeq.count != cols * rows || v.tileCaptureCols != cols { v.tileCaptureSeq = Array(repeating: 0, count: cols * rows); v.tileCaptureCols = cols }
         let c0 = max(0, rect.x / 64), c1 = min(cols - 1, (rect.maxX - 1) / 64), r0 = max(0, rect.y / 64), r1 = min(rows - 1, (rect.maxY - 1) / 64)
         guard c1 >= c0, r1 >= r0 else { return true }
         for r in r0...r1 { for cc in c0...c1 where v.tileCaptureSeq[r * cols + cc] > captureSeq {
@@ -867,7 +869,7 @@ final class ViewerSession: @unchecked Sendable {
         let c = v.compositor
         guard c.width > 0 else { return }
         let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
-        if v.tileCaptureSeq.count != cols * rows { v.tileCaptureSeq = Array(repeating: 0, count: cols * rows) }
+        if v.tileCaptureSeq.count != cols * rows || v.tileCaptureCols != cols { v.tileCaptureSeq = Array(repeating: 0, count: cols * rows); v.tileCaptureCols = cols }
         let c0 = max(0, rect.x / 64), c1 = min(cols - 1, (rect.maxX - 1) / 64), r0 = max(0, rect.y / 64), r1 = min(rows - 1, (rect.maxY - 1) / 64)
         guard c1 >= c0, r1 >= r0 else { return }
         for r in r0...r1 { for cc in c0...c1 { v.tileCaptureSeq[r * cols + cc] = max(v.tileCaptureSeq[r * cols + cc], captureSeq) } }
@@ -879,6 +881,8 @@ final class ViewerSession: @unchecked Sendable {
         let c = v.compositor
         guard c.width > 0, !v.tileCaptureSeq.isEmpty else { return false }
         let cols = (c.width + 63) / 64, rows = (c.height + 63) / 64
+        // The picture changed size since the table was made (a new display size): nothing in it applies any more.
+        guard v.tileCaptureSeq.count == cols * rows, v.tileCaptureCols == cols else { return false }
         let c0 = max(0, rect.x / 64), c1 = min(cols - 1, (rect.maxX - 1) / 64), r0 = max(0, rect.y / 64), r1 = min(rows - 1, (rect.maxY - 1) / 64)
         guard c1 >= c0, r1 >= r0 else { return false }
         for r in r0...r1 { for cc in c0...c1 where v.tileCaptureSeq[r * cols + cc] > captureSeq { return true } }
