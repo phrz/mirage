@@ -23,6 +23,8 @@
 #     NOTES="…"      release notes                                       MIRAGE_NEXT_KEY=<base64 public key>: nextKey
 #     MIRAGE_MANIFEST_KEY=<base64 private key>   sign with this instead of 1Password's or the keychain's current key (CI)
 #     MIRAGE_MANIFEST_KEY_REF=op://...            where the 1Password CLI reads it (default op://Private/Mirage manifest key/credential)
+#     MIRAGE_NOTARY_REF=op://...                  notarytool's login item, stored as the keychain profile "mirage" on first use
+#                                                 (default op://Private/mirage notarytool (Apple))
 #     MIRAGE_LINUX_BUILDER=host                   the Linux host's builder (ssh, Docker; default bigrig)
 #     MIRAGE_EXTRA_SIGNING_KEY_FILE=path         a second private key (rotation: the promoted key, from 1Password)
 #
@@ -42,6 +44,7 @@ REPO=phrz/mirage
 PROFILE=mirage
 KEY_SERVICE=com.paulherz.mirage.manifest-key
 KEY_REF=${MIRAGE_MANIFEST_KEY_REF:-op://${MIRAGE_OP_VAULT:-Private}/Mirage manifest key/credential}
+NOTARY_REF=${MIRAGE_NOTARY_REF:-op://${MIRAGE_OP_VAULT:-Private}/mirage notarytool (Apple)}
 DR_APP='anchor apple generic and identifier "com.paulherz.mirage" and certificate leaf[subject.OU] = "M8MME6Q9DA"'
 DR_HOST='anchor apple generic and identifier "com.paulherz.mirage.host" and certificate leaf[subject.OU] = "M8MME6Q9DA"'
 
@@ -62,6 +65,17 @@ op_read() {
     done
     return 1
 }
+# A field of an item named by an op://vault/item reference, looked up by name: secret references refuse some characters
+# in names (parentheses), `op item get` takes any name. Tries each signed-in account like op_read.
+op_field() {
+    command -v op >/dev/null 2>&1 || return 1
+    r=${1#op://}; vault=${r%%/*}; item=${r#*/}
+    op item get "$item" --vault "$vault" --fields "label=$2" --reveal 2>/dev/null && return 0
+    for a in $(op account list --format json 2>/dev/null | python3 -c "import json,sys; print(' '.join(x.get('url','') for x in json.load(sys.stdin)))" 2>/dev/null); do
+        op item get "$item" --account "$a" --vault "$vault" --fields "label=$2" --reveal 2>/dev/null && return 0
+    done
+    return 1
+}
 tool() { .build/release/mirage-release "$@"; }
 build_tool() { swift build -c release --product mirage-release >/dev/null 2>&1 || swift build -c release --product mirage-release; }
 
@@ -77,11 +91,22 @@ missing: a "Developer ID Application" signing identity for team $TEAM in this Ma
 EOF
     return 1
 }
+# The notarytool profile: this Mac's keychain, else made there from 1Password's login item (its username is the Apple
+# Account, its password an app-specific one) the first time a release needs it.
 check_notary() {
     xcrun notarytool history --keychain-profile "$PROFILE" >/dev/null 2>&1 && return 0
+    user=$(op_read "$NOTARY_REF/username" || op_field "$NOTARY_REF" username || true)
+    pass=$(op_read "$NOTARY_REF/password" || op_field "$NOTARY_REF" password || true)
+    if [ -n "$user" ] && [ -n "$pass" ]; then
+        echo "notarytool: storing the keychain profile \"$PROFILE\" from 1Password ($NOTARY_REF)" >&2
+        xcrun notarytool store-credentials "$PROFILE" --apple-id "$user" --team-id "$TEAM" --password "$pass" --validate >/dev/null 2>&1 &&
+            xcrun notarytool history --keychain-profile "$PROFILE" >/dev/null 2>&1 && return 0
+        echo "notarytool: 1Password's credentials were refused (check the item's username and app-specific password)" >&2
+    fi
     cat >&2 <<EOF
 missing: the notarytool keychain profile "$PROFILE".
-  Set up once (an app-specific password from appleid.apple.com > Sign-In and Security, or an App Store Connect API key):
+  1Password: the login item $NOTARY_REF (username: the Apple Account, password: an app-specific password from
+  account.apple.com > Sign-In and Security) is stored into the keychain on the next run. Or set it up by hand:
     xcrun notarytool store-credentials $PROFILE --apple-id <apple-id> --team-id $TEAM --password <app-specific-password>
   Check: xcrun notarytool history --keychain-profile $PROFILE
 EOF
