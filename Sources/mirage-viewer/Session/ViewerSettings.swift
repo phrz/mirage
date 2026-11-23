@@ -16,9 +16,10 @@ enum ViewerSettings {
     static let keyAccessoryKey = "keyboardAccessoryRow"
     /// Mac: ⌘-shortcuts typed over the picture go to the remote Mac (on, the default) or to this app's menus first.
     static let captureShortcutsKey = "captureKeyboardShortcuts"
-    /// Mac: Dynamic Resolution, the host's display made the size of the window (and back when the session ends).
+    /// Dynamic Resolution, the host's display made the size of the window or screen (and back when the session ends). On
+    /// unless turned off.
     static let dynamicResolutionKey = "dynamicResolution"
-    static var dynamicResolution: Bool { UserDefaults.standard.bool(forKey: dynamicResolutionKey) }
+    static var dynamicResolution: Bool { UserDefaults.standard.object(forKey: dynamicResolutionKey) as? Bool ?? true }
     /// iPhone and iPad: whether the last session with this host was in Unified mode (a connect starts in the mode last used).
     static func unifiedKey(host: String) -> String { "unified.\(host)" }
     /// "Lock After Suspending" (DESIGN §3.12): how long a host keeps the curtain up for this device's suspended session before

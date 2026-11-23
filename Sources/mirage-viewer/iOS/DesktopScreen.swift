@@ -29,7 +29,7 @@ struct DesktopScreen: View {
     /// The pill's (or its handle's) bottom edge on screen: a zoomed picture pans down until it clears it.
     @State private var pillBottom: CGFloat = 0
     /// Read here so a change in Settings re-sends the stream request at once.
-    @AppStorage(ViewerSettings.dynamicResolutionKey) private var dynamicResolution = false
+    @AppStorage(ViewerSettings.dynamicResolutionKey) private var dynamicResolution = true
     /// Unified mode (DESIGN §3.11): the host's windows one at a time, a strip of them on top. A connect starts in the mode
     /// last used with this host.
     @State private var unifiedOn = false

@@ -11,7 +11,7 @@ struct SettingsSheet: View {
     @AppStorage(ViewerSettings.keyAccessoryKey) private var accessoryRow = true
     @AppStorage(ViewerSettings.showStatsKey) private var statsOnConnect = false
     @AppStorage(ViewerSettings.startAtOneToOneKey) private var startAtOneToOne = false
-    @AppStorage(ViewerSettings.dynamicResolutionKey) private var dynamicResolution = false
+    @AppStorage(ViewerSettings.dynamicResolutionKey) private var dynamicResolution = true
     @Environment(\.dismiss) private var dismiss
     /// Pushed pages (the throttle's). Test hook: `-settingsPage throttle` opens on it.
     @State private var path: [String] = UserDefaults.standard.string(forKey: "settingsPage").map { [$0] } ?? []
