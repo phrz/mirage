@@ -34,6 +34,10 @@
 # its own (linux/release.sh, op://Private/Mirage Linux manifest key/credential).
 set -e
 cd "$(dirname "$0")/.."
+# Release secrets kept on this Mac (MIRAGE_MANIFEST_KEY, MIRAGE_LINUX_KEY, MIRAGE_APPLE_ID, ...), read before 1Password so
+# a release needs no approvals: ~/.config/mirage/release.env (mode 600), or MIRAGE_RELEASE_ENV.
+RELEASE_ENV=${MIRAGE_RELEASE_ENV:-$HOME/.config/mirage/release.env}
+if [ -f "$RELEASE_ENV" ]; then set -a; . "$RELEASE_ENV"; set +a; fi
 if [ -z "${DEVELOPER_DIR:-}" ]; then
     for x in /Applications/Xcode.app /Applications/Xcode-27.1.0-Beta.app; do
         [ -d "$x" ] && { export DEVELOPER_DIR=$x/Contents/Developer; break; }

@@ -16,6 +16,10 @@
 # MIRAGE_LINUX_KEY_FILE. Environment: MIRAGE_LINUX_BUILDER (an ssh host with Docker; its processor is the build's).
 set -eu
 cd "$(dirname "$0")/.."
+# Release secrets kept on this Mac (MIRAGE_MANIFEST_KEY, MIRAGE_LINUX_KEY, MIRAGE_APPLE_ID, ...), read before 1Password so
+# a release needs no approvals: ~/.config/mirage/release.env (mode 600), or MIRAGE_RELEASE_ENV.
+RELEASE_ENV=${MIRAGE_RELEASE_ENV:-$HOME/.config/mirage/release.env}
+if [ -f "$RELEASE_ENV" ]; then set -a; . "$RELEASE_ENV"; set +a; fi
 BUILDER=${MIRAGE_LINUX_BUILDER:-bigrig}
 VAULT=${MIRAGE_OP_VAULT:-Private}
 KEY_TITLE="Mirage Linux manifest key"
