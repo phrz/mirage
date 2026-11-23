@@ -91,11 +91,11 @@ missing: a "Developer ID Application" signing identity for team $TEAM in this Ma
 EOF
     return 1
 }
-# The notarytool profile: this Mac's keychain, else made there from 1Password's login item (its username is the Apple
+# The notarytool profile: this Mac's keychain, else made there from 1Password's item (its username, or MIRAGE_APPLE_ID, is the Apple
 # Account, its password an app-specific one) the first time a release needs it.
 check_notary() {
     xcrun notarytool history --keychain-profile "$PROFILE" >/dev/null 2>&1 && return 0
-    user=$(op_read "$NOTARY_REF/username" || op_field "$NOTARY_REF" username || true)
+    user=${MIRAGE_APPLE_ID:-$(op_read "$NOTARY_REF/username" || op_field "$NOTARY_REF" username || true)}
     pass=$(op_read "$NOTARY_REF/password" || op_field "$NOTARY_REF" password || true)
     if [ -n "$user" ] && [ -n "$pass" ]; then
         echo "notarytool: storing the keychain profile \"$PROFILE\" from 1Password ($NOTARY_REF)" >&2
