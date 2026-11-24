@@ -5,8 +5,8 @@ import MirageCore
 /// The remote desktop full screen, its status banners and a Liquid Glass button bar (keyboard, touch mode, stats,
 /// settings, disconnect; 44 pt targets). The picture fills the safe area (in landscape, the full height); zoom and pan
 /// happen in the view, presentation only. Stats are a small translucent overlay behind the stats button (off at connect
-/// unless Settings › Display says otherwise). In landscape the bar hides itself after a few seconds, leaving a handle in
-/// the corner that brings it back.
+/// unless Settings › Display says otherwise). The bar floats in a corner: dragged, it goes to the corner it was thrown
+/// toward (as FaceTime's picture does) and stays there across launches; after a few seconds it folds into one button.
 ///
 /// On an iPhone Duo (DESIGN §3.11) the layout follows the pose. Laptop (and tent: a hinge running side to side): the
 /// picture fills the region above the hinge, the bar sits at the top of the region below it, and with the keyboard up
@@ -26,8 +26,13 @@ struct DesktopScreen: View {
     @AppStorage(TouchMode.defaultsKey) private var touchMode = TouchMode.direct
     @State private var toolbarShown = true
     @State private var hideToolbar: Task<Void, Never>?
-    /// The pill's (or its handle's) bottom edge on screen: a zoomed picture pans down until it clears it.
-    @State private var pillBottom: CGFloat = 0
+    /// The bar's (or its button's) frame on screen: a zoomed picture pans until it clears it.
+    @State private var barFrame: CGRect = .zero
+    @AppStorage(BarCorner.defaultsKey) private var barCorner = BarCorner.topTrailing
+    /// While the bar is dragged: how far from its corner.
+    @State private var barDrag: CGSize?
+    /// The keyboard's top edge on screen while it is up: a bar in a bottom corner sits above it.
+    @State private var keyboardTop: CGFloat?
     /// Read here so a change in Settings re-sends the stream request at once.
     @AppStorage(ViewerSettings.dynamicResolutionKey) private var dynamicResolution = true
     /// Unified mode (DESIGN §3.11): the host's windows one at a time, a strip of them on top. A connect starts in the mode
@@ -54,28 +59,27 @@ struct DesktopScreen: View {
                         UnifiedArea(session: session, model: model, unified: unifiedHolder.get(session), keyboard: $keyboard, touchMode: touchMode, accessoryRow: accessoryRow, safeInsets: safe)
                             .onDuoPoseChange { pose = $0 }
                     } else {
-                        DesktopView(session: session, model: model, keyboard: $keyboard, touchMode: touchMode, accessoryRow: accessoryRow, safeInsets: safe, topObstruction: laptop ? 0 : pillBottom, foldInsets: foldInsets, accessoryDocked: laptop, handle: desktop, dynamicResolution: dynamicResolution)
+                        DesktopView(session: session, model: model, keyboard: $keyboard, touchMode: touchMode, accessoryRow: accessoryRow, safeInsets: safe, topObstruction: laptop || !barCorner.isTop ? 0 : barFrame.maxY, bottomObstruction: laptop || barCorner.isTop || barFrame == .zero ? nil : barFrame.minY, foldInsets: foldInsets, accessoryDocked: laptop, handle: desktop, dynamicResolution: dynamicResolution)
                             .ignoresSafeArea()
                             .onDuoPoseChange { pose = $0 }
                     }
                     if model.showStats {
                         StatsPanel(model: model).padding(.top, landscape ? 8 : 44).padding(.leading, 8)
                     }
-                    if !laptop {
-                        // Unified: the strip takes the top, so the bar floats at the bottom and hides itself.
-                        toolbar
-                            .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).maxY } action: { pillBottom = unifiedOn ? 0 : $0 }
-                            .frame(maxWidth: .infinity, maxHeight: unifiedOn ? .infinity : nil, alignment: unifiedOn ? .bottom : .trailing)
-                            .padding(.top, landscape ? 8 : 4).padding(.trailing, unifiedOn ? 0 : 8).padding(.bottom, unifiedOn ? 4 : 0)
-                    }
+                    if !laptop { floatingBar(geo, landscape: landscape) }
                 }
-                // Laptop: the bar under the hinge; tent (no keyboard) hides it after 3 s like landscape does. Unified hides it too.
-                .onChange(of: laptop ? !keyboard : (landscape || unifiedOn), initial: true) { _, autoHide in showToolbar(autoHide: autoHide) }
+                // Laptop: the bar under the hinge, hidden after 3 s only with no keyboard (tent). Anywhere else it folds.
+                .onChange(of: laptop ? !keyboard : true, initial: true) { _, autoHide in showToolbar(autoHide: autoHide) }
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { n in
+                    guard let f = n.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+                    let full = geo.frame(in: .global).maxY + geo.safeAreaInsets.bottom
+                    withAnimation(.snappy(duration: 0.25)) { keyboardTop = f.minY < full - 1 ? f.minY : nil }
+                }
                 .onChange(of: unifiedOn) { _, on in
                     UserDefaults.standard.set(on, forKey: ViewerSettings.unifiedKey(host: model.hostName))
                     if !on { unifiedHolder.stop() }
                 }
-                .onAppear { unifiedOn = UserDefaults.standard.bool(forKey: ViewerSettings.unifiedKey(host: model.hostName)) }
+                .onAppear { unifiedOn = !linuxHost && UserDefaults.standard.bool(forKey: ViewerSettings.unifiedKey(host: model.hostName)) }
                 .onDisappear { unifiedHolder.stop() }
                 .task {
                     // Test hook: `-openSettings 1` (simctl launch) opens the settings sheet once the picture is up.
@@ -141,19 +145,48 @@ struct DesktopScreen: View {
         .ignoresSafeArea()
     }
 
-    @State private var landscapeAutoHide = false
+    @State private var barAutoHide = false
 
-    /// Shows the bar; in landscape it hides itself again after 3 s (not while the settings sheet is up).
+    /// Shows the bar; it folds again after 3 s (not while the settings sheet is up).
     private func showToolbar(autoHide: Bool? = nil) {
-        if let autoHide { landscapeAutoHide = autoHide }
+        if let autoHide { barAutoHide = autoHide }
         hideToolbar?.cancel()
         withAnimation(.easeOut(duration: 0.2)) { toolbarShown = true }
-        guard landscapeAutoHide, !settingsShown else { return }
+        guard barAutoHide, !settingsShown else { return }
         hideToolbar = Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
             guard !Task.isCancelled else { return }
-            withAnimation(.easeIn(duration: 0.3)) { toolbarShown = false }
+            withAnimation(.snappy(duration: 0.3)) { toolbarShown = false }
         }
+    }
+
+    /// The bar in its corner, dragged from anywhere on it.
+    private func floatingBar(_ geo: GeometryProxy, landscape: Bool) -> some View {
+        let frame = geo.frame(in: .global)
+        let lift = keyboardTop.map { max(0, frame.maxY - $0) } ?? 0
+        return toolbar
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { if barDrag == nil { barFrame = $0 } }
+            .offset(barDrag ?? .zero)
+            // High priority: a touch that moves is the bar's, never a press of the button it started on.
+            .highPriorityGesture(DragGesture(minimumDistance: 8, coordinateSpace: .global)
+                .onChanged { g in hideToolbar?.cancel(); barDrag = g.translation }
+                .onEnded { g in
+                    // Where the throw would carry the bar's own middle.
+                    let p = CGPoint(x: barFrame.midX + g.predictedEndTranslation.width, y: barFrame.midY + g.predictedEndTranslation.height)
+                    let to = BarCorner.nearest(p, in: frame)
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { barCorner = to; barDrag = nil }
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    if toolbarShown { showToolbar() }
+                })
+            .accessibilityActions {
+                ForEach(BarCorner.allCases, id: \.self) { c in
+                    if c != barCorner { Button("Move to \(c.title)") { withAnimation { barCorner = c } } }
+                }
+            }
+            .padding(.top, (landscape ? 8 : 4) + (unifiedOn ? UnifiedArea.stripHeight : 0))
+            .padding(.horizontal, 8)
+            .padding(.bottom, 4 + lift)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: barCorner.alignment)
     }
 
     @ViewBuilder private var toolbar: some View {
@@ -161,11 +194,12 @@ struct DesktopScreen: View {
             controls.transition(.opacity)
         } else {
             Button { showToolbar() } label: {
-                Image(systemName: unifiedOn ? "chevron.compact.up" : "chevron.compact.down")
+                // The laptop pose's bar is on the deck, not in a corner.
+                Image(systemName: laptop ? "chevron.compact.down" : "ellipsis")
                     .font(.system(size: 17, weight: .semibold))
-                    .frame(width: 56, height: 28)
+                    .frame(width: laptop ? 56 : 44, height: laptop ? 28 : 44)
                     .glassBar(in: Capsule())
-                    .frame(minWidth: 64, minHeight: 44)   // the touch target: larger than the handle
+                    .frame(minWidth: laptop ? 64 : 44, minHeight: 44)   // the touch target: larger than the handle
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -189,7 +223,7 @@ struct DesktopScreen: View {
             }
             .accessibilityLabel("Touch: \(touchMode.title)")
             .onChange(of: touchMode) { showToolbar() }
-            barButton(Self.unifiedSymbol, "Unified", on: unifiedOn) { withAnimation(.snappy(duration: 0.3)) { unifiedOn.toggle() } }
+            if !linuxHost { barButton(Self.unifiedSymbol, "Unified", on: unifiedOn) { withAnimation(.snappy(duration: 0.3)) { unifiedOn.toggle() } } }
             barButton("gearshape", "Settings", on: false) { settingsShown = true; hideToolbar?.cancel() }
             barButton("xmark", "Disconnect", on: false) { onDisconnect() }
         }
@@ -197,6 +231,9 @@ struct DesktopScreen: View {
         .foregroundStyle(.white)
         .glassBar(in: Capsule())
     }
+
+    /// A Linux host streams its whole screen only: no window layers, so no Unified.
+    private var linuxHost: Bool { (try? Store().knownHosts())?[session.host].map(ViewerFeed.isLinux) ?? false }
 
     /// iOS 27's symbol for windows over a desktop, else its iOS 18 forerunner.
     static let unifiedSymbol = UIImage(systemName: "interface.window.on.rectangle.dashed") != nil ? "interface.window.on.rectangle.dashed" : "rectangle.on.rectangle.dashed"
@@ -214,6 +251,32 @@ struct DesktopScreen: View {
             .foregroundStyle(on ? Color.accentColor : Color.white)
             .frame(width: 44, height: 44)
             .contentShape(Rectangle())
+    }
+}
+
+/// The corner the floating bar sits in, kept across launches.
+enum BarCorner: String, CaseIterable {
+    case topLeading, topTrailing, bottomLeading, bottomTrailing
+    static let defaultsKey = "barCorner"
+    var isTop: Bool { self == .topLeading || self == .topTrailing }
+    var alignment: Alignment {
+        switch self {
+        case .topLeading: .topLeading
+        case .topTrailing: .topTrailing
+        case .bottomLeading: .bottomLeading
+        case .bottomTrailing: .bottomTrailing
+        }
+    }
+    var title: String {
+        switch self {
+        case .topLeading: "Top Left"
+        case .topTrailing: "Top Right"
+        case .bottomLeading: "Bottom Left"
+        case .bottomTrailing: "Bottom Right"
+        }
+    }
+    static func nearest(_ p: CGPoint, in r: CGRect) -> BarCorner {
+        p.y < r.midY ? (p.x < r.midX ? .topLeading : .topTrailing) : (p.x < r.midX ? .bottomLeading : .bottomTrailing)
     }
 }
 
@@ -246,6 +309,7 @@ struct DesktopView: UIViewRepresentable {
     let accessoryRow: Bool
     let safeInsets: UIEdgeInsets
     let topObstruction: CGFloat
+    let bottomObstruction: CGFloat?
     /// The fold's share of `safeInsets` (DuoPose.pictureInsets), kept in landscape too.
     var foldInsets: UIEdgeInsets = .zero
     /// The accessory row lives in the screen's layout (DockedKeyRow), not on the keyboard.
@@ -264,6 +328,7 @@ struct DesktopView: UIViewRepresentable {
     func updateUIView(_ v: DesktopUIView, context: Context) {
         v.safeInsets = safeInsets
         v.topObstruction = topObstruction
+        v.bottomObstruction = bottomObstruction
         v.foldInsets = foldInsets
         v.accessoryDocked = accessoryDocked
         v.touchMode = touchMode

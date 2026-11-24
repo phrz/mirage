@@ -1077,11 +1077,14 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         let t: ScreenCapturer.Target
         do { t = try await cap.update(req) } catch { await DynamicResolution.shared.settle(); throw error }
         await DynamicResolution.shared.settle()   // the capture is off a virtual display let go of: now it goes
+        // The catalog's displays and windows are those of before the change: a window capture on a display that has gone
+        // fails ("The stream is nil"), and Unified stayed blank after leaving Dynamic Resolution (phrz, 2026-11-24).
+        await catalog.refreshNow()
         return try await withCheckedThrowingContinuation { c in
             queue.async {
                 let old = self.target
                 self.target = t
-                if old?.pixelWidth != t.pixelWidth || old?.pixelHeight != t.pixelHeight || self.display?.encoder == nil {
+                if old?.pixelWidth != t.pixelWidth || old?.pixelHeight != t.pixelHeight || old?.display.displayID != t.display.displayID || self.display?.encoder == nil {
                     do {
                         self.request = req
                         try self.configure(for: t, req: req)
@@ -2135,7 +2138,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
             l.forceFullDiff = true
             cap.onStop = { [weak self, weak l] err in self?.queue.async {
                 guard let l, l.capturer === cap else { return }; l.capturer = nil; self?.log("layer \(l.id) capture stopped: \(err.map { "\($0)" } ?? "ok")")
-                if let err { self?.useFallback(l, why: "its own capture stopped (\(err))") }
+                if let err { self?.useFallback(l, why: "its own capture stopped (\(err))"); self?.retryCapture(l) }
             } }
             cap.adopt { [weak self] pb, nanos in self?.queue.async { self?.ownFrame(pb, nanos, layer: l) } }
             cap.exclude(others)
@@ -2151,7 +2154,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
         l.forceFullDiff = true
         cap.onStop = { [weak self, weak l] err in self?.queue.async {
             guard let l, l.capturer === cap else { return }; l.capturer = nil; self?.log("layer \(l.id) capture stopped: \(err.map { "\($0)" } ?? "ok")")
-            if let err { self?.useFallback(l, why: "its own capture stopped (\(err))") }
+            if let err { self?.useFallback(l, why: "its own capture stopped (\(err))"); self?.retryCapture(l) }
         } }
         // The window's first frame from a snapshot with the stream's own filter, while ScreenCaptureKit queues the stream.
         let shot = compositor && (!cutStands(l) || Self.testCutCheck)
@@ -2206,7 +2209,10 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                 // zoom-in animation had replaced). With no frame soon after the start, a snapshot is its first.
                 let started = Clock.nowNanos()
                 try? await Task.sleep(for: .milliseconds(400))
-                guard let self, self.queue.sync(execute: { l.capturer === cap && l.lastCapturedNanos < started }) else { return }
+                guard let self else { return }
+                let (current, silent) = self.queue.sync { (l.capturer === cap, l.lastCapturedNanos < started) }
+                if !current { await cap.stop(); return }   // replaced while it was starting: its stop found no stream yet
+                guard silent else { return }
                 let independent = self.queue.sync { self.hostTunables[.windowShotIndependent] >= 0.5 }
                 if let pb = await cap.snapshot(excluding: others, independent: independent) {
                     self.queue.async {
@@ -2217,7 +2223,24 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
                     }
                 }
             }
-            catch { self?.queue.async { if l.capturer === cap { l.capturer = nil }; self?.log("layer \(l.id) capture failed: \(error)"); self?.useFallback(l, why: "its own capture failed") } }
+            catch { self?.queue.async { if l.capturer === cap { l.capturer = nil }; self?.log("layer \(l.id) capture failed: \(error)"); self?.useFallback(l, why: "its own capture failed"); self?.retryCapture(l) } }
+        }
+    }
+
+    /// On `queue`: a window's capture failed or stopped (the displays changed under it, usually). Nothing else starts it
+    /// again before the window list changes, so it is started again here from a fresh catalog, at growing intervals.
+    private func retryCapture(_ l: Layer) {
+        guard !compositor, layers[l.id] === l, l.capturer == nil else { return }
+        let delay = min(8, 0.5 * pow(2, Double(min(l.captureFailures, 4))))
+        l.captureFailures += 1
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard let self, self.queue.sync(execute: { self.output != nil && self.layers[l.id] === l && l.capturer == nil }) else { return }
+            await self.catalog.refreshNow()
+            self.queue.async {
+                guard self.output != nil, self.layers[l.id] === l, l.capturer == nil, let s = self.windows?.current else { return }
+                self.reconcileLayers(s, now: Clock.nowNanos())
+            }
         }
     }
 
@@ -2464,6 +2487,7 @@ public final class MacDesktopStreamer: DesktopStreamer, @unchecked Sendable {
     private func ownFrame(_ pb: CVPixelBuffer, _ nanos: UInt64, layer l: Layer) {
         guard l.capturer != nil else { return }
         l.awaitingOwnSince = 0
+        l.captureFailures = 0
         // How far the window's snapshot was from its own first frame (the snapshot filter's correctness; M-FIVE).
         if let snap = l.snapshotFrame {
             l.snapshotFrame = nil

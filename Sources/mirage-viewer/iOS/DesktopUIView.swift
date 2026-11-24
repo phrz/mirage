@@ -133,6 +133,8 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
     var safeInsets: UIEdgeInsets = .zero { didSet { if safeInsets != oldValue { syncViewport() } } }
     /// The bottom of the control pill (or its handle) in this view: the picture can be panned down until it clears it.
     var topObstruction: CGFloat = 0 { didSet { if topObstruction != oldValue { syncViewport() } } }
+    /// The top of the control pill when it sits in a bottom corner (nil: it does not).
+    var bottomObstruction: CGFloat? { didSet { if bottomObstruction != oldValue { syncViewport() } } }
     /// What a fold keeps the picture from in every orientation (DuoPose: the hinge and the region below it in the laptop
     /// pose). Also part of `safeInsets`; named apart only so landscape's full-height fit doesn't drop it.
     var foldInsets: UIEdgeInsets = .zero { didSet { if foldInsets != oldValue { syncViewport() } } }
@@ -257,7 +259,8 @@ final class DesktopUIView: UIView, UIKeyInput, UIGestureRecognizerDelegate, UISc
     private var unobstructedRect: CGRect {
         let r = bounds.inset(by: safeInsets)
         let top = min(max(r.minY, topObstruction), r.maxY)
-        return CGRect(x: r.minX, y: top, width: r.width, height: r.maxY - top)
+        let bottom = max(top, min(r.maxY, bottomObstruction ?? r.maxY))
+        return CGRect(x: r.minX, y: top, width: r.width, height: bottom - top)
     }
 
     private var screenScale: CGFloat { window?.screen.scale ?? traitCollection.displayScale }

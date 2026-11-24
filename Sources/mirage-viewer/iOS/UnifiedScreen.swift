@@ -222,6 +222,7 @@ struct UnifiedArea: View {
     /// While a card is dragged over the panes: which side it would land on (nil: replace the window shown).
     @State private var dropSide: DropSide?
     @State private var dividerDrag: CGFloat?
+    @State private var noWindows = false
     enum DropSide { case leading, trailing, replace }
 
     static let stripHeight: CGFloat = 104
@@ -241,8 +242,21 @@ struct UnifiedArea: View {
             .padding(.leading, safeInsets.left).padding(.trailing, safeInsets.right)
         }
         .background(Color.black)
+        // The host is still capturing its windows, or has none.
+        .overlay { if unified.panes.isEmpty { waiting } }
         .ignoresSafeArea()
         .onAppear { unified.start() }
+        .task(id: unified.panes.isEmpty) {
+            noWindows = false
+            guard unified.panes.isEmpty else { return }
+            try? await Task.sleep(for: .seconds(6))
+            if !Task.isCancelled { noWindows = true }
+        }
+    }
+
+    @ViewBuilder private var waiting: some View {
+        if noWindows { ContentUnavailableView("No Windows", systemImage: "macwindow").environment(\.colorScheme, .dark) }
+        else { ProgressView().tint(.white).controlSize(.large) }
     }
 
     private var canSplit: Bool { sizeClass == .regular }

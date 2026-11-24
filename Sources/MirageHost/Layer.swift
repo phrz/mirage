@@ -66,6 +66,8 @@ final class Layer {
     var absentSince: UInt64 = 0
     /// When the layer's own capture was (re)started and has not delivered since (0: it has, or none is wanted).
     var awaitingOwnSince: UInt64 = 0
+    /// Own captures that failed or stopped in a row (reset by a frame): what spaces the retries.
+    var captureFailures = 0
     var createdNanos: UInt64
     /// Display layer only: tiles the viewer may hold window pixels for (DisplayTaint) and the ones already queued for a re-send.
     var taint = DisplayTaint()
