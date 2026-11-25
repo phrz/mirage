@@ -215,7 +215,7 @@ final class VirtualScreen: @unchecked Sendable {
 
     /// The helper started as the desktop's user (directly when this process is that user), and its monitor opened.
     private func open(user: SessionUser, width: Int, height: Int, scale: Double) -> Result<(OpaquePointer, Process), Failure> {
-        Self.open(user: user, width: width, height: height, scale: scale, cursorMetadata: false)
+        Self.open(user: user, width: width, height: height, scale: scale, cursorMetadata: true)
     }
 
     static func open(user: SessionUser?, width: Int, height: Int, scale: Double, cursorMetadata: Bool) -> Result<(OpaquePointer, Process), Failure> {
@@ -301,10 +301,17 @@ struct StreamTest: AsyncParsableCommand {
 
     final class Output: StreamOutput, @unchecked Sendable {
         let lock = NSLock()
-        var datagrams = 0, bytes = 0
+        var datagrams = 0, bytes = 0, positions = 0, hiddenPositions = 0
         var infos: [(Date, ControlMessage.StreamInfo)] = []
         func sendDatagram(_ data: Data) { lock.lock(); datagrams += 1; bytes += data.count; lock.unlock() }
         func sendControl(_ message: ControlMessage) {
+            switch message {
+            case .cursorShape(let s):
+                print("  → pointer image: \(s.width)x\(s.height) points, hotspot (\(s.hotspotX), \(s.hotspotY)), \(s.png.count) bytes")
+            case .cursorPosition(let p):
+                lock.lock(); positions += 1; if !p.visible { hiddenPositions += 1 }; lock.unlock()
+            default: break
+            }
             if case .streamInfo(let i) = message {
                 lock.lock(); infos.append((Date(), i)); lock.unlock()
                 print("  → stream info: \(i.width)x\(i.height) pixels, display \(i.displayWidth)x\(i.displayHeight) points at scale \(i.displayScale)")
@@ -345,7 +352,7 @@ struct StreamTest: AsyncParsableCommand {
     /// The pointer circling (through the viewer's input path) for a while; frames and bytes sent meanwhile.
     private func step(_ streamer: LinuxStreamer, _ out: Output, _ label: String) async {
         print(label)
-        out.lock.lock(); let d0 = out.datagrams, b0 = out.bytes; out.lock.unlock()
+        out.lock.lock(); let d0 = out.datagrams, b0 = out.bytes, p0 = out.positions, h0 = out.hiddenPositions; out.lock.unlock()
         let start = Date()
         var a = 0.0
         while Date().timeIntervalSince(start) < seconds {
@@ -353,9 +360,9 @@ struct StreamTest: AsyncParsableCommand {
             a += 0.05
             try? await Task.sleep(for: .milliseconds(8))
         }
-        out.lock.lock(); let d = out.datagrams - d0, b = out.bytes - b0; out.lock.unlock()
+        out.lock.lock(); let d = out.datagrams - d0, b = out.bytes - b0, p = out.positions - p0, h = out.hiddenPositions - h0; out.lock.unlock()
         let span = Date().timeIntervalSince(start)
-        print(String(format: "  %.0f datagrams/s, %.0f kbit/s over %.1f s", Double(d) / span, Double(b) * 8 / 1000 / span, span))
+        print(String(format: "  %.0f datagrams/s, %.0f kbit/s, %.0f pointer positions/s (%d hidden) over %.1f s", Double(d) / span, Double(b) * 8 / 1000 / span, Double(p) / span, h, span))
     }
 }
 
@@ -395,11 +402,15 @@ struct VirtualDisplayTest: ParsableCommand {
             md_virtual_pointer_move(m, x, y)
             usleep(250_000)
             var cx: Int32 = 0, cy: Int32 = 0
-            let known = md_virtual_cursor(m, &cx, &cy) != 0
+            var serial: UInt64 = 0, iw: Int32 = 0, ih: Int32 = 0, hx: Int32 = 0, hy: Int32 = 0
+            let known = md_picture_cursor(md_virtual_picture(m), &cx, &cy, &serial) == 1
+            var image = [UInt8](repeating: 0, count: 384 * 384 * 4)
+            let gotImage = md_picture_cursor_image(md_virtual_picture(m), &image, image.count, &iw, &ih, &hx, &hy, &serial) == 0
             var pw: Int32 = 0, ph: Int32 = 0
             md_picture_size(md_virtual_picture(m), &pw, &ph)
             print(String(format: "pointer to (%.2f, %.2f): expected (%d, %d) pixels, stream says %@", x, y, Int(x * Double(pw)), Int(y * Double(ph)),
-                         known ? "(\(cx), \(cy))" : "nothing"))
+                         known ? "(\(cx), \(cy))" : "nothing")
+                  + (gotImage ? ", image \(serial): \(iw)x\(ih), hotspot (\(hx), \(hy)), \(stride(from: 3, to: Int(iw * ih) * 4, by: 4).filter { image[$0] != 0 }.count) visible pixels" : ", no image"))
         }
         md_virtual_stop(m); md_virtual_free(m)
         while mp.isRunning { usleep(20_000) }

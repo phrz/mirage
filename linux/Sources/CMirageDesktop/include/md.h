@@ -25,6 +25,12 @@ void md_picture_size(md_picture *p, int *width, int *height);
 int md_picture_ended(md_picture *p);
 /// Copies the newest frame (4 bytes per pixel) into `dst` when it fits `cap`; returns its stride, 0 when there is none.
 int md_picture_copy(md_picture *p, uint8_t *dst, size_t cap, int *width, int *height);
+/// The pointer, for a source that sends it apart from the picture: where it points, in the picture's pixels, and the serial
+/// of its image (0: none yet). Returns 1 while it is on the picture, 2 while it is not, 0 when nothing is known of it.
+int md_picture_cursor(md_picture *p, int *x, int *y, uint64_t *serial);
+/// Its image (premultiplied B, G, R, A, in the picture's pixels; 0x0 for an invisible pointer) and hotspot. 0 when there is
+/// one that fits `cap` bytes.
+int md_picture_cursor_image(md_picture *p, uint8_t *bgra, size_t cap, int *width, int *height, int *hx, int *hy, uint64_t *serial);
 
 // MARK: GNOME (a logged-in session's own remote-desktop interface; the host runs as that user)
 
@@ -74,8 +80,6 @@ int md_virtual_resize(md_virtual *v, int width, int height, double scale, char *
 /// Its size in logical pixels and its scale, as GNOME took them.
 void md_virtual_geometry(md_virtual *v, int *logical_width, int *logical_height, double *scale);
 md_picture *md_virtual_picture(md_virtual *v);
-/// The pointer's position in the picture (with cursor metadata), 1 once known.
-int md_virtual_cursor(md_virtual *v, int *x, int *y);
 /// Ends it: the helper quits (the monitor goes, the layout comes back) and the picture ends. Its picture stays readable
 /// until md_virtual_free.
 void md_virtual_stop(md_virtual *v);

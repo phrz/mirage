@@ -158,7 +158,7 @@ md_session *md_session_open(char *err, size_t err_len) {
 
     GVariantBuilder rec;
     g_variant_builder_init(&rec, G_VARIANT_TYPE("a{sv}"));
-    g_variant_builder_add(&rec, "{sv}", "cursor-mode", g_variant_new_uint32(1));   // embedded: the pointer is in the picture
+    g_variant_builder_add(&rec, "{sv}", "cursor-mode", g_variant_new_uint32(1));   // embedded: with metadata GNOME Shell 50 crashes when the monitor goes off under the cast
     r = call(s, SC_BUS, s->sc_path, SC_SESSION_IFACE, "RecordMonitor", g_variant_new("(sa{sv})", "", &rec), G_VARIANT_TYPE("(o)"), err, err_len);
     if (!r) goto fail;
     g_variant_get(r, "(o)", &s->stream_path); g_variant_unref(r);

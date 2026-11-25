@@ -208,20 +208,29 @@ final class LinuxStreamer: DesktopStreamer, @unchecked Sendable {
 
     /// The pointer's image and position to the viewer as they change (a few milliseconds behind the screen).
     private func cursorLoop() {
-        guard source is KMSDesktop else { return }   // GNOME's screen cast draws the pointer into the picture
-        var relay: (lease: DesktopLease, relay: CursorRelay)?
-        var hidden = false
+        let kms = source is KMSDesktop   // its cursor plane; GNOME's screen cast draws the pointer into the picture
+        var plane: (lease: DesktopLease, relay: CursorRelay)?
+        var virt: (lease: DesktopLease, relay: CastCursorRelay)?
+        var blank = false
+        func drop() {
+            if let v = virt { VirtualScreen.shared.release(v.lease) }
+            virt = nil
+        }
+        defer { drop() }
         while true {
             lock.lock(); let go = running; let out = output; let base = lease; let virtual = virtualLease != nil; lock.unlock()
             guard go, let out else { return }
+            if let v = virt, v.lease.ended || !virtual { drop() }
             if virtual {
-                // The virtual monitor draws the pointer into its picture: the kernel's cursor is another screen's.
-                if !hidden { out.sendControl(.cursorPosition(.init(x: 0, y: 0, visible: false))); hidden = true }
-                relay = nil
+                plane = nil; blank = false
+                // A use of its own: the encode thread lets go of the one it shows whenever that ends.
+                if virt == nil, let l = VirtualScreen.shared.acquire() { virt = (l, CastCursorRelay(lease: l)) }
+                if let virt { for m in virt.relay.poll() { out.sendControl(m) } }
+            } else if !kms {
+                if !blank { out.sendControl(.cursorShape(CastCursorRelay.invisible)); blank = true }
             } else if let base {
-                hidden = false
-                if relay?.lease !== base { relay = (base, CursorRelay(source: source, lease: base)) }
-                for m in relay!.relay.poll() { out.sendControl(m) }
+                if plane?.lease !== base { plane = (base, CursorRelay(source: source, lease: base)) }
+                for m in plane!.relay.poll() { out.sendControl(m) }
             }
             usleep(5000)
         }

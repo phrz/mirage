@@ -15,9 +15,8 @@ typedef struct md_cast {
     struct spa_hook stream_listener;
     struct spa_video_info_raw format;
     md_picture *pic;
-    /// Asks for the pointer as metadata (its position read into cursor_x/y) instead of drawn in.
+    /// Asks for the pointer as metadata (into the picture's cursor) instead of drawn in.
     int cursor_meta;
-    volatile int cursor_x, cursor_y, cursor_seen;
     /// Called (on PipeWire's thread) when the stream fails or disconnects.
     void (*on_end)(void *data);
     void *end_data;

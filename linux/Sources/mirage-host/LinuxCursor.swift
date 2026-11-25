@@ -70,7 +70,7 @@ final class CursorRelay {
     }
 
     /// The image cut to its visible pixels, as PNG (straight alpha), with the hotspot from the cut's top-left.
-    static func shape(_ bgra: [UInt8], width: Int, height: Int, hotspot: (Int, Int)) -> ControlMessage.CursorShape? {
+    static func shape(_ bgra: [UInt8], width: Int, height: Int, hotspot: (Int, Int), scale: Double = 1) -> ControlMessage.CursorShape? {
         var minX = width, minY = height, maxX = -1, maxY = -1
         for y in 0..<height { for x in 0..<width where bgra[(y * width + x) * 4 + 3] != 0 {
             minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
@@ -86,9 +86,42 @@ final class CursorRelay {
             rgba[d] = UInt8(min(255, Int(bgra[s + 2]) * 255 / a)); rgba[d + 1] = UInt8(min(255, Int(bgra[s + 1]) * 255 / a))
             rgba[d + 2] = UInt8(min(255, Int(bgra[s]) * 255 / a)); rgba[d + 3] = UInt8(a)
         } }
-        return .init(png: PNG.encode(rgba: rgba, width: w, height: h), width: Double(w), height: Double(h),
-                     hotspotX: Double(hotspot.0 - minX), hotspotY: Double(hotspot.1 - minY))
+        return .init(png: PNG.encode(rgba: rgba, width: w, height: h), width: Double(w) / scale, height: Double(h) / scale,
+                     hotspotX: Double(hotspot.0 - minX) / scale, hotspotY: Double(hotspot.1 - minY) / scale)
     }
+}
+
+/// The pointer of the virtual monitor, which comes with the frames apart from
+/// the picture: image, hotspot and position, in the picture's pixels.
+final class CastCursorRelay {
+    private let lease: DesktopLease
+    private var sent: (serial: UInt64, scale: Double)?
+    private var sentPosition: ControlMessage.CursorPosition?
+
+    init(lease: DesktopLease) { self.lease = lease }
+
+    func poll() -> [ControlMessage] {
+        var out: [ControlMessage] = []
+        var x: Int32 = 0, y: Int32 = 0, serial: UInt64 = 0, pw: Int32 = 0, ph: Int32 = 0
+        let state = md_picture_cursor(lease.picture, &x, &y, &serial)
+        md_picture_size(lease.picture, &pw, &ph)
+        guard state != 0, pw > 1, ph > 1, let scale = lease.scale else { return out }
+        if serial != 0, sent.map({ $0 != (serial, scale) }) ?? true {
+            var buf = [UInt8](repeating: 0, count: 1024 * 1024 * 4)
+            var w: Int32 = 0, h: Int32 = 0, hx: Int32 = 0, hy: Int32 = 0
+            if md_picture_cursor_image(lease.picture, &buf, buf.count, &w, &h, &hx, &hy, &serial) == 0 {
+                out.append(.cursorShape(CursorRelay.shape(buf, width: Int(w), height: Int(h), hotspot: (Int(hx), Int(hy)), scale: scale) ?? Self.invisible))
+                sent = (serial, scale)
+            }
+        }
+        let pos = ControlMessage.CursorPosition(x: Double(x) / Double(pw), y: Double(y) / Double(ph), visible: state == 1)
+        if pos != sentPosition { out.append(.cursorPosition(pos)); sentPosition = pos }
+        return out
+    }
+
+    /// An application hid the pointer, or the picture has it: viewers draw the last image sent, so one with nothing in it.
+    static let invisible = ControlMessage.CursorShape(png: PNG.encode(rgba: [0, 0, 0, 0], width: 1, height: 1), width: 1, height: 1,
+                                                              hotspotX: 0, hotspotY: 0)
 }
 
 /// A minimal PNG writer (8-bit RGBA, stored deflate blocks): cursor images are a few kilobytes.

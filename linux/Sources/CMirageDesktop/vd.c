@@ -471,12 +471,6 @@ void md_virtual_geometry(md_virtual *v, int *logical_width, int *logical_height,
 
 md_picture *md_virtual_picture(md_virtual *v) { return &v->pic; }
 
-int md_virtual_cursor(md_virtual *v, int *x, int *y) {
-    if (!v->cast.cursor_seen) return 0;
-    *x = v->cast.cursor_x; *y = v->cast.cursor_y;
-    return 1;
-}
-
 void md_virtual_stop(md_virtual *v) {
     if (v->fd < 0) return;
     send_line(v->fd, &v->wlock, "quit\n");

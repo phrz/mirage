@@ -5,6 +5,7 @@
 #include <spa/debug/types.h>
 #include <spa/param/video/type-info.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -36,23 +37,62 @@ static void on_param_changed(void *data, uint32_t id, const struct spa_pod *para
     pw_stream_update_params(c->stream, params, n);
 }
 
+/// The pointer a buffer carries. A buffer without an image keeps the last one.
+static void read_cursor(md_cast *c, struct spa_buffer *buf) {
+    struct spa_meta *m = spa_buffer_find_meta(buf, SPA_META_Cursor);
+    if (!m || !m->data || m->size < sizeof(struct spa_meta_cursor)) return;
+    const struct spa_meta_cursor *mc = m->data;
+    if (!spa_meta_cursor_is_valid(mc)) { md_picture_cursor_away(c->pic); return; }
+    size_t at = mc->bitmap_offset, size = m->size;
+    if (at >= sizeof *mc && at <= size && size - at >= sizeof(struct spa_meta_bitmap)) {
+        const struct spa_meta_bitmap *bm = (const void *)((const uint8_t *)mc + at);
+        size_t w = bm->size.width, h = bm->size.height, stride = bm->stride > 0 ? (size_t)bm->stride : w * 4;
+        size_t room = size - at;
+        if (w == 0 || h == 0) md_picture_cursor_set(c->pic, NULL, 0, 0, 0, 0);
+        else if (w <= 1024 && h <= 1024 && stride >= w * 4 && bm->offset <= room && stride <= (room - bm->offset) / h) {
+            int r = 0, g = 1, b = 2, a = 3;   // RGBA
+            switch (bm->format) {
+            case SPA_VIDEO_FORMAT_BGRA: r = 2; g = 1; b = 0; a = 3; break;
+            case SPA_VIDEO_FORMAT_ARGB: r = 1; g = 2; b = 3; a = 0; break;
+            case SPA_VIDEO_FORMAT_ABGR: r = 3; g = 2; b = 1; a = 0; break;
+            default: break;
+            }
+            const uint8_t *src = (const uint8_t *)bm + bm->offset;
+            uint8_t *img = malloc(w * h * 4);
+            if (img) {
+                for (size_t y = 0; y < h; y++)
+                    for (size_t x = 0; x < w; x++) {
+                        const uint8_t *s = src + y * stride + x * 4;
+                        uint8_t *d = img + (y * w + x) * 4;
+                        d[0] = s[b]; d[1] = s[g]; d[2] = s[r]; d[3] = s[a];
+                    }
+                md_picture_cursor_set(c->pic, img, (int)w, (int)h, mc->hotspot.x, mc->hotspot.y);
+            }
+        }
+    }
+    md_picture_cursor_at(c->pic, mc->position.x, mc->position.y);
+}
+
+static int has_picture(struct spa_buffer *buf) {
+    struct spa_meta_header *h = spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof *h);
+    struct spa_data *d = &buf->datas[0];
+    return d->data && d->chunk && d->chunk->size > 0 && !(h && (h->flags & SPA_META_HEADER_FLAG_CORRUPTED));
+}
+
 static void on_process(void *data) {
     md_cast *c = data;
+    // The newest buffer with a picture (a moved pointer comes in one without), and every buffer's pointer.
     struct pw_buffer *b = NULL, *next;
     while ((next = pw_stream_dequeue_buffer(c->stream))) {
+        if (c->cursor_meta) read_cursor(c, next->buffer);
+        if (!has_picture(next->buffer)) { pw_stream_queue_buffer(c->stream, next); continue; }
         if (b) pw_stream_queue_buffer(c->stream, b);
         b = next;
     }
     if (!b) return;
     struct spa_buffer *buf = b->buffer;
-    if (c->cursor_meta) {
-        struct spa_meta_cursor *mc = spa_buffer_find_meta_data(buf, SPA_META_Cursor, sizeof *mc);
-        if (mc && spa_meta_cursor_is_valid(mc)) { c->cursor_x = mc->position.x; c->cursor_y = mc->position.y; c->cursor_seen = 1; }
-    }
-    struct spa_meta_header *h = spa_buffer_find_meta_data(buf, SPA_META_Header, sizeof *h);
     struct spa_data *d = &buf->datas[0];
-    int ok = d->data && d->chunk && d->chunk->size > 0 && !(h && (h->flags & SPA_META_HEADER_FLAG_CORRUPTED));
-    if (ok) {
+    {
         int w = (int)c->format.size.width, hgt = (int)c->format.size.height;
         int stride = d->chunk->stride ? d->chunk->stride : w * 4;
         int r = 2, g = 1, bl = 0;   // BGRx / BGRA
